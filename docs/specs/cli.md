@@ -21,6 +21,22 @@ when the metadata or the registry omits one.
 - Why: three independently kept lists drift silently unless each is checked
   against what the runtime accepts.
 
+## Chair hook budget
+
+`domains.hooks.timeout_secs` (default 10) is the one installed timeout for
+chair-start, chair-stop and chair-prompt, both for native registrations and for
+the chair's own switch settings. Every hook runs under a single local budget of
+60% of that value. A hook that reaches the budget warns with `HOOK_BUDGET_OVERRUN`,
+records the overrun and its setting source under the state root's
+`hooks/diagnostics/failures.jsonl`, and returns before the host timeout. Usage
+ingest is never done on the hook path: chair hooks queue a detached
+`telemetry ingest --incremental` worker, which resumes durable transcript cursors
+and has no time window to rescan. `provenant doctor` (and `provenant hosts doctor`)
+shows the installed timeout with its source and every overrun in the last 24 h.
+
+- Why: a slow transcript must not cost the chair a hook, and the operator can see
+  both the setting and its effect without reading raw diagnostics.
+
 ## Targets
 
 Target verbs share one grammar and resolve only the named graph. Ambiguity is
@@ -59,6 +75,24 @@ addressable.
 - Why: inspection must be safe outside a checkout and paths must not change in
   transit.
 
+## Upgrade verification
+
+`provenant upgrade --verify` builds its smoke fixture in an owner-only scratch
+project under the home-relative `domains.smoke.fixture_root` (default
+`.local/state/provenant-smoke`; see run-launch.md), never in the system
+temporary directory. A peer can only name a
+project whose canonical common directory is relative to its own home:
+`ProjectLocator` strips `$HOME`, hashes that relative path into a cross-host key
+and resolves it against the receiving home. A fixture under `$TMPDIR` is outside
+that home, so a remote smoke could never be submitted and refused at its first
+node with `peer_project_unprojectable`. Every smoke scratch, including the
+`--dry-run` preview, uses the home-relative root, and the host binding is removed
+when verification ends. `--host PEER` runs the same graph on the peer and reaches
+its reader because the locator names a project the peer can resolve.
+
+- Why: a real remote verification must reach every node on the peer; a scratch
+  outside the home can never be projected and fails before submission.
+
 ## Build commands
 
 `provenant build` inspects and resets the host's build slots without reading
@@ -77,6 +111,28 @@ in place and is reported as incomplete coverage, never as complete.
 
 - Why: a partial observation must not hide available work or imply complete
   coverage.
+
+### Graph wait recovery
+
+A graph status refresh is read-only. While a wait observes remote attempts, a
+successful reading that confirms terminal remote work re-drives an unsettled
+graph through the journal-locked advancement owner. The plain `wait` verb uses
+this path too, so it settles a graph whose peer attempt has finished without
+waiting for the next host tick or a manual advance. A successful advance also
+clears the transport error held from an earlier failed attempt to settle it.
+Unavailable remote readings remain pending and are retried within the wait
+budget; if the wait ends pending, it reports the last failed reading. A peer
+read failure also projects the attempt as unknown in status; that projection
+does not erase the failure from wait history.
+
+Graph advancement is a separate pass in `tick` and completes before forge
+polling starts, so a slow forge page cannot put graph settlement behind a long
+poll. The wait's terminal-remote recovery covers the remaining case where the
+scheduled tick itself is delayed by that poll: a waiting client settles the
+graph on its own next reread.
+
+- Why: terminal remote work must settle as soon as its home endpoint can be
+  reached again, without requiring a second wait or a manual advance.
 
 ### Nested tree
 
@@ -110,10 +166,12 @@ that cannot publish a result carries a bounded marker in `data` (`truncated`,
 error. Paged reads bind the cursor to the input, terminal text escapes control
 sequences, unknown facts stay unknown, and `--json` always preserves the envelope.
 The envelope is version 2: it always carries a `warnings` array (empty when the
-command raised none). Under `--json` no warning is written to stderr; human mode
-prints `warning: <message>` and its repair to stderr as each warning arrives and
-collapses repeats by key. Per-change keys are remembered in the state root, so a
-warning shows once until its key changes. The envelope also always carries a
+command raised none). Under `--json` no warning is written to stderr and every
+warning is kept as data, repeats included; a JSON envelope never marks a key as
+shown. Human mode prints `warning: <message>` and its repair to stderr as each
+warning arrives and collapses repeats by key. Only a warning actually shown to a
+person marks its per-change key in the state root, so a warning shows once until
+its key changes while a later envelope still lists it. The envelope also always carries a
 `next` array of suggested commands: each value has an `argv` array of literal
 arguments and a `why` sentence stating the reason from the state the owner
 holds. The binary edge renders these once for human output through the one
@@ -139,12 +197,12 @@ passing `--project PATH` as the repair.
 ### Warnings are typed values
 
 A warning is a typed value: a stable UPPER_SNAKE code from one of the two
-declared catalogues, a one-sentence message, and optional subject, source and
-repair.
+declared catalogues, a one-sentence message, a required structured source, and
+optional subject and repair.
 Library code never writes a warning itself: one function routes each warning to
 the innermost thread-local capture on this thread, then to the command's process
-sink, then to stderr as `warning: <message>` when neither is installed. A sink
-guard restores the previous sink when it is dropped. Codes follow the same
+sink, then retains it for the caller when neither is installed. A sink guard
+restores the previous sink when it is dropped. Codes follow the same
 stability rules as refusal codes, so a consumer branches on the code and never
 on the prose, and adding a code is additive. A repeated key collapses per
 invocation or per change; a per-change key hashes the code, subject and message
@@ -155,8 +213,9 @@ malformed and nothing else. The const catalogue in
 a one-line meaning and the upper-snake test derives its list from those consts.
 Policy rule codes are the second catalogue, declared in the compiled policy
 table `run/assets/policy.toml` and read by `crates/records/src/policy.rs`; a
-violated rule warns under its own rule code and reaches the same sink and
-envelope. Both catalogues follow the same stability rules: a code names one event
+violated observational rule warns under its own rule code, carries the layer and
+knob that set the rule as its source, and asks to be shown once per change while
+every JSON envelope still lists it. Both catalogues follow the same stability rules: a code names one event
 for the lifetime of its declaration and adding a code is additive.
 - Why: a consumer needs to act on a warning without matching text, and a
   command that returns warnings as data must not also print them.
@@ -176,6 +235,25 @@ repair action. A kind-only failure never loses its local diagnostic detail.
 - Why: the operator can see and fix the cause instead of chasing an opaque
   confinement refusal.
 
+### Upgrade verify failures name the root cause
+
+A failed `provenant upgrade --verify` reports the smoke graph id, the node that
+actually failed, that node's advance code and message, and a next command
+`provenant status GRAPH` carrying the same graph id. The cause is read from a
+checkpoint envelope in the failing child's report: a dependant marked
+`upstream_blocked` whose note begins `blocked by` is not a cause, even when its
+envelope is the innermost typed error. The node with a concrete owner or
+advance code wins, owner code first. The cause's message is bounded before the
+graph, node, code and next command are assembled, so a long checker note cannot
+clip the parts the operator needs from the one-line host reason. A report with
+no recorded cause keeps the innermost typed code and message. The smoke graph
+is ephemeral: its scratch project binding is removed when verification ends,
+including on failure, so the next command names the graph recorded in the
+report and a live reread requires re-running `provenant upgrade --verify`.
+- Why: a blocked dependant names its blocker but not why the blocker failed;
+  the operator needs the failing node and the command to inspect its graph.
+- Owner: `tools/front-door/src/install_report.rs`, `tools/front-door/src/install.rs`
+
 ### Template name errors
 
 An unknown template or flavour names the supplied value and lists the matching
@@ -187,7 +265,10 @@ input errors keep their generic message.
 
 ### Waits are readers
 
-Waiting observes work; a timeout or cancellation does not stop it. `wait`
+Waiting observes work; a timeout or cancellation does not stop it. The one
+exception is graph terminal-remote recovery below: a successful terminal remote
+reading re-drives the journal-locked advance, but the wait never claims a
+settlement it has not observed. `wait`
 defaults to `--all` (worst final result of every target); `--any` and
 `--fail-fast` return early, and output names the mode. A target settles by its
 own state, so an older settlement cannot satisfy a wait for new work.
@@ -195,7 +276,13 @@ own state, so an older settlement cannot satisfy a wait for new work.
 Local graph waiters share one filesystem event source; when it is unavailable
 the result says why and rereads at `domains.wait.local_interval_ms`. Peer and
 relayed rows use the same paced reread because the relay has no remote
-subscription. Every blocking forge operation inside a wait shares one request
+subscription. An unreachable home endpoint is one pending observation, not a
+failed wait: a graph wait keeps rereading remote attempts until its budget ends
+or a later reading succeeds. A successful reading clears the earlier failure;
+when the budget ends still pending, the wait names the last failed reading
+rather than the first one held when it began. A successful reading of a finished
+remote lane also clears the transport error held from an earlier failed advance,
+so status shows the lane's settled state. Every blocking forge operation inside a wait shares one request
 context (the wait's absolute deadline, capped per read by
 `domains.wait.pr_read_timeout_seconds`, and its cancellation), and a wait that
 settles cancels the forge transport of its other targets. Wait event lines,
@@ -240,16 +327,37 @@ serves every listed graph, so a `--full` page never repeats those scans per grap
 The admission summary reuses that holder reading, and the process census is
 taken only when local attempt evidence needs it.
 
+`status NAME` resolves the name in the caller's project first. On a miss it
+searches the state root's other registered projects: one match is read through
+the owning project's identity and reported with a `CROSS_PROJECT_TARGET_FOUND`
+warning naming that project; several matches refuse with `AMBIGUOUS_TARGET`
+listing every project instead of guessing one. Inside a lane the relay's project
+and chair-session read scope still applies
+([fabric](fabric.md#lane-graph-read-scope)).
+
+- Why: a graph in another registered project stays reachable without the caller
+  having to know which project owns it, and an ambiguous name is never resolved
+  by guessing.
+
 `status --mine` reads active custody across projects (or one `--project`),
 including attempts nested under the current chair and unattended items open to
-adoption. Settled custody leaves the view, and the session-start digest reads
-this view instead of extracting PRs from prose.
+adoption. `status --adoptable` lists only the unattended items open to adoption.
+Settled custody leaves the view. The session-start digest reads this view
+instead of extracting PRs from prose: it names only custody this chair holds in
+the hook's project, and collapses unattended and other projects' rows into one
+`Unattended: N (M this project) — provenant status --adoptable` line. Set
+`session.digest.scope = all` under `[knobs]` to list the chair's custody across
+projects again; the effective scope and its layer appear in that line.
 
 Writer presence is `live`, `unattended`, `settling` or `unknown`. `running` shows
 only while the recorded guardian or provider identity is present. A changed boot
 proves the old process tree is gone; same-boot absence, a reused PID, an
 unobservable host, incomplete evidence and unreachable peers stay `unknown`,
-because a child may have forked into another session and been reparented. Status
+because a child may have forked into another session and been reparented. A
+reachable peer supplies its own observed presence with the relayed status, so
+its attempt reports `running` on the launching host without that host reading
+the peer's process table; a reconcile hint for a peer-owned attempt names the
+peer's graph target and the host where it resolves. Status
 never mutates or schedules recovery; unattended and settling rows name the scoped
 `provenant reconcile` action, which rechecks custody before settlement. A
 settling row also names PIDs and the custody writer-lock path observed at the
@@ -286,6 +394,27 @@ automatically and settlement releases it. A custody failure after a successful
 external action warns and can be retried by adoption.
 
 - Why: a chair acting on a listing must see work still running.
+
+### Run explain reports peer placement
+
+`run --explain` resolves each node's declared host with the same placement rule
+that admits a launch: `local`, `localhost` and this host's id are local, a
+configured peer is remote, and an unknown host is refused. A writer placed on a
+peer carries only a branch and a base ref, so its `source_admission` row names
+the peer (`host`), the worktree that peer will provision from that branch
+(`path`) and `pending_registration`; credential admission stays `pending_route`.
+No caller checkout path is resolved or admitted for that writer, and the
+explanation is not refused for the caller's state root. Local writers keep their
+existing admission check and row shape.
+
+`upgrade --verify --dry-run` builds the `run smoke --explain` preview from the
+same argument builder as the real verify, including the writer's branch and
+base. A preview that named no base would resolve the writer's identity from the
+caller checkout and report a refusal the launch itself does not produce.
+
+- Why: an explanation of a peer launch must describe the peer's writer, not the
+  caller's checkout, and a dry run must show the writer placement it would run.
+- Owner: `tools/front-door/src/fabric/interface.rs`, `tools/front-door/src/install.rs`
 
 ### Output references and bounded tails
 
@@ -444,6 +573,17 @@ Release checks inspect the artifact to be distributed as well as Git evidence.
 - Why: an inspection must not change its subject or certify an uninspected
   artifact.
 
+### Check config reports warm-target provenance
+
+`check config` names the layer that set `build.target` when a layer other than
+the builtin changed the target identity, and warns when the toolchain recorded in
+a warm slot differs from the checkout's `rust-toolchain.toml` pin. These are
+findings: the check never rewarms a target or edits a slot record.
+
+- Why: a warm cache built by a different toolchain or worktree is cold or
+  stale, and the source of that decision must be visible without building.
+- Owner: `tools/front-door/src/checks.rs`
+
 ### Check install uses recorded roots
 
 `check install` builds its targets from the roots recorded in the install
@@ -516,10 +656,21 @@ settle stays pending for `domains.wait.actions_grace_seconds`, though a failure
 still settles a default wait at once. `--head SHA` pins the wait to one head:
 until GitHub reports that SHA the reading stays pending, so a push's predecessor
 never produces a verdict. Without `--head`, when the local tip differs from
-GitHub's head, the wait warns and watches the local tip. The last line of output
-names every target's settle state (`settled ok`, `failed`, `needs input` or
-`still running at timeout`) and the one next command; the observation method
-shows only under `--full` and in JSON.
+GitHub's head, the wait warns and watches the local tip. The wait pins one subject
+at admission and reports it (with `origin`, `policy` and `policy_source`) in JSON.
+`domains.wait.pr_head_policy` (default `pinned`, overridable per project and by
+`wait --pr-head-policy`, which requires `--pr` and conflicts with `--head`)
+decides what happens when that head moves: `pinned` settles `Unsuccessful` with
+cause `pr_head_moved` naming both heads and the rerun command; `follow_latest`
+re-pins and warns `PR_HEAD_FOLLOWED`, recording the old head in `followed_from`.
+`--head` always pins. `domains.wait.pr_head_source` chooses the forge head
+(`forge`), the local branch tip (`local`, warning and using the forge when no
+local branch exists) or today's `auto` preference. When no forge head is known at
+admission the wait warns `PR_HEAD_UNPINNED` and pins its first successful sample;
+`domains.wait.pr_head_unpinned` can instead refuse with cause `head_unpinned`.
+The last line of output names every target's settle state (`settled ok`, `failed`,
+`needs input` or `still running at timeout`) and the one next command; the
+observation method shows only under `--full` and in JSON.
 
 A head does not settle on whichever checks happen to exist. `wait --pr` reads
 the base branch's required-check policy through the same CI observer as the

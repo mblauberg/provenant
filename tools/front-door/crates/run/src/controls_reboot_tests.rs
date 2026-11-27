@@ -326,7 +326,7 @@ fn lost_read_only_review_keeps_reservation_fenced_by_live_custody_lock() -> Test
     let mut record = store.record(id, &call)?;
     record.state = AttemptState::Terminal {
         extra: Default::default(),
-        terminal_cause: None,
+        cause: None,
         terminal_note: None,
         stop: None,
         outcome: Outcome::Lost,

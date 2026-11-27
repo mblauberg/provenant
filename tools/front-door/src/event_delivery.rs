@@ -435,7 +435,7 @@ pub(crate) fn tick(resolved: &crate::roots::Resolved) -> Result<()> {
                                             "forge discovery unavailable for {project}: {error}; local journal sources continue; {}",
                                             origin.describe("domains.wait.forge_source")
                                         ),
-                                    )
+                                     provenant_records::warning::detected_source(provenant_records::warning::FORGE_DISCOVERY_UNAVAILABLE))
                                     .subject(project.to_string()),
                                 );
                                 return Ok(());
@@ -473,6 +473,9 @@ pub(crate) fn tick(resolved: &crate::roots::Resolved) -> Result<()> {
                                     provenant_records::warning::FORWARDER_UNAVAILABLE,
                                     format!(
                                         "forwarder unavailable: {error}; conditional reconciliation continues"
+                                    ),
+                                    provenant_records::warning::detected_source(
+                                        provenant_records::warning::FORWARDER_UNAVAILABLE,
                                     ),
                                 ));
                             }
@@ -539,6 +542,9 @@ pub(crate) fn tick(resolved: &crate::roots::Resolved) -> Result<()> {
                             warn(Warning::new(
                                 provenant_records::warning::FORWARDER_UNAVAILABLE,
                                 format!("forwarder unavailable: {error}; using conditional poller"),
+                                provenant_records::warning::detected_source(
+                                    provenant_records::warning::FORWARDER_UNAVAILABLE,
+                                ),
                             ));
                             selected = "poll".into();
                         }
@@ -696,6 +702,9 @@ fn continue_after_index<T>(
                         "; will retry"
                     }
                 ),
+                provenant_records::warning::detected_source(
+                    provenant_records::warning::GRAPH_OBSERVATION_DEFERRED,
+                ),
             )
             .subject(project.to_string()),
         );
@@ -705,6 +714,9 @@ fn continue_after_index<T>(
             Warning::new(
                 provenant_records::warning::NOTE_OBSERVATION_DEFERRED,
                 format!("note observation indexing failed for {project}: {error}; will retry"),
+                provenant_records::warning::detected_source(
+                    provenant_records::warning::NOTE_OBSERVATION_DEFERRED,
+                ),
             )
             .subject(project.to_string()),
         );
@@ -906,6 +918,9 @@ fn source(
         warn(Warning::new(
             provenant_records::warning::FORGE_SOURCE_UNRESOLVED,
             format!("{warning}; {origin}"),
+            provenant_records::warning::detected_source(
+                provenant_records::warning::FORGE_SOURCE_UNRESOLVED,
+            ),
         ));
     }
     use std::io::Write;
@@ -949,6 +964,9 @@ pub(crate) fn listen(repository: &str, globals: &provenant_cli::Globals) -> u8 {
             warn(Warning::new(
                 provenant_records::warning::FORWARDER_UNAVAILABLE,
                 format!("forge forwarder: {error}; host reconciliation continues"),
+                provenant_records::warning::detected_source(
+                    provenant_records::warning::FORWARDER_UNAVAILABLE,
+                ),
             ));
             1
         }
@@ -1536,6 +1554,7 @@ mod tests {
             crate::pr::observer::Check {
                 head: "old-head".into(),
                 name: "x".repeat(700),
+                job_id: None,
                 bucket: "pass".into(),
                 app: None,
                 app_slug: None,
@@ -1598,7 +1617,21 @@ mod tests {
         );
         // A default (incomplete) wait settles from the event directly, with no
         // fresh observer read, so the failure must still be named downstream.
-        let reading = crate::status_wait::reading_pr_event(7, None, false, detail);
+        let mut subject = None;
+        let mut seen = false;
+        let reading = crate::status_wait::reading_pr_event(
+            &mut subject,
+            &mut seen,
+            &crate::status_wait::PrSample {
+                number: 7,
+                repository: &Ok("owner/repo".into()),
+                policy: provenant_records::subject::SubjectPolicy::Pinned,
+                policy_source: &crate::status_wait::test_policy_source(),
+                now: provenant_core::WallTime::UNIX_EPOCH,
+            },
+            false,
+            detail,
+        );
         assert_eq!(reading.settle, crate::status_wait::Settle::Unsuccessful);
         let recovered: crate::pr::status::Line =
             serde_json::from_value(reading.data.clone()).unwrap();
@@ -1622,6 +1655,7 @@ mod tests {
                 crate::pr::observer::Check {
                     head: "abc".into(),
                     name: "x".repeat(700),
+                    job_id: None,
                     bucket: "fail".into(),
                     app: None,
                     app_slug: None,
@@ -1655,7 +1689,21 @@ mod tests {
             let round_trip: crate::pr::status::Line =
                 serde_json::from_value(recovered["status"].clone()).unwrap();
             assert_eq!(serde_json::to_value(round_trip).unwrap(), projected);
-            let reading = crate::status_wait::reading_pr_event(7, None, false, recovered);
+            let mut subject = None;
+            let mut seen = false;
+            let reading = crate::status_wait::reading_pr_event(
+                &mut subject,
+                &mut seen,
+                &crate::status_wait::PrSample {
+                    number: 7,
+                    repository: &Ok("owner/repo".into()),
+                    policy: provenant_records::subject::SubjectPolicy::Pinned,
+                    policy_source: &crate::status_wait::test_policy_source(),
+                    now: provenant_core::WallTime::UNIX_EPOCH,
+                },
+                false,
+                recovered,
+            );
             assert_eq!(
                 reading.settle,
                 if count == 0 {

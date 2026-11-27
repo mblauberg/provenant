@@ -167,6 +167,12 @@ fn apply_to(
         provenant_core::consumer_env::PRIMARY_CHECKOUT.into(),
         primary.as_os_str().to_owned(),
     ));
+    // In-lane Provenant commands resolve their project from this binding;
+    // a pinned read view is not a registered checkout.
+    env.push((
+        provenant_core::consumer_env::LANE_PROJECT.into(),
+        context.project.into(),
+    ));
     if let Some(gitdir) = context
         .worktree_gitdir
         .filter(|gitdir| context.writer || Some(*gitdir) != context.common_git)
@@ -442,6 +448,10 @@ mod tests {
             assert!(env.contains(&(
                 provenant_core::consumer_env::PRIMARY_CHECKOUT.into(),
                 primary.as_os_str().to_owned()
+            )));
+            assert!(env.contains(&(
+                provenant_core::consumer_env::LANE_PROJECT.into(),
+                "example".into()
             )));
             assert!(env.contains(&(
                 provenant_core::consumer_env::WORKTREE_GITDIR.into(),

@@ -23,6 +23,9 @@ pub fn seal_launch_policy(
             warn(Warning::new(
                 provenant_records::warning::LAUNCH_ACCESS_PROFILE,
                 "recorded repository launch policy is missing; retaining sealed classification",
+                provenant_records::warning::detected_source(
+                    provenant_records::warning::LAUNCH_ACCESS_PROFILE,
+                ),
             ));
         }
         return Ok(());

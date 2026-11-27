@@ -138,7 +138,7 @@ pub(super) fn append_changes(
         let old = previous.and_then(|previous| previous.nodes.iter().find(|old| old.id == node.id));
         if old.is_none_or(|old| {
             old.state != node.state
-                || old.advance_error_code != node.advance_error_code
+                || old.advance_code != node.advance_code
                 || old.loop_pause_code != node.loop_pause_code
         }) {
             let mut change = event(
@@ -152,10 +152,10 @@ pub(super) fn append_changes(
                     NodeState::Blocked => "blocked",
                     NodeState::Skipped => "skipped",
                 },
-                &node.advance_error_code,
+                &node.advance_code,
             )?;
             change.details = Some(
-                serde_json::json!({"cause": node.advance_error_code.as_deref().or(node.loop_pause_code.as_deref())}),
+                serde_json::json!({"cause": node.advance_code.as_deref().or(node.loop_pause_code.as_deref())}),
             );
             events.push(change);
         }
@@ -227,13 +227,13 @@ pub(super) fn append_changes(
                     input_tokens: metrics.and_then(|m| m.get("input_tokens")).and_then(Value::as_u64),
                     queue_time_ms: metrics.and_then(|m| m.get("queue_time_ms")).and_then(Value::as_u64),
                     outcome: metrics.and_then(|m| m.get("outcome")).and_then(Value::as_str).map(str::to_owned).or_else(|| match attempt.outcome? {
-                        AttemptOutcome::PreparationRefused(_) => Some("preparation_refused".into()),
+                        GraphAttemptOutcome::PreparationRefused(_) => Some("preparation_refused".into()),
                         outcome => serde_json::to_value(outcome).ok()?.as_str().map(str::to_owned),
                     }),
                     route: metrics.and_then(|m| m.get("resolved_route")).cloned().unwrap_or_else(|| serde_json::json!({"adapter":attempt.route.adapter,"model":attempt.route.model,"name":attempt.route.name,"alias":attempt.route.alias,"effort":attempt.route.effort})),
                 });
                 events.push(observation);
-                if attempt.outcome == Some(AttemptOutcome::UsageLimited) {
+                if attempt.outcome == Some(GraphAttemptOutcome::UsageLimited) {
                     events.push(event(
                         GraphEventKind::Wait,
                         &node.id,
@@ -536,8 +536,8 @@ mod tests {
         let mut after = before.clone();
         after.nodes[0].concurrency_warning = Some("cap occupied".into());
         after.nodes[0].state = NodeState::Failed;
-        after.nodes[0].advance_error_code = Some("required_input_unavailable".into());
-        after.nodes[0].advance_error = Some("private brief or secret text".into());
+        after.nodes[0].advance_code = Some("required_input_unavailable".into());
+        after.nodes[0].advance_note = Some("private brief or secret text".into());
         append_changes(&directory, "g", Some(&before), &after, None).unwrap();
         let records = read(&directory, "g").unwrap();
         assert!(records.iter().any(|event| event.subject == "build"
@@ -579,7 +579,7 @@ mod tests {
         checkpoint.nodes[0].state = NodeState::Failed;
         let attempt = &mut checkpoint.nodes[0].attempts[0];
         attempt.state = AttemptState::Terminal;
-        attempt.outcome = Some(AttemptOutcome::AdapterUnavailable);
+        attempt.outcome = Some(GraphAttemptOutcome::AdapterUnavailable);
         attempt.settled = 1;
         append_changes(&directory, "g", Some(&before), &checkpoint, None).unwrap();
         append_changes(&directory, "g", Some(&checkpoint), &checkpoint, None).unwrap();
@@ -652,6 +652,8 @@ mod tests {
         let mut after = before.clone();
         after.expansions.push(Expansion {
             extra: Default::default(),
+            delivery_review_disposition: None,
+            delivery_review_node: None,
             retired: None,
             retry_generation: None,
             final_result: false,
@@ -711,6 +713,8 @@ mod tests {
         let mut after = before.clone();
         after.expansions.push(Expansion {
             extra: Default::default(),
+            delivery_review_disposition: None,
+            delivery_review_node: None,
             retired: None,
             retry_generation: None,
             final_result: false,

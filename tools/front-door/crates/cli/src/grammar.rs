@@ -69,6 +69,8 @@ pub enum Command {
     /// Share append-only observations with project lanes
     #[command(subcommand)]
     Notes(crate::notes::Notes),
+    /// Declare this lane's result to the host-bound journal
+    Declare(crate::declaration::DeclareArgs),
     /// Answer a request using the revision you saw
     Answer(Box<crate::inbox::Answer>),
     /// Register and list provider accounts
@@ -79,6 +81,8 @@ pub enum Command {
         #[command(subcommand)]
         command: Option<Hosts>,
     },
+    /// Report host health, installed hook settings and recent hook timeouts
+    Doctor,
     /// Show and edit configuration
     #[command(subcommand)]
     Config(Config),
@@ -106,7 +110,7 @@ pub enum Command {
     Adopt {
         subject: provenant_records::custody::Subject,
     },
-    /// Release an item from custody (KIND:ID)
+    /// Release an item from custody (KIND:ID); an attempt whose record no longer decodes also has its dead writer lease reclaimed
     Release {
         subject: provenant_records::custody::Subject,
     },
@@ -177,9 +181,9 @@ pub enum Command {
     /// Retry a graph, node or attempt
     #[command(name = "retry", add = crate::metadata::CoreCommand(5, "provenant retry fix-login"))]
     Retry(Resume),
-    /// Deliver a steering note; resume the session where the provider supports it
+    /// Deliver a steering note; queue by default, interrupt with --now
     #[command(
-        long_about = "Queue a steering note for the next turn without interrupting the running attempt. Settlement resumes the retained session or applies the configured fallback. The default fresh_with_handoff starts fresh with the accepted brief, prior handoff and queued steering text; refuse rejects unsupported routes up front and leaves unavailable sessions without a successor.",
+        long_about = "Queue a steering note for the next turn without interrupting the running attempt. Settlement resumes the retained session or applies the configured fallback. The default fresh_with_handoff starts fresh with the accepted brief, prior handoff and queued steering text; refuse rejects unsupported routes up front and leaves unavailable sessions without a successor. Pass --now to interrupt through custody once the session identity is durable and resume that same session with the text; it refuses a running attempt with no retained session. Delivery defaults to queued from domains.fabric.steer.delivery (queued|now), and --now overrides it for one call. Use --explain to show the effective delivery mode and its source without steering.",
         add = crate::metadata::CoreCommand(3, "provenant steer fix-login/implement --brief-file - < message.md")
     )]
     Steer(crate::inbox::Steer),
@@ -192,7 +196,7 @@ pub enum Command {
     /// Deliver a settled writer attempt
     #[command(subcommand)]
     Lane(Lane),
-    /// Settle open attempts and report uncertain custody
+    /// Settle open attempts, reclaim dead leases behind undecodable records, and report uncertain custody
     Reconcile(Reconcile),
     /// Report local usage and cost
     #[command(subcommand)]
@@ -254,6 +258,9 @@ pub enum Command {
     /// Run fast repository checks
     #[command(subcommand)]
     Check(Check),
+    /// Inspect declared adapter capabilities
+    #[command(subcommand)]
+    Adapter(Adapter),
     /// Run harness and git hook handlers
     #[command(subcommand)]
     Hook(Hook),
@@ -706,8 +713,8 @@ pub struct GraphRunArgs {
     /// Access for a plain task; writer targets imply worktree-write
     #[arg(long, value_parser = ["read-only", "worktree-write"])]
     pub mode: Option<String>,
-    /// Tree a read-only task reads: the fetched upstream head, or the local checkout
-    #[arg(long, value_parser = ["upstream", "local"])]
+    /// Read source: auto, live, default_branch, or a Git ref
+    #[arg(long, value_parser = parse_read_source)]
     pub source: Option<String>,
     /// Existing writer worktree
     #[arg(long, conflicts_with = "branch")]
@@ -752,7 +759,7 @@ pub struct GraphRunArgs {
     /// keep their higher precedence
     #[arg(long)]
     pub no_sandbox: bool,
-    /// Explain the compiled graph without starting work
+    /// Explain the compiled graph and each node's route without starting work
     #[arg(long)]
     pub explain: bool,
 }
@@ -862,6 +869,15 @@ pub struct Cancel {
     /// Reason to record (up to 256 bytes)
     #[arg(long, value_parser = reason, catalog_bounds = (0, 256))]
     pub reason: Option<String>,
+    /// Apply this existing stop operation as a revisioned delivery queue control
+    #[arg(long, value_enum, requires_all = ["queue_revision", "operation_id"])]
+    pub queue_control: Option<QueueControlAction>,
+    /// Current delivery queue graph revision
+    #[arg(long, requires = "queue_control", catalog_u64_range = 0..)]
+    pub queue_revision: Option<u64>,
+    /// Stable ID for replaying this queue control
+    #[arg(long, requires = "queue_control", value_parser = explicit_operation_id)]
+    pub operation_id: Option<OperationId>,
 }
 #[derive(Clone, Debug, Args)]
 pub struct Resume {
@@ -877,6 +893,23 @@ pub struct Resume {
     /// Raise a graph limit or budget (KEY=VALUE) on a graph target; may be repeated
     #[arg(long, value_name = "KEY=VALUE")]
     pub extend: Vec<String>,
+    /// Apply this existing retry operation as a revisioned delivery queue control
+    #[arg(long, value_enum, requires_all = ["queue_revision", "operation_id"])]
+    pub queue_control: Option<QueueControlAction>,
+    /// Current delivery queue graph revision
+    #[arg(long, requires = "queue_control", catalog_u64_range = 0..)]
+    pub queue_revision: Option<u64>,
+    /// Stable ID for replaying this queue control
+    #[arg(long, requires = "queue_control", value_parser = explicit_operation_id)]
+    pub operation_id: Option<OperationId>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum QueueControlAction {
+    Accept,
+    Fix,
+    Retry,
+    Drop,
 }
 #[derive(Clone, Debug, Args)]
 pub struct Reconcile {
@@ -1018,6 +1051,9 @@ pub struct Ingest {
     /// Ingest transcripts written, and messages stamped, from this date or timestamp, or a span such as 1d ago
     #[arg(long, value_parser = since)]
     pub since: Option<jiff::Timestamp>,
+    /// Resume from the durable cursor instead of rescanning a time window
+    #[arg(long)]
+    pub incremental: bool,
 }
 #[derive(Clone, Debug, Args)]
 pub struct Mileage {
@@ -1194,6 +1230,19 @@ pub enum Rules {
 }
 pub use crate::check::Check;
 pub use crate::ci::Ci;
+/// Read the declared adapter capability matrix.
+#[derive(Clone, Debug, Subcommand)]
+pub enum Adapter {
+    /// Project the registry, compatibility and measured latency as JSON or text
+    Capabilities {
+        /// Show only these adapter ids; an unknown id warns and is skipped (repeatable)
+        #[arg(long = "adapter", value_name = "ID")]
+        adapters: Vec<String>,
+        /// Skip the harness version probe; compatibility reports `version_unread`
+        #[arg(long)]
+        no_probe: bool,
+    },
+}
 #[derive(Clone, Debug, Subcommand)]
 pub enum Hook {
     /// Handle git hook events
@@ -1395,6 +1444,9 @@ pub(crate) fn duration_seconds(value: &str) -> Result<u64, &'static str> {
             Warning::new(
                 provenant_records::warning::WAIT_BUDGET_CLAMPED,
                 format!("wait budget clamped to maximum {maximum}s"),
+                provenant_records::warning::detected_source(
+                    provenant_records::warning::WAIT_BUDGET_CLAMPED,
+                ),
             )
             .repair("Request a smaller wait budget."),
         );
@@ -1410,8 +1462,11 @@ pub(crate) fn observation_wait_seconds(value: &str) -> Result<u64, &'static str>
 #[derive(Clone, Debug, Args)]
 pub struct Status {
     /// Active custody of this chair and unattended items, across projects unless --project is set
-    #[arg(long, conflicts_with_all = ["targets", "session_stream", "all"])]
+    #[arg(long, conflicts_with_all = ["targets", "session_stream", "all", "adoptable"])]
     pub mine: bool,
+    /// Unattended custody open to adoption, across projects unless --project is set
+    #[arg(long, conflicts_with_all = ["mine", "targets", "session_stream", "all"])]
+    pub adoptable: bool,
     /// Exact chair session for the custody view (used by the session-start digest)
     #[arg(long = "session", requires = "mine")]
     pub custody_session: Option<String>,
@@ -1419,6 +1474,9 @@ pub struct Status {
     /// paged with --all, --limit and --cursor like the graph listing.
     #[arg(long, hide = true, conflicts_with = "targets")]
     pub session_stream: bool,
+    /// Stream custody rows for the session collector.
+    #[arg(long, hide = true, requires = "mine")]
+    pub custody_stream: bool,
     /// Graphs, nodes or attempts to show (NAME[/NODE[#N]]); every graph when omitted
     #[arg(value_name = "TARGET", catalog_graph_target())]
     pub targets: Vec<Target>,
@@ -1454,6 +1512,9 @@ pub struct Wait {
     /// Wait until GitHub reports this exact head; never verdict another SHA
     #[arg(long, value_name = "SHA", value_parser = parse_head_oid)]
     pub head: Option<String>,
+    /// What this wait does when its pinned pull request head moves: pinned or follow_latest
+    #[arg(long, value_name = "POLICY", value_parser = parse_pr_head_policy, requires = "prs", conflicts_with = "head")]
+    pub pr_head_policy: Option<provenant_records::subject::SubjectPolicy>,
     /// PR check settlement: failure (default) or complete (waits for all checks, with a 60-minute default budget)
     #[arg(long, value_enum, requires = "prs")]
     pub until: Option<PrWaitUntil>,
@@ -1485,6 +1546,15 @@ fn parse_head_oid(value: &str) -> Result<String, String> {
     GitOid::parse(value)
         .map(|_| value.to_owned())
         .map_err(|error| error.to_string())
+}
+
+/// Parse the declared wait policy, so a bad flag value is a grammar refusal
+/// with the allowed spellings rather than a runtime default.
+fn parse_pr_head_policy(value: &str) -> Result<provenant_records::subject::SubjectPolicy, String> {
+    serde_json::from_value::<provenant_records::subject::SubjectPolicy>(serde_json::Value::String(
+        value.to_owned(),
+    ))
+    .map_err(|_| "expected pinned or follow_latest".to_owned())
 }
 
 fn parse_landing_tier(value: &str) -> Result<String, String> {
@@ -1532,4 +1602,9 @@ fn edit_graph_name(value: &str) -> Result<String, String> {
         );
     }
     Ok(target.name)
+}
+
+/// Validate launch read sources using the same vocabulary as configuration.
+fn parse_read_source(value: &str) -> Result<String, String> {
+    crate::run::ReadSource::parse(value).map(|_| value.to_owned())
 }

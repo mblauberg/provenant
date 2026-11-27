@@ -194,7 +194,7 @@ pub fn input_warnings(
                         rule.source,
                         rule.rule.knob.as_deref().unwrap_or("unknown")
                     ),
-                ));
+                 provenant_records::warning::detected_source(SECRET_INPUT_POLICY_UNEXPECTED)));
             }
         }
     }

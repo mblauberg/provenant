@@ -59,7 +59,7 @@ fn sealed_destination_is_namespaced_or_absent() {
     request.task.deliver = Some(provenant_records::run::WriterDeliveryRequest {
         extra: Default::default(),
         mode: Default::default(),
-        remote: "origin".into(),
+        remote: provenant_records::run::Destination::from_name("origin").expect("fixture remote"),
         branch: "published/lane".into(),
         open_pr: false,
         fast_forward_only: false,

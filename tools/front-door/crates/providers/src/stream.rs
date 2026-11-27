@@ -68,12 +68,6 @@ pub enum ProviderEvent {
     ToolActivity,
     /// The final result was empty, so the last assistant text stands in for it.
     ResultFallback,
-    /// The provider completed a turn; text before it was that turn's answer.
-    /// Decoders emit `tool_activity: false`; the stream state records whether
-    /// a tool ran since the previous turn ended.
-    TurnEnd {
-        tool_activity: bool,
-    },
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct ExitObservation {
@@ -127,7 +121,7 @@ pub struct ProviderOutcome {
     session: Option<String>,
     model: Option<String>,
     status: OutcomeStatus,
-    terminal: bool,
+    terminal_event_seen: bool,
     exit: ExitObservation,
     final_events: Vec<ProviderEvent>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -161,8 +155,8 @@ impl ProviderOutcome {
     pub fn status(&self) -> OutcomeStatus {
         self.status
     }
-    pub fn terminal(&self) -> bool {
-        self.terminal
+    pub fn terminal_event_seen(&self) -> bool {
+        self.terminal_event_seen
     }
     pub fn exit(&self) -> ExitObservation {
         self.exit
@@ -174,7 +168,8 @@ const MAX_LINE_BYTES: usize = provenant_os::exec::PROVIDER_LINE_LIMIT;
 /// whatever a command printed) is not evidence; every other oversized line
 /// still fails closed. The item type sits in the first bytes of the frame.
 fn oversize_ignorable(adapter: &str, head: &[u8]) -> bool {
-    provenant_records::AdapterSpec::get(adapter).is_some_and(|spec| spec.oversize_command_frames)
+    provenant_records::AdapterSpec::get(adapter)
+        .is_some_and(|spec| spec.launch.oversize_command_frames)
         && (head.starts_with(br#"{"type":"item.completed","item":{"id":""#)
             || head.starts_with(br#"{"type":"item.started","item":{"id":""#))
         && head[..head.len().min(256)]
@@ -211,7 +206,6 @@ pub struct StreamState {
     last_assistant_text: Option<String>,
     result_text_seen: bool,
     early_stop: bool,
-    turn_tool_activity: bool,
 }
 impl StreamState {
     pub(crate) fn new(
@@ -246,7 +240,6 @@ impl StreamState {
             last_assistant_text: None,
             result_text_seen: false,
             early_stop: false,
-            turn_tool_activity: false,
         }
     }
     /// Whether the actual EOF record ended before its JSON value was complete.
@@ -284,7 +277,7 @@ impl StreamState {
     }
     fn raw_stream(&self) -> bool {
         provenant_records::AdapterSpec::get(self.adapter)
-            .is_some_and(|spec| spec.stdout == provenant_records::StreamContract::Raw)
+            .is_some_and(|spec| spec.launch.framing == provenant_records::StreamFraming::Raw)
     }
     pub(crate) fn observe(&mut self, bytes: &[u8]) -> Result<Vec<ProviderEvent>, ProviderError> {
         if self.raw_stream() {
@@ -441,11 +434,11 @@ impl StreamState {
                 ProviderEvent::ToolActivity => self.last_assistant_text = None,
                 ProviderEvent::Text(text)
                     if provenant_records::AdapterSpec::get(self.adapter)
-                        .is_some_and(|spec| spec.answer_from_text) =>
+                        .is_some_and(|spec| spec.launch.answer_from_text) =>
                 {
                     self.result_text_seen |= !text.trim().is_empty();
                     if provenant_records::AdapterSpec::get(self.adapter)
-                        .is_some_and(|spec| spec.result_event_usage)
+                        .is_some_and(|spec| spec.launch.result_event_usage)
                         && let Some(model) = self.resolve_answer_model(text)?
                     {
                         answer_model = Some(model);
@@ -466,15 +459,6 @@ impl StreamState {
                 | ProviderEvent::ModelUnavailable { .. }
                 | ProviderEvent::ModelOverloaded { .. } => self.refusal = true,
                 ProviderEvent::AuthRequired => self.auth_required = true,
-                _ => {}
-            }
-        }
-        for event in &mut events {
-            match event {
-                ProviderEvent::ToolActivity => self.turn_tool_activity = true,
-                ProviderEvent::TurnEnd { tool_activity } => {
-                    *tool_activity = std::mem::take(&mut self.turn_tool_activity);
-                }
                 _ => {}
             }
         }
@@ -548,7 +532,9 @@ impl StreamState {
                 "VERDICT: FAIL\n"
             });
             self.pending.clear();
-            self.terminal = true;
+            // Raw output carries the sole authoritative exit-derived verdict,
+            // but it is not a provider terminal event. Settlement reads the
+            // adapter's declared terminal-event strength below instead.
             final_events.push(ProviderEvent::Text(text));
         }
         // A malformed provider result can carry a useful typed diagnostic
@@ -576,6 +562,13 @@ impl StreamState {
                 }
             }
         }
+        // An unknown adapter is treated strictly: success still requires a
+        // provider terminal event. A declared `Absent` adapter (raw command
+        // output) settles a clean exit on the process contract alone.
+        let terminal_event = provenant_records::AdapterSpec::get(self.adapter)
+            .map_or(provenant_records::TerminalEventStrength::Weak, |spec| {
+                spec.capabilities.terminal_event.value
+            });
         let status = if self.malformed {
             OutcomeStatus::Malformed
         } else if self.refusal || self.auth_required {
@@ -586,30 +579,24 @@ impl StreamState {
             OutcomeStatus::Partial
         } else if exit.code != Some(0) {
             OutcomeStatus::Failed
-        } else if self.terminal {
+        } else if self.terminal
+            || terminal_event == provenant_records::TerminalEventStrength::Absent
+        {
             OutcomeStatus::Success
         } else {
             OutcomeStatus::Partial
         };
-        // A turn that ran a tool and never produced its own `result` (an error
-        // result, a kill or a timeout) is still a turn: record its boundary so
-        // an earlier turn's handoff does not stand over unfinished work.
-        if std::mem::take(&mut self.turn_tool_activity) {
-            final_events.push(ProviderEvent::TurnEnd {
-                tool_activity: true,
-            });
-        }
         // Recover only a clean, complete terminal stream, using the same
         // answer identity checks as an ordinary result event.
         if provenant_records::AdapterSpec::get(self.adapter)
-            .is_some_and(|spec| spec.answer_from_text)
+            .is_some_and(|spec| spec.launch.answer_from_text)
             && status == OutcomeStatus::Success
             && !self.early_stop
             && !self.result_text_seen
             && let Some(text) = self.last_assistant_text.take()
         {
             if provenant_records::AdapterSpec::get(self.adapter)
-                .is_some_and(|spec| spec.result_event_usage)
+                .is_some_and(|spec| spec.launch.result_event_usage)
                 && let Some(model) = self.resolve_answer_model(&text)?
             {
                 final_events.push(ProviderEvent::Model(model));
@@ -626,7 +613,7 @@ impl StreamState {
                 self.model
             },
             status,
-            terminal: self.terminal,
+            terminal_event_seen: self.terminal,
             exit,
             final_events,
             protocol_error,

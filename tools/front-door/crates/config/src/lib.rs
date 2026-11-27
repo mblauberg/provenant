@@ -11,6 +11,7 @@ pub use admission::{
     ResolvedAdmissionClass,
 };
 mod account_sync;
+pub mod adapter_capabilities;
 mod cache_budget;
 mod domains;
 mod edit;
@@ -36,6 +37,11 @@ pub use pr_policy::{KNOB as PR_KNOB, PrPolicy, ResolvedPrPolicy};
 mod harness;
 mod hooks;
 pub use hooks::{hook_plugin_source, lane_hook_settings, registrations as hook_registrations};
+pub mod hooks_config;
+pub use hooks_config::{
+    DEFAULT_HOOK_TIMEOUT_SECS, HOOK_BUDGET_PERCENT, SECTION as HOOKS_SECTION,
+    Settings as HookSettings, hook_budget,
+};
 mod inspection;
 mod knobs;
 mod lane_history;
@@ -63,15 +69,16 @@ pub mod ports;
 mod project_binding;
 pub use ports::{
     Adapter, BuildClean, BuildOffload, BuildOverflow, BuildPort, BuildPriority, BuildSoakPort,
-    BuildStrategyName, CommandExitCodes, DEFAULT_PORT_COMMAND_RECEIPT_AGE_DAYS, ExitDisposition,
-    Forge, ForgeOperation, ForgePort, ForgeResponse, GitPort, HeadersObservation, Integration,
-    LandBackend, LandPort, PORTS_CONFIG, PORTS_SCHEMA_VERSION, PackagePath, Port, PortBackend,
-    PortBackendKind, PortCommand, PortCommandBackend, PortCommandDisposition, PortCommandExecution,
-    PortCommandPublication, PortCommandReceipt, PortCommandReceiptCollectionLock,
-    PortCommandReceiptEntry, PortCommandReceiptInventory, PortCommandReceiptProof, PortError,
-    PortEvidenceError, PortExecution, PortReceiptIssue, PortReceiptLifetime, PortTable,
-    ResolvedBuildValue, TierCommand, VerifyAffectedPort, VerifyFormat, VerifyPort, VerifySelection,
-    VerifyStaticCheck, VerifyTier, WorktreeLayoutPort, dispatch_port_backend, execute_port_command,
+    BuildStrategyName, BuildTargetKey, CommandExitCodes, DEFAULT_BUILD_TARGET_KEYS,
+    DEFAULT_PORT_COMMAND_RECEIPT_AGE_DAYS, ExitDisposition, Forge, ForgeOperation, ForgePort,
+    ForgeResponse, GitPort, HeadersObservation, Integration, LandBackend, LandPort, PORTS_CONFIG,
+    PORTS_SCHEMA_VERSION, PackagePath, Port, PortBackend, PortBackendKind, PortCommand,
+    PortCommandBackend, PortCommandDisposition, PortCommandExecution, PortCommandPublication,
+    PortCommandReceipt, PortCommandReceiptCollectionLock, PortCommandReceiptEntry,
+    PortCommandReceiptInventory, PortCommandReceiptProof, PortError, PortEvidenceError,
+    PortExecution, PortReceiptIssue, PortReceiptLifetime, PortTable, ResolvedBuildValue,
+    TierCommand, VerifyAffectedPort, VerifyFormat, VerifyPort, VerifySelection, VerifyStaticCheck,
+    VerifyTier, WorktreeLayoutPort, dispatch_port_backend, execute_port_command,
     execute_port_command_with_input, infer_verify_base, land_backend, port_command_environment,
     port_command_receipt_proof, port_command_receipts, port_declaration_warnings,
     port_source_layer, project_key, project_key_for, record_port_command,
@@ -104,7 +111,7 @@ pub use domains::{
 };
 pub use edit::{EditOptions, Edited, edit_config, revision_of, show};
 pub use history::{FieldChange, HistoryEntry, HistoryLimits, history};
-pub use knobs::{KNOB_PRECEDENCE, KnobEdit, knob_source};
+pub use knobs::{KNOB_PRECEDENCE, KnobEdit, knob_source, read_source_value};
 pub use lane_history::{
     CONFLICT_MARKERS, DEFAULT_BRANCH_REWRITE, DefaultBranchRewrite, HistoryEffect, HistoryValue,
     LaneHistory, REBASE, Rebase, Setting, UNROOTED_TIP,
@@ -116,9 +123,10 @@ pub use presets::Profile;
 pub use project_binding::{
     GcProjectSelection, GcProjectStatus, ProjectBinding, ProjectLocation, Retirement, bind_host,
     bind_project, forget_project, forget_project_at_state, host_project_dir, lookup_gc_project,
-    lookup_host, lookup_project, lookup_project_at_state, project_binding_dir,
-    registered_gc_project_selection, registered_gc_project_selection_with_progress,
-    registered_gc_projects, registered_projects, retire_vanished_projects, transient_location,
+    lookup_host, lookup_project, lookup_project_at_state, lookup_project_by_id,
+    project_binding_dir, registered_gc_project_selection,
+    registered_gc_project_selection_with_progress, registered_gc_projects, registered_projects,
+    retire_vanished_projects, transient_location,
 };
 pub use provenant_records::{Finding, Layer};
 pub use schema::{
@@ -290,7 +298,7 @@ fn close_matches(close: &[String]) -> String {
 }
 
 /// `D` is composition's closed, typed aggregate of registered domain sections.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ResolvedConfig<D = NoDomains> {
     pub schema_version: u64,
     pub profile: Profile,

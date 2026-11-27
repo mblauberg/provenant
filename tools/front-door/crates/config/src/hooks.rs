@@ -24,7 +24,7 @@ fn registrations_for(harnesses: &[Harness], lane: bool) -> Vec<HookRegistration>
         .filter_map(|harness| {
             let spec = harness.spec();
             let install = spec.install?;
-            if !install.hooks.is_supported() {
+            if !install.native.hooks.value {
                 return None;
             }
             let protocol = install.hook_protocol?;
@@ -48,7 +48,7 @@ fn registrations_for(harnesses: &[Harness], lane: bool) -> Vec<HookRegistration>
                         if lane && action.is_answer_delivery() {
                             return None;
                         }
-                        if action.is_answer_delivery() && !install.answer_delivery.is_supported() {
+                        if action.is_answer_delivery() && !install.native.answer_delivery.value {
                             return None;
                         }
                         if matches!(
@@ -56,7 +56,7 @@ fn registrations_for(harnesses: &[Harness], lane: bool) -> Vec<HookRegistration>
                             HookAction::ChairPrompt
                                 | HookAction::ChairStart
                                 | HookAction::ChairStop
-                        ) && !spec.chair_switch
+                        ) && !spec.launch.chair_switch
                         {
                             return None;
                         }
@@ -90,7 +90,7 @@ fn hook_command(
     let state = state
         .to_str()
         .ok_or(InstallError::InvalidConfig("hook state root must be UTF-8"))?;
-    let adapter = spec.harness.spec().name;
+    let adapter = spec.harness.spec().identity.name;
     Ok([
         binary,
         "--state-dir",
@@ -104,9 +104,25 @@ fn hook_command(
     .collect::<Vec<_>>()
     .join(" "))
 }
-fn hook_value(spec: &HookRegistration, binary: &Path, state: &Path) -> Result<Value, InstallError> {
+fn hook_value(
+    spec: &HookRegistration,
+    binary: &Path,
+    state: &Path,
+    timeout_secs: u64,
+) -> Result<Value, InstallError> {
     let mut value = json!({"type":"command", "command":hook_command(spec, binary, state)?});
-    let timeout = spec.timeout_seconds.map(|seconds| match spec.protocol {
+    // Chair hooks are the ones whose work the host owns; one setting controls
+    // their installed timeout so the runtime can keep its budget below it.
+    // Other actions keep their declared per-protocol timeout.
+    let configured = if matches!(
+        spec.action,
+        HookAction::ChairPrompt | HookAction::ChairStart | HookAction::ChairStop
+    ) {
+        Some(timeout_secs)
+    } else {
+        spec.timeout_seconds
+    };
+    let timeout = configured.map(|seconds| match spec.protocol {
         HookProtocol::CursorCommands {
             timeout_unit: HookTimeoutUnit::Milliseconds,
         } => seconds.saturating_mul(1000),
@@ -137,12 +153,13 @@ pub(crate) fn value(spec: &HookRegistration, targets: &Targets) -> Result<Value,
         spec,
         &targets.bin_dir.join("provenant"),
         targets.roots.state.as_path(),
+        targets.hook_timeout_secs,
     )
 }
 
 fn identity(spec: &HookRegistration, command: &str) -> HookIdentity {
     HookIdentity {
-        harness: spec.harness.spec().name.into(),
+        harness: spec.harness.spec().identity.name.into(),
         action: spec.action.command().into(),
         event: spec.event.into(),
         matcher: spec.matcher.map(str::to_owned),
@@ -175,7 +192,7 @@ fn read_identity(selector: &str) -> Result<HookIdentity, InstallError> {
 fn harness(identity: &HookIdentity) -> Result<Harness, InstallError> {
     ADAPTER_SPECS
         .iter()
-        .find(|spec| spec.name == identity.harness)
+        .find(|spec| spec.identity.name == identity.harness)
         .map(|spec| spec.id)
         .ok_or(InstallError::InvalidConfig("hook adapter"))
 }
@@ -432,25 +449,30 @@ pub(crate) fn register(
     let mut changes = Vec::new();
     let mut owned = Vec::new();
     let mut relinquished_modified = false;
-    let declared_actions: BTreeSet<&str> = targets
+    let declared_actions: BTreeSet<HookAction> = targets
         .hook_specs
         .iter()
         .filter(|spec| spec.harness == harness)
-        .map(|spec| spec.action.command())
+        .map(|spec| spec.action)
         .collect();
-    let inherited_actions: BTreeSet<String> = inherited
+    let inherited_actions: BTreeSet<HookAction> = inherited
         .iter()
         .filter_map(|selector| read_identity(selector).ok())
-        .filter(|old| old.harness == harness.spec().name)
-        .map(|old| old.action)
+        .filter(|old| old.harness == harness.spec().identity.name)
+        .filter_map(|old| action(&old).ok())
         .collect();
     // An upgrade can retire an action and declare its replacement. The receipt
-    // still owns the retired leaf, so the harness's declared set inherits that
+    // still owns the retired leaf, so its declared replacement inherits that
     // ownership; without this a plain upgrade (no explicit `--hooks on`) would
-    // silently lose the replacement.
-    let retires_owned = inherited_actions
+    // silently lose the replacement. Transfer only to the declared replacement:
+    // transferring to the whole declared set would re-add a managed leaf the
+    // user deleted by hand, which the ownership contract promises to respect.
+    let replacements: BTreeSet<HookAction> = inherited_actions
         .iter()
-        .any(|action| !declared_actions.contains(action.as_str()));
+        .filter(|old| !declared_actions.contains(*old))
+        .filter_map(|old| old.declared_replacement())
+        .filter(|replacement| declared_actions.contains(replacement))
+        .collect();
     for spec in targets.hook_specs.iter().filter(|spec| {
         spec.harness == harness && !matches!(spec.protocol, HookProtocol::OpenCodePlugin)
     }) {
@@ -460,8 +482,9 @@ pub(crate) fn register(
             .and_then(Value::as_str)
             .ok_or(InstallError::InvalidConfig("hook command"))?;
         let sel = selector(spec, command)?;
-        let was_owned =
-            follows_siblings || retires_owned || inherited_actions.contains(spec.action.command());
+        let was_owned = follows_siblings
+            || inherited_actions.contains(&spec.action)
+            || replacements.contains(&spec.action);
         if !targets.hooks && !was_owned {
             continue;
         }
@@ -499,7 +522,9 @@ fn render_settings(harness: Harness, binary: &Path, state: &Path) -> Result<Valu
         if matches!(spec.protocol, HookProtocol::OpenCodePlugin) {
             continue;
         }
-        let value = hook_value(&spec, binary, state)?;
+        // Lane settings carry no chair actions, so the configured chair timeout
+        // cannot change them; the declared per-action timeout still applies.
+        let value = hook_value(&spec, binary, state, crate::DEFAULT_HOOK_TIMEOUT_SECS)?;
         settings = append_registration(&settings, &spec, value)?;
     }
     decode_jsonc(Cursor::new(settings), Limits::CONFIG).map_err(InstallError::from)
@@ -539,7 +564,7 @@ pub fn hook_plugin_source(binary: &Path, state: &Path) -> Result<Vec<u8>, Instal
         .map_err(|_| InstallError::InvalidConfig("hook executable"))?;
     let state =
         serde_json::to_string(state).map_err(|_| InstallError::InvalidConfig("hook state root"))?;
-    let adapter = serde_json::to_string(Harness::Opencode.spec().name)
+    let adapter = serde_json::to_string(Harness::Opencode.spec().identity.name)
         .map_err(|_| InstallError::InvalidConfig("hook adapter"))?;
     Ok(format!(
         r#"import {{ Plugin }} from "@opencode/plugin"
@@ -733,13 +758,13 @@ mod tests {
                 else {
                     return None;
                 };
-                if (!spec.chair_switch
+                if (!spec.launch.chair_switch
                     && matches!(
                         action,
                         HookAction::ChairPrompt | HookAction::ChairStart | HookAction::ChairStop
                     ))
                     || (action.is_answer_delivery()
-                        && (lane || !install.answer_delivery.is_supported()))
+                        && (lane || !install.native.answer_delivery.value))
                 {
                     return None;
                 }
@@ -756,7 +781,7 @@ mod tests {
             let Some(install) = adapter.install else {
                 continue;
             };
-            if !install.hooks.is_supported() {
+            if !install.native.hooks.value {
                 continue;
             }
             let native = registrations(&[adapter.id]);
@@ -765,7 +790,7 @@ mod tests {
                 native.len(),
                 declared_native.len(),
                 "{} native",
-                adapter.name
+                adapter.identity.name
             );
             for (action, event, matcher, timeout) in declared_native {
                 assert_eq!(
@@ -780,14 +805,19 @@ mod tests {
                         .count(),
                     1,
                     "{} {:?}",
-                    adapter.name,
+                    adapter.identity.name,
                     action
                 );
             }
 
             let lane = registrations_for(&[adapter.id], true);
             let declared_lane = declared(adapter.id, true);
-            assert_eq!(lane.len(), declared_lane.len(), "{} lane", adapter.name);
+            assert_eq!(
+                lane.len(),
+                declared_lane.len(),
+                "{} lane",
+                adapter.identity.name
+            );
             for (action, event, matcher, timeout) in declared_lane {
                 assert_eq!(
                     lane.iter()
@@ -800,7 +830,7 @@ mod tests {
                         .count(),
                     1,
                     "{} lane {:?}",
-                    adapter.name,
+                    adapter.identity.name,
                     action
                 );
             }
@@ -818,7 +848,7 @@ mod tests {
                     assert!(
                         source.contains(&encoded),
                         "{} {:?}",
-                        adapter.name,
+                        adapter.identity.name,
                         row.action
                     );
                 }
@@ -830,7 +860,7 @@ mod tests {
                     assert!(
                         !source.contains(&format!("\"action\":\"{}\"", action.command())),
                         "{} {:?}",
-                        adapter.name,
+                        adapter.identity.name,
                         action
                     );
                 }
@@ -838,13 +868,39 @@ mod tests {
                 let settings = lane_hook_settings(adapter.id, binary, state).unwrap();
                 let bytes = serde_json::to_vec(&settings).unwrap();
                 for row in &lane {
-                    let value = hook_value(row, binary, state).unwrap();
+                    let value =
+                        hook_value(row, binary, state, crate::DEFAULT_HOOK_TIMEOUT_SECS).unwrap();
                     let command = value.get("command").and_then(Value::as_str).unwrap();
                     let selector = selector(row, command).unwrap();
                     assert_eq!(get(&bytes, &selector).unwrap(), Some(value));
                 }
             }
         }
+    }
+
+    #[test]
+    fn configured_timeout_replaces_only_the_installed_chair_timeout() {
+        let binary = Path::new("/private/bin/provenant");
+        let state = Path::new("/private/state");
+        let chair = registrations(&[Harness::Claude])
+            .into_iter()
+            .find(|spec| spec.action == HookAction::ChairStop)
+            .unwrap();
+        let worktree = registrations(&[Harness::Claude])
+            .into_iter()
+            .find(|spec| spec.action == HookAction::WorktreeCreate)
+            .unwrap();
+        let chair_value = hook_value(&chair, binary, state, 17).unwrap();
+        let worktree_value = hook_value(&worktree, binary, state, 17).unwrap();
+        assert_eq!(chair_value["timeout"], json!(17));
+        assert_eq!(
+            worktree_value["timeout"],
+            json!(worktree.timeout_seconds.unwrap())
+        );
+        assert_eq!(
+            crate::hook_budget(17),
+            std::time::Duration::from_millis(10200)
+        );
     }
 
     #[test]

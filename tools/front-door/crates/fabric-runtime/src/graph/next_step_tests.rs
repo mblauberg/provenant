@@ -14,12 +14,17 @@ struct Owner {
     worktrees: Vec<Option<String>>,
     facts: Option<DepletionFacts>,
     spawn_custody_released: Option<bool>,
+    on_stop_defaults: provenant_records::OnStop,
 }
 
 impl AttemptOwner for Owner {
     type Error = std::convert::Infallible;
     fn worktree_layout(&self) -> provenant_config::WorktreeLayoutPort {
         provenant_config::PortTable::builtin().worktree_layout
+    }
+
+    fn graph_on_stop_defaults(&self) -> provenant_records::OnStop {
+        self.on_stop_defaults.clone()
     }
 
     fn actor(&self) -> String {
@@ -143,20 +148,25 @@ fn document(access: &str, on_stop: serde_json::Value) -> GraphDocument {
 
 fn terminal(
     reference: &str,
-    outcome: AttemptOutcome,
+    outcome: GraphAttemptOutcome,
     stop: Option<StopCause>,
     result: Option<&str>,
 ) -> AttemptObservation {
     AttemptObservation::Terminal {
         attempt_ref: Some(reference.into()),
-        settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
+        settlement_class: Some(provenant_records::run::SettlementClass::Completed),
         outcome,
         launched: true,
         result: result.map(|text| {
             let mut capture = crate::result_capture::ResultCapture::new(None);
             capture.push(text.as_bytes());
             let mut result = capture.finish();
-            result.handoff = provenant_records::handoff::Handoff::from_turns(text, &[]);
+            result.handoff = text
+                .split_once("```handoff\n")
+                .and_then(|(_, remainder)| remainder.split_once("\n```").map(|(json, _)| json))
+                .map_or(Ok(None), |json| {
+                    provenant_records::handoff::Handoff::from_json(json.as_bytes()).map(Some)
+                });
             Box::new(result)
         }),
         result_warning: None,
@@ -164,11 +174,12 @@ fn terminal(
         branch: None,
         commit: None,
         stop,
+        cause: None,
     }
 }
 
 fn done(reference: &str) -> AttemptObservation {
-    terminal(reference, AttemptOutcome::Succeeded, None, None)
+    terminal(reference, GraphAttemptOutcome::Succeeded, None, None)
 }
 
 /// Small: final handoff status, committed work and the host's no-work evidence
@@ -182,16 +193,15 @@ fn writer_handoff_classes_settle_without_mistaking_done_for_a_stop() {
             "remaining":if status == "done" { vec![] } else { vec!["Finish the brief"] },
             "decisions":[], "verify":[]
         })));
-        let mut observation = terminal(
-            "a/1",
-            if status.is_some() {
-                AttemptOutcome::Succeeded
-            } else {
-                AttemptOutcome::StoppedNoWork
-            },
-            None,
-            text.as_deref(),
-        );
+        // The host's one pure `settle()` projects the declared stop; the graph
+        // only records that projected outcome (it no longer derives one from a
+        // handoff). A finished brief stays provider success.
+        let outcome = match status {
+            Some("done") => GraphAttemptOutcome::Succeeded,
+            Some(_) => GraphAttemptOutcome::DeclaredStop,
+            None => GraphAttemptOutcome::StoppedNoWork,
+        };
+        let mut observation = terminal("a/1", outcome, None, text.as_deref());
         if let AttemptObservation::Terminal { commit, .. } = &mut observation {
             *commit = status.map(|_| "a".repeat(40));
         }
@@ -205,16 +215,16 @@ fn writer_handoff_classes_settle_without_mistaking_done_for_a_stop() {
             assert_eq!(progress.state, NodeState::Succeeded);
             assert_eq!(
                 progress.attempts[0].outcome,
-                Some(AttemptOutcome::Succeeded)
+                Some(GraphAttemptOutcome::Succeeded)
             );
             assert!(run.checkpoint.pause.is_none());
         } else {
             assert_eq!(
                 progress.attempts[0].outcome,
                 Some(if status.is_some() {
-                    AttemptOutcome::DeclaredStop
+                    GraphAttemptOutcome::DeclaredStop
                 } else {
-                    AttemptOutcome::StoppedNoWork
+                    GraphAttemptOutcome::StoppedNoWork
                 })
             );
             assert!(run.checkpoint.pause.is_some());
@@ -223,7 +233,7 @@ fn writer_handoff_classes_settle_without_mistaking_done_for_a_stop() {
                 assert_eq!(progress.attempts[0].stop, Some(StopCause::Blocked));
                 assert!(
                     progress
-                        .advance_error
+                        .advance_note
                         .as_deref()
                         .unwrap()
                         .contains("missing capability")
@@ -249,7 +259,7 @@ fn retry_of_a_declared_stop_preserves_a_valid_checkpoint() {
         let mut owner = Owner {
             observations: [terminal(
                 "a/1",
-                AttemptOutcome::Succeeded,
+                GraphAttemptOutcome::Succeeded,
                 None,
                 Some(&text),
             )]
@@ -298,7 +308,7 @@ fn settled_review_required_proceeds_without_acknowledgement() {
     document.nodes.push(dependent);
     let mut owner = Owner {
         observations: [
-            terminal("a/1", AttemptOutcome::ReviewRequired, None, None),
+            terminal("a/1", GraphAttemptOutcome::ReviewRequired, None, None),
             done("b/1"),
         ]
         .into(),
@@ -315,7 +325,7 @@ fn settled_review_required_proceeds_without_acknowledgement() {
     );
     assert_eq!(
         run.checkpoint.nodes[0].attempts[0].outcome,
-        Some(AttemptOutcome::ReviewRequired)
+        Some(GraphAttemptOutcome::ReviewRequired)
     );
     assert_eq!(
         advance(&document, &mut owner, &mut journal)
@@ -333,7 +343,9 @@ fn never_spawned_attempt_retries_elsewhere_only_with_released_custody() {
         let document = document("worktree_write", serde_json::Value::Null);
         let mut failed = terminal(
             "a/1",
-            AttemptOutcome::PreparationRefused(provenant_records::run::TerminalCause::SpawnFailure),
+            GraphAttemptOutcome::PreparationRefused(
+                provenant_records::run::CauseKind::SpawnFailure,
+            ),
             Some(StopCause::SpawnFailure),
             None,
         );
@@ -368,7 +380,7 @@ fn never_spawned_attempt_retries_elsewhere_only_with_released_custody() {
             !progress
                 .attempts
                 .iter()
-                .any(|attempt| attempt.outcome == Some(AttemptOutcome::TaskFailed))
+                .any(|attempt| attempt.outcome == Some(GraphAttemptOutcome::TaskFailed))
         );
     }
 }
@@ -379,11 +391,15 @@ fn never_spawned_attempt_retries_elsewhere_only_with_released_custody() {
 fn stalled_provider_retry_advances_but_fail_policy_does_not() {
     for (outcome, expected_routes, expected_state) in [
         (
-            AttemptOutcome::ProviderStalledRetry,
+            GraphAttemptOutcome::ProviderStalledRetry,
             vec!["first", "second"],
             NodeState::Succeeded,
         ),
-        (AttemptOutcome::TaskFailed, vec!["first"], NodeState::Failed),
+        (
+            GraphAttemptOutcome::TaskFailed,
+            vec!["first"],
+            NodeState::Failed,
+        ),
     ] {
         let document = document("worktree_write", serde_json::Value::Null);
         let mut owner = Owner {
@@ -393,7 +409,7 @@ fn stalled_provider_retry_advances_but_fail_policy_does_not() {
         let run = advance(&document, &mut owner, &mut journal(&document)).unwrap();
         assert_eq!(adapters(&owner), expected_routes);
         assert_eq!(run.checkpoint.nodes[0].state, expected_state);
-        if outcome == AttemptOutcome::ProviderStalledRetry {
+        if outcome == GraphAttemptOutcome::ProviderStalledRetry {
             assert_eq!(owner.worktrees[0], owner.worktrees[1]);
         }
     }
@@ -422,7 +438,7 @@ fn a_transient_stop_retries_once_on_its_route_then_takes_a_new_route() {
     let crash = |reference| {
         terminal(
             reference,
-            AttemptOutcome::OtherFailure,
+            GraphAttemptOutcome::OtherFailure,
             Some(StopCause::ProcessCrash),
             None,
         )
@@ -460,7 +476,7 @@ fn a_depleted_writer_moves_to_a_new_route_at_once_in_its_worktree() {
         let document = document("worktree_write", serde_json::Value::Null);
         let mut owner = Owner {
             observations: [
-                terminal("a/1", AttemptOutcome::OtherFailure, Some(cause), Some("```handoff\n{\"schema_version\":2,\"status\":\"stopped_early\",\"note\":\"Work remains\",\"remaining\":[\"Finish work\"],\"decisions\":[],\"verify\":[]}\n```")),
+                terminal("a/1", GraphAttemptOutcome::OtherFailure, Some(cause), Some("```handoff\n{\"schema_version\":2,\"status\":\"stopped_early\",\"note\":\"Work remains\",\"remaining\":[\"Finish work\"],\"decisions\":[],\"verify\":[]}\n```")),
                 done("b/1"),
             ]
             .into(),
@@ -476,6 +492,85 @@ fn a_depleted_writer_moves_to_a_new_route_at_once_in_its_worktree() {
 }
 
 #[test]
+fn a_pinned_model_unavailable_lens_falls_back_to_the_next_candidate() {
+    // A lens pinned to an exact model has no pool selection and no recorded
+    // tier. A capacity stop on it must hand the work to another eligible
+    // candidate and record the typed cause on the restart.
+    let document = document("read_only", serde_json::Value::Null);
+    let spare = "claude/claude-haiku-5-5";
+    let config: provenant_routing::RoutingConfig = serde_json::from_value(json!({
+        "pools": {
+            "utility": [{"model": spare, "weight": 1, "efforts": []}],
+            "senior": [{"model": "codex/gpt-6.1-sol", "weight": 1, "efforts": []}]
+        },
+        "depletion": {
+            "rungs": ["other_provider_same_tier", "adjacent_tier"],
+            "tiers": ["utility", "senior"],
+            "adjacent": ["lower"]
+        }
+    }))
+    .unwrap();
+    let facts = DepletionFacts {
+        catalogue: provenant_routing::Catalogue::bundled().unwrap(),
+        config,
+        stopped: provenant_routing::Stopped {
+            model: provenant_routing::ModelId::parse("codex/gpt-6.1-luna").unwrap(),
+            account: Some("pinned".into()),
+            effort: None,
+            tier: None,
+            family: Some("openai".into()),
+        },
+        readiness: vec![provenant_routing::ReadinessFact {
+            model: provenant_routing::ModelId::parse(spare).unwrap(),
+            account: Some("spare".into()),
+            state: provenant_routing::Readiness::Ready,
+        }],
+        tried: Vec::new(),
+        host_native: Vec::new(),
+        exclusions: Vec::new(),
+        intent: Default::default(),
+        confidential: false,
+        now: provenant_core::WallTime::from_unix_seconds(100).unwrap(),
+    };
+    let mut owner = Owner {
+        observations: [
+            terminal(
+                "a/1",
+                GraphAttemptOutcome::ModelUnavailable,
+                Some(StopCause::ModelUnavailable),
+                None,
+            ),
+            done("b/1"),
+        ]
+        .into(),
+        facts: Some(facts),
+        ..Default::default()
+    };
+    let mut journal = journal(&document);
+    let run = advance(&document, &mut owner, &mut journal).unwrap();
+    assert!(run.checkpoint.successful(), "{:?}", run.checkpoint.nodes[0]);
+    assert_eq!(owner.routes.len(), 2);
+    assert_eq!(owner.routes[1].model.as_deref(), Some(spare));
+    assert_eq!(
+        restarts(&run.checkpoint),
+        [(StopCause::ModelUnavailable, NextStep::NewRoute)]
+    );
+    let restart = run.checkpoint.expansions[0]
+        .patch
+        .as_ref()
+        .expect("a restart was saved")
+        .restart
+        .as_ref()
+        .expect("a restart was saved");
+    let choice = restart
+        .ladder
+        .as_ref()
+        .expect("the ladder names the fallback it took");
+    assert_eq!(choice.target, format!("{spare} (spare)"));
+    assert_eq!(choice.tier.as_deref(), Some("utility"));
+}
+
+#[test]
 fn a_writer_that_lost_its_lane_token_continues_from_its_handoff_on_a_new_route() {
     let document = document("worktree_write", serde_json::Value::Null);
     let handoff = "```handoff\n{\"schema_version\":2,\"status\":\"stopped_early\",\"note\":\"Renderer half done\",\"remaining\":[\"Finish renderer\"],\"decisions\":[],\"verify\":[]}\n```";
@@ -483,7 +578,7 @@ fn a_writer_that_lost_its_lane_token_continues_from_its_handoff_on_a_new_route()
         observations: [
             terminal(
                 "a/1",
-                AttemptOutcome::TaskFailed,
+                GraphAttemptOutcome::TaskFailed,
                 Some(StopCause::LaneTokenLost),
                 Some(handoff),
             ),
@@ -516,7 +611,7 @@ fn a_stopped_writer_restarts_when_handoff_holds_a_known_credential() {
         observations: [
             terminal(
                 "a/1",
-                AttemptOutcome::TaskFailed,
+                GraphAttemptOutcome::TaskFailed,
                 Some(StopCause::LaneTokenLost),
                 Some(&handoff),
             ),
@@ -544,7 +639,7 @@ fn on_stop_sends_a_stop_to_the_chair_and_unproved_custody_always_goes_there() {
         let document = document("worktree_write", on_stop);
         let mut owner = Owner {
             observations: [
-                terminal("a/1", AttemptOutcome::OtherFailure, Some(cause), None),
+                terminal("a/1", GraphAttemptOutcome::OtherFailure, Some(cause), None),
                 done("b/1"),
             ]
             .into(),
@@ -565,7 +660,7 @@ fn on_stop_moves_a_chair_cause_to_a_new_route() {
         observations: [
             terminal(
                 "a/1",
-                AttemptOutcome::OtherFailure,
+                GraphAttemptOutcome::OtherFailure,
                 Some(StopCause::Deadline),
                 None,
             ),
@@ -591,7 +686,7 @@ fn restarts_stop_at_the_graph_wide_continuation_budget() {
         observations: [
             terminal(
                 "a/1",
-                AttemptOutcome::OtherFailure,
+                GraphAttemptOutcome::OtherFailure,
                 Some(StopCause::UsageLimited),
                 None,
             ),
@@ -742,7 +837,7 @@ fn ladder_choices(checkpoint: &GraphCheckpoint) -> Vec<patch::LadderChoice> {
 fn limited(reference: &str) -> AttemptObservation {
     terminal(
         reference,
-        AttemptOutcome::OtherFailure,
+        GraphAttemptOutcome::OtherFailure,
         Some(StopCause::UsageLimited),
         None,
     )
@@ -854,7 +949,12 @@ fn stopped_early_handoff(remaining: &[&str]) -> String {
 /// A writer round that declares `stopped_early` with the given head.
 fn stopped_round(reference: &str, remaining: &[&str], commit: char) -> AttemptObservation {
     let handoff = stopped_early_handoff(remaining);
-    let mut observation = terminal(reference, AttemptOutcome::Succeeded, None, Some(&handoff));
+    let mut observation = terminal(
+        reference,
+        GraphAttemptOutcome::DeclaredStop,
+        None,
+        Some(&handoff),
+    );
     if let AttemptObservation::Terminal { commit: head, .. } = &mut observation {
         *head = Some(commit.to_string().repeat(40));
     }
@@ -883,17 +983,25 @@ fn pause_reason(checkpoint: &GraphCheckpoint) -> &str {
 fn a_recoverable_stop_on_a_single_route_continues_on_the_same_route() {
     for cause in [
         StopCause::StoppedEarly,
+        StopCause::StoppedNoWork,
         StopCause::LaneTokenLost,
         StopCause::ContextHandoff,
     ] {
         let document = single_route_document(serde_json::Value::Null);
         let handoff = stopped_early_handoff(&["Finish the renderer"]);
         let stopped = if cause == StopCause::StoppedEarly {
-            terminal("a/1", AttemptOutcome::Succeeded, None, Some(&handoff))
+            // The host projects the unfinished handoff to a declared stop; the
+            // graph only records that outcome and then continues it.
+            terminal(
+                "a/1",
+                GraphAttemptOutcome::DeclaredStop,
+                None,
+                Some(&handoff),
+            )
         } else {
             terminal(
                 "a/1",
-                AttemptOutcome::TaskFailed,
+                GraphAttemptOutcome::TaskFailed,
                 Some(cause),
                 Some(&handoff),
             )
@@ -1070,7 +1178,7 @@ fn blocked_handoff(blocked_on: Option<&str>) -> String {
 fn blocked_round(reference: &str, blocked_on: Option<&str>) -> AttemptObservation {
     terminal(
         reference,
-        AttemptOutcome::Succeeded,
+        GraphAttemptOutcome::DeclaredStop,
         None,
         Some(&blocked_handoff(blocked_on)),
     )
@@ -1202,4 +1310,49 @@ fn an_unrecognised_blocked_on_is_named_not_reported_missing() {
     assert!(reason.contains("weather"), "{reason}");
     assert!(!reason.contains("not given"), "{reason}");
     assert!(!reason.contains("owner decision"), "{reason}");
+}
+
+/// Host/project defaults are resolved once at admission; the node's own entry
+/// wins where both name the same cause.
+#[test]
+fn stopped_no_work_default_pauses_and_the_node_overrides_it() {
+    let defaults =
+        provenant_records::OnStop::new([(StopCause::StoppedNoWork, NextStep::Chair)].into());
+    let handoff = stopped_early_handoff(&["Finish the renderer"]);
+    let stopped = || {
+        terminal(
+            "a/1",
+            GraphAttemptOutcome::StoppedNoWork,
+            Some(StopCause::StoppedNoWork),
+            Some(&handoff),
+        )
+    };
+
+    let document = single_route_document(serde_json::Value::Null);
+    let mut owner = Owner {
+        observations: [stopped()].into(),
+        on_stop_defaults: defaults.clone(),
+        ..Default::default()
+    };
+    let run = advance(&document, &mut owner, &mut journal(&document)).unwrap();
+    assert!(pause_reason(&run.checkpoint).contains("return to the chair"));
+    assert!(restarts(&run.checkpoint).is_empty());
+
+    let document = single_route_document(json!({"stopped_no_work": "same_route"}));
+    let mut owner = Owner {
+        observations: [stopped(), done("a/2")].into(),
+        on_stop_defaults: defaults,
+        ..Default::default()
+    };
+    let run = advance(&document, &mut owner, &mut journal(&document)).unwrap();
+    assert!(run.checkpoint.successful());
+    assert_eq!(
+        restarts(&run.checkpoint),
+        [(
+            StopCause::StoppedNoWork,
+            NextStep::SameRoute {
+                continuation: provenant_records::Continuation::Fresh
+            }
+        )]
+    );
 }

@@ -309,6 +309,42 @@ fn without_done(text: &str) -> &str {
     text.strip_suffix(DONE_FENCE).unwrap_or(text)
 }
 
+/// Declare the answer's handoff through the lane's `provenant declare`, as
+/// the brief asks: the journal is the only channel settlement reads, so the
+/// fence stays in the answer only as the prose tests compare. A fence that is
+/// not a schema v2 object with a status (a cut-off or empty block) declares
+/// nothing, like a model that never declared.
+fn declared(answer: String) -> Result<String> {
+    let Some(payload) = answer
+        .rsplit_once("```handoff\n")
+        .and_then(|(_, rest)| rest.split_once("\n```"))
+        .and_then(|(body, _)| serde_json::from_str::<Value>(body).ok())
+        .filter(|payload| payload["status"].is_string())
+    else {
+        return Ok(answer);
+    };
+    let mut child = std::process::Command::new("provenant")
+        .args(["declare", "--stdin"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()?;
+    child
+        .stdin
+        .take()
+        .ok_or("declare stdin")?
+        .write_all(&serde_json::to_vec(&payload)?)?;
+    let output = child.wait_with_output()?;
+    if !output.status.success() {
+        return Err(format!(
+            "fixture declaration refused: {}",
+            String::from_utf8_lossy(&output.stderr)
+        )
+        .into());
+    }
+    Ok(answer)
+}
+
 fn fixture() -> Result {
     let args: Vec<_> = std::env::args().collect();
     if args.get(1).is_some_and(|v| v == "login") && args.get(2).is_some_and(|v| v == "status") {
@@ -558,7 +594,7 @@ fn fixture() -> Result {
         } else {
             "OK".to_owned()
         };
-        let answer = format!("{answer}{DONE_FENCE}");
+        let answer = declared(format!("{answer}{DONE_FENCE}"))?;
         for frame in [
             json!({"type":"system","subtype":"init","session_id":"fixture-session"}),
             json!({"type":"assistant","session_id":"fixture-session","parent_tool_use_id":null,"message":{"model":"claude-sonnet-5-5","role":"assistant","content":[{"type":"text","text":answer}],"usage":{"input_tokens":1,"output_tokens":1}}}),
@@ -644,7 +680,7 @@ fn fixture() -> Result {
             );
             for frame in [
                 json!({"type":"thread.started","thread_id":STEER_SESSION}),
-                json!({"type":"item.completed","item":{"type":"agent_message","text":format!("finished in the resumed worktree{DONE_FENCE}")}}),
+                json!({"type":"item.completed","item":{"type":"agent_message","text":declared(format!("finished in the resumed worktree{DONE_FENCE}"))?}}),
                 json!({"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}),
             ] {
                 writeln!(io::stdout(), "{frame}")?;
@@ -688,7 +724,7 @@ fn fixture() -> Result {
                 std::thread::sleep(std::time::Duration::from_millis(50));
             }
             for frame in [
-                json!({"type":"item.completed","item":{"type":"agent_message","text":format!("finished in the first turn{DONE_FENCE}")}}),
+                json!({"type":"item.completed","item":{"type":"agent_message","text":declared(format!("finished in the first turn{DONE_FENCE}"))?}}),
                 json!({"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}),
             ] {
                 writeln!(io::stdout(), "{frame}")?;
@@ -811,7 +847,7 @@ fn fixture() -> Result {
             json!({"type":"item.completed","item":{"type":"command_execution",
                 "command":"rg TOKEN=\" source.rs",
                 "aggregated_output":format!("TOKEN=\"{token}\nnext line")}}),
-            json!({"type":"item.completed","item":{"type":"agent_message","text":format!("Final answer: credential {token}{DONE_FENCE}")}}),
+            json!({"type":"item.completed","item":{"type":"agent_message","text":declared(format!("Final answer: credential {token}{DONE_FENCE}"))?}}),
             json!({"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}),
         ] {
             if prompt.contains("corrupt") && frame["item"]["type"] == "command_execution" {
@@ -944,6 +980,7 @@ fn fixture() -> Result {
     } else {
         format!("OK{DONE_FENCE}")
     };
+    let answer = declared(answer)?;
     for frame in [
         json!({"type":"thread.started","thread_id":session}),
         json!({"type":"item.completed","item":{"type":"agent_message","text":answer}}),
@@ -1194,7 +1231,7 @@ fn public_implement_steers_and_resumes_the_same_local_codex_session() -> Result 
                     &record.state,
                     provenant_run::AttemptState::Terminal {
                         outcome: provenant_run::Outcome::Uncommitted,
-                        terminal_cause: None,
+                        cause: None,
                         ..
                     }
                 ),
@@ -1612,17 +1649,25 @@ fn remote_only_writer_cli_starts_at_remote_tip() -> Result {
         "recovery must retain the selected remote tip before provisioning"
     );
     // Spec: docs/specs/cli.md#warnings-are-typed-values -- under
-    // --json warnings travel in the envelope, never on raw stderr.
+    // --json warnings travel in the envelope, never on raw stderr, each with
+    // its stable code and the source of the state that caused it.
+    let warnings = settled.launch_value["warnings"]
+        .as_array()
+        .ok_or("launch envelope warnings")?;
     assert!(
-        settled.launch_value["warnings"]
-            .as_array()
-            .is_some_and(|warnings| warnings.iter().any(|warning| {
-                warning["code"] == "BRANCH_BEHIND_BASE"
-                    && warning["message"]
-                        .as_str()
-                        .is_some_and(|message| message.contains("ignoring --base"))
-            })),
-        "no BRANCH_BEHIND_BASE warning in the launch envelope: {combined}"
+        warnings.iter().all(|warning| warning["code"].is_string()),
+        "every launch warning carries a code: {combined}"
+    );
+    assert!(
+        warnings.iter().any(|warning| {
+            warning["code"] == "BRANCH_BEHIND_BASE"
+                && warning["message"]
+                    .as_str()
+                    .is_some_and(|message| message.contains("ignoring --base"))
+                && warning["source"]["layer"] == "detected"
+                && warning["source"]["origin"].is_string()
+        }),
+        "no sourced BRANCH_BEHIND_BASE warning in the launch envelope: {combined}"
     );
 
     let args = vec![
@@ -1941,8 +1986,7 @@ fn host_native_preparation_uses_the_provider_contract() -> Result {
         &roots,
         provenant_config::ProjectLocation::new(rig.project.join(".git"))?,
     )?;
-    let assets = rig.root.join("assets");
-    fs::create_dir(&assets)?;
+    let assets = rig.assets.clone();
     let mut host = provenant_run::HostLaunchContext::from_environment(
         &rig.state,
         &rig.project,
@@ -2206,8 +2250,8 @@ fn claude_dispatch(host_native: bool, pool: bool) -> Result {
     let lane = run_graph_provider(&rig, "fixture-claude", node)?;
     if !cfg!(target_os = "macos") {
         assert_eq!(lane["state"], "rejected", "{lane}");
-        assert_eq!(lane["cause"], "pre_launch_refusal", "{lane}");
-        assert_eq!(lane["terminal_cause"], "unsupported_platform", "{lane}");
+        assert_eq!(lane["settlement_class"], "pre_launch_refusal", "{lane}");
+        assert_eq!(lane["cause"], "unsupported_platform", "{lane}");
         assert!(lane["started_at"].is_null(), "{lane}");
         assert!(lane["applied_route"].is_null(), "{lane}");
         assert!(account.join("refreshed").exists());
@@ -2377,9 +2421,9 @@ fn simultaneous_first_launches_pass_cutover_guard() -> Result {
         attempts.push((graph.to_owned(), node.to_owned()));
     }
 
-    // `wait` observes attempt settlement but does not run graph advancement.
-    // Once each provider attempt is terminal, one explicit host tick drives
-    // the normal graph settlement owner for every concurrently launched run.
+    // These attempts run on this host, so their wait only observes: recovery
+    // is for terminal *remote* attempts, whose peer owns the settlement. One
+    // explicit host tick drives the graph settlement owner for every local run.
     for (graph, node) in &attempts {
         let target = format!("{graph}/{node}#1");
         let waited = rig.command(&["wait", &target, "--timeout", "30s", "--json"])?;
@@ -2441,7 +2485,7 @@ fn writer_fixture_diagnostics(rig: &TestRig) -> String {
                         serde_json::from_slice::<Value>(&bytes).ok().map(|value| {
                             json!({
                                 "state":value["state"], "outcome":value["outcome"],
-                                "reason":value["reason"], "terminal_cause":value["terminal_cause"]
+                                "reason":value["reason"], "cause":value["cause"]
                             })
                             .to_string()
                         })
@@ -2860,19 +2904,30 @@ fn distinct_branch_writer_launches_start_without_shared_waits() -> Result {
                 String::from_utf8_lossy(&output.stderr)
             );
             assert_eq!(node["launch_retry"], Value::Null, "{response}");
-            graph_ids.push(
+            graph_ids.push((
                 response["data"]["checkpoint"]["graph_id"]
                     .as_str()
                     .ok_or("graph id")?
                     .to_owned(),
-            );
+                node["id"].as_str().ok_or("node id")?.to_owned(),
+            ));
         }
         for index in 0..2 {
             await_fixture_marker(&live.join(format!("{index}-ready")))?;
         }
         // Every provider now holds its distinct worktree lease at once.
         fs::write(live.join("release"), b"release")?;
-        for graph in graph_ids {
+        // Local attempt completion is observed separately from graph advancement.
+        // Drive the host settlement owner after both attempts finish, instead of
+        // depending on a scheduled tick racing the graph wait.
+        for (graph, node) in &graph_ids {
+            let target = format!("{graph}/{node}#1");
+            let waited = rig.command(&["wait", &target, "--timeout", "30s", "--json"])?;
+            assert_eq!(code(&waited), 0, "{target}: {waited:?}");
+        }
+        let tick = rig.command(&["tick", "--json"])?;
+        assert_eq!(code(&tick), 0, "graph settlement tick: {tick:?}");
+        for (graph, _) in graph_ids {
             let waited = rig.command(&["wait", &graph, "--timeout", "30s", "--json"])?;
             assert_eq!(
                 code(&waited),
@@ -2925,7 +2980,7 @@ fn pending_graph_reports_pre_attempt_writer_failure() -> Result {
             .find(|node| node["id"] == "writer")
             .ok_or("writer")?;
         assert_eq!(
-            writer["advance_error_code"], "writer_binding_unavailable",
+            writer["advance_code"], "writer_binding_unavailable",
             "{response}"
         );
         assert_eq!(writer["attempts"], json!([]), "{response}");
@@ -2933,12 +2988,12 @@ fn pending_graph_reports_pre_attempt_writer_failure() -> Result {
             response["error"]["code"],
             writer["advance_owner_code"]
                 .as_str()
-                .or_else(|| writer["advance_error_code"].as_str())
+                .or_else(|| writer["advance_code"].as_str())
                 .ok_or("code")?,
             "{response}"
         );
         assert_eq!(
-            response["error"]["message"], writer["advance_error"],
+            response["error"]["message"], writer["advance_note"],
             "{response}"
         );
     }
@@ -3398,7 +3453,7 @@ fn seed_composite_output_graph_with_gate(
 ) -> Result {
     use provenant_core::{CancelToken, Clock, RootInputs, WaitBudget};
     use provenant_fabric_runtime::graph::{
-        AccessMode, AttemptKey, AttemptObservation, AttemptOutcome, AttemptOwner, FileJournal,
+        AccessMode, AttemptKey, AttemptObservation, AttemptOwner, FileJournal, GraphAttemptOutcome,
         GraphDocument, GraphExecution, GraphRoute, NodeInput, Replay,
     };
     use provenant_os::clock::SystemClock;
@@ -3438,15 +3493,16 @@ fn seed_composite_output_graph_with_gate(
             result.push(self.response.as_bytes());
             Ok(AttemptObservation::Terminal {
                 attempt_ref: Some(format!("{}/{}", self.host, attempt_id)),
-                outcome: AttemptOutcome::Succeeded,
+                outcome: GraphAttemptOutcome::Succeeded,
                 launched: true,
                 result: Some(Box::new(result.finish())),
                 result_warning: None,
                 result_path: None,
                 branch: None,
                 commit: None,
-                settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
+                settlement_class: Some(provenant_records::run::SettlementClass::Completed),
                 stop: None,
+                cause: None,
             })
         }
     }
@@ -3779,7 +3835,7 @@ fn persisted_attempt_with(
         running.resolved_route = None;
         running.state = provenant_run::AttemptState::Terminal {
             extra: Default::default(),
-            terminal_cause: None,
+            cause: None,
             terminal_note: None,
             stop: None,
             outcome: provenant_run::Outcome::Lost,
@@ -3788,7 +3844,7 @@ fn persisted_attempt_with(
             reason: Some("lost before recording a route".into()),
         };
         // Version 2 records carry the evidence that justifies the decision.
-        running.terminal_evidence = Some(provenant_run::TerminalEvidence::Lost {
+        running.terminal_basis = Some(provenant_run::TerminalBasis::Lost {
             reason: "lost before recording a route".into(),
         });
         let bytes = CanonicalV1::bytes(&running)?.as_bytes().to_vec();
@@ -3938,23 +3994,24 @@ fn persisted_attempt_with(
             attempt_id,
             running.revision,
             &provenant_run::TerminalPublication {
-                handoff: Ok(None),
-                terminal_cause: None,
-                terminal_note: None,
-                outcome: provenant_run::Outcome::Succeeded,
+                fact: provenant_records::settlement::classify::settle(
+                    &provenant_records::settlement::SettlementEvidence::fixture(
+                        provenant_records::settlement::LaneRole::Reader,
+                        provenant_run::Outcome::Succeeded,
+                        None,
+                    ),
+                ),
+                evidence: None,
                 finished_at: clock.wall_now()?,
                 started_at: running.started_at,
                 provider_ms: None,
-                reason: None,
                 result: "OK",
-                complete: true,
                 redacted: false,
                 resolved_route: Some(applied.clone()),
                 applied_route: Some(applied.clone()),
                 observed_route: Some(applied),
                 usage: Default::default(),
                 session: None,
-                partial_signals: Vec::new(),
             },
             &exit,
             &call,
@@ -4476,7 +4533,7 @@ fn agy_denial_keeps_raw_step_out_of_terminal_diagnostics() -> Result {
     let lanes: Value = serde_json::from_slice(&lanes.stdout.bytes)?;
     let lane = &lanes["data"]["rows"][0];
     assert_eq!(lane["state"], "permission_denied");
-    assert_eq!(lane["cause"], "failed");
+    assert_eq!(lane["settlement_class"], "failed");
     for diagnostic in [&lane["reason"], &lane["settlement"]["reason"]] {
         let diagnostic = diagnostic.as_str().ok_or("failure diagnostic")?;
         assert!(!diagnostic.is_empty());
@@ -4524,7 +4581,7 @@ fn agy_denied_command_reaches_result_without_entering_terminal_diagnostics() -> 
         let lanes: Value = serde_json::from_slice(&lanes.stdout.bytes)?;
         let lane = &lanes["data"]["rows"][0];
         assert_eq!(lane["state"], "failed");
-        assert_eq!(lane["cause"], "failed");
+        assert_eq!(lane["settlement_class"], "failed");
         for diagnostic in [&lane["reason"], &lane["settlement"]["reason"]] {
             let diagnostic = diagnostic.as_str().ok_or("failure diagnostic")?;
             assert!(!diagnostic.is_empty());
@@ -5287,10 +5344,10 @@ fn graph_preparation_refusal_retains_non_adapter_cause() -> Result {
             json!({"preparation_refused": "unregistered_account"}),
             "{node}"
         );
-        assert_eq!(node["advance_error_code"], "preparation_refused", "{node}");
+        assert_eq!(node["advance_code"], "preparation_refused", "{node}");
         assert_eq!(
-            node["advance_error"],
-            provenant_records::run::TerminalCause::UnregisteredAccount.detail(),
+            node["advance_note"],
+            provenant_records::run::CauseKind::UnregisteredAccount.detail(),
             "{node}"
         );
     }
@@ -6267,7 +6324,7 @@ fn graph_launch_reports_provider_update_after_wait_budget() -> Result {
         "1s",
     )?;
     assert_eq!(lane["state"], "rejected", "{lane}");
-    assert_eq!(lane["cause"], "pre_launch_refusal", "{lane}");
+    assert_eq!(lane["settlement_class"], "pre_launch_refusal", "{lane}");
     assert!(lane["started_at"].is_null(), "{lane}");
     assert!(lane["applied_route"].is_null(), "{lane}");
     assert_eq!(
@@ -6282,12 +6339,7 @@ fn graph_codex_commit_source_starts_and_returns_a_verdict() -> Result {
     if !graph_fixture_available()? {
         return Ok(());
     }
-    let mut rig = policy_codex_fixture()?;
-    let assets = rig.root.join("product-assets");
-    fs::create_dir(&assets)?;
-    rig.env.retain(|(key, _)| key != "PROVENANT_ROOT");
-    rig.env
-        .push(("PROVENANT_ROOT".into(), assets.into_os_string()));
+    let rig = policy_codex_fixture()?;
     let cleanup = rig.process_cleanup();
     fs::write(
         rig.project.join("review-subject.txt"),
@@ -6355,10 +6407,12 @@ fn graph_codex_rollout_binds_observed_route_and_missing_rollout_is_explicit() ->
             );
         } else {
             assert_eq!(lane["state"], "succeeded", "{lane}");
-            assert!(lane["terminal_cause"].is_null(), "{lane}");
-            let warnings: Vec<provenant_records::run::PartialSignal> =
-                serde_json::from_value(lane["partial_signals"].clone())?;
-            assert!(warnings.contains(&provenant_records::run::PartialSignal::IdentityUnobserved));
+            assert!(lane["cause"].is_null(), "{lane}");
+            let warnings: Vec<provenant_records::run::SettlementSignal> =
+                serde_json::from_value(lane["signals"].clone())?;
+            assert!(
+                warnings.contains(&provenant_records::run::SettlementSignal::IdentityUnobserved)
+            );
             assert!(lane["observed_route"].is_null(), "{lane}");
             assert!(
                 lane["transcript"]["session"]
@@ -6467,6 +6521,62 @@ fn provider_checks_preserve_routes_and_settlement_causes() -> Result {
     ])?;
     assert_eq!(code(&out), 0);
     rig.assert_v1_root_untouched()
+}
+
+/// Spec: docs/specs/cli.md#warnings-are-typed-values
+fn run_json_carries_launch_warning_source_without_warning_stderr() -> Result {
+    if !graph_fixture_available()? {
+        return Ok(());
+    }
+    let rig = policy_codex_fixture()?;
+    let cleanup = rig.process_cleanup();
+    let auth = br#"{"tokens":{"account_id":"fixture-one"}}"#;
+    let account =
+        provenant_providers::identity::codex_account(auth).ok_or("Codex fixture account")?;
+    support::register_account(&rig, "codex", "fixture", &account, &rig.root.join("codex"))?;
+    let config = rig.state.join("config.toml");
+    let mut settings: toml_edit::DocumentMut = fs::read_to_string(&config)?.parse()?;
+    settings["unknown"] = toml_edit::value("fixture");
+    fs::write(&config, settings.to_string())?;
+    let document = rig.root.join("config-warning.json");
+    fs::write(
+        &document,
+        serde_json::to_vec(&json!({
+            "schema_version": support::GRAPH_DOCUMENT_SCHEMA_VERSION,
+            "graph_id": "config-warning",
+            "nodes": [{
+                "id": "reader",
+                "prompt": "fixture config warning",
+                "access": "read_only",
+                "route": {"adapter": "codex", "model": "gpt-6-luna"}
+            }]
+        }))?,
+    )?;
+
+    let (out, envelope) = rig.launch(&["--file", document.to_str().ok_or("document path")?])?;
+    assert_eq!(code(&out), 0, "{out:?}");
+    let warnings = envelope["warnings"].as_array().ok_or("warnings array")?;
+    let warning = warnings
+        .iter()
+        .find(|warning| warning["code"] == "CONFIG_KEY_IGNORED")
+        .ok_or("ignored config key warning")?;
+    assert_eq!(warning["source"]["layer"], "detected", "{warning}");
+    assert_eq!(
+        warning["source"]["origin"], "warning:CONFIG_KEY_IGNORED",
+        "{warning}"
+    );
+    assert!(
+        warnings.iter().all(|warning| {
+            warning["code"].as_str().is_some() && warning["source"]["layer"].as_str().is_some()
+        }),
+        "every envelope warning needs a code and source: {envelope}"
+    );
+    assert!(
+        !String::from_utf8_lossy(&out.stderr.bytes).contains("warning:"),
+        "JSON warning was also written to stderr: {out:?}"
+    );
+    cleanup.disarm();
+    Ok(())
 }
 
 /// Issue #3531: an exact model present in the cached discovered layer must
@@ -6603,6 +6713,10 @@ fn main() -> ExitCode {
             (
                 "provider_checks_preserve_routes_and_settlement_causes",
                 provider_checks_preserve_routes_and_settlement_causes,
+            ),
+            (
+                "run_json_carries_launch_warning_source_without_warning_stderr",
+                run_json_carries_launch_warning_source_without_warning_stderr,
             ),
             (
                 "pending_graph_reports_pre_attempt_writer_failure",

@@ -136,6 +136,9 @@ fn parse_name(name: &str) -> Result<String, TargetError> {
             provenant_records::warning::Warning::new(
                 provenant_records::warning::NAME_CASE_FOLDED,
                 format!("folded `{name}` to `{folded}`"),
+                provenant_records::warning::detected_source(
+                    provenant_records::warning::NAME_CASE_FOLDED,
+                ),
             )
             .subject(folded.clone()),
         );
@@ -279,6 +282,13 @@ impl<E> ResolveError<E> {
             Self::Read(_) => None,
         }
     }
+}
+
+/// Strip a typed code that a fault's `Display` carries when the envelope
+/// already names that code. Otherwise a human renderer prints it twice.
+pub fn fault_message(code: &str, text: &str) -> String {
+    let prefix = format!("{code}: ");
+    text.strip_prefix(&prefix).unwrap_or(text).to_owned()
 }
 
 fn close(matches: &[String]) -> String {

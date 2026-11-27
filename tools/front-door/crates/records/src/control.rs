@@ -97,7 +97,7 @@ pub fn control_capabilities() -> Vec<ControlCapability> {
     let mut rows = Vec::new();
     for spec in crate::ADAPTER_SPECS {
         for launch in [LaunchKind::Lane, LaunchKind::Chair] {
-            let support = spec.launch.control.for_launch(launch);
+            let support = spec.capabilities.control.for_launch(launch);
             let lane = launch == LaunchKind::Lane;
             let owned = |ok: bool, no: &'static str| if ok { "supported" } else { no };
             rows.push(ControlCapability {
@@ -114,16 +114,19 @@ pub fn control_capabilities() -> Vec<ControlCapability> {
                     action("cancel", lane, owned(lane, "applies to lanes only")),
                     action(
                         "resume",
-                        lane && spec.launch.resume,
+                        lane && spec.capabilities.launch.resume.value,
                         owned(
-                            lane && spec.launch.resume,
+                            lane && spec.capabilities.launch.resume.value,
                             "the adapter has no provider continuation",
                         ),
                     ),
                     action(
                         "land",
-                        lane && spec.launch.write,
-                        owned(lane && spec.launch.write, "only worktree writers land"),
+                        lane && spec.capabilities.launch.write.value,
+                        owned(
+                            lane && spec.capabilities.launch.write.value,
+                            "only worktree writers land",
+                        ),
                     ),
                 ],
             });
@@ -274,7 +277,7 @@ mod tests {
             .iter()
             .filter(|row| row.launch == LaunchKind::Lane)
         {
-            let resumable = row.provider.spec().launch.resume;
+            let resumable = row.provider.spec().capabilities.launch.resume.value;
             assert_eq!(
                 row.support,
                 if resumable {

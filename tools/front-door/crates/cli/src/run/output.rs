@@ -13,91 +13,6 @@ fn budget_usage(record: &run::AttemptRecord) -> Option<Value> {
     serde_json::to_value(usage).ok()
 }
 
-/// Build the one result projection from a host-owned read. Host facts come
-/// from observed data; the handoff and verify are lane claims, never host
-/// attestations. An unobserved fact stays unknown.
-/// Spec: docs/specs/lane-contracts.md#result-projection
-pub(super) fn result_projection(
-    data: &Value,
-    attempt: AttemptId,
-) -> provenant_records::lane_contract::ResultProjection {
-    use provenant_records::lane_contract::{
-        Coverage, GitFacts, HostFacts, LaneClaims, Observed, ResultProjection,
-    };
-
-    let commands = run::observed_commands();
-    let git_facts = GitFacts {
-        base: data["writer_base"].as_str().map(str::to_owned),
-        head: data["writer_head"]
-            .as_str()
-            .or_else(|| data["head"].as_str())
-            .map(str::to_owned),
-        commits: data["stop_work"]["ahead"]
-            .as_u64()
-            .into_iter()
-            .map(|ahead| format!("{ahead} commit(s)"))
-            .collect(),
-        diffstat: data["changed_files_total"]
-            .as_u64()
-            .map(|total| format!("{total} changed file(s)")),
-        shared_worktree: false,
-        extra: Default::default(),
-    };
-    let git_complete = git_facts.base.is_some() || git_facts.head.is_some();
-    let git = Observed {
-        source: "host-observation".into(),
-        completeness: if git_complete {
-            Coverage::Partial
-        } else {
-            Coverage::Unknown
-        },
-        value: Some(git_facts),
-        extra: Default::default(),
-    };
-    let ci: Observed<Value> = Observed {
-        source: "unavailable".into(),
-        completeness: Coverage::Unknown,
-        value: None,
-        extra: Default::default(),
-    };
-    let scope: Observed<provenant_records::handoff::WriteScopeReport> = Observed {
-        source: "unavailable".into(),
-        completeness: Coverage::Unknown,
-        value: None,
-        extra: Default::default(),
-    };
-    let handoff = serde_json::from_value::<provenant_records::handoff::Handoff>(
-        data["handoff"]["Ok"].clone(),
-    )
-    .ok();
-    let verify = handoff
-        .as_ref()
-        .map(|handoff| handoff.verify.clone())
-        .or_else(|| {
-            let verify = &data["selected"]["verify"];
-            verify
-                .is_array()
-                .then(|| serde_json::from_value(verify.clone()).ok())
-                .flatten()
-        });
-    ResultProjection::new(
-        provenant_records::RecordHeader::V1,
-        attempt,
-        HostFacts {
-            commands,
-            git,
-            ci,
-            scope,
-            extra: Default::default(),
-        },
-        LaneClaims {
-            handoff,
-            verify,
-            extra: Default::default(),
-        },
-    )
-}
-
 /// Render a host-owned read through the same CLI projection.
 pub fn render_output(command: Output, read: Result<(Value, String), Fail>, full: bool) -> Reply {
     let receipt_tail = matches!(command.part, Part::Receipt)
@@ -113,37 +28,44 @@ pub fn render_output(command: Output, read: Result<(Value, String), Fail>, full:
             // A live attempt has no decoded result artifact yet. When nothing
             // is returned the caller labels the page as no-result-yet: an empty
             // page is not evidence that the attempt produced nothing.
-            if headed
-                && let Some(state) = data["state"].as_str()
-                && matches!(state, "queued" | "starting" | "running" | "settling")
-            {
-                let state = state.to_owned();
-                data["status"] = json!(state);
-                if data["length"].as_u64().unwrap_or(0) == 0 {
-                    data["result"] = json!("pending");
+            let tail_selection = command.tail_selection().map(|tail| match tail {
+                crate::Tail::Bytes(bytes) => crate::console::projection::OutputTail::Bytes(bytes),
+                crate::Tail::Lines(lines) => crate::console::projection::OutputTail::Lines(lines),
+            });
+            let progress = crate::console::projection::output_render_fields(
+                &mut data,
+                crate::console::projection::OutputRenderFields {
+                    headed,
+                    tail: tail_selection,
+                    tail_clamped: command.tail_clamped(),
+                    ..Default::default()
+                },
+            );
+            if let Some(progress) = progress {
+                if progress.pending {
                     text = format!(
-                        "{state}\nno result yet: the result is not sealed while the attempt is {state}\n{text}"
+                        "{}\nno result yet: the result is not sealed while the attempt is {}\n{text}",
+                        progress.state, progress.state
                     );
                 } else {
-                    data["result"] = json!("partial");
-                    text = format!("{state}\npartial result\n{text}");
+                    text = format!("{}\npartial result\n{text}", progress.state);
                 }
             }
-            if let Some(tail) = command.tail_selection() {
-                match tail {
-                    crate::Tail::Bytes(bytes) => data["tail"] = json!(bytes),
-                    crate::Tail::Lines(lines) => data["tail_lines"] = json!(lines),
-                }
-                data["tail_clamped"] = json!(command.tail_clamped());
-            }
+            let mut tail_text = None;
             if let Some(tail) = receipt_tail {
-                let start = match tail {
-                    crate::Tail::Bytes(bytes) => tail_start_bytes(text.as_bytes(), bytes),
-                    crate::Tail::Lines(lines) => tail_start_lines(text.as_bytes(), lines),
+                let tail = match tail {
+                    crate::Tail::Bytes(bytes) => {
+                        crate::console::projection::OutputTail::Bytes(bytes)
+                    }
+                    crate::Tail::Lines(lines) => {
+                        crate::console::projection::OutputTail::Lines(lines)
+                    }
                 };
-                text = text[start..].to_owned();
-                data["tail_text"] = json!(text);
+                text = crate::console::projection::output_tail_text(&text, tail);
+                tail_text = Some(text.clone());
             }
+            let mut written_path = None;
+            let mut written_bytes = 0;
             if let Some(path) = &to {
                 let bytes = chunk_bytes(&data).ok_or_else(|| {
                     Fail::new(
@@ -155,14 +77,29 @@ pub fn render_output(command: Output, read: Result<(Value, String), Fail>, full:
                 std::fs::write(path, &bytes).map_err(|error| {
                     Fail::new(Status::Error, ErrorKind::Io, error.to_string())
                 })?;
-                let written_path = std::fs::canonicalize(path).map_err(|error| Fail::new(Status::Error, ErrorKind::Io, error.to_string()))?;
-                data["to"] = json!(provenant_records::StructuredPathWire::from_path(&written_path).map_err(|error| Fail::new(Status::Error, ErrorKind::Io, error.to_string()))?);
-                data["written"] = json!(bytes.len());
-                if final_result {
-                    data["bytes"] = json!({"encoding": "utf8", "data": ""});
-                }
+                let canonical_path = std::fs::canonicalize(path)
+                    .map_err(|error| Fail::new(Status::Error, ErrorKind::Io, error.to_string()))?;
+                written_path = Some(json!(provenant_records::StructuredPathWire::from_path(
+                    &canonical_path,
+                )
+                .map_err(|error| Fail::new(Status::Error, ErrorKind::Io, error.to_string()))?));
+                written_bytes = bytes.len();
                 text = format!("wrote {} bytes to {}\n", bytes.len(), path.display());
             }
+            crate::console::projection::output_render_fields(
+                &mut data,
+                crate::console::projection::OutputRenderFields {
+                    tail_text: tail_text.as_deref(),
+                    written: written_path.as_ref().map(|path| {
+                        crate::console::projection::OutputWrite {
+                            path,
+                            bytes: written_bytes,
+                            final_result,
+                        }
+                    }),
+                    ..Default::default()
+                },
+            );
             Ok((data, text))
         }),
     );
@@ -179,9 +116,10 @@ pub fn render_output(command: Output, read: Result<(Value, String), Fail>, full:
         } else {
             out.summary = Some(output_summary_default(&out.result.data, &out.human, headed));
         }
-        out.result.next = output_next_step(&out.result.data, Some(&command.target))
-            .into_iter()
-            .collect();
+        out.result.next =
+            crate::console::projection::output_next_step(&out.result.data, Some(&command.target))
+                .into_iter()
+                .collect();
         if warn_human
             && out
                 .result
@@ -561,9 +499,7 @@ fn summary(data: &Value, text: &str, headed: bool, full: bool) -> crate::Summary
         // value is absent evidence: never render a header saying "unavailable".
         // Spec: docs/specs/lane-contracts.md#result-projection
         let lane_publication = (data["delivery"]["state"]["state"].as_str() == Some("delivered")
-            && data["delivery"]["integration"]["remote"]
-                .as_str()
-                .is_some_and(|remote| !remote.is_empty()))
+            && data["delivery"]["integration"]["remote"].as_str().is_some())
         .then_some("pushed");
         for (label, value) in [
             ("base", data["writer_base"].as_str()),
@@ -577,12 +513,29 @@ fn summary(data: &Value, text: &str, headed: bool, full: bool) -> crate::Summary
                 "publication",
                 data["publication"].as_str().or(lane_publication),
             ),
+            ("pushed", data["pushed_head"].as_str()),
+            ("declaration source", data["declaration_source"].as_str()),
             ("residual tree state", data["residual_tree"].as_str()),
         ] {
             if let Some(value) = value {
                 lines.push(format!("{label}: {value}"));
             }
         }
+    }
+    if full
+        && headed
+        && let Some(paths) = data
+            .get("uncommitted_paths")
+            .and_then(Value::as_array)
+            .filter(|paths| !paths.is_empty())
+    {
+        let listed = paths
+            .iter()
+            .filter_map(Value::as_str)
+            .map(|path| plain_text(path, 256))
+            .collect::<Vec<_>>()
+            .join(", ");
+        lines.push(format!("uncommitted paths ({}): {listed}", paths.len()));
     }
     if full
         && headed
@@ -631,133 +584,6 @@ fn summary(data: &Value, text: &str, headed: bool, full: bool) -> crate::Summary
 
 /// The owner's suggested command travels on the envelope's `next` array, never
 /// as a line inside the compact summary. The edge renders it once from the argv.
-pub(super) fn output_next_step(
-    data: &Value,
-    target: Option<&crate::Target>,
-) -> Option<provenant_records::command_result::NextStep> {
-    use provenant_records::command_result::NextStep;
-    let target = target?;
-    let state = data["state"].as_str().unwrap_or_default();
-    if data["eof"] == json!(false) {
-        let offset = data["next_offset"].as_u64()?;
-        let part = data["part"].as_str().unwrap_or("result");
-        Some(NextStep::from_args(
-            &[
-                "provenant",
-                "output",
-                &target.to_string(),
-                "--part",
-                part,
-                "--offset",
-                &offset.to_string(),
-            ],
-            "read the next page of this output",
-        ))
-    } else if matches!(state, "queued" | "starting" | "running" | "settling") {
-        let handle = target.to_string();
-        Some(NextStep::from_args(
-            &["provenant", "wait", &handle],
-            "wait for this work to settle",
-        ))
-    } else {
-        None
-    }
-}
-
-pub(super) fn receipt_model(adapter: Option<&str>, model: Option<&str>) -> Option<String> {
-    let adapter = adapter.filter(|value| !value.is_empty())?;
-    let model = model.filter(|value| !value.is_empty())?;
-    Some(if model.starts_with(&format!("{adapter}/")) {
-        model.to_owned()
-    } else {
-        format!("{adapter}/{model}")
-    })
-}
-
-pub(super) fn receipt_family(
-    catalogue: Option<&provenant_routing::Catalogue>,
-    model: Option<&str>,
-) -> String {
-    catalogue
-        .and_then(|catalogue| {
-            ModelId::parse(model?)
-                .ok()
-                .and_then(|id| catalogue.model(&id).and_then(|entry| entry.family.clone()))
-        })
-        .unwrap_or_else(|| "unknown".into())
-}
-
-/// The effort that actually ran, paired with the evidence that justifies it.
-/// A recorded applied effort wins. An adapter warning supplies the recorded
-/// applied default or drop; without either, the effort and its source are unknown.
-pub(super) fn receipt_effort(record: &run::AttemptRecord) -> (String, String) {
-    let route = record.applied_route.as_ref();
-    if let Some(effort) = route
-        .and_then(|route| route.effort.as_deref())
-        .filter(|value| !value.is_empty())
-    {
-        return (effort.to_owned(), "applied_route.effort".into());
-    }
-    if let Some(warning) = route.and_then(|route| route.effort_warning.as_ref()) {
-        let source = format!("effort_warning:{}", warning.source);
-        if let Some(applied) = warning.applied.as_deref().filter(|value| !value.is_empty()) {
-            return (applied.to_owned(), source);
-        }
-        // The adapter dropped the requested effort: report the applied value
-        // explicitly rather than presenting the requested effort as applied.
-        return ("none".into(), source);
-    }
-    ("unknown".into(), "unknown".into())
-}
-
-pub(super) fn receipt_resolution(record: &run::AttemptRecord) -> String {
-    let Some(route) = record.applied_route.as_ref() else {
-        return "unknown".into();
-    };
-    let Some(applied) = receipt_model(route.provider.as_deref(), route.model.as_deref()) else {
-        return "unknown".into();
-    };
-    // The recorded pick proves a pool result even when other candidates were unavailable.
-    if let Some(pool) = &route.pool_selection {
-        return if pool.pick == applied {
-            format!("pool {}", pool.pool)
-        } else {
-            "unknown".into()
-        };
-    }
-    // Dispatched lanes name a route rather than an exact model. The launch
-    // record carries the decision that selected the applied model, so use it
-    // instead of reporting an unknown resolution for every named lane.
-    match route.source.as_deref() {
-        Some("pin") => return "explicit".into(),
-        Some("pool") => return "pool".into(),
-        Some("named_route") => {
-            return match &record.requested_route {
-                run::RequestedRoute::Named { name, .. }
-                | run::RequestedRoute::Review { name, .. } => format!("route {name}"),
-                _ => "route".into(),
-            };
-        }
-        Some("fallback") => return "fallback".into(),
-        Some("continuation") => return "continuation".into(),
-        _ => {}
-    }
-    // A model pin may predate the recorded launch source.
-    let run::RequestedRoute::Model {
-        provider, model, ..
-    } = &record.requested_route
-    else {
-        return "unknown".into();
-    };
-    let Some(requested) = receipt_model(Some(provider), Some(model)) else {
-        return "unknown".into();
-    };
-    if applied == requested {
-        return "explicit".into();
-    }
-    "unknown".into()
-}
-
 pub(super) fn reviewer_receipt(
     record: &provenant_records::run::AttemptRecord,
     writer: bool,
@@ -771,59 +597,7 @@ pub(super) fn reviewer_receipt(
             "receipt requires a settled attempt",
         ));
     }
-    let route = record.applied_route.as_ref();
-    let adapter = route
-        .and_then(|r| r.provider.as_deref())
-        .filter(|value| !value.is_empty())
-        .unwrap_or("unknown");
-    let model = route
-        .and_then(|r| r.model.as_deref())
-        .filter(|value| !value.is_empty())
-        .unwrap_or("unknown");
-    let qualified_model =
-        route.and_then(|r| receipt_model(r.provider.as_deref(), r.model.as_deref()));
-    let (effort, effort_source) = receipt_effort(record);
-    let family = receipt_family(catalogue, qualified_model.as_deref());
-    let resolved_from = receipt_resolution(record);
-    let reviewer = run::fact(record.clone())?.reviewer;
-    let reviewer_model = record
-        .observed_route
-        .as_ref()
-        .and_then(|route| receipt_model(route.provider.as_deref(), route.model.as_deref()));
-    let reviewer_family = receipt_family(catalogue, reviewer_model.as_deref());
-    let provenance = reviewer
-        .as_ref()
-        .map_or("unknown", |reviewer| match reviewer.provenance {
-            provenant_records::ReviewerProvenance::Observed => "observed",
-            provenant_records::ReviewerProvenance::ChairAttested => "chair_attested",
-            provenant_records::ReviewerProvenance::Unknown => "unknown",
-        });
-    let actor = reviewer
-        .as_ref()
-        .map_or_else(|| "unknown".into(), |r| r.actor_id.to_string());
-    let reviewer_model = reviewer
-        .as_ref()
-        .and_then(|r| r.model.as_deref())
-        .unwrap_or("unknown");
-    let reviewer_family = if reviewer.is_some() {
-        reviewer_family
-    } else {
-        "unknown".into()
-    };
-    let role = if writer { "writer" } else { "reviewer" };
-    let label = if writer { "Writer" } else { "Reviewer" };
-    let qualified_model = qualified_model.as_deref().unwrap_or("unknown");
-    let line = format!(
-        "{label}: {qualified_model}@{effort} ({family}; resolved from {resolved_from}; effort source {effort_source}), attempt {} {}",
-        record.key, record.attempt_id
-    );
-    let attribution = format!(
-        "Reviewer provenance: {provenance}, actor {actor}, model {reviewer_model}, family {reviewer_family}"
-    );
-    Ok((
-        json!({"key": record.key, "attempt_id": record.attempt_id, "adapter": adapter, "model": model, "effort": effort, "effort_source": effort_source, "family": family, "role": role, "resolved_from": resolved_from, "receipt": line, "reviewer": {"provenance": provenance, "actor_id": actor, "model": reviewer_model, "family": reviewer_family}, "reviewer_provenance": attribution}),
-        format!("{line}\n{attribution}\n"),
-    ))
+    crate::console::projection::output_receipt(record, writer, catalogue).map_err(Into::into)
 }
 
 /// Read the selected part and attach the shared lane projection.
@@ -857,27 +631,7 @@ fn output_read(
         call.clock.wall_now().ok(),
         true,
     );
-    if let (Some(data), Some(row)) = (data.as_object_mut(), json!(projected).as_object()) {
-        data.remove("settlement_reason");
-        if let Some(grants) = data.get_mut("grants").and_then(Value::as_object_mut) {
-            for field in ["write_grants", "read_only_writable"] {
-                if let Some(value) = row.get(field) {
-                    grants.insert(field.into(), value.clone());
-                }
-            }
-            if let Some(route) = row.get("applied_route") {
-                for field in ["user_skills", "lane_access"] {
-                    grants.insert(
-                        field.into(),
-                        route.get(field).cloned().unwrap_or(Value::Null),
-                    );
-                }
-            }
-        }
-        data.extend(row.clone());
-    }
-    data["result_projection"] =
-        serde_json::to_value(result_projection(&data, id)).unwrap_or(Value::Null);
+    crate::console::projection::output_lane_fields(&mut data, &projected, id);
     Ok((data, human))
 }
 
@@ -996,18 +750,33 @@ fn output_read_part(
     {
         // There may be useful admission evidence before a result exists. Do
         // not invent an artefact length, digest or completeness for it.
-        let mut data = json!({
-            "attempt_id": id, "state": state_and_reason(&record.state).0,
-            "reason": reason, "part": "result", "offset": 0, "next_offset": 0,
-            "length": null, "eof": true, "clipped": null, "complete": null,
-            "digest": null, "bytes": json!({"encoding":"utf8", "data":""}),
-        });
-        if let Some(stop_work) = &record.stop_work {
-            data["stop_work"] = json!(stop_work);
-        }
-        if let Some(usage) = budget_usage(&record) {
-            data["budget_usage"] = usage;
-        }
+        let mut data = crate::console::projection::output(
+            &id.to_string(),
+            &state_and_reason(&record.state).0,
+            Some(json!(reason)),
+            None,
+            "result",
+            0,
+            0,
+            None,
+            true,
+            None,
+            None,
+            &Value::Null,
+            &json!(
+                provenant_fabric_runtime::coordination::facade::OutputBytes::from_bytes(Vec::new(),)
+            ),
+        );
+        let budget_usage = budget_usage(&record);
+        let stop_work = record.stop_work.as_ref().map(|stop_work| json!(stop_work));
+        crate::console::projection::output_extras(
+            &mut data,
+            crate::console::projection::OutputExtras {
+                budget_usage: budget_usage.as_ref(),
+                stop_work: stop_work.as_ref(),
+                ..Default::default()
+            },
+        );
         return Ok((data, format!("{reason}\n")));
     }
     let evicted = status::artifact(
@@ -1017,13 +786,32 @@ fn output_read_part(
     )
     .exists();
     if evicted && matches!(part, run::ArtifactPart::Transcript) {
+        let mut data = crate::console::projection::output(
+            &id.to_string(),
+            &state_and_reason(&record.state).0,
+            None,
+            None,
+            "transcript",
+            0,
+            0,
+            None,
+            true,
+            None,
+            None,
+            &Value::Null,
+            &json!(
+                provenant_fabric_runtime::coordination::facade::OutputBytes::from_bytes(Vec::new(),)
+            ),
+        );
+        crate::console::projection::output_extras(
+            &mut data,
+            crate::console::projection::OutputExtras {
+                payload_evicted: true,
+                ..Default::default()
+            },
+        );
         return Ok((
-            json!({
-                "attempt_id": id, "state": state_and_reason(&record.state).0,
-                "payload": "evicted", "part": "transcript", "offset": 0, "next_offset": 0,
-                "length": null, "eof": true, "clipped": null, "complete": null,
-                "digest": null, "bytes": json!({"encoding":"utf8", "data":""}),
-            }),
+            data,
             "payload evicted by retention; the transcript is no longer retained\n".into(),
         ));
     }
@@ -1064,28 +852,28 @@ fn output_read_part(
     {
         text = format!("{reason}\n");
     }
-    let mut data = json!({
-            "attempt_id": id,
-            "state": state,
-            "reason": reason,
-            "settlement_reason": record.settlement_reason,
-            "part": format!("{:?}", command.part).to_lowercase(),
-            "offset": chunk.offset,
-            "next_offset": chunk.next_offset,
-            "length": chunk.len,
-            "eof": chunk.eof,
-            "clipped": chunk.clipped,
-            "complete": chunk.complete,
-            "digest": chunk.digest,
-            "bytes": provenant_fabric_runtime::coordination::facade::OutputBytes::from_bytes(chunk.bytes),
-    });
-    if let Some(usage) = budget_usage(&record) {
-        data["budget_usage"] = usage;
-    }
+    let part = format!("{:?}", command.part).to_lowercase();
+    let id_text = id.to_string();
+    let mut data = crate::console::projection::output(
+        &id_text,
+        &state,
+        Some(json!(reason)),
+        Some(json!(record.settlement_class)),
+        &part,
+        chunk.offset,
+        chunk.next_offset,
+        Some(chunk.len),
+        chunk.eof,
+        Some(chunk.clipped),
+        Some(chunk.complete),
+        &json!(chunk.digest),
+        &json!(
+            provenant_fabric_runtime::coordination::facade::OutputBytes::from_bytes(chunk.bytes)
+        ),
+    );
     if evicted {
         // Retention removed the bulk payload; the record, result and capture
         // tails remain.
-        data["payload"] = json!("evicted");
         if matches!(command.part, Part::Stderr) && text.is_empty() {
             text = "payload evicted by retention; the retained capture tail is empty\n".into();
         }
@@ -1097,44 +885,71 @@ fn output_read_part(
         let base = run::writer_base(session.context.state_root.as_path(), &record)
             .ok()
             .flatten();
-        data["writer_base"] = json!(base);
-        data["writer_head"] = json!(record.head);
-        data["residual_tree"] = residual_tree_evidence(session, &record, call);
-        data["publication"] = match &record.delivery {
+        // Diagnostic Git evidence sealed at the cut; settle never read it.
+        let git = run::settlement_git(session.context.state_root.as_path(), &record)
+            .ok()
+            .flatten();
+        crate::console::projection::output_git_evidence(
+            &mut data,
+            &json!(git.as_ref().and_then(|git| git.pushed_head)),
+            git.as_ref()
+                .filter(|git| !git.uncommitted_paths.is_empty())
+                .map(|git| json!(git.uncommitted_paths)),
+            &json!(record.declaration_source),
+        );
+        let publication = match &record.delivery {
             Some(delivery)
                 if matches!(delivery.state, run::WriterDeliveryState::Delivered { .. })
                     && delivery
                         .integration
                         .as_ref()
-                        .is_some_and(|integration| !integration.remote.is_empty()) =>
+                        .is_some_and(|integration| !integration.remote.is_local()) =>
             {
                 json!("pushed")
             }
             _ => Value::Null,
         };
         let (paths, total) = changed_file_evidence(session, &record, call);
-        data["changed_files"] = paths;
-        data["changed_files_total"] = total;
-        // The wire schema declares `stop_work` an optional object: absent,
-        // never null, when no stop evidence was recorded.
-        if let Some(stop_work) = &record.stop_work {
-            data["stop_work"] = json!(stop_work);
-        }
+        crate::console::projection::output_result_evidence(
+            &mut data,
+            &json!(base),
+            &json!(record.head),
+            &residual_tree_evidence(session, &record, call),
+            &publication,
+            &paths,
+            &total,
+        );
     }
     if let Some(reason) = fallback_reason {
         add_planner_fallback(&mut data, &mut text, reason);
     }
-    if matches!(command.part, Part::Result)
+    let failed_result = matches!(command.part, Part::Result)
         && matches!(
             record.state,
             run::AttemptState::Terminal {
                 outcome: run::Outcome::Failed,
                 ..
             }
-        )
-    {
-        data["provider_error"] = json!(provider_error_line(session, id, call));
-    }
+        );
+    let provider_error = failed_result
+        .then(|| provider_error_line(session, id, call))
+        .flatten();
+    let budget_usage = budget_usage(&record);
+    let stop_work = (matches!(command.part, Part::Result)
+        && command.tail_selection().is_none()
+        && command.offset == 0)
+        .then(|| record.stop_work.as_ref().map(|stop_work| json!(stop_work)))
+        .flatten();
+    crate::console::projection::output_extras(
+        &mut data,
+        crate::console::projection::OutputExtras {
+            budget_usage: budget_usage.as_ref(),
+            stop_work: stop_work.as_ref(),
+            payload_evicted: evicted,
+            provider_error: failed_result.then_some(provider_error.as_deref()),
+            ..Default::default()
+        },
+    );
     Ok((data, text))
 }
 
@@ -1145,7 +960,13 @@ pub(super) fn add_planner_fallback(data: &mut Value, text: &mut String, reason: 
         "\nPlanner fallback: static stage\nReason: {}\n",
         plain_text(&reason, 1024)
     ));
-    data["planner_fallback"] = json!({"stage":"static", "reason":reason});
+    crate::console::projection::output_extras(
+        data,
+        crate::console::projection::OutputExtras {
+            planner_fallback: Some(&reason),
+            ..Default::default()
+        },
+    );
 }
 
 /// The reason the attempt's graph planner fell back to its static stage, read
@@ -1472,7 +1293,13 @@ pub fn attempt_provider(
         .flatten()
         .find_map(|route| {
             if route.host_native.is_some() {
-                Some(provenant_records::Harness::HostNative.spec().name.into())
+                Some(
+                    provenant_records::Harness::HostNative
+                        .spec()
+                        .identity
+                        .name
+                        .into(),
+                )
             } else {
                 route.provider.clone()
             }

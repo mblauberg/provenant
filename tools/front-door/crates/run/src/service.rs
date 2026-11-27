@@ -548,6 +548,7 @@ impl<'a> Service<'a> {
                 Warning::new(
                     SECRET_SHAPE_IN_FIELD,
                     format!("provenant: field={field} rule=known_secret_shape"),
+                    provenant_records::warning::detected_source(SECRET_SHAPE_IN_FIELD),
                 )
                 .subject(field.to_owned())
                 .once_per_change(),
@@ -1036,7 +1037,9 @@ impl From<&RunError> for ErrorKind {
             {
                 Self::UpgradeRequired
             }
-            RunError::Decode(_) | RunError::ArtifactMismatch(_) => Self::StateCorrupt,
+            RunError::Decode(_) | RunError::Version(_) | RunError::ArtifactMismatch(_) => {
+                Self::StateCorrupt
+            }
             _ => Self::Io,
         }
     }
@@ -1093,24 +1096,29 @@ fn fresh<T>(make: impl FnOnce([u8; 16]) -> T) -> Result<T> {
         .map_err(RunError::from)
 }
 
-/// Refuse a request outside an adapter's declared launch table. This runs
-/// before any writer is prepared or any run, reservation or receipt exists.
-/// Named routes resolve their adapter later, where routing checks effort.
+/// Refuse a request that breaches a field an adapter refuses (write, network,
+/// resume or skill location). Degrades (model, effort and image input) pass to
+/// routing, which drops the control or selects a fallback. This runs before any
+/// writer is prepared or any run, reservation or receipt exists.
 fn check_launch_capabilities(task: &DispatchTask, route: &RequestedRoute) -> Result<()> {
     let write = Service::has_writes(task.worktree.is_some(), &task.access.write_roots);
     let check = |provider: &str, model: Option<&str>, effort: Option<&str>| {
         let Some(spec) = provenant_records::AdapterSpec::get(provider) else {
             return Ok(());
         };
-        spec.check_launch(&provenant_records::LaunchRequest {
+        let check = spec.check_launch(&provenant_records::LaunchRequest {
             model,
             effort,
+            image_input: false,
             resume: false,
             network: task.access.network,
             write,
             skill_location: task.profile.require_skill_location,
+            gap_policy: provenant_records::GapPolicy::default(),
+        });
+        check.refusal().map_or(Ok(()), |decision| {
+            Err(input_error(ErrorKind::Unsupported, decision.to_string()))
         })
-        .map_err(|error| input_error(ErrorKind::Unsupported, error.to_string()))
     };
     match route {
         RequestedRoute::Model {

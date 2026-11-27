@@ -77,6 +77,26 @@ pub(super) fn latest() -> provenant_core::WallTime {
 /// `.retry-` and the digits of a u64 generation.
 const RETRY_SUFFIX_BYTES: usize = 27;
 
+/// The largest configurable `on_stop` defaults a checkpoint can seal: one entry
+/// for every cause, each with the longest wire step. Config declares keys from
+/// this closed set only, so the bound stays an upper bound without a config
+/// special case.
+pub(super) fn worst_case_on_stop_defaults() -> provenant_records::OnStop {
+    provenant_records::OnStop::new(
+        provenant_records::StopCause::ALL
+            .into_iter()
+            .map(|cause| {
+                (
+                    cause,
+                    provenant_records::NextStep::SameRoute {
+                        continuation: provenant_records::Continuation::Fresh,
+                    },
+                )
+            })
+            .collect(),
+    )
+}
+
 fn ask_bound(ask: &AskRequest) -> usize {
     let link = AskLink {
         extra: Default::default(),
@@ -107,7 +127,9 @@ pub(super) fn checkpoint_bound(
         .unwrap_or_else(|| unreachable!("nonempty graph bases produce a binding"));
     let skeleton = GraphCheckpoint {
         bases: None,
+        subject: None,
         extra: Default::default(),
+        delivery_queue_controls: None,
         cancellation_request_receipt: None,
         pending_writer_provisioning: Default::default(),
         pending_steers: Default::default(),
@@ -128,6 +150,8 @@ pub(super) fn checkpoint_bound(
         pull_request: Some(String::new()),
         integration_pin: Some(String::new()),
         cancelled: true,
+        on_stop_defaults: worst_case_on_stop_defaults(),
+        delivery_ci_superseded: Vec::new(),
         cancel_reason: Some(String::new()),
         pause: provenant_records::pause::Pause::new(
             provenant_records::pause::PauseCause::Stop(
@@ -162,6 +186,16 @@ pub(super) fn checkpoint_bound(
         metric: "wall_time_seconds".into(),
         reason: Some(String::new()),
     };
+    let superseded_publications = vec![
+        DeliveryCiSupersession {
+            node_id: "n".repeat(longest_id),
+            head_sha: "f".repeat(64),
+        };
+        plan.nodes
+            .iter()
+            .filter(|node| node.kind == Some(NodeKind::Publish))
+            .count()
+    ];
     let fixed = [
         ENVELOPE_KEYS_BYTES,
         // GraphExecution stores the configured graph-wide bases beside the checkpoint.
@@ -198,6 +232,9 @@ pub(super) fn checkpoint_bound(
             + 6 * MAX_CANCEL_REASON_BYTES,
         MAX_UNKNOWN_USAGE * (UNKNOWN_USAGE_TEXT_BYTES + longest_id + 1),
         MAX_USAGE_EVENTS * (canonical_len(&event) + 64 + NOTE_BYTES + 1),
+        canonical_len(&serde_json::json!({
+            "delivery_ci_superseded": superseded_publications,
+        })),
         // The pause ask: one open at a time.
         plan.decision_session.as_deref().map_or(0, |session| {
             ask_bound(&asks::pause_ask(
@@ -270,8 +307,117 @@ fn node_bound(
     let expands = plans::agent(node);
     let gate = node.condition.is_some();
     let ci = matches!(node.condition, Some(GateCondition::Ci { .. }));
+    let conflict = matches!(node.condition, Some(GateCondition::Conflict { .. }));
+    let node_index = plan
+        .nodes
+        .iter()
+        .position(|candidate| candidate.id == node.id);
+    let escalation_policy =
+        node_index.and_then(|index| loops::escalation_owner(index, plan).map(|(_, policy)| policy));
+    let escalation_owner = node_index.and_then(|index| {
+        loops::escalation_owner(index, plan)
+            .filter(|(owner, _)| *owner == index)
+            .map(|(_, policy)| policy)
+    });
+    let worst_attempt_key = AttemptKey {
+        extra: Default::default(),
+        retry_generation: Some(u64::MAX),
+        previous_attempt_ref: Some(String::new()),
+        graph_id: plan.graph_id.clone(),
+        node_id: node.id.clone(),
+        attempt: u32::MAX,
+        route_index: u16::MAX,
+    };
+    let delivery_hygiene =
+        (node.kind == Some(NodeKind::Hygiene)).then(|| DeliveryHygieneProgress {
+            operation_id: "x".repeat(256),
+            input_head: "1".repeat(64),
+            handoff: Some("\\".repeat(plans::STORED_HANDOFF_BYTES)),
+            outcome: Some(provenant_records::graph::HygieneOutcome {
+                kind: provenant_records::graph::HygieneOutcomeKind::Error,
+                before_head: Some("2".repeat(64)),
+                after_head: Some("3".repeat(64)),
+                handoff: Some("\\".repeat(plans::STORED_HANDOFF_BYTES)),
+            }),
+        });
+    let publication_writer = (node.kind == Some(NodeKind::Publish))
+        .then_some(node.source.as_ref())
+        .flatten()
+        .and_then(|source| match source {
+            SourceBinding::Node { node: hygiene } => plan
+                .nodes
+                .iter()
+                .find(|candidate| &candidate.id == hygiene)
+                .and_then(|hygiene| match &hygiene.source {
+                    Some(SourceBinding::Node { node: writer }) => Some(writer.clone()),
+                    _ => None,
+                }),
+            _ => None,
+        });
+    let delivery_publication = publication_writer.as_ref().map(|writer| {
+        let mut source_key = worst_attempt_key.clone();
+        source_key.node_id.clone_from(writer);
+        source_key.previous_attempt_ref = Some("x".repeat(OUTPUT_FIELD_BYTES));
+        DeliveryPublicationProgress {
+            operation_id: "x".repeat(256),
+            source_node: writer.clone(),
+            source_key,
+            source_attempt: format!("{}/{}", "x".repeat(HOST_ID_BYTES), "x".repeat(32)),
+            writer_branch: "x".repeat(OUTPUT_FIELD_BYTES),
+            input_head: "1".repeat(64),
+            source_branch: "x".repeat(OUTPUT_FIELD_BYTES),
+            integration_base: "2".repeat(64),
+            expected_remote_head: Some("3".repeat(64)),
+            ci_admission: None,
+            ci_admission_wait: None,
+            receipt: Some(DeliveryPublication {
+                branch: "x".repeat(OUTPUT_FIELD_BYTES),
+                head: "4".repeat(64),
+                pull_request: format!("https://{}", "x".repeat(OUTPUT_FIELD_BYTES - 8)),
+            }),
+            error: Some("x".repeat(MAX_ADVANCE_NOTE_BYTES)),
+        }
+    });
+    let delivery_park = (plan.queue.is_some()
+        || node.kind == Some(NodeKind::Hygiene)
+        || node.kind == Some(NodeKind::Publish)
+        || node.delivery_review.is_some())
+    .then(|| {
+        let mut attempt_key = worst_attempt_key.clone();
+        attempt_key.previous_attempt_ref = Some("x".repeat(OUTPUT_FIELD_BYTES));
+        DeliveryParkProgress {
+            transition_id: "x".repeat(256),
+            operation_id: "x".repeat(256),
+            item: plan.queue.as_ref().map(|_| "x".repeat(OUTPUT_FIELD_BYTES)),
+            attempt_key: Some(attempt_key),
+            attempt_ref: Some(format!("{}/{}", "x".repeat(HOST_ID_BYTES), "x".repeat(32))),
+            reason: provenant_records::graph::ParkReason::LoopExhausted,
+            handoff: "\\".repeat(plans::STORED_HANDOFF_BYTES),
+            head: Some("1".repeat(64)),
+            evidence: vec!["x".repeat(512); 8],
+            request_id: Some(provenant_core::HumanRequestId::from_bytes([u8::MAX; 16])),
+        }
+    });
     let boundary = gate || node.loop_body.is_some();
     let mut skeleton = NodeProgress {
+        delivery_adoption: None,
+        delivery_review_disposition: None,
+        delivery_loop: node.loop_body.as_ref().map(|spec| {
+            provenant_records::graph::DeliveryLoopProgress {
+                name: node.id.clone(),
+                round: loop_rounds.max(spec.max_rounds),
+                last_attempt: worst_attempt_key.clone(),
+            }
+        }),
+        escalation: escalation_owner.map(|_| provenant_records::graph::EscalationProgress {
+            rung: usize::MAX,
+            cause: provenant_records::graph::EscalationCause::UncommittedEdits,
+            transition_attempt: worst_attempt_key.clone(),
+        }),
+        delivery_hygiene,
+        delivery_publication,
+        delivery_park,
+        conflict: None,
         extra: Default::default(),
         children: node.composite_members.clone(),
         source_binding: node.source.clone(),
@@ -356,6 +502,8 @@ fn node_bound(
             outcome: SeparationOutcome::Unconstrained,
         }),
         ci: ci.then(|| CiEvidence {
+            quota_reset_at: None,
+            failed_checks_policy: None,
             wake_at: Some(latest()),
             pending_observations: u64::MAX,
             extra: Default::default(),
@@ -384,11 +532,37 @@ fn node_bound(
         wait_reason: None,
         cancelled_from: Some(NodeState::Running),
         skip_reason: Some("graph cancelled".into()),
-        advance_error: Some(String::new()),
-        advance_error_code: Some("c".repeat(REFUSAL_CODE_BYTES)),
+        advance_note: Some(String::new()),
+        advance_code: Some("c".repeat(REFUSAL_CODE_BYTES)),
         advance_owner_code: Some("c".repeat(REFUSAL_CODE_BYTES)),
         outputs: Some(if boundary {
             gate_outputs(false)
+        } else if node.kind == Some(NodeKind::Hygiene) {
+            NodeOutputs {
+                schema_version: 2,
+                hygiene: Some(provenant_records::graph::HygieneOutcome {
+                    kind: provenant_records::graph::HygieneOutcomeKind::UncommittedEdits,
+                    before_head: Some("2".repeat(64)),
+                    after_head: Some("3".repeat(64)),
+                    handoff: Some("\\".repeat(plans::STORED_HANDOFF_BYTES)),
+                }),
+                branch: Some("x".repeat(OUTPUT_FIELD_BYTES)),
+                commit: Some("3".repeat(64)),
+                warnings: vec!["x".repeat(WARNING_BYTES); MAX_WARNINGS],
+                ..Default::default()
+            }
+        } else if node.kind == Some(NodeKind::Publish) {
+            NodeOutputs {
+                schema_version: 2,
+                publication: Some(DeliveryPublication {
+                    branch: "x".repeat(OUTPUT_FIELD_BYTES),
+                    head: "4".repeat(64),
+                    pull_request: format!("https://{}", "x".repeat(OUTPUT_FIELD_BYTES - 8)),
+                }),
+                branch: Some("x".repeat(OUTPUT_FIELD_BYTES)),
+                commit: Some("4".repeat(64)),
+                ..Default::default()
+            }
         } else {
             NodeOutputs {
                 extra: Default::default(),
@@ -404,6 +578,9 @@ fn node_bound(
                 compact_disposition_findings: None,
                 full_disposition_findings: None,
                 verdict_error: Some(String::new()),
+                hygiene: None,
+                publication: None,
+                handoff: None,
                 schema_version: 2,
                 decide_outcome: None,
                 result: Some(ResultOutput {
@@ -469,8 +646,8 @@ fn node_bound(
     }
     let mut bytes = canonical_len(&skeleton)
         + 64 // source commit
-        + MAX_ADVANCE_ERROR_BYTES // advance error
-        + if correction { MAX_ADVANCE_ERROR_BYTES } else { 0 };
+        + MAX_ADVANCE_NOTE_BYTES // advance error
+        + if correction { MAX_ADVANCE_NOTE_BYTES } else { 0 };
     if template::review_node(node) {
         bytes += canonical_len(&serde_json::json!({"review_settlement": {
             "attempt_id": "1".repeat(32),
@@ -487,10 +664,10 @@ fn node_bound(
     }
     // The node's own bounded launch retry wait, kept while it is running.
     if !boundary && node.composite.is_none() && node.decide.is_none() && node.land.is_none() {
-        bytes += MAX_ADVANCE_ERROR_BYTES + 320; // retry reason, timing and bounded policy
+        bytes += MAX_ADVANCE_NOTE_BYTES + 320; // retry reason, timing and bounded policy
     }
     if expands {
-        bytes += MAX_ADVANCE_ERROR_BYTES; // expansion pause
+        bytes += MAX_ADVANCE_NOTE_BYTES; // expansion pause
     }
     if plans::agent(node) && !admitted {
         // Final blocks are always externalised by prompt_store. Reserve the
@@ -499,6 +676,9 @@ fn node_bound(
     }
     if plans::writer(node) {
         bytes += plans::STORED_HANDOFF_BYTES + 16; // the record and its key
+    }
+    if plans::agent(node) {
+        bytes += plans::STORED_HANDOFF_BYTES + 16; // the full report handoff and its key
     }
     if template::review_node(node) {
         bytes += plans::STORED_DECISION_BYTES + 16;
@@ -517,7 +697,7 @@ fn node_bound(
             + 256;
     }
     if let Some(spec) = &node.loop_body {
-        bytes += MAX_ADVANCE_ERROR_BYTES + LOOP_PAUSE_TEXT_BYTES + 3 * node.id.len();
+        bytes += MAX_ADVANCE_NOTE_BYTES + LOOP_PAUSE_TEXT_BYTES + 3 * node.id.len();
         if let Some(session) = &spec.decision_session {
             let ask = asks::loop_ask(&plan.graph_id, &node.id, usize::MAX, session);
             bytes += loop_rounds * (ask_bound(&ask) + RETRY_SUFFIX_BYTES);
@@ -545,7 +725,7 @@ fn node_bound(
     if let Some(spec) = &node.land {
         // branch, head, ask ID, actor and note; and one ask link.
         bytes +=
-            2 * OUTPUT_FIELD_BYTES + node.id.len() + 32 + HOST_ID_BYTES + MAX_ADVANCE_ERROR_BYTES;
+            2 * OUTPUT_FIELD_BYTES + node.id.len() + 32 + HOST_ID_BYTES + MAX_ADVANCE_NOTE_BYTES;
         let session = land::session(spec, plan).unwrap_or("");
         let ask = land::land_ask(
             &plan.graph_id,
@@ -584,6 +764,11 @@ fn node_bound(
                 .saturating_add(count.saturating_mul(256))
                 .saturating_add(OUTPUT_FIELD_BYTES + 512);
         }
+    }
+    if conflict {
+        // Exact head, summary, poll deadline, observation count and CI recheck
+        // marker survive a pending replay.
+        bytes = bytes.saturating_add(OUTPUT_FIELD_BYTES + 160);
     }
     if plans::writer(node) {
         bytes = bytes.saturating_add(6 * 4096 + 256);
@@ -625,7 +810,22 @@ fn node_bound(
             bytes += MAX_FINDINGS * (64 + 12);
         }
     }
+    let attempt_rows_per_route = plan
+        .queue
+        .as_ref()
+        .map_or(1, |queue| queue.prep_retries.value.saturating_add(1));
     for route in &node.routes {
+        let attempt_route = if plans::writer(node) {
+            escalation_policy
+                .into_iter()
+                .flat_map(|policy| policy.ladder.iter())
+                .map(|alias| loops::tier_route(Some(route), alias))
+                .chain(std::iter::once(route.clone()))
+                .max_by_key(canonical_len)
+                .unwrap_or_else(|| route.clone())
+        } else {
+            route.clone()
+        };
         let attempt = GraphAttempt {
             placement_host: None,
             placement_host_id: None,
@@ -635,19 +835,21 @@ fn node_bound(
             launched: false,
             key: AttemptKey {
                 extra: Default::default(),
-                retry_generation: None,
-                previous_attempt_ref: None,
-                graph_id: plan.graph_id.clone(),
-                node_id: node.id.clone(),
-                attempt: u32::MAX,
-                route_index: u16::MAX,
+                retry_generation: worst_attempt_key.retry_generation,
+                previous_attempt_ref: worst_attempt_key.previous_attempt_ref.clone(),
+                graph_id: worst_attempt_key.graph_id.clone(),
+                node_id: worst_attempt_key.node_id.clone(),
+                attempt: worst_attempt_key.attempt,
+                route_index: worst_attempt_key.route_index,
             },
-            route: route.clone(),
+            escalation_rung: (plans::writer(node) && escalation_policy.is_some())
+                .then_some(usize::MAX),
+            route: attempt_route,
             state: AttemptState::Unresolved,
             // The longest stop cause name.
             stop: Some(provenant_records::StopCause::HostNativeUnconfigured),
             attempt_ref: Some(String::new()),
-            outcome: Some(AttemptOutcome::AdapterUnavailable),
+            outcome: Some(GraphAttemptOutcome::AdapterUnavailable),
             launch_actor: String::new(),
             input_cap: Some(usize::MAX),
             input_cap_source: Some(InputCapSource::EffectiveGraphLimits),
@@ -663,6 +865,7 @@ fn node_bound(
                 cost_partial: true,
                 cost_unknown_reason: Some(String::new()),
             }),
+            cause: None,
         };
         // A manifest records at most MANIFEST_INPUT_LIMIT selected values. Each
         // entry carries two bounded identifiers, a digest and an optional OID.
@@ -672,7 +875,7 @@ fn node_bound(
             .map(|input| input.outputs.len())
             .sum::<usize>()
             .min(MANIFEST_INPUT_LIMIT);
-        bytes += canonical_len(&attempt)
+        let attempt_row_bound = canonical_len(&attempt)
             + 2 * HOST_ID_BYTES
             + NOTE_BYTES
             + 1
@@ -685,6 +888,7 @@ fn node_bound(
                 .map(|id| canonical_len(id) + 1)
                 .sum::<usize>()
             + selections * 768;
+        bytes = bytes.saturating_add(attempt_row_bound.saturating_mul(attempt_rows_per_route));
     }
     bytes
 }

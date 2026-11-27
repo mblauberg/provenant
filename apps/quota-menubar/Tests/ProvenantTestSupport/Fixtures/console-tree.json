@@ -4,11 +4,33 @@
     "children_absent": 0,
     "coverage": {
       "host": null,
-      "nested_runs": "unavailable",
+      "nested_runs": "complete",
       "runs": "complete",
       "scope": "local"
     },
-    "edges": [],
+    "edges": [
+      {
+        "child_attempt": "c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2",
+        "kind": "dispatch",
+        "parent_attempt": "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
+        "parent_status": "present",
+        "project_id": "01010101010101010101010101010101"
+      },
+      {
+        "child_attempt": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3",
+        "kind": "dispatch",
+        "parent_attempt": "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
+        "parent_status": "present",
+        "project_id": "01010101010101010101010101010101"
+      },
+      {
+        "child_attempt": "c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4",
+        "kind": "continuation",
+        "parent_attempt": "c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2",
+        "parent_status": "present",
+        "project_id": "01010101010101010101010101010101"
+      }
+    ],
     "identity_conflicts": [],
     "limits": {
       "depth": 8,
@@ -35,21 +57,30 @@
             "graph": "implement-console-overview",
             "node": "task",
             "project": "01010101010101010101010101010101"
-          }
+          },
+          "project_id": "01010101010101010101010101010101"
         },
         "metadata": {
           "attempt": {
             "account": null,
             "applied_route": null,
+            "attempt_directory": {
+              "kind": "path",
+              "relative": {
+                "encoding": "utf8",
+                "path": "fixture/attempts/c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1"
+              },
+              "root": "/"
+            },
             "attempt_id": "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
             "attempt_number": 1,
             "cache_read_share": null,
-            "cause": null,
             "continuation": null,
             "delivery": null,
             "delivery_id": null,
             "exit_code": null,
             "finished_at": null,
+            "first_output_at": null,
             "git_grants_digest": null,
             "graph": "implement-console-overview",
             "head": null,
@@ -60,7 +91,6 @@
             "node": "task",
             "observed_route": null,
             "overdue": null,
-            "partial_signals": [],
             "presence": "unknown",
             "priority": null,
             "project_id": "01010101010101010101010101010101",
@@ -79,6 +109,8 @@
             "retry_of": null,
             "runtime_deadline": null,
             "settlement": null,
+            "settlement_class": null,
+            "signals": [],
             "skipped_routes": [],
             "stale": null,
             "started_at": null,
@@ -100,22 +132,45 @@
             },
             "waiting_for": null,
             "write_grants": []
+          },
+          "operation": {
+            "actor_id": "02020202020202020202020202020202",
+            "kind": "dispatch",
+            "operation_id": "tree-implement-console-overview",
+            "project_id": "01010101010101010101010101010101",
+            "request_digest": "sha256:0707070707070707070707070707070707070707070707070707070707070707",
+            "schema_version": 1,
+            "state": "accepted"
           }
         },
         "parents": {
           "continuation": null,
           "dispatch": null
         },
-        "status": "running"
+        "status": "unknown",
+        "store_parent_attempt": null,
+        "title": "node implement-console-overview",
+        "usage": {
+          "context_basis_points": null,
+          "source": "stream",
+          "tokens": {
+            "cache_read": null,
+            "cache_write": null,
+            "cache_write_1h": null,
+            "input": null,
+            "output": null,
+            "reasoning": null
+          }
+        }
       },
       {
         "children": [
           {
             "attempt_id": "c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4",
-            "kind": "retry"
+            "kind": "continuation"
           }
         ],
-        "depth": 1,
+        "depth": 0,
         "lane_id": {
           "attempt_id": "c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2",
           "host": null,
@@ -124,21 +179,30 @@
             "graph": "review-the-change-set",
             "node": "task",
             "project": "01010101010101010101010101010101"
-          }
+          },
+          "project_id": "01010101010101010101010101010101"
         },
         "metadata": {
           "attempt": {
             "account": null,
             "applied_route": null,
+            "attempt_directory": {
+              "kind": "path",
+              "relative": {
+                "encoding": "utf8",
+                "path": "fixture/attempts/c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2"
+              },
+              "root": "/"
+            },
             "attempt_id": "c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2",
             "attempt_number": 1,
             "cache_read_share": null,
-            "cause": null,
             "continuation": null,
             "delivery": null,
             "delivery_id": null,
             "exit_code": null,
             "finished_at": null,
+            "first_output_at": null,
             "git_grants_digest": null,
             "graph": "review-the-change-set",
             "head": null,
@@ -149,7 +213,6 @@
             "node": "task",
             "observed_route": null,
             "overdue": null,
-            "partial_signals": [],
             "presence": "unknown",
             "priority": null,
             "project_id": "01010101010101010101010101010101",
@@ -168,6 +231,8 @@
             "retry_of": null,
             "runtime_deadline": null,
             "settlement": null,
+            "settlement_class": null,
+            "signals": [],
             "skipped_routes": [],
             "stale": null,
             "started_at": null,
@@ -189,17 +254,41 @@
             },
             "waiting_for": null,
             "write_grants": []
+          },
+          "operation": {
+            "actor_id": "02020202020202020202020202020202",
+            "kind": "dispatch",
+            "operation_id": "tree-review-the-change-set",
+            "parent_attempt": "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
+            "project_id": "01010101010101010101010101010101",
+            "request_digest": "sha256:0707070707070707070707070707070707070707070707070707070707070707",
+            "schema_version": 1,
+            "state": "accepted"
           }
         },
         "parents": {
           "continuation": null,
-          "dispatch": null
+          "dispatch": "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1"
         },
-        "status": "running"
+        "status": "unknown",
+        "store_parent_attempt": null,
+        "title": "node review-the-change-set",
+        "usage": {
+          "context_basis_points": null,
+          "source": "stream",
+          "tokens": {
+            "cache_read": null,
+            "cache_write": null,
+            "cache_write_1h": null,
+            "input": null,
+            "output": null,
+            "reasoning": null
+          }
+        }
       },
       {
         "children": [],
-        "depth": 1,
+        "depth": 0,
         "lane_id": {
           "attempt_id": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3",
           "host": null,
@@ -208,21 +297,30 @@
             "graph": "write-the-migration-notes",
             "node": "task",
             "project": "01010101010101010101010101010101"
-          }
+          },
+          "project_id": "01010101010101010101010101010101"
         },
         "metadata": {
           "attempt": {
             "account": null,
             "applied_route": null,
+            "attempt_directory": {
+              "kind": "path",
+              "relative": {
+                "encoding": "utf8",
+                "path": "fixture/attempts/c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3"
+              },
+              "root": "/"
+            },
             "attempt_id": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3",
             "attempt_number": 1,
             "cache_read_share": null,
-            "cause": null,
             "continuation": null,
             "delivery": null,
             "delivery_id": null,
             "exit_code": null,
             "finished_at": null,
+            "first_output_at": null,
             "git_grants_digest": null,
             "graph": "write-the-migration-notes",
             "head": null,
@@ -233,7 +331,6 @@
             "node": "task",
             "observed_route": null,
             "overdue": null,
-            "partial_signals": [],
             "presence": "unknown",
             "priority": null,
             "project_id": "01010101010101010101010101010101",
@@ -252,6 +349,8 @@
             "retry_of": null,
             "runtime_deadline": null,
             "settlement": null,
+            "settlement_class": null,
+            "signals": [],
             "skipped_routes": [],
             "stale": null,
             "started_at": null,
@@ -273,17 +372,41 @@
             },
             "waiting_for": null,
             "write_grants": []
+          },
+          "operation": {
+            "actor_id": "02020202020202020202020202020202",
+            "kind": "dispatch",
+            "operation_id": "tree-write-the-migration-notes",
+            "parent_attempt": "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
+            "project_id": "01010101010101010101010101010101",
+            "request_digest": "sha256:0707070707070707070707070707070707070707070707070707070707070707",
+            "schema_version": 1,
+            "state": "accepted"
           }
         },
         "parents": {
           "continuation": null,
-          "dispatch": null
+          "dispatch": "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1"
         },
-        "status": "running"
+        "status": "unknown",
+        "store_parent_attempt": null,
+        "title": "node write-the-migration-notes",
+        "usage": {
+          "context_basis_points": null,
+          "source": "stream",
+          "tokens": {
+            "cache_read": null,
+            "cache_write": null,
+            "cache_write_1h": null,
+            "input": null,
+            "output": null,
+            "reasoning": null
+          }
+        }
       },
       {
         "children": [],
-        "depth": 2,
+        "depth": 0,
         "lane_id": {
           "attempt_id": "c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4",
           "host": null,
@@ -292,21 +415,30 @@
             "graph": "settle-quota-fixtures",
             "node": "task",
             "project": "01010101010101010101010101010101"
-          }
+          },
+          "project_id": "01010101010101010101010101010101"
         },
         "metadata": {
           "attempt": {
             "account": null,
             "applied_route": null,
+            "attempt_directory": {
+              "kind": "path",
+              "relative": {
+                "encoding": "utf8",
+                "path": "fixture/attempts/c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4"
+              },
+              "root": "/"
+            },
             "attempt_id": "c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4c4",
             "attempt_number": 1,
             "cache_read_share": null,
-            "cause": null,
             "continuation": null,
             "delivery": null,
             "delivery_id": null,
             "exit_code": null,
             "finished_at": null,
+            "first_output_at": null,
             "git_grants_digest": null,
             "graph": "settle-quota-fixtures",
             "head": null,
@@ -317,7 +449,6 @@
             "node": "task",
             "observed_route": null,
             "overdue": null,
-            "partial_signals": [],
             "presence": "unknown",
             "priority": null,
             "project_id": "01010101010101010101010101010101",
@@ -333,9 +464,11 @@
               "provider": "fixture"
             },
             "result_path": null,
-            "retry_of": null,
+            "retry_of": "c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2",
             "runtime_deadline": null,
             "settlement": null,
+            "settlement_class": null,
+            "signals": [],
             "skipped_routes": [],
             "stale": null,
             "started_at": null,
@@ -357,13 +490,36 @@
             },
             "waiting_for": null,
             "write_grants": []
+          },
+          "operation": {
+            "actor_id": "02020202020202020202020202020202",
+            "kind": "dispatch",
+            "operation_id": "tree-settle-quota-fixtures",
+            "project_id": "01010101010101010101010101010101",
+            "request_digest": "sha256:0707070707070707070707070707070707070707070707070707070707070707",
+            "schema_version": 1,
+            "state": "accepted"
           }
         },
         "parents": {
-          "continuation": null,
+          "continuation": "c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2",
           "dispatch": null
         },
-        "status": "running"
+        "status": "unknown",
+        "store_parent_attempt": null,
+        "title": "node settle-quota-fixtures",
+        "usage": {
+          "context_basis_points": null,
+          "source": "stream",
+          "tokens": {
+            "cache_read": null,
+            "cache_write": null,
+            "cache_write_1h": null,
+            "input": null,
+            "output": null,
+            "reasoning": null
+          }
+        }
       },
       {
         "children": [],
@@ -376,21 +532,30 @@
             "graph": "regenerate-cli-fixtures",
             "node": "task",
             "project": "01010101010101010101010101010101"
-          }
+          },
+          "project_id": "01010101010101010101010101010101"
         },
         "metadata": {
           "attempt": {
             "account": null,
             "applied_route": null,
+            "attempt_directory": {
+              "kind": "path",
+              "relative": {
+                "encoding": "utf8",
+                "path": "fixture/attempts/c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5"
+              },
+              "root": "/"
+            },
             "attempt_id": "c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5",
             "attempt_number": 1,
             "cache_read_share": null,
-            "cause": null,
             "continuation": null,
             "delivery": null,
             "delivery_id": null,
             "exit_code": null,
             "finished_at": null,
+            "first_output_at": null,
             "git_grants_digest": null,
             "graph": "regenerate-cli-fixtures",
             "head": null,
@@ -401,7 +566,6 @@
             "node": "task",
             "observed_route": null,
             "overdue": null,
-            "partial_signals": [],
             "presence": "unknown",
             "priority": null,
             "project_id": "01010101010101010101010101010101",
@@ -420,6 +584,8 @@
             "retry_of": null,
             "runtime_deadline": null,
             "settlement": null,
+            "settlement_class": null,
+            "signals": [],
             "skipped_routes": [],
             "stale": null,
             "started_at": null,
@@ -441,13 +607,36 @@
             },
             "waiting_for": null,
             "write_grants": []
+          },
+          "operation": {
+            "actor_id": "02020202020202020202020202020202",
+            "kind": "dispatch",
+            "operation_id": "tree-regenerate-cli-fixtures",
+            "project_id": "01010101010101010101010101010101",
+            "request_digest": "sha256:0707070707070707070707070707070707070707070707070707070707070707",
+            "schema_version": 1,
+            "state": "accepted"
           }
         },
         "parents": {
           "continuation": null,
           "dispatch": null
         },
-        "status": "running"
+        "status": "unknown",
+        "store_parent_attempt": null,
+        "title": "node regenerate-cli-fixtures",
+        "usage": {
+          "context_basis_points": null,
+          "source": "stream",
+          "tokens": {
+            "cache_read": null,
+            "cache_write": null,
+            "cache_write_1h": null,
+            "input": null,
+            "output": null,
+            "reasoning": null
+          }
+        }
       },
       {
         "children": [],
@@ -460,21 +649,30 @@
             "graph": "run-the-whole-test-suite",
             "node": "task--writer",
             "project": "01010101010101010101010101010101"
-          }
+          },
+          "project_id": "01010101010101010101010101010101"
         },
         "metadata": {
           "attempt": {
             "account": null,
             "applied_route": null,
+            "attempt_directory": {
+              "kind": "path",
+              "relative": {
+                "encoding": "utf8",
+                "path": "fixture/attempts/c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6"
+              },
+              "root": "/"
+            },
             "attempt_id": "c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6c6",
-            "attempt_number": 1,
+            "attempt_number": 2,
             "cache_read_share": null,
-            "cause": null,
             "continuation": null,
             "delivery": null,
             "delivery_id": null,
             "exit_code": null,
             "finished_at": null,
+            "first_output_at": null,
             "git_grants_digest": null,
             "graph": "run-the-whole-test-suite",
             "head": null,
@@ -482,17 +680,16 @@
             "last_event_at": "2026-11-02T01:57:31.075623Z",
             "last_event_source": "queued",
             "last_output_at": null,
-            "node": "task",
+            "node": "task--writer",
             "observed_route": null,
             "overdue": null,
-            "partial_signals": [],
             "presence": "unknown",
             "priority": null,
             "project_id": "01010101010101010101010101010101",
             "protected_paths": [],
             "queued_at": "2026-11-02T01:57:31.075623Z",
             "read_only_writable": [],
-            "reason": "the writer process state cannot be verified; run `provenant reconcile run-the-whole-test-suite/task#1` to inspect recovery before retrying",
+            "reason": "the writer process state cannot be verified; run `provenant reconcile run-the-whole-test-suite/task--writer#2` to inspect recovery before retrying",
             "recorded_state": "running",
             "requested_route": {
               "effort": "high",
@@ -504,6 +701,8 @@
             "retry_of": null,
             "runtime_deadline": null,
             "settlement": null,
+            "settlement_class": null,
+            "signals": [],
             "skipped_routes": [],
             "stale": null,
             "started_at": null,
@@ -525,20 +724,64 @@
             },
             "waiting_for": null,
             "write_grants": []
+          },
+          "operation": {
+            "actor_id": "02020202020202020202020202020202",
+            "kind": "dispatch",
+            "operation_id": "tree-run-the-whole-test-suite",
+            "project_id": "01010101010101010101010101010101",
+            "request_digest": "sha256:0707070707070707070707070707070707070707070707070707070707070707",
+            "schema_version": 1,
+            "state": "accepted"
           }
         },
         "parents": {
           "continuation": null,
           "dispatch": null
         },
-        "status": "running"
+        "status": "unknown",
+        "store_parent_attempt": null,
+        "title": "node run-the-whole-test-suite",
+        "usage": {
+          "context_basis_points": null,
+          "source": "stream",
+          "tokens": {
+            "cache_read": null,
+            "cache_write": null,
+            "cache_write_1h": null,
+            "input": null,
+            "output": null,
+            "reasoning": null
+          }
+        }
       }
     ],
     "schema_version": 1,
     "totals": {
       "attempts": 6,
       "duplicate_observations": 0,
-      "usage": {}
+      "usage": {
+        "cache_read": {
+          "known_sum": 0,
+          "missing": 6
+        },
+        "cache_write": {
+          "known_sum": 0,
+          "missing": 6
+        },
+        "input": {
+          "known_sum": 0,
+          "missing": 6
+        },
+        "output": {
+          "known_sum": 0,
+          "missing": 6
+        },
+        "reasoning": {
+          "known_sum": 0,
+          "missing": 6
+        }
+      }
     },
     "truncated": false,
     "unfetched_children": []

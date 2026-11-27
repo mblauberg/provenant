@@ -40,13 +40,13 @@ fn response_outcome(command: &str, data: &Value) -> Outcome {
 
 fn launch_error_node(data: &Value, outcome: Outcome) -> Option<&Value> {
     data["checkpoint"]["nodes"].as_array()?.iter().find(|node| {
-        node["advance_error"].is_string()
+        node["advance_note"].is_string()
             && node["attempts"].as_array().is_some_and(Vec::is_empty)
             && (matches!(outcome, Outcome::Failed | Outcome::Refused)
                 || node["state"] == "failed"
                 || (node["state"] == "blocked"
                     && matches!(
-                        node["advance_error_code"].as_str(),
+                        node["advance_code"].as_str(),
                         Some("launch_refused" | "launch_retry_exhausted")
                     )))
     })
@@ -186,9 +186,9 @@ fn refusal_lines(checkpoint: &Value) -> String {
         .as_array()
         .map_or(&[][..], Vec::as_slice)
         .iter()
-        .filter(|node| node["advance_error_code"] == "preparation_refused")
+        .filter(|node| node["advance_code"] == "preparation_refused")
         .filter_map(|node| {
-            let message = node["advance_error"].as_str()?;
+            let message = node["advance_note"].as_str()?;
             let line = format!(
                 "refused {}: {}",
                 node["id"].as_str().unwrap_or_default(),
@@ -368,7 +368,7 @@ fn invoke(
                 .is_some_and(|nodes| {
                     nodes.iter().any(|node| {
                         node["state"] == "failed"
-                            && node["advance_error_code"] == "writer_binding_unavailable"
+                            && node["advance_code"] == "writer_binding_unavailable"
                             && node["advance_owner_code"] != "writer_lock_busy"
                     })
                 })
@@ -441,9 +441,9 @@ fn invoke(
                 result.error = Some(provenant_records::CommandError::new(
                     node["advance_owner_code"]
                         .as_str()
-                        .or_else(|| node["advance_error_code"].as_str())
+                        .or_else(|| node["advance_code"].as_str())
                         .unwrap_or("launch_failed"),
-                    node["advance_error"].as_str().unwrap_or("launch failed"),
+                    node["advance_note"].as_str().unwrap_or("launch failed"),
                     None,
                     "correct the reported launch failure and rerun `provenant run`",
                 ));
@@ -562,6 +562,63 @@ pub(crate) fn run(
                 "--over creates {} nodes; check comma-separated items",
                 request.over.len()
             ),
+            provenant_records::warning::detected_source(
+                provenant_records::warning::ARGUMENT_VALUE_SUSPECT,
+            ),
+        ));
+    }
+    // `run smoke` is the hermetic lifecycle, not a graph against the caller's
+    // checkout. The lifecycle re-execs this binary with a fixture project; the
+    // child then lands here with a project under fixture_root and launches the
+    // compiled graph normally. An explanation is a pure compile and stays on
+    // that path too.
+    if request.template.as_deref() == Some("smoke")
+        && !request.explain
+        && request.file.is_none()
+        && let Ok(resolved) = crate::roots::resolve(
+            globals,
+            crate::roots::Workspace::Directory,
+            crate::roots::Product::Optional,
+        )
+    {
+        let (smoke_settings, smoke_origin) = crate::smoke::settings(&resolved.roots);
+        let root = smoke_settings.root();
+        if !resolved
+            .project
+            .starts_with(crate::smoke::fixture_root(&resolved.home, &root))
+        {
+            if globals.project.is_some() {
+                warn(Warning::new(
+                    provenant_records::warning::SMOKE_PROJECT_IGNORED,
+                    "run smoke ignores --project and uses a hermetic fixture",
+                    provenant_records::warning::detected_source(
+                        provenant_records::warning::SMOKE_PROJECT_IGNORED,
+                    ),
+                ));
+            }
+            return smoke_lifecycle(&request, globals, &resolved, &smoke_settings, &smoke_origin);
+        }
+    }
+    // An explanation compiles against the caller's project and creates no
+    // fixture. Report the effective smoke values and their sources alongside it.
+    if request.template.as_deref() == Some("smoke")
+        && request.explain
+        && let Ok(resolved) = crate::roots::resolve(
+            globals,
+            crate::roots::Workspace::Directory,
+            crate::roots::Product::Optional,
+        )
+    {
+        let (smoke_settings, smoke_origin) = crate::smoke::settings(&resolved.roots);
+        warn(Warning::new(
+            provenant_records::warning::LAUNCH_ADVISORY,
+            format!(
+                "run smoke --explain effective settings:\n{}",
+                smoke_settings.explain(&smoke_origin)
+            ),
+            provenant_records::warning::detected_source(
+                provenant_records::warning::LAUNCH_ADVISORY,
+            ),
         ));
     }
     let bare_model = request
@@ -613,6 +670,9 @@ pub(crate) fn run(
             warn(Warning::new(
                 provenant_records::warning::MODEL_SEGMENT_ADVISORY,
                 warning,
+                provenant_records::warning::detected_source(
+                    provenant_records::warning::MODEL_SEGMENT_ADVISORY,
+                ),
             ));
         }
     }
@@ -622,6 +682,129 @@ pub(crate) fn run(
         globals,
         workers,
     )
+}
+
+/// Drive the smoke lifecycle from the CLI edge and publish its typed output.
+/// A failed lifecycle carries the failing row named by the verifier; a passed
+/// one carries the child's launch, wait and status envelopes.
+fn smoke_lifecycle(
+    request: &GraphRunArgs,
+    globals: &Globals,
+    resolved: &crate::roots::Resolved,
+    settings: &provenant_cli::smoke::Settings,
+    origin: &provenant_cli::smoke::Origin,
+) -> u8 {
+    let program = match std::env::current_exe() {
+        Ok(program) => program,
+        Err(error) => {
+            return cli_input_error_emit(
+                "run",
+                &format!("smoke program is unavailable: {error}"),
+                globals,
+            );
+        }
+    };
+    let runner = match provenant_os::exec::SystemExecutor::new(1) {
+        Ok(executor) => crate::install::ChildRunner {
+            executor,
+            environment: std::env::vars_os().collect(),
+            cwd: resolved.project.clone(),
+        },
+        Err(error) => {
+            return cli_input_error_emit(
+                "run",
+                &format!("smoke executor is unavailable: {error}"),
+                globals,
+            );
+        }
+    };
+    let args = provenant_cli::install::Upgrade {
+        yes: false,
+        from_source: None,
+        hosts: "all".into(),
+        verify: true,
+        verify_only: false,
+        dry_run: false,
+        host: request.host.clone(),
+        route: request.route.clone(),
+        set: request.set.clone(),
+    };
+    let clock = provenant_os::clock::SystemClock::new();
+    match crate::smoke::run_lifecycle(
+        &clock,
+        &runner,
+        &program,
+        resolved.roots.state.as_path(),
+        &resolved.home,
+        &args,
+    ) {
+        Ok(outcome) => match &outcome.verdict {
+            crate::smoke::SmokeVerdict::Passed => {
+                let text = outcome.text();
+                crate::emit(
+                    &CommandResult::new("run", Outcome::Ok, serde_json::json!({"smoke": text})),
+                    globals,
+                    "",
+                    false,
+                )
+            }
+            crate::smoke::SmokeVerdict::Unverified { cause, .. } => {
+                let text = outcome.text();
+                if settings.unverified == provenant_cli::smoke::Unverified::Fail {
+                    let mut result =
+                        CommandResult::new("run", Outcome::Failed, serde_json::Value::Null);
+                    result.error = Some(provenant_records::CommandError::new(
+                        cause.code().0,
+                        format!(
+                            "{text}\nsource: {}",
+                            origin.describe(provenant_cli::smoke::UNVERIFIED_KEY)
+                        ),
+                        None,
+                        cause.remedy(),
+                    ));
+                    return crate::emit(&result, globals, "", false);
+                }
+                crate::emit(
+                    &CommandResult::new("run", Outcome::Ok, serde_json::json!({"smoke": text})),
+                    globals,
+                    "",
+                    false,
+                )
+            }
+            crate::smoke::SmokeVerdict::Failed { .. } => {
+                let mut result =
+                    CommandResult::new("run", Outcome::Failed, serde_json::Value::Null);
+                result.error = Some(provenant_records::CommandError::new(
+                    "SMOKE_FAILED",
+                    outcome.text(),
+                    None,
+                    "inspect the reported smoke failure, then rerun `provenant run smoke`",
+                ));
+                crate::emit(&result, globals, "", false)
+            }
+        },
+        Err(error) => {
+            let mut result = CommandResult::new("run", Outcome::Failed, serde_json::Value::Null);
+            result.error = Some(provenant_records::CommandError::new(
+                "SMOKE_FAILED",
+                &error,
+                None,
+                "inspect the reported smoke failure, then rerun `provenant run smoke`",
+            ));
+            crate::emit(&result, globals, "", false)
+        }
+    }
+}
+
+fn cli_input_error_emit(command: &str, detail: &str, globals: &Globals) -> u8 {
+    let mut result = CommandResult::new(command, Outcome::Invalid, serde_json::Value::Null);
+    result.error = Some(provenant_records::CommandError::new(
+        "INVALID",
+        detail,
+        None,
+        "resolve the reported input error and retry",
+    ));
+    crate::emit(&result, globals, "", false)
 }
 
 /// A `--model` without an adapter names the one catalogued model that carries
@@ -1354,8 +1537,8 @@ mod tests {
     #[test]
     fn pending_graph_projects_failed_pre_attempt_node() {
         let data = json!({"status":"pending", "checkpoint":{"nodes":[
-            {"id":"retry", "state":"blocked", "attempts":[], "advance_error":"retrying"},
-            {"id":"writer", "state":"failed", "attempts":[], "advance_error":"binding failed"},
+            {"id":"retry", "state":"blocked", "attempts":[], "advance_note":"retrying"},
+            {"id":"writer", "state":"failed", "attempts":[], "advance_note":"binding failed"},
             {"id":"other", "state":"running", "attempts":[{}]}
         ]}});
         assert_eq!(response_outcome("run", &data), Outcome::Waiting);
@@ -1378,7 +1561,7 @@ mod tests {
             let data = json!({"status":"pending", "timed_out":true, "checkpoint":{"nodes":[
                 {"id":"slow", "state":"running", "attempts":[{}]},
                 {"id":"writer", "state":"blocked", "attempts":[],
-                 "advance_error":"bounded launch refused", "advance_error_code":code,
+                 "advance_note":"bounded launch refused", "advance_code":code,
                  "advance_owner_code":"writer_lock_busy"}
             ]}});
             assert_eq!(response_outcome("run", &data), Outcome::Waiting);
@@ -1386,7 +1569,7 @@ mod tests {
             assert_eq!(node["id"], "writer");
             assert_eq!(node["advance_owner_code"], "writer_lock_busy");
             let mut retrying = data.clone();
-            retrying["checkpoint"]["nodes"][1]["advance_error_code"] = json!("retrying");
+            retrying["checkpoint"]["nodes"][1]["advance_code"] = json!("retrying");
             assert!(launch_error_node(&retrying, Outcome::Waiting).is_none());
             let mut launched = data.clone();
             launched["checkpoint"]["nodes"][1]["attempts"] = json!([{}]);
@@ -1397,8 +1580,10 @@ mod tests {
     #[test]
     fn run_receipt_is_bounded_and_ends_in_one_next_command() {
         let nodes: Vec<_> = (0..40)
-            .map(|n| json!({"id":format!("n{n}"), "state":"failed", "advance_error_code":"preparation_refused",
-                "advance_error":"x".repeat(1000), "attempts":[]}))
+            .map(|n| {
+                json!({"id":format!("n{n}"), "state":"failed", "advance_code":"preparation_refused",
+                "advance_note":"x".repeat(1000), "attempts":[]})
+            })
             .collect();
         for (status, command, why) in [
             (
@@ -1546,7 +1731,7 @@ mod tests {
     #[test]
     fn failed_attempt_does_not_project_launch_error() {
         let data = json!({"checkpoint":{"nodes":[
-            {"id":"task", "state":"failed", "attempts":[{}], "advance_error":"fallback_route_pinned"}
+            {"id":"task", "state":"failed", "attempts":[{}], "advance_note":"fallback_route_pinned"}
         ]}});
         assert!(launch_error_node(&data, Outcome::Failed).is_none());
     }

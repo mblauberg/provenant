@@ -1,4 +1,5 @@
 use super::*;
+use crate::graph::transitions::initial_checkpoint;
 
 fn advance(
     document: &GraphDocument,
@@ -41,7 +42,7 @@ fn reviews(results: &[&str]) -> FakeOwner {
         actor: "chair".into(),
         observations: results
             .iter()
-            .map(|text| terminal_with_result(AttemptOutcome::Succeeded, text))
+            .map(|text| terminal_with_result(GraphAttemptOutcome::Succeeded, text))
             .collect(),
         ..Default::default()
     }
@@ -70,6 +71,354 @@ fn extension(
         values,
     )
     .unwrap()
+}
+
+#[test]
+fn queue_loop_can_bind_an_outer_publication_gate() {
+    let mut document: GraphDocument = serde_json::from_value(serde_json::json!({
+            "schema_version":2, "graph_id":"outer-publication", "integration_branch":"delivery/item", "nodes":[
+                {"id":"writer", "access":"worktree_write", "worktree":"retained",
+                 "prompt":"Write", "route":{"alias":"junior"}},
+                {"id":"hygiene", "kind":"hygiene", "access":"worktree_write", "worktree":"retained",
+                 "depends_on":["writer"], "source":{"type":"node","node":"writer"}},
+                {"id":"publish", "kind":"publish", "access":"worktree_write", "worktree":"retained",
+                 "depends_on":["hygiene"], "source":{"type":"node","node":"hygiene"}},
+                {"id":"cycle", "kind":"loop", "access":"read_only", "depends_on":["publish"],
+                 "loop":{"max_rounds":1, "until":"check", "body":[
+                     {"id":"check", "kind":"gate", "access":"read_only",
+                      "condition":{"type":"ci","target":{"node":"publish"}}}
+                 ]}}
+            ]
+        })).unwrap();
+    document.queue = Some(QueueKnobs::default());
+    let expanded = loops::expand(&document, &[], &Default::default()).unwrap();
+    assert!(validate_flat_plan(&expanded, &Default::default()).is_ok());
+}
+
+#[test]
+fn bounded_recovery_retries_only_named_failed_gates() {
+    let document: GraphDocument = serde_json::from_value(serde_json::json!({
+        "schema_version": 2, "graph_id": "general-recovery", "nodes": [
+            {"id":"cycle", "kind":"loop", "access":"read_only", "loop": {
+                "max_rounds":2, "until":"last", "retry_on":["first"], "body":[
+                    {"id":"first", "kind":"gate", "access":"read_only",
+                     "condition":{"type":"ci", "target":"main"}},
+                    {"id":"last", "kind":"gate", "access":"read_only", "depends_on":["first"],
+                     "condition":{"type":"ci", "target":"main"}}
+                ]
+            }}
+        ]
+    }))
+    .unwrap();
+    let expanded = loops::expand(&document, &[], &Default::default()).unwrap();
+    let (plan, positions) = validate_flat_plan(&expanded, &Default::default()).unwrap();
+    let mut checkpoint = initial_checkpoint(&expanded, &plan, "digest".into(), None, None, None);
+    let first = positions["cycle--r1--first"];
+    let last = positions["cycle--r1--last"];
+    let next = &plan.nodes[positions["cycle--r2--first"]];
+
+    checkpoint.nodes[first].state = NodeState::Failed;
+    checkpoint.nodes[last].state = NodeState::Blocked;
+    assert!(!loops::inactive_round(next, &plan, &checkpoint, &positions));
+    checkpoint.nodes[first].state = NodeState::Succeeded;
+    assert!(loops::inactive_round(next, &plan, &checkpoint, &positions));
+    checkpoint.nodes[last].state = NodeState::Succeeded;
+    assert!(loops::inactive_round(next, &plan, &checkpoint, &positions));
+
+    let mut bypass = document;
+    let last_gate = &mut bypass.nodes[0].loop_body.as_mut().unwrap().body[1];
+    last_gate.depends_on.clear();
+    last_gate.after_settled.push("first".into());
+    assert!(loops::expand(&bypass, &[], &Default::default()).is_err());
+}
+
+#[test]
+fn typed_hygiene_failures_retry_from_the_settled_prior_outcome() {
+    let document: GraphDocument = serde_json::from_value(serde_json::json!({
+        "schema_version": 2, "graph_id": "hygiene-recovery", "nodes": [
+            {"id":"initial-write", "access":"worktree_write", "worktree":"/wt/feature",
+             "prompt":"write", "route":{"alias":"senior"}},
+            {"id":"initial-hygiene", "kind":"hygiene", "access":"worktree_write",
+             "worktree":"/wt/feature", "depends_on":["initial-write"],
+             "source":{"type":"node","node":"initial-write"}, "on_fail":"recovery"},
+            {"id":"recovery", "kind":"loop", "access":"read_only",
+             "depends_on":["initial-hygiene"], "loop":{
+                "max_rounds":2, "until":"done", "retry_on":["hygiene"],
+                "previous_bindings":{"hygiene":"initial-hygiene"}, "body":[
+                    {"id":"repair", "access":"worktree_write", "worktree":"/wt/feature",
+                     "prompt":"continue the exact prior work", "route":{"alias":"senior"},
+                     "source":{"type":"node","node":"previous.hygiene"},
+                     "inputs":[{"node":"previous.hygiene","outputs":["commit"]}]},
+                    {"id":"hygiene", "kind":"hygiene", "access":"worktree_write",
+                     "worktree":"/wt/feature", "depends_on":["repair"],
+                     "source":{"type":"node","node":"repair"}},
+                    {"id":"done", "kind":"gate", "access":"read_only",
+                     "depends_on":["hygiene"], "condition":{"type":"budget"}}
+                ]
+             }}
+        ]
+    }))
+    .unwrap();
+
+    assert!(validate_plan(&document).is_ok());
+    let expanded = loops::expand(&document, &[], &Default::default()).unwrap();
+    let (plan, positions) = validate_flat_plan(&expanded, &Default::default()).unwrap();
+    let first_hygiene = &plan.nodes[positions["recovery--r1--hygiene"]];
+    assert!(
+        first_hygiene
+            .round
+            .as_ref()
+            .is_some_and(|round| round.retry_on)
+    );
+
+    let next_repair = &plan.nodes[positions["recovery--r2--repair"]];
+    assert!(matches!(
+        next_repair.source.as_ref(),
+        Some(SourceBinding::Node { node }) if node == "recovery--r1--hygiene"
+    ));
+    assert!(
+        !next_repair
+            .depends_on
+            .contains(&"recovery--r1--hygiene".to_owned())
+    );
+    assert!(
+        next_repair
+            .after_settled
+            .contains(&"recovery--r1--hygiene".to_owned())
+    );
+    assert!(
+        next_repair
+            .after_settled
+            .contains(&"recovery--r1--done".to_owned())
+    );
+
+    // A source inherited as an ordering-only entry must become a single
+    // success dependency, while the failed prior hygiene remains settled-only.
+    let mut inherited = document.clone();
+    inherited.nodes[2]
+        .after_settled
+        .push("initial-write".into());
+    inherited.nodes[2].loop_body.as_mut().unwrap().body[0].source = Some(SourceBinding::Node {
+        node: "initial-write".into(),
+    });
+    let expanded = loops::expand(&inherited, &[], &Default::default()).unwrap();
+    let first = expanded
+        .nodes
+        .iter()
+        .find(|node| node.id == "recovery--r1--repair")
+        .unwrap();
+    assert!(first.depends_on.contains(&"initial-write".to_owned()));
+    assert!(!first.after_settled.contains(&"initial-write".to_owned()));
+
+    let mut untyped_hygiene = document.clone();
+    untyped_hygiene.nodes[2].loop_body.as_mut().unwrap().body[1].source = None;
+    assert!(validate_plan(&untyped_hygiene).is_err());
+}
+
+#[test]
+fn recovery_bindings_use_selected_publication_and_sourced_hygiene_names() {
+    for adopted_seed in [false, true] {
+        let mut nodes = Vec::new();
+        if !adopted_seed {
+            nodes.extend([
+                serde_json::json!({
+                    "id":"seed-writer", "access":"worktree_write", "worktree":"/wt/feature",
+                    "prompt":"write", "route":{"alias":"senior"}
+                }),
+                serde_json::json!({
+                    "id":"seed-hygiene", "kind":"hygiene", "access":"worktree_write",
+                    "worktree":"/wt/feature", "depends_on":["seed-writer"],
+                    "source":{"type":"node","node":"seed-writer"}
+                }),
+            ]);
+        }
+        let seed_hygiene = if adopted_seed {
+            "seed-publication"
+        } else {
+            "seed-hygiene"
+        };
+        let seed_publication = if adopted_seed {
+            serde_json::json!({
+                "id":"seed-publication", "kind":"publish", "access":"worktree_write",
+                "worktree":"/wt/feature", "delivery_adoption":{
+                    "operation_id":format!("sha256:{}", "a".repeat(64)),
+                    "project":"project", "tracker":"github", "item":"issue",
+                    "repository":"owner/repo", "issue_identity":"issue", "issue_number":7,
+                    "pull_request":8, "pull_request_url":"https://example.test/pr/8",
+                    "branch":"feature", "worktree":"/wt/feature",
+                    "source_directory_identity":{"device":1,"inode":2},
+                    "custody_host":"host", "custody_attempt":"attempt",
+                    "custody_operation":"custody", "head":"1111111111111111111111111111111111111111",
+                    "base_repository":"owner/repo", "base_branch":"main",
+                    "base_head":"2222222222222222222222222222222222222222"
+                }
+            })
+        } else {
+            serde_json::json!({
+                "id":"seed-publication", "kind":"publish", "access":"worktree_write",
+                "worktree":"/wt/feature", "depends_on":["seed-hygiene"],
+                "source":{"type":"node","node":"seed-hygiene"}
+            })
+        };
+        nodes.push(seed_publication);
+        nodes.extend([
+            serde_json::json!({
+                "id":"entry-conflict", "kind":"gate", "access":"read_only",
+                "depends_on":["seed-publication"], "on_fail":"recovery-owner",
+                "condition":{"type":"conflict","target":{"node":"seed-publication"}}
+            }),
+            serde_json::json!({
+                "id":"entry-ci", "kind":"gate", "access":"read_only",
+                "depends_on":["entry-conflict"], "on_fail":"recovery-owner",
+                "condition":{"type":"ci","target":{"node":"seed-publication"}}
+            }),
+        ]);
+        let mut entry_dependencies = vec!["seed-publication", "entry-conflict", "entry-ci"];
+        if !adopted_seed {
+            entry_dependencies.push("seed-hygiene");
+        }
+        nodes.push(serde_json::json!({
+            "id":"recovery-owner", "kind":"loop", "access":"read_only",
+            "depends_on":entry_dependencies,
+            "loop":{
+                "max_rounds":2, "until":"accepted",
+                "retry_on":["verified-clean", "fresh-conflict", "fresh-ci", "accepted"],
+                "selected_publication":"published-head", "initial_publication":"seed-publication",
+                "previous_bindings":{
+                    "published-head":"seed-publication", "verified-clean":seed_hygiene
+                },
+                "body":[
+                    {"id":"repair-writer", "access":"worktree_write", "worktree":"/wt/feature",
+                     "prompt":"repair", "route":{"alias":"senior"},
+                     "source":{"type":"node","node":"previous.verified-clean"},
+                     "inputs":[{"node":"previous.published-head","outputs":["branch","commit"]}]},
+                    {"id":"verified-clean", "kind":"hygiene", "access":"worktree_write",
+                     "worktree":"/wt/feature", "depends_on":["repair-writer"],
+                     "source":{"type":"node","node":"repair-writer"}},
+                    {"id":"published-head", "kind":"publish", "access":"worktree_write",
+                     "worktree":"/wt/feature", "depends_on":["verified-clean"],
+                     "source":{"type":"node","node":"verified-clean"}},
+                    {"id":"fresh-conflict", "kind":"gate", "access":"read_only",
+                     "depends_on":["published-head"],
+                     "condition":{"type":"conflict","target":{"node":"published-head"}}},
+                    {"id":"fresh-ci", "kind":"gate", "access":"read_only",
+                     "depends_on":["fresh-conflict"],
+                     "condition":{"type":"ci","target":{"node":"published-head"}}},
+                    {"id":"fresh-review", "access":"read_only", "prompt":"review",
+                     "route":{"alias":"senior"}, "source":{"type":"head","node":"published-head"},
+                     "depends_on":["published-head","fresh-conflict","fresh-ci"]},
+                    {"id":"accepted", "kind":"gate", "access":"read_only",
+                     "depends_on":["fresh-review","fresh-ci"],
+                     "inputs":[{"node":"fresh-review","outputs":["verdict"]}],
+                     "condition":{"type":"verdict","expected":"VERDICT: PASS","threshold":"all"}}
+                ]
+            }
+        }));
+        let mut document: GraphDocument = serde_json::from_value(serde_json::json!({
+            "schema_version":2, "graph_id":"renamed-recovery", "integration_branch":"feature",
+            "nodes":nodes
+        }))
+        .unwrap();
+        document.queue = Some(QueueKnobs::default());
+        assert!(
+            validate_plan(&document).is_ok(),
+            "adopted_seed={adopted_seed}"
+        );
+    }
+}
+
+#[test]
+fn clean_entry_selects_seed_only_after_recovery_is_inactive() {
+    let mut document = fixture("pass");
+    document.nodes.push(node("seed", route("fixture")));
+    document.nodes.push(node("entry", route("fixture")));
+    let expanded = loops::expand(&document, &[], &Default::default()).unwrap();
+    let (mut plan, positions) = validate_flat_plan(&expanded, &Default::default()).unwrap();
+    let owner_index = positions["revise"];
+    let seed_index = positions["seed"];
+    let entry_index = positions["entry"];
+    plan.nodes[owner_index].depends_on = vec!["seed".into(), "entry".into()];
+    let spec = plan.nodes[owner_index].loop_body.as_mut().unwrap();
+    spec.selected_publication = Some("review".into());
+    spec.initial_publication = Some("seed".into());
+    plan.nodes[entry_index].on_fail = Some("revise".into());
+    let mut checkpoint = initial_checkpoint(&expanded, &plan, "digest".into(), None, None, None);
+    checkpoint.nodes[seed_index].state = NodeState::Succeeded;
+    checkpoint.nodes[entry_index].state = NodeState::Succeeded;
+    for progress in &mut checkpoint.nodes {
+        if progress
+            .round
+            .as_ref()
+            .is_some_and(|round| round.loop_id == "revise")
+        {
+            progress.state = NodeState::Skipped;
+        }
+    }
+    assert_eq!(
+        repair::selected_publication_index(&plan.nodes[owner_index], &checkpoint, &plan),
+        Some(seed_index)
+    );
+    checkpoint.nodes[entry_index].state = NodeState::Failed;
+    assert_eq!(
+        repair::selected_publication_index(&plan.nodes[owner_index], &checkpoint, &plan),
+        None
+    );
+    checkpoint.nodes[entry_index].state = NodeState::Succeeded;
+    checkpoint.nodes[seed_index].state = NodeState::Pending;
+    assert_eq!(
+        repair::selected_publication_index(&plan.nodes[owner_index], &checkpoint, &plan),
+        None
+    );
+}
+
+#[test]
+fn loop_body_preserves_outer_node_sources_and_entry_dependencies() {
+    let document: GraphDocument = serde_json::from_value(serde_json::json!({
+        "schema_version": 2,
+        "graph_id": "outer-node-source",
+        "nodes": [
+            {"id":"writer", "access":"read_only", "prompt":"write",
+             "route":{"alias":"fixture"}},
+            {"id":"ready", "kind":"gate", "access":"read_only",
+             "depends_on":["writer"], "condition":{"type":"budget"}},
+            {"id":"cycle", "kind":"loop", "access":"read_only",
+             "depends_on":["ready"], "loop":{"max_rounds":1,"until":"done","body":[
+                {"id":"reader", "access":"read_only", "prompt":"read writer output",
+                 "route":{"alias":"fixture"}, "depends_on":["writer"], "source":{"type":"node","node":"writer"}},
+                {"id":"settled-reader", "access":"read_only", "prompt":"read after writer settles",
+                 "route":{"alias":"fixture"}, "depends_on":["reader"], "after_settled":["writer"]},
+                {"id":"done", "kind":"gate", "access":"read_only",
+                 "depends_on":["settled-reader"], "condition":{"type":"budget"}}
+             ]}}
+        ]
+    }))
+    .unwrap();
+
+    let expanded = loops::expand(&document, &[], &Default::default()).unwrap();
+    let reader = expanded
+        .nodes
+        .iter()
+        .find(|node| node.id == "cycle--r1--reader")
+        .unwrap();
+    assert!(matches!(
+        &reader.source,
+        Some(SourceBinding::Node { node }) if node == "writer"
+    ));
+    assert!(reader.depends_on.contains(&"writer".to_owned()));
+    assert!(reader.depends_on.contains(&"ready".to_owned()));
+    assert!(!reader.depends_on.contains(&"cycle--r1--writer".to_owned()));
+    let settled_reader = expanded
+        .nodes
+        .iter()
+        .find(|node| node.id == "cycle--r1--settled-reader")
+        .unwrap();
+    assert!(settled_reader.after_settled.contains(&"writer".to_owned()));
+    assert!(
+        !settled_reader
+            .after_settled
+            .contains(&"cycle--r1--writer".to_owned())
+    );
+    assert!(validate_flat_plan(&expanded, &Default::default()).is_ok());
 }
 
 // Spec: docs/specs/fabric.md#bounded-graphs-and-route-fallback
@@ -109,6 +458,351 @@ fn settled_loop_dependency_does_not_inherit_entry_inputs() {
 }
 
 #[test]
+fn loop_outcome_edge_validates_target_and_replays_the_selected_branch() {
+    let make_document = |outcome: &str, target: &str| -> GraphDocument {
+        serde_json::from_value(serde_json::json!({
+            "schema_version":2,"graph_id":"loop-outcome-edge","nodes":[
+                {"id":"cycle","kind":"loop","access":"read_only",
+                 "loop":{"until":"finished","max_rounds":1,
+                         "outcome_edge":{"outcome":outcome,"node":target},
+                         "body":[{"id":"finished","kind":"gate","access":"read_only",
+                             "condition":{"type":"budget"}}]}},
+                {"id":"on_exhausted","access":"read_only","prompt":"handle exhaustion",
+                 "route":{"alias":"senior"}}
+            ]
+        }))
+        .unwrap()
+    };
+
+    assert!(
+        loops::expand(
+            &make_document("exhausted", "missing"),
+            &[],
+            &Default::default()
+        )
+        .is_err()
+    );
+    assert!(
+        loops::expand(
+            &make_document("exhausted", "finished"),
+            &[],
+            &Default::default()
+        )
+        .is_err()
+    );
+
+    let document = make_document("exhausted", "on_exhausted");
+    let expanded = loops::expand(&document, &[], &Default::default()).unwrap();
+    assert!(expanded.nodes.iter().any(|node| {
+        node.id == "on_exhausted" && node.depends_on.contains(&"cycle".to_owned())
+    }));
+    let (plan, positions) = validate_flat_plan(&expanded, &Default::default()).unwrap();
+    let mut checkpoint = initial_checkpoint(&expanded, &plan, "digest".into(), None, None, None);
+    let loop_index = positions["cycle"];
+    let target_index = positions["on_exhausted"];
+    checkpoint.nodes[loop_index].state = NodeState::Blocked;
+    checkpoint.nodes[loop_index].outputs = Some(NodeOutputs::default());
+    checkpoint.nodes[loop_index].delivery_park = Some(DeliveryParkProgress {
+        transition_id: "park-loop".into(),
+        operation_id: "park-loop".into(),
+        item: None,
+        attempt_key: None,
+        attempt_ref: None,
+        reason: provenant_records::graph::ParkReason::LoopExhausted,
+        handoff: "bounded loop exhausted".into(),
+        head: None,
+        evidence: Vec::new(),
+        request_id: Some(provenant_core::HumanRequestId::from_bytes([41; 16])),
+    });
+
+    assert_eq!(
+        dependency_state(&plan.nodes[target_index], &plan, &checkpoint, &positions),
+        None,
+        "the exhausted branch becomes runnable after its park receipt"
+    );
+    let replay: GraphCheckpoint =
+        serde_json::from_value(serde_json::to_value(&checkpoint).unwrap()).unwrap();
+    assert_eq!(
+        dependency_state(&plan.nodes[target_index], &plan, &replay, &positions),
+        None,
+        "replay selects the same exhausted branch"
+    );
+
+    checkpoint.nodes[loop_index].state = NodeState::Succeeded;
+    checkpoint.nodes[loop_index].delivery_park = None;
+    assert_eq!(
+        dependency_state(&plan.nodes[target_index], &plan, &checkpoint, &positions),
+        Some(NodeState::Skipped),
+        "a successful loop skips its exhausted-only target"
+    );
+    let replay: GraphCheckpoint =
+        serde_json::from_value(serde_json::to_value(&checkpoint).unwrap()).unwrap();
+    assert_eq!(
+        dependency_state(&plan.nodes[target_index], &plan, &replay, &positions),
+        Some(NodeState::Skipped),
+        "replay preserves the inactive branch"
+    );
+
+    let document = make_document("succeeded", "on_exhausted");
+    let expanded = loops::expand(&document, &[], &Default::default()).unwrap();
+    let (plan, positions) = validate_flat_plan(&expanded, &Default::default()).unwrap();
+    let mut checkpoint = initial_checkpoint(&expanded, &plan, "digest".into(), None, None, None);
+    let loop_index = positions["cycle"];
+    let target_index = positions["on_exhausted"];
+    checkpoint.nodes[loop_index].state = NodeState::Succeeded;
+    checkpoint.nodes[loop_index].outputs = Some(NodeOutputs::default());
+    assert_eq!(
+        dependency_state(&plan.nodes[target_index], &plan, &checkpoint, &positions),
+        None,
+        "the succeeded branch becomes runnable after success"
+    );
+    let replay: GraphCheckpoint =
+        serde_json::from_value(serde_json::to_value(&checkpoint).unwrap()).unwrap();
+    assert_eq!(
+        dependency_state(&plan.nodes[target_index], &plan, &replay, &positions),
+        None,
+        "replay selects the same succeeded branch"
+    );
+}
+
+#[test]
+fn delivery_loop_exhaustion_parks_once_and_replays_the_same_transition() {
+    struct ParkOwner {
+        calls: Vec<(String, String)>,
+        effects: std::collections::BTreeMap<String, provenant_core::HumanRequestId>,
+    }
+    impl AttemptOwner for ParkOwner {
+        type Error = Infallible;
+        fn worktree_layout(&self) -> provenant_config::WorktreeLayoutPort {
+            provenant_config::PortTable::builtin().worktree_layout
+        }
+        fn actor(&self) -> String {
+            "chair".into()
+        }
+        fn observe_or_start(
+            &mut self,
+            _: &AttemptKey,
+            _: NodeInput<'_>,
+            _: &GraphRoute,
+            _: AccessMode,
+            _: Option<&str>,
+            _: Replay<'_>,
+        ) -> Result<AttemptObservation, Infallible> {
+            unreachable!("loop settlement does not launch an attempt")
+        }
+        fn park_delivery(
+            &mut self,
+            request: DeliveryParkRequest<'_>,
+        ) -> Result<Option<provenant_core::HumanRequestId>, Infallible> {
+            assert_eq!(
+                request.reason,
+                provenant_records::graph::ParkReason::LoopExhausted
+            );
+            assert!(request.item.is_none());
+            self.calls
+                .push((request.transition_id.into(), request.operation_id.into()));
+            let request_id = *self
+                .effects
+                .entry(request.operation_id.into())
+                .or_insert_with(|| provenant_core::HumanRequestId::from_bytes([37; 16]));
+            // Simulate a lost reply after the inbox created the request.
+            Ok((self.calls.len() > 1).then_some(request_id))
+        }
+    }
+
+    let mut document: GraphDocument = serde_json::from_value(serde_json::json!({
+        "schema_version": 2, "graph_id": "delivery-loop-park",
+        "nodes": [{"id":"cycle", "kind":"loop", "access":"read_only",
+            "loop":{"until":"ci", "max_rounds":1, "body":[
+                {"id":"writer", "access":"worktree_write", "worktree":"/fixture/writer",
+                    "prompt":"repair",
+                    "write_scope":["src"], "route":{"alias":"junior"}},
+                {"id":"ci", "kind":"gate", "access":"read_only",
+                    "depends_on":["writer"], "condition":{"type":"budget"}}
+            ]}}
+        ]
+    }))
+    .unwrap();
+    document.queue = Some(QueueKnobs::default());
+    let limits = crate::config::GraphLimits::default();
+    let expanded = loops::expand(&document, &[], &limits).unwrap();
+    let (plan, positions) = validate_flat_plan(&expanded, &limits).unwrap();
+    let mut checkpoint = initial_checkpoint(&expanded, &plan, "digest".into(), None, None, None);
+    checkpoint.ask_actor = Some("chair".into());
+    let loop_index = positions["cycle"];
+    let writer_index = positions["cycle--r1--writer"];
+    let attempt_key = AttemptKey {
+        extra: Default::default(),
+        retry_generation: None,
+        previous_attempt_ref: None,
+        graph_id: plan.graph_id.clone(),
+        node_id: "cycle--r1--writer".into(),
+        attempt: 1,
+        route_index: 0,
+    };
+    checkpoint.nodes[loop_index].delivery_loop =
+        Some(provenant_records::graph::DeliveryLoopProgress {
+            name: "cycle".into(),
+            round: 1,
+            last_attempt: attempt_key.clone(),
+        });
+    checkpoint.nodes[writer_index].state = NodeState::Succeeded;
+    checkpoint.nodes[writer_index].advance_note = Some("repair did not satisfy CI".into());
+    let writer_outputs = NodeOutputs {
+        commit: Some("a".repeat(40)),
+        ..Default::default()
+    };
+    checkpoint.nodes[writer_index].outputs = Some(writer_outputs);
+    checkpoint.nodes[writer_index].attempts.push(GraphAttempt {
+        extra: Default::default(),
+        placement_host: None,
+        placement_host_id: None,
+        launched: true,
+        host_refused_before_acceptance: false,
+        review_substitution: false,
+        key: attempt_key,
+        escalation_rung: None,
+        route: serde_json::from_value(serde_json::json!({"alias":"junior"})).unwrap(),
+        state: AttemptState::Terminal,
+        attempt_ref: Some("attempt-1".into()),
+        outcome: Some(GraphAttemptOutcome::Succeeded),
+        cause: None,
+        launch_actor: "chair".into(),
+        input_cap: None,
+        input_cap_source: None,
+        input_manifest: None,
+        usage: None,
+        settled: 1,
+        stop: None,
+    });
+    checkpoint.nodes[positions["cycle--r1--ci"]].state = NodeState::Failed;
+    let spec = plan.nodes[loop_index].loop_body.as_ref().unwrap().clone();
+    let mut owner = ParkOwner {
+        calls: Vec::new(),
+        effects: Default::default(),
+    };
+    let mut journal = MemoryJournal::default();
+
+    loops::settle(
+        &document,
+        loop_index,
+        &spec,
+        &plan,
+        &positions,
+        &mut checkpoint,
+        &mut owner,
+        &mut journal,
+    )
+    .unwrap();
+    let pending = checkpoint.nodes[loop_index].delivery_park.as_ref().unwrap();
+    assert_eq!(
+        pending.reason,
+        provenant_records::graph::ParkReason::LoopExhausted
+    );
+    assert_eq!(pending.attempt_ref.as_deref(), Some("attempt-1"));
+    let expected_head = "a".repeat(40);
+    assert_eq!(pending.head.as_deref(), Some(expected_head.as_str()));
+    assert_eq!(pending.request_id, None);
+    let progress = checkpoint.nodes[loop_index].clone();
+    assert!(
+        loops::validate_progress(
+            &progress,
+            &plan.nodes[loop_index],
+            &plan,
+            &checkpoint,
+            &positions,
+            true,
+        )
+        .is_ok()
+    );
+    assert!(
+        loops::validate_progress(
+            &progress,
+            &plan.nodes[loop_index],
+            &plan,
+            &checkpoint,
+            &positions,
+            false,
+        )
+        .is_err()
+    );
+    let replay: GraphCheckpoint =
+        serde_json::from_value(serde_json::to_value(&checkpoint).unwrap()).unwrap();
+    let progress = replay.nodes[loop_index].clone();
+    assert!(
+        loops::validate_progress(
+            &progress,
+            &plan.nodes[loop_index],
+            &plan,
+            &replay,
+            &positions,
+            true,
+        )
+        .is_ok()
+    );
+
+    // A crash after filing but before the receipt replays the same operation.
+    loops::settle(
+        &document,
+        loop_index,
+        &spec,
+        &plan,
+        &positions,
+        &mut checkpoint,
+        &mut owner,
+        &mut journal,
+    )
+    .unwrap();
+    let completed = checkpoint.nodes[loop_index].delivery_park.as_ref().unwrap();
+    assert_eq!(
+        completed.request_id,
+        Some(provenant_core::HumanRequestId::from_bytes([37; 16]))
+    );
+    assert_eq!(owner.calls.len(), 2);
+    assert_eq!(owner.calls[0], owner.calls[1]);
+    assert_eq!(owner.effects.len(), 1);
+    let progress = checkpoint.nodes[loop_index].clone();
+    assert!(
+        loops::validate_progress(
+            &progress,
+            &plan.nodes[loop_index],
+            &plan,
+            &checkpoint,
+            &positions,
+            true,
+        )
+        .is_ok()
+    );
+    let replay: GraphCheckpoint =
+        serde_json::from_value(serde_json::to_value(&checkpoint).unwrap()).unwrap();
+    let progress = replay.nodes[loop_index].clone();
+    assert!(
+        loops::validate_progress(
+            &progress,
+            &plan.nodes[loop_index],
+            &plan,
+            &replay,
+            &positions,
+            true,
+        )
+        .is_ok()
+    );
+
+    loops::settle(
+        &document,
+        loop_index,
+        &spec,
+        &plan,
+        &positions,
+        &mut checkpoint,
+        &mut owner,
+        &mut journal,
+    )
+    .unwrap();
+    assert_eq!(owner.calls.len(), 2);
+}
+
+#[test]
 fn loop_composite_review_pins_each_repaired_commit() {
     let document: GraphDocument = serde_json::from_value(serde_json::json!({
         "schema_version":1,"graph_id":"repair-composite","nodes":[{
@@ -130,22 +824,23 @@ fn loop_composite_review_pins_each_repaired_commit() {
     let commit2 = "2".repeat(40);
     let writer = |commit: &str| AttemptObservation::Terminal {
         attempt_ref: None,
-        outcome: AttemptOutcome::Succeeded,
+        outcome: GraphAttemptOutcome::Succeeded,
         launched: true,
         result: None,
         result_warning: None,
         result_path: None,
         branch: None,
         commit: Some(commit.to_owned()),
-        settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
+        settlement_class: Some(provenant_records::run::SettlementClass::Completed),
         stop: None,
+    cause: None,
     };
     let mut owner = FakeOwner {
         observations: [
             writer(&commit1),
-            terminal_with_result(AttemptOutcome::Succeeded, "VERDICT: FAIL"),
+            terminal_with_result(GraphAttemptOutcome::Succeeded, "VERDICT: FAIL"),
             writer(&commit2),
-            terminal_with_result(AttemptOutcome::Succeeded, "VERDICT: PASS"),
+            terminal_with_result(GraphAttemptOutcome::Succeeded, "VERDICT: PASS"),
         ]
         .into(),
         ..Default::default()
@@ -314,8 +1009,18 @@ fn loop_admission_counts_every_round_before_any_launch() {
         ..Default::default()
     };
     // Spec: docs/specs/fabric.md#graph-admission-and-refusal-causes
-    let error = advance_with_budget(&document, &mut owner, &mut journal, &limits, &Default::default()).unwrap_err();
-    assert!(matches!(error, GraphError::Candidate(CandidateError::Structural(_))));
+    let error = advance_with_budget(
+        &document,
+        &mut owner,
+        &mut journal,
+        &limits,
+        &Default::default(),
+    )
+    .unwrap_err();
+    assert!(matches!(
+        error,
+        GraphError::Candidate(CandidateError::Structural(_))
+    ));
     assert!(journal.0.is_none());
     assert!(owner.calls.is_empty());
 }
@@ -366,7 +1071,7 @@ fn loop_body_failure_blocks_later_rounds_and_dependants() {
     child.depends_on = vec!["revise".into()];
     document.nodes.push(child);
     let mut owner = FakeOwner {
-        observations: [terminal(AttemptOutcome::TaskFailed)].into(),
+        observations: [terminal(GraphAttemptOutcome::TaskFailed)].into(),
         ..Default::default()
     };
     let mut journal = MemoryJournal::default();
@@ -505,7 +1210,7 @@ fn loop_replays_every_checkpoint_boundary_including_extensions() {
             _: Replay<'_>,
         ) -> Result<AttemptObservation, Infallible> {
             Ok(terminal_with_result(
-                AttemptOutcome::Succeeded,
+                GraphAttemptOutcome::Succeeded,
                 if key.node_id.contains("--r1--") {
                     "VERDICT: FAIL"
                 } else {
@@ -643,7 +1348,7 @@ fn loop_inbox_extension_keeps_original_actor_and_applies_once() {
     assert_eq!(paused.status, GraphStatus::Paused);
     owner.inner.actor = "guardian".into();
     owner.inner.observations.push_back(terminal_with_result(
-        AttemptOutcome::Succeeded,
+        GraphAttemptOutcome::Succeeded,
         "VERDICT: PASS",
     ));
     owner.decision = Some(LoopDecision::Extend { rounds: 1 });
@@ -800,8 +1505,8 @@ fn loop_invalid_inbox_answers_pause_and_keep_observing_other_attempts() {
                 attempt_ref: Some("review-attempt".into()),
             });
         owner.inner.observations.extend([
-            terminal(AttemptOutcome::Succeeded),
-            terminal(AttemptOutcome::Succeeded),
+            terminal(GraphAttemptOutcome::Succeeded),
+            terminal(GraphAttemptOutcome::Succeeded),
         ]);
         owner
             .inner
@@ -820,8 +1525,8 @@ fn loop_invalid_inbox_answers_pause_and_keep_observing_other_attempts() {
         )
         .unwrap();
         owner.inner.observations.extend([
-            terminal_with_result(AttemptOutcome::Succeeded, "VERDICT: FAIL"),
-            terminal(AttemptOutcome::Succeeded),
+            terminal_with_result(GraphAttemptOutcome::Succeeded, "VERDICT: FAIL"),
+            terminal(GraphAttemptOutcome::Succeeded),
         ]);
         let paused = advance_with_budget(
             &document,
@@ -909,7 +1614,7 @@ fn loop_delivery_retry_reopens_failed_wrapper_and_dependants() {
     let mut after = node("after", route("fixture"));
     after.depends_on = vec!["revise".into()];
     document.nodes.push(after);
-    let mut observation = terminal(AttemptOutcome::OtherFailure);
+    let mut observation = terminal(GraphAttemptOutcome::OtherFailure);
     if let AttemptObservation::Terminal { attempt_ref, .. } = &mut observation {
         *attempt_ref = Some(format!("host/{attempt}"));
     }
@@ -1072,16 +1777,48 @@ fn loop_default_host_allows_one_to_two_round_extension() {
 #[test]
 fn loop_extension_refusals_keep_the_rule_and_identifier() {
     let mut document = fixture("extend");
-    document.nodes[0].loop_body.as_mut().unwrap().max_extension_rounds = 1;
+    document.nodes[0]
+        .loop_body
+        .as_mut()
+        .unwrap()
+        .max_extension_rounds = 1;
     let limits = crate::config::GraphLimits::default();
     let mut journal = MemoryJournal::default();
-    advance_with_budget(&document, &mut reviews(&["VERDICT: FAIL"]), &mut journal, &limits, &Default::default()).unwrap();
+    advance_with_budget(
+        &document,
+        &mut reviews(&["VERDICT: FAIL"]),
+        &mut journal,
+        &limits,
+        &Default::default(),
+    )
+    .unwrap();
     let mut checkpoint = journal.0.clone().unwrap();
     checkpoint.extensions.push("loop.revise.rounds=2".into());
-    for (value, rule) in [("loop.revise.rounds=02", refusal::ExtensionRule::NonIncreasing), ("loop.revise.rounds=4", refusal::ExtensionRule::MaxExtensionRounds)] {
+    for (value, rule) in [
+        (
+            "loop.revise.rounds=02",
+            refusal::ExtensionRule::NonIncreasing,
+        ),
+        (
+            "loop.revise.rounds=4",
+            refusal::ExtensionRule::MaxExtensionRounds,
+        ),
+    ] {
         let before = checkpoint.clone();
-        let error = match admit_candidate(&document, Some(&checkpoint), &[value.into()], &limits, &Default::default(), None) { Ok(_) => panic!("expected refusal"), Err(error) => error };
-        let CandidateError::Extension(cause) = error else { panic!("expected extension refusal") };
+        let error = match admit_candidate(
+            &document,
+            Some(&checkpoint),
+            &[value.into()],
+            &limits,
+            &Default::default(),
+            None,
+        ) {
+            Ok(_) => panic!("expected refusal"),
+            Err(error) => error,
+        };
+        let CandidateError::Extension(cause) = error else {
+            panic!("expected extension refusal")
+        };
         assert_eq!(cause.rule, rule);
         assert_eq!(cause.loop_id.as_deref(), Some("revise"));
         assert!(!cause.next_action().is_empty());
@@ -1104,10 +1841,18 @@ fn loop_host_ceiling_rejects_third_round_before_saving_and_can_accept() {
     )
     .unwrap();
     let paused = resume_with_budget(
-        &document, &mut reviews(&[]), &mut journal, &limits,
-        &Default::default(), &["loop.revise.rounds=3".into()],
-    ).unwrap();
-    assert_eq!(paused.checkpoint.pause_cause(), Some(PauseCause::StructuralLimit));
+        &document,
+        &mut reviews(&[]),
+        &mut journal,
+        &limits,
+        &Default::default(),
+        &["loop.revise.rounds=3".into()],
+    )
+    .unwrap();
+    assert_eq!(
+        paused.checkpoint.pause_cause(),
+        Some(PauseCause::StructuralLimit)
+    );
     assert_eq!(journal.0.as_ref(), Some(&paused.checkpoint));
     assert!(paused.checkpoint.extensions.is_empty());
     let accepted = extension(
@@ -1244,8 +1989,8 @@ fn loop_inbox_failure_pauses_without_stopping_later_attempt_observation() {
         AttemptObservation::Pending {
             attempt_ref: Some("review".into()),
         },
-        terminal(AttemptOutcome::Succeeded),
-        terminal(AttemptOutcome::Succeeded),
+        terminal(GraphAttemptOutcome::Succeeded),
+        terminal(GraphAttemptOutcome::Succeeded),
         AttemptObservation::Pending {
             attempt_ref: Some("late".into()),
         },
@@ -1261,8 +2006,8 @@ fn loop_inbox_failure_pauses_without_stopping_later_attempt_observation() {
     )
     .unwrap();
     owner.inner.observations.extend([
-        terminal_with_result(AttemptOutcome::Succeeded, "VERDICT: FAIL"),
-        terminal(AttemptOutcome::Succeeded),
+        terminal_with_result(GraphAttemptOutcome::Succeeded, "VERDICT: FAIL"),
+        terminal(GraphAttemptOutcome::Succeeded),
     ]);
     let paused = advance_with_budget(
         &document,
@@ -1364,7 +2109,7 @@ fn loop_simultaneous_exhaustion_keeps_both_reasons_and_resolves_individually() {
 }
 
 #[test]
-fn loop_rejects_nested_routing_worktree_prefix_and_identifier_ambiguities() {
+fn loop_rejects_nested_loops_invalid_recovery_targets_and_identifier_ambiguities() {
     for case in 0..5 {
         let mut document = fixture("extend");
         let nested = document.nodes[0].clone();
@@ -1384,9 +2129,8 @@ fn loop_rejects_nested_routing_worktree_prefix_and_identifier_ambiguities() {
             _ => document.nodes[0].id = "x".repeat(198),
         }
         let expected = match case {
-            0 | 1 => {
-                "loop body cannot nest loops or route on_fail, and may only deliver by integrate:"
-            }
+            0 => "loop body cannot nest loops and may only deliver by integrate:",
+            1 => "node approved: on_fail target must depend on its gate",
             2 => "loop writers must share one worktree",
             3 => "previous. is reserved for prior round inputs",
             _ => "expanded loop node id exceeds 200 bytes",
@@ -1397,6 +2141,411 @@ fn loop_rejects_nested_routing_worktree_prefix_and_identifier_ambiguities() {
             "case {case}"
         );
     }
+}
+
+#[test]
+fn loop_conflict_recovery_is_bounded_and_replays_the_namespaced_target() {
+    let mut document: GraphDocument = serde_json::from_value(serde_json::json!({
+        "schema_version":2,"graph_id":"loop-conflict-recovery",
+        "integration_branch":"delivery/item","nodes":[
+        {"id":"write","access":"worktree_write","worktree":"/fixture/writer",
+         "prompt":"write the change","write_scope":["src"],"route":{"alias":"senior"}},
+        {"id":"hygiene","kind":"hygiene","access":"worktree_write",
+         "worktree":"/fixture/writer","depends_on":["write"],
+         "source":{"type":"node","node":"write"}},
+        {"id":"publish","kind":"publish","access":"worktree_write",
+         "worktree":"/fixture/writer","depends_on":["hygiene"],
+         "source":{"type":"node","node":"hygiene"}},
+        {"id":"initial_conflict","kind":"gate","access":"read_only",
+         "depends_on":["publish"],"on_fail":"delivery",
+         "condition":{"type":"conflict","target":{"node":"publish"}}},
+        {"id":"delivery","kind":"loop","access":"read_only",
+         "depends_on":["initial_conflict","publish"],
+            "loop":{"max_rounds":2,"until":"done",
+             "previous_bindings":{"rebase_publish":"publish"},"body":[
+                {"id":"conflict","kind":"gate","access":"read_only","on_fail":"rebase",
+                 "condition":{"type":"conflict","target":{"node":"previous.rebase_publish"}}},
+                {"id":"rebase","access":"worktree_write","worktree":"/fixture/writer",
+                 "prompt":"merge the base into the retained worktree","write_scope":["src"],
+                 "route":{"alias":"senior"},"depends_on":["conflict"],
+                 "source":{"type":"head","node":"previous.rebase_publish"}},
+                {"id":"rebase_hygiene","kind":"hygiene","access":"worktree_write",
+                 "worktree":"/fixture/writer","depends_on":["rebase"],
+                 "source":{"type":"node","node":"rebase"}},
+                {"id":"rebase_publish","kind":"publish","access":"worktree_write",
+                 "worktree":"/fixture/writer","depends_on":["rebase_hygiene"],
+                 "source":{"type":"node","node":"rebase_hygiene"}},
+                {"id":"recheck","kind":"gate","access":"read_only",
+                 "depends_on":["rebase_publish"],
+                 "condition":{"type":"conflict","target":{"node":"rebase_publish"}}},
+                {"id":"fresh_ci","kind":"gate","access":"read_only",
+                 "depends_on":["recheck"],
+                 "condition":{"type":"ci","target":{"node":"rebase_publish"}}},
+                {"id":"done","kind":"gate","access":"read_only",
+                 "depends_on":["conflict"],
+                 "after_settled":["rebase","rebase_hygiene","rebase_publish","recheck","fresh_ci"],
+                 "condition":{"type":"ci","target":{"node":"previous.rebase_publish"}}}
+            ]}
+        }]
+    }))
+    .unwrap();
+    document.queue = Some(QueueKnobs::default());
+
+    let limits = crate::config::GraphLimits::default();
+    assert!(document.admit(&limits).is_ok());
+    let expanded = loops::expand(&document, &[], &limits).unwrap();
+    let (plan, positions) = validate_flat_plan(&expanded, &limits).unwrap();
+    for round in [1, 2] {
+        let conflict = &plan.nodes[positions[&format!("delivery--r{round}--conflict")]];
+        let rebase_id = format!("delivery--r{round}--rebase");
+        assert_eq!(conflict.on_fail.as_deref(), Some(rebase_id.as_str()));
+        let previous_publish = if round == 1 {
+            "publish".to_owned()
+        } else {
+            format!("delivery--r{}--rebase_publish", round - 1)
+        };
+        assert!(matches!(
+            conflict.condition.as_ref(),
+            Some(GateCondition::Conflict {
+                target: CiTarget::Node { node, .. },
+                ..
+            }) if node == &previous_publish
+        ));
+        assert!(matches!(
+            plan.nodes[positions[&rebase_id]].source.as_ref(),
+            Some(SourceBinding::Head { node }) if node == &previous_publish
+        ));
+        assert!(matches!(
+            plan.nodes[positions[&format!("delivery--r{round}--done")]]
+                .condition
+                .as_ref(),
+            Some(GateCondition::Ci {
+                target: CiTarget::Node { node, .. },
+                ..
+            }) if node == &previous_publish
+        ));
+        let fresh_conflict = &plan.nodes[positions[&format!("delivery--r{round}--recheck")]];
+        assert!(fresh_conflict.on_fail.is_none());
+        assert!(
+            fresh_conflict
+                .round
+                .as_ref()
+                .is_some_and(|round| !round.until)
+        );
+        let fresh_ci = &plan.nodes[positions[&format!("delivery--r{round}--fresh_ci")]];
+        assert!(fresh_ci.depends_on.contains(&fresh_conflict.id));
+    }
+
+    let gate_index = positions["delivery--r1--conflict"];
+    let rebase_index = positions["delivery--r1--rebase"];
+    let mut checkpoint = initial_checkpoint(&expanded, &plan, "digest".into(), None, None, None);
+    checkpoint.nodes[positions["publish"]].state = NodeState::Succeeded;
+    checkpoint.nodes[gate_index].state = NodeState::Failed;
+    checkpoint.nodes[gate_index].outputs = Some(NodeOutputs::default());
+    checkpoint.nodes[gate_index].gate = Some(GateResult {
+        extra: Default::default(),
+        passed: false,
+        reason: Some("CONFLICTING".into()),
+        on_fail: plan.nodes[gate_index].on_fail.clone(),
+    });
+    assert_eq!(
+        dependency_state(&plan.nodes[rebase_index], &plan, &checkpoint, &positions),
+        None,
+        "the failed conflict gate activates the same-round merge writer"
+    );
+    let replay: GraphCheckpoint =
+        serde_json::from_value(serde_json::to_value(&checkpoint).unwrap()).unwrap();
+    assert_eq!(
+        dependency_state(&plan.nodes[rebase_index], &plan, &replay, &positions),
+        None,
+        "replay keeps the rebase edge active"
+    );
+
+    checkpoint.nodes[gate_index].state = NodeState::Succeeded;
+    checkpoint.nodes[gate_index].outputs = Some(NodeOutputs::default());
+    checkpoint.nodes[gate_index].gate.as_mut().unwrap().passed = true;
+    checkpoint.nodes[gate_index].gate.as_mut().unwrap().reason = None;
+    assert_eq!(
+        dependency_state(&plan.nodes[rebase_index], &plan, &checkpoint, &positions),
+        Some(NodeState::Skipped),
+        "the merge writer is inactive when the conflict gate is clear"
+    );
+
+    let next_round_conflict = positions["delivery--r2--conflict"];
+    let until_index = positions["delivery--r1--done"];
+    checkpoint.nodes[gate_index].state = NodeState::Failed;
+    checkpoint.nodes[until_index].state = NodeState::Skipped;
+    checkpoint.nodes[positions["delivery--r1--rebase_publish"]].state = NodeState::Succeeded;
+    let fresh_conflict_index = positions["delivery--r1--recheck"];
+    let fresh_ci_index = positions["delivery--r1--fresh_ci"];
+    assert!(
+        !loops::retryable_round_failure_is_terminal(
+            gate_index,
+            "delivery",
+            &plan,
+            &checkpoint,
+            &positions,
+        ),
+        "a failed initial conflict remains nonterminal while fresh CI is pending"
+    );
+    checkpoint.ask_actor = Some("chair".into());
+    let loop_index = positions["delivery"];
+    let mut premature_failure = checkpoint.nodes[loop_index].clone();
+    premature_failure.state = NodeState::Failed;
+    premature_failure.outputs = Some(repair::terminal_outputs(
+        &plan.nodes[loop_index],
+        &checkpoint,
+        &positions,
+        &plan,
+        false,
+    ));
+    assert!(
+        loops::validate_progress(
+            &premature_failure,
+            &plan.nodes[loop_index],
+            &plan,
+            &checkpoint,
+            &positions,
+            true,
+        )
+        .is_err(),
+        "checkpoint validation rejects a terminal loop while conflict recovery is pending"
+    );
+    let mut failed_writer = checkpoint.clone();
+    failed_writer.nodes[rebase_index].state = NodeState::Failed;
+    assert!(
+        loops::retryable_round_failure_is_terminal(
+            rebase_index,
+            "delivery",
+            &plan,
+            &failed_writer,
+            &positions,
+        ),
+        "a failed merge operation is terminal, not a conflict retry"
+    );
+    assert_eq!(
+        dependency_state(
+            &plan.nodes[next_round_conflict],
+            &plan,
+            &checkpoint,
+            &positions,
+        ),
+        Some(NodeState::Pending),
+        "a skipped until waits while the same-round conflict recovery is unresolved"
+    );
+
+    checkpoint.nodes[fresh_conflict_index].state = NodeState::Failed;
+    checkpoint.nodes[fresh_ci_index].state = NodeState::Blocked;
+    let replay: GraphCheckpoint =
+        serde_json::from_value(serde_json::to_value(&checkpoint).unwrap()).unwrap();
+    assert_eq!(
+        dependency_state(&plan.nodes[next_round_conflict], &plan, &replay, &positions),
+        None,
+        "replay activates the next round after its fresh conflict blocks CI"
+    );
+
+    checkpoint.nodes[fresh_conflict_index].state = NodeState::Succeeded;
+    checkpoint.nodes[fresh_ci_index].state = NodeState::Succeeded;
+    assert_eq!(
+        loops::conflict_recovery_round_state(until_index, &plan, &checkpoint, &positions),
+        Some(loops::ConflictRecoveryRoundState::Succeeded),
+        "the fresh CI gate is a successful alternative to the skipped until gate"
+    );
+
+    let final_conflict_index = positions["delivery--r2--recheck"];
+    let final_ci_index = positions["delivery--r2--fresh_ci"];
+    checkpoint.nodes[positions["delivery--r2--conflict"]].state = NodeState::Failed;
+    checkpoint.nodes[final_conflict_index].state = NodeState::Failed;
+    checkpoint.nodes[final_ci_index].state = NodeState::Blocked;
+    assert!(
+        loops::retryable_round_failure_is_terminal(
+            final_conflict_index,
+            "delivery",
+            &plan,
+            &checkpoint,
+            &positions,
+        ),
+        "a failed fresh conflict with no remaining round is terminal"
+    );
+
+    let mut missing_fresh_ci = document.clone();
+    let body = &mut missing_fresh_ci
+        .nodes
+        .iter_mut()
+        .find(|node| node.id == "delivery")
+        .unwrap()
+        .loop_body
+        .as_mut()
+        .unwrap()
+        .body;
+    body.retain(|node| node.id != "fresh_ci");
+    body.iter_mut()
+        .find(|node| node.id == "done")
+        .unwrap()
+        .after_settled
+        .retain(|node| node != "fresh_ci");
+    assert!(
+        missing_fresh_ci.admit(&limits).is_err(),
+        "a retryable loop conflict cannot omit CI on the fresh publication"
+    );
+    let mut missing_initial_binding = document.clone();
+    missing_initial_binding
+        .nodes
+        .iter_mut()
+        .find(|node| node.id == "delivery")
+        .unwrap()
+        .loop_body
+        .as_mut()
+        .unwrap()
+        .previous_bindings
+        .clear();
+    assert!(
+        missing_initial_binding.admit(&limits).is_err(),
+        "a prior-round publication needs an explicit initial binding"
+    );
+    let mut stale_retry_head = document.clone();
+    let stale_body = &mut stale_retry_head
+        .nodes
+        .iter_mut()
+        .find(|node| node.id == "delivery")
+        .unwrap()
+        .loop_body
+        .as_mut()
+        .unwrap()
+        .body;
+    for node in stale_body {
+        if let Some(SourceBinding::Head { node: source }) = node.source.as_mut()
+            && source == "previous.rebase_publish"
+        {
+            *source = "publish".into();
+        }
+        if let Some(
+            GateCondition::Ci {
+                target: CiTarget::Node { node: target, .. },
+                ..
+            }
+            | GateCondition::Conflict {
+                target: CiTarget::Node { node: target, .. },
+                ..
+            },
+        ) = node.condition.as_mut()
+            && target == "previous.rebase_publish"
+        {
+            *target = "publish".into();
+        }
+    }
+    stale_retry_head
+        .nodes
+        .iter_mut()
+        .find(|node| node.id == "delivery")
+        .unwrap()
+        .loop_body
+        .as_mut()
+        .unwrap()
+        .previous_bindings
+        .clear();
+    assert!(
+        stale_retry_head.admit(&limits).is_err(),
+        "a later recovery round cannot reuse the outer stale publication"
+    );
+
+    let mut cyclic = document;
+    cyclic
+        .nodes
+        .iter_mut()
+        .find(|node| node.id == "delivery")
+        .unwrap()
+        .loop_body
+        .as_mut()
+        .unwrap()
+        .body
+        .iter_mut()
+        .find(|node| node.id == "rebase")
+        .unwrap()
+        .depends_on
+        .push("rebase".into());
+    assert!(
+        validate_plan(&cyclic).is_err(),
+        "an in-loop dependency cycle stays rejected"
+    );
+}
+
+#[test]
+fn composite_expansion_namespaces_explicit_loop_initial_bindings() {
+    let document: GraphDocument = serde_json::from_value(serde_json::json!({
+        "schema_version":2,"graph_id":"nested-loop-binding","nodes":[
+            {"id":"flow","kind":"composite","access":"read_only",
+             "composite":{"nodes":[
+                {"id":"writer","access":"worktree_write","worktree":"/fixture/writer",
+                 "prompt":"write the first change","write_scope":["src"],
+                 "route":{"alias":"senior"}},
+                {"id":"retry","kind":"loop","access":"read_only","depends_on":["writer"],
+                 "loop":{"max_rounds":2,"until":"done",
+                  "previous_bindings":{"writer":"writer"},"body":[
+                    {"id":"writer","access":"worktree_write","worktree":"/fixture/writer",
+                     "prompt":"continue from the prior head","write_scope":["src"],
+                     "route":{"alias":"senior"},
+                     "source":{"type":"node","node":"previous.writer"}},
+                    {"id":"done","kind":"gate","access":"read_only",
+                     "depends_on":["writer"],"condition":{"type":"budget"}}
+                  ]}
+                }
+             ],"exports":[{"node":"writer","outputs":["result"]}]}}
+        ]
+    }))
+    .unwrap();
+    let mut with_seed = document.clone();
+    with_seed.nodes[0].composite.as_mut().unwrap().nodes[1]
+        .loop_body
+        .as_mut()
+        .unwrap()
+        .initial_publication = Some("writer".into());
+    let scoped = composites::expand(&with_seed, &crate::config::GraphLimits::default()).unwrap();
+    let scoped_loop = scoped
+        .nodes
+        .iter()
+        .find(|node| node.id == "flow--retry")
+        .unwrap();
+    assert_eq!(
+        scoped_loop
+            .loop_body
+            .as_ref()
+            .unwrap()
+            .initial_publication
+            .as_deref(),
+        Some("flow--writer")
+    );
+
+    let expanded = loops::expand(&document, &[], &crate::config::GraphLimits::default()).unwrap();
+    let loop_node = expanded
+        .nodes
+        .iter()
+        .find(|node| node.id == "flow--retry")
+        .unwrap();
+    assert_eq!(
+        loop_node.loop_body.as_ref().unwrap().previous_bindings["writer"],
+        "flow--writer"
+    );
+    assert!(matches!(
+        expanded
+            .nodes
+            .iter()
+            .find(|node| node.id == "flow--retry--r1--writer")
+            .unwrap()
+            .source
+            .as_ref(),
+        Some(SourceBinding::Node { node }) if node == "flow--writer"
+    ));
+    assert!(matches!(
+        expanded
+            .nodes
+            .iter()
+            .find(|node| node.id == "flow--retry--r2--writer")
+            .unwrap()
+            .source
+            .as_ref(),
+        Some(SourceBinding::Node { node }) if node == "flow--retry--r1--writer"
+    ));
 }
 
 fn integrating_repair(delivery: Option<&str>) -> GraphDocument {
@@ -1430,15 +2579,16 @@ fn integrating_repair(delivery: Option<&str>) -> GraphDocument {
 fn commit_terminal(commit: &str) -> AttemptObservation {
     AttemptObservation::Terminal {
         attempt_ref: None,
-        outcome: AttemptOutcome::Succeeded,
+        outcome: GraphAttemptOutcome::Succeeded,
         launched: true,
         result: None,
         result_warning: None,
         result_path: None,
         branch: None,
         commit: Some(commit.to_owned()),
-        settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
+        settlement_class: Some(provenant_records::run::SettlementClass::Completed),
         stop: None,
+    cause: None,
     }
 }
 
@@ -1469,7 +2619,7 @@ fn loop_body_delivers_only_by_integrate() {
     for refused in ["push", "pr"] {
         assert_eq!(
             validate_plan(&integrating_repair(Some(refused))).unwrap_err(),
-            "loop body cannot nest loops or route on_fail, and may only deliver by integrate:",
+            "loop body cannot nest loops and may only deliver by integrate:",
             "{refused}"
         );
     }
@@ -1501,9 +2651,9 @@ fn loop_rounds_integrate_from_the_head_the_previous_round_delivered() {
         observations: [
             commit_terminal(&c0),
             commit_terminal(&c1),
-            terminal_with_result(AttemptOutcome::Succeeded, "VERDICT: FAIL"),
+            terminal_with_result(GraphAttemptOutcome::Succeeded, "VERDICT: FAIL"),
             commit_terminal(&c2),
-            terminal_with_result(AttemptOutcome::Succeeded, "VERDICT: PASS"),
+            terminal_with_result(GraphAttemptOutcome::Succeeded, "VERDICT: PASS"),
         ]
         .into(),
         // Each round starts when the target is at the previous delivery.
@@ -1539,7 +2689,7 @@ fn loop_stops_when_the_target_moved_after_the_previous_delivery() {
         observations: [
             commit_terminal(&c0),
             commit_terminal(&c1),
-            terminal_with_result(AttemptOutcome::Succeeded, "VERDICT: FAIL"),
+            terminal_with_result(GraphAttemptOutcome::Succeeded, "VERDICT: FAIL"),
         ]
         .into(),
         // Someone else advanced the target after round one delivered.
@@ -1556,7 +2706,7 @@ fn loop_stops_when_the_target_moved_after_the_previous_delivery() {
         .unwrap();
     assert_eq!(second.state, NodeState::Failed);
     assert_eq!(
-        second.advance_error_code.as_deref(),
+        second.advance_code.as_deref(),
         Some("integration_head_moved")
     );
     assert!(second.attempts.is_empty());
@@ -1632,7 +2782,7 @@ fn loop_cancel_and_manual_decisions_close_unanswered_asks() {
         } else {
             let extension = if action == "extend" {
                 owner.inner.observations.push_back(terminal_with_result(
-                    AttemptOutcome::Succeeded,
+                    GraphAttemptOutcome::Succeeded,
                     "VERDICT: PASS",
                 ));
                 "loop.revise.rounds=2".into()
@@ -2175,8 +3325,15 @@ fn confirmed_should_fix_on_the_default_path_runs_a_repair_writer() {
     let mut journal = MemoryJournal::default();
     let run = advance(&document, &mut owner, &mut journal).unwrap();
     assert!(run.checkpoint.successful());
-    let nodes: Vec<_> = owner.calls.iter().map(|call| call.0.node_id.as_str()).collect();
-    assert_eq!(nodes, vec!["initial", "repair--r1--fix", "repair--r1--check"]);
+    let nodes: Vec<_> = owner
+        .calls
+        .iter()
+        .map(|call| call.0.node_id.as_str())
+        .collect();
+    assert_eq!(
+        nodes,
+        vec!["initial", "repair--r1--fix", "repair--r1--check"]
+    );
     assert_eq!(
         advance(&document, &mut FakeOwner::default(), &mut journal)
             .unwrap()
@@ -2270,6 +3427,41 @@ fn checked_shared_flaw_at_first_round_routes_to_design() {
     let document = review_repair_document();
     let finding = repair_finding(false).replace("\"shared_flaw\":false", "\"shared_flaw\":true");
     let mut owner = repair_reviews(&[&finding, "structural alternative"]);
+    let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
+    assert!(run.checkpoint.successful());
+    assert_eq!(owner.calls.len(), 2);
+    assert_eq!(owner.calls.last().unwrap().0.node_id, "design");
+    assert_eq!(
+        run.checkpoint
+            .nodes
+            .iter()
+            .find(|node| node.id == "repair")
+            .unwrap()
+            .gate
+            .as_ref()
+            .unwrap()
+            .reason
+            .as_deref(),
+        Some("checked findings share a design flaw")
+    );
+
+    // The class is the named invariant: two distinct findings that name the
+    // same invariant are one shared flaw even without the boolean.
+    let shared = |id: &str, file: &str| {
+        serde_json::json!({
+            "id":id,"lens":"correctness","severity":"high","file":file,"line":1,
+            "class":"input boundary","summary":"constraint","status":"open",
+            "evidence":"counterexample","proposed_fix":"repair","design_defect":false,
+            "trigger":{"sequence":"invoke the default operation","reach":"default_path","observed":true},
+            "triage":{"decision":"confirmed","reason":"counterexample reproduced","worth_fixing":true,
+                "root_cause":"constraint","blocking_class":"default_path_defect","shared_flaw":false}
+        })
+    };
+    let report = format!(
+        "```findings\n{}\n```\nVERDICT: FAIL",
+        serde_json::json!({"schema_version":1,"findings":[shared("F1","a.rs"), shared("F2","b.rs")]})
+    );
+    let mut owner = repair_reviews(&[&report, "structural alternative"]);
     let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
     assert!(run.checkpoint.successful());
     assert_eq!(owner.calls.len(), 2);
@@ -2655,7 +3847,11 @@ fn failed_replanned_panel_repairs_its_findings_within_cycle_limit() {
         );
         let new_finding = initial
             .replace("F1", "F2")
-            .replace("correctness", "security");
+            .replace("correctness", "security")
+            .replace(
+                "\"summary\":\"constraint\"",
+                "\"class\":\"security invariant\",\"summary\":\"constraint\"",
+            );
         let checked_new_finding = new_finding.replace(
             "\"status\":\"open\"",
             "\"status\":\"open\",\"disposition\":\"accepted\",\"reason\":\"Reproduced on the repaired head\"",
@@ -2669,6 +3865,9 @@ fn failed_replanned_panel_repairs_its_findings_within_cycle_limit() {
                 pass,
                 &new_finding,
                 &checked_new_finding,
+                // A split between the correctness and security lenses now
+                // gets one read-only adjudication before the design fallback.
+                &checked_new_finding,
                 "principal options",
             ])
         } else {
@@ -2679,6 +3878,8 @@ fn failed_replanned_panel_repairs_its_findings_within_cycle_limit() {
                 pass,
                 &new_finding,
                 &checked_new_finding,
+                // The adjudicator upholds the finding, so round two repairs it.
+                &checked_new_finding,
                 "fix two",
                 pass,
                 pass,
@@ -2687,7 +3888,7 @@ fn failed_replanned_panel_repairs_its_findings_within_cycle_limit() {
             ])
         };
         owner.repair_panel = Some(vec!["correctness".into(), "security".into()]);
-        for (index, oid) in [(1, 'a'), (6, 'b')] {
+        for (index, oid) in [(1, 'a'), (7, 'b')] {
             if let Some(AttemptObservation::Terminal { commit, .. }) =
                 owner.observations.get_mut(index)
             {
@@ -2705,6 +3906,27 @@ fn failed_replanned_panel_repairs_its_findings_within_cycle_limit() {
             .find(|node| node.id == "repair--r1--accepted")
             .unwrap();
         assert_eq!(first_gate.state, NodeState::Failed);
+        let adjudicators: Vec<_> = run
+            .checkpoint
+            .nodes
+            .iter()
+            .filter(|node| node.id.ends_with("--adjudicate"))
+            .collect();
+        assert_eq!(
+            adjudicators.len(),
+            1,
+            "nested lens split adds one adjudicator"
+        );
+        let adjudication = adjudicators[0];
+        assert_eq!(adjudication.state, NodeState::Succeeded);
+        assert_eq!(
+            adjudication
+                .outputs
+                .as_ref()
+                .and_then(|outputs| outputs.verdict.as_deref()),
+            Some("VERDICT: FAIL"),
+            "an upheld finding returns FAIL successfully so the gate can route repair"
+        );
         if limit == 1 {
             assert_eq!(owner.calls.last().unwrap().0.node_id, "design");
             let findings = &run
@@ -2871,15 +4093,16 @@ fn compiled_repair_design_continuation_keeps_the_original_writer() {
     );
     let writer = AttemptObservation::Terminal {
         attempt_ref: None,
-        outcome: AttemptOutcome::Succeeded,
+        outcome: GraphAttemptOutcome::Succeeded,
         launched: true,
         result: None,
         result_warning: None,
         result_path: None,
         branch: Some("work/item".into()),
         commit: Some("1".repeat(40)),
-        settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
+        settlement_class: Some(provenant_records::run::SettlementClass::Completed),
         stop: None,
+    cause: None,
     };
     let mut owner = repair_reviews(&[
         &finding,
@@ -3224,7 +4447,11 @@ fn compiled_repair_rechecks_new_panel_lens_after_the_next_fix() {
     let initial = repair_finding(false);
     let security = initial
         .replace("F1", "F2")
-        .replace("correctness", "security");
+        .replace("correctness", "security")
+        .replace(
+            "\"summary\":\"constraint\"",
+            "\"class\":\"security invariant\",\"summary\":\"constraint\"",
+        );
     let checked_security = security.replace(
         "\"status\":\"open\"",
         "\"status\":\"open\",\"disposition\":\"accepted\",\"reason\":\"Reproduced on the repaired head\"",
@@ -3239,6 +4466,8 @@ fn compiled_repair_rechecks_new_panel_lens_after_the_next_fix() {
         pass,
         &security,
         &checked_security,
+        // The split panel is adjudicated before the second repair writer runs.
+        &checked_security,
         "fix two",
         pass,
         pass,
@@ -3247,7 +4476,7 @@ fn compiled_repair_rechecks_new_panel_lens_after_the_next_fix() {
         pass,
     ]);
     owner.repair_panel = Some(vec!["correctness".into(), "security".into()]);
-    for (index, oid) in [(1, 'a'), (7, 'b')] {
+    for (index, oid) in [(1, 'a'), (8, 'b')] {
         if let AttemptObservation::Terminal { commit, .. } = &mut owner.observations[index] {
             *commit = Some(oid.to_string().repeat(40));
         }
@@ -3261,7 +4490,7 @@ fn compiled_repair_rechecks_new_panel_lens_after_the_next_fix() {
         run.checkpoint
             .nodes
             .iter()
-            .map(|node| (&node.id, node.state, &node.gate, &node.advance_error))
+            .map(|node| (&node.id, node.state, &node.gate, &node.advance_note))
             .collect::<Vec<_>>()
     );
     assert_eq!(owner.repair_panel_calls, 2);

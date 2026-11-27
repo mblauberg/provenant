@@ -1,5 +1,10 @@
 use super::*;
 
+mod finding;
+pub use finding::*;
+mod pending_steer;
+pub use pending_steer::*;
+
 /// The checkpoint wire spelling of a template layer. This field is covered by
 /// the checkpoint digest, so its bytes stay as deployed while the in-memory
 /// type is the shared `Layer`. The adapter is private: a value that is not one
@@ -78,6 +83,101 @@ pub(super) fn is_false(value: &bool) -> bool {
     !value
 }
 
+/// Config keys for the sealed delivery queue settings.
+pub const QUEUE_MAX_PARALLEL_KEY: &str = "domains.fabric.queue.max_parallel";
+pub const QUEUE_CI_SLOTS_KEY: &str = "domains.fabric.queue.ci_slots";
+pub const QUEUE_PREP_RETRIES_KEY: &str = "domains.fabric.queue.prep_retries";
+
+/// Effective values and their sources, sealed before queue admission.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct QueueKnobs {
+    pub max_parallel: provenant_records::Sourced<usize>,
+    pub ci_slots: provenant_records::Sourced<usize>,
+    pub prep_retries: provenant_records::Sourced<usize>,
+}
+
+impl Default for QueueKnobs {
+    fn default() -> Self {
+        fn shipped(value: usize) -> provenant_records::Sourced<usize> {
+            provenant_records::Sourced {
+                value,
+                source: provenant_records::Source {
+                    layer: provenant_records::Layer::Default,
+                    origin: None,
+                },
+            }
+        }
+        Self {
+            max_parallel: shipped(4),
+            ci_slots: shipped(1),
+            prep_retries: shipped(2),
+        }
+    }
+}
+
+impl QueueKnobs {
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if self.max_parallel.value == 0 {
+            return Err("queue.max_parallel must be positive");
+        }
+        Ok(())
+    }
+}
+
+/// Ordered route-tier aliases. Rung zero is the first attempt.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct EscalateSpec {
+    pub ladder: Vec<String>,
+    pub max_ci_rounds: usize,
+}
+
+impl Default for EscalateSpec {
+    fn default() -> Self {
+        Self {
+            ladder: ["junior", "senior", "principal"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect(),
+            max_ci_rounds: 3,
+        }
+    }
+}
+
+impl EscalateSpec {
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if self.ladder.is_empty()
+            || self
+                .ladder
+                .iter()
+                .any(|alias| provenant_core::valid_name(alias).is_none())
+        {
+            return Err("escalate.ladder must contain route-tier aliases");
+        }
+        if self.max_ci_rounds == 0 {
+            return Err("escalate.max_ci_rounds must be positive");
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct DeliveryReviewSpec {
+    pub shape: provenant_records::graph::ReviewShape,
+    pub accept_inconclusive_without_blocking: bool,
+}
+
+impl Default for DeliveryReviewSpec {
+    fn default() -> Self {
+        Self {
+            shape: Default::default(),
+            accept_inconclusive_without_blocking: true,
+        }
+    }
+}
+
 /// Host retry policy sealed with the attempt before a launch can fail.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LaunchRetryPolicy {
@@ -144,14 +244,19 @@ pub(super) fn canonical_len<T: Serialize>(value: &T) -> usize {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GraphDocument {
+    /// Queue CI lease wait resolved from the authenticated item configuration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queue_ci_wait: Option<provenant_records::Sourced<u64>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queue: Option<QueueKnobs>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review_base: Option<String>,
     /// Review resolution inputs retained with the submitted graph.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review: Option<provenant_routing::ReviewRequest>,
-    /// The graph requested a review without a resolvable review subject.
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub review_subject_missing: bool,
+    /// Written by the host at admission; a caller-supplied value is overwritten.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subject: Option<provenant_records::subject::PinnedSubject>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context: Option<provenant_records::run::WorkContext>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -327,6 +432,10 @@ impl GraphBaseBinding {
 }
 
 impl GraphExecution {
+    /// Keeps the host-bound bases self-consistent and consistent with the
+    /// admitted subject: when both carry a review base they must name the same
+    /// commit. Absence on either side is allowed, so graphs admitted before
+    /// this field existed (subject `None`) still validate.
     pub(super) fn valid_bases(&self) -> bool {
         let (review, integration) = self
             .bases
@@ -342,6 +451,12 @@ impl GraphExecution {
                 .integration_branch
                 .as_deref()
                 .is_none_or(|reference| reference.is_empty() || integration.is_some())
+            && self
+                .document
+                .subject
+                .as_ref()
+                .and_then(|subject| subject.base)
+                .is_none_or(|base| review.is_none_or(|review| review == base))
     }
 }
 
@@ -695,6 +810,13 @@ fn graph_node_extra<'de, D: serde::Deserializer<'de>>(
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GraphNode {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub escalate: Option<EscalateSpec>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery_review: Option<DeliveryReviewSpec>,
+    /// Untrusted facts for a host-verified queue PR adoption seed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery_adoption: Option<DeliveryAdoptionIntent>,
     /// The step to take after a stop with a given cause instead of the stop
     /// table's default (`docs/specs/run.md#what-follows-a-stop`).
     #[serde(default, skip_serializing_if = "provenant_records::OnStop::is_empty")]
@@ -706,6 +828,11 @@ pub struct GraphNode {
     pub family_group: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub template: Option<String>,
+    /// The commit or ref a writer node starts from. On a node that reuses a
+    /// worktree this is the merge target for its review range, distinct from
+    /// the writer's own head.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review_base: Option<String>,
     /// Launch conditions resolved at submission; the node is skipped unless every term holds.
@@ -1038,7 +1165,70 @@ pub enum AdmissionError {
     },
 }
 
+pub(super) fn validate_delivery_contracts(document: &GraphDocument) -> Result<(), AdmissionError> {
+    if let Some(queue) = &document.queue {
+        queue
+            .validate()
+            .map_err(|reason| AdmissionError::Plan(reason.into()))?;
+    }
+    fn check_nodes(nodes: &[GraphNode]) -> Result<(), AdmissionError> {
+        for node in nodes {
+            if let Some(escalate) = &node.escalate {
+                escalate
+                    .validate()
+                    .map_err(|reason| AdmissionError::Plan(reason.into()))?;
+                let has_writer = node.access == AccessMode::WorktreeWrite
+                    || node.loop_body.as_ref().is_some_and(|spec| {
+                        spec.body
+                            .iter()
+                            .any(|member| member.access == AccessMode::WorktreeWrite)
+                    });
+                if !has_writer {
+                    return Err(AdmissionError::Plan(
+                        "escalate requires a writer node or loop body".into(),
+                    ));
+                }
+            }
+            if let Some(spec) = &node.loop_body {
+                if spec.max_rounds == 0 {
+                    return Err(AdmissionError::Plan(format!(
+                        "node {}: loop.max_rounds must be positive",
+                        node.id
+                    )));
+                }
+                if let Some(edge) = &spec.outcome_edge
+                    && edge.node.trim().is_empty()
+                {
+                    return Err(AdmissionError::Plan(
+                        "loop outcome edge requires a node".into(),
+                    ));
+                }
+                check_nodes(&spec.body)?;
+            }
+            if let Some(spec) = &node.composite {
+                check_nodes(&spec.nodes)?;
+            }
+            if let Some(fallback) = node.plan.as_ref().and_then(|plan| plan.fallback.as_ref()) {
+                check_nodes(&fallback.nodes)?;
+            }
+        }
+        Ok(())
+    }
+    check_nodes(&document.nodes)
+}
+
 impl GraphDocument {
+    /// The authenticated queue item's sourced CI lease wait, when present.
+    /// Stored as a typed field so queue admission data has a declared owner.
+    pub fn queue_ci_wait(&self) -> Option<provenant_records::Sourced<u64>> {
+        self.queue_ci_wait.clone()
+    }
+
+    /// Seal the queue registry's sourced CI wait into the persisted document.
+    pub fn set_queue_ci_wait(&mut self, wait: &provenant_records::Sourced<u64>) {
+        self.queue_ci_wait = Some(wait.clone());
+    }
+
     /// The host digest of the input that created this graph. A named `run` whose
     /// input has the same digest finds this graph instead of starting another.
     pub fn replay_digest(&self) -> Option<&str> {
@@ -1092,6 +1282,7 @@ impl GraphDocument {
         limits: &crate::config::GraphLimits,
     ) -> Result<Self, AdmissionError> {
         validate_schema(self)?;
+        validate_delivery_contracts(self)?;
         let expansion_limits = expansion_safety_limits(limits);
         let expanded = loops::expand(self, &[], &expansion_limits)?;
         // Refused at admission only. A graph persisted before the removal
@@ -1172,10 +1363,15 @@ pub enum NodeKind {
     Composite,
     Task,
     Synthesise,
+    /// Resolves conflicting per-head review verdicts into one verdict without
+    /// starting another review round.
+    Adjudicate,
     Gate,
     Loop,
     Decide,
     Land,
+    Hygiene,
+    Publish,
 }
 
 /// Immutable review subject or the commit a later writer must start from.
@@ -1223,6 +1419,11 @@ pub enum GateCondition {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         max_failed_checks: Option<usize>,
     },
+    Conflict {
+        #[serde(flatten)]
+        extra: provenant_records::ExtraFields,
+        target: CiTarget,
+    },
 }
 
 pub(super) fn default_ci_timeout() -> u64 {
@@ -1254,10 +1455,29 @@ pub enum CiState {
     NotScheduled,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CiLimitSource {
+    #[default]
+    Default,
+    Condition,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CiFailedChecksPolicy {
+    pub max_bytes: usize,
+    pub max_bytes_source: CiLimitSource,
+    pub max_checks: usize,
+    pub max_checks_source: CiLimitSource,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CiObservation {
     #[serde(flatten)]
     pub extra: provenant_records::ExtraFields,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quota_reset_at: Option<provenant_core::WallTime>,
     pub state: CiState,
     pub summary: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1288,6 +1508,10 @@ pub struct CiEvidence {
     pub pending_observations: u64,
     #[serde(flatten)]
     pub extra: provenant_records::ExtraFields,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quota_reset_at: Option<provenant_core::WallTime>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failed_checks_policy: Option<CiFailedChecksPolicy>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub first_observed_stamp: Option<CiHostStamp>,
     #[serde(default, skip_serializing_if = "is_zero_u8")]
@@ -1377,6 +1601,15 @@ pub struct RepairItem {
     pub reason: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub alternative: Option<String>,
+    /// The sweep query the writer ran to find every site of this invariant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sweep: Option<String>,
+    /// Every site the writer changed while pinning this invariant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sites: Option<Vec<String>>,
+    /// The test that pins this invariant so a recurrence is caught.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pin: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1436,6 +1669,13 @@ pub struct NodeOutputs {
     pub extra: provenant_records::ExtraFields,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verdict_error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hygiene: Option<provenant_records::graph::HygieneOutcome>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub publication: Option<DeliveryPublication>,
+    /// Bounded full report handoff; continuation still uses `NodeProgress.handoff`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handoff: Option<provenant_records::handoff::Handoff>,
     pub schema_version: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub decide_outcome: Option<DecideOutcome>,
@@ -1520,6 +1760,132 @@ impl DecideOutcome {
     }
 }
 
+/// A durable hygiene intent and its bounded result for one graph node.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeliveryHygieneProgress {
+    pub operation_id: String,
+    pub input_head: String,
+    pub handoff: Option<String>,
+    pub outcome: Option<provenant_records::graph::HygieneOutcome>,
+}
+
+/// Exact branch, commit and PR returned by the queue publication owner.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeliveryPublication {
+    pub branch: String,
+    pub head: String,
+    pub pull_request: String,
+}
+
+/// A durable publication intent and its reconciled receipt for one graph node.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeliveryPublicationProgress {
+    pub operation_id: String,
+    pub source_node: String,
+    pub source_key: provenant_records::graph::AttemptKey,
+    pub source_attempt: String,
+    /// The worktree branch verified under writer custody after hygiene.
+    pub writer_branch: String,
+    /// `integration_branch`, the branch whose source head is published.
+    pub input_head: String,
+    pub source_branch: String,
+    /// The integration base pinned at graph admission, used for PR contents.
+    pub integration_base: String,
+    /// Expected old graph-owned remote head; `None` means it must not exist.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_remote_head: Option<String>,
+    /// Durable host-class reservation written before the external publication
+    /// effect; a missing field in an older checkpoint remains absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ci_admission: Option<DeliveryCiAdmission>,
+    /// Durable retry state for bounded, nonblocking host CI admission.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ci_admission_wait: Option<DeliveryCiAdmissionWait>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub receipt: Option<DeliveryPublication>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// Host admission token retained with publication intent for replay and cleanup.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeliveryCiLease {
+    pub id: String,
+    pub slot: u64,
+    pub project: String,
+    pub graph_id: String,
+    pub node_id: String,
+    pub head_sha: String,
+    /// The effective shared CI class cap and its sealed source.
+    pub ci_slots: provenant_records::Sourced<usize>,
+}
+
+/// Exact published head made obsolete by a durable queue conflict recovery.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeliveryCiSupersession {
+    pub node_id: String,
+    pub head_sha: String,
+}
+
+/// Sourced wait window retained while a queue publication waits for CI capacity.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeliveryCiAdmissionWait {
+    pub started_at: provenant_core::WallTime,
+    pub deadline: provenant_core::WallTime,
+    pub wake_at: provenant_core::WallTime,
+    pub policy: provenant_records::Sourced<u64>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub clock_missing: bool,
+}
+
+fn default_delivery_ci_slots() -> provenant_records::Sourced<usize> {
+    QueueKnobs::default().ci_slots
+}
+
+/// Queue CI admission outcome, sealed before publication. Overflow remains
+/// advisory and is retained so status can explain why the cap was exceeded.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum DeliveryCiAdmission {
+    Held {
+        lease: DeliveryCiLease,
+    },
+    Overflow {
+        waited_millis: u64,
+        #[serde(default = "default_delivery_ci_slots")]
+        ci_slots: provenant_records::Sourced<usize>,
+    },
+    Unavailable {
+        reason: String,
+    },
+}
+
+impl DeliveryCiAdmission {
+    pub fn lease(&self) -> Option<&DeliveryCiLease> {
+        match self {
+            Self::Held { lease } => Some(lease),
+            Self::Overflow { .. } | Self::Unavailable { .. } => None,
+        }
+    }
+}
+
+/// A durable park intent, completed when the inbox returns its request ID.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeliveryParkProgress {
+    pub transition_id: String,
+    pub operation_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub item: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt_key: Option<provenant_records::graph::AttemptKey>,
+    pub attempt_ref: Option<String>,
+    pub reason: provenant_records::graph::ParkReason,
+    pub handoff: String,
+    pub head: Option<String>,
+    pub evidence: Vec<String>,
+    pub request_id: Option<provenant_core::HumanRequestId>,
+}
+
 /// Typed review evidence retained when a read-only review lane settles.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReviewSettlement {
@@ -1531,196 +1897,28 @@ pub struct ReviewSettlement {
     pub independent: bool,
 }
 
+/// A chair's reasoned disposition of valid review evidence for one exact head.
+/// It is stored on the reviewed node and never replaces the reviewer output.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PlanOutput {
-    #[serde(flatten)]
-    pub extra: provenant_records::ExtraFields,
-    pub fallback_reason: String,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ResultOutput {
-    #[serde(flatten)]
-    pub extra: provenant_records::ExtraFields,
-    pub digest: String,
-    pub excerpt: String,
-    pub truncated: bool,
-    pub path: Option<String>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Finding {
-    #[serde(flatten)]
-    pub extra: provenant_records::ExtraFields,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub url: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub trigger: Option<FindingTrigger>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub triage: Option<FindingTriage>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub class: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub verification: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub evidence: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub proposed_fix: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub kind: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub lens: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub propagates: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub design_defect: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub risk_grew: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub scope_grew: Option<bool>,
-    pub id: String,
-    pub severity: String,
-    pub file: String,
-    pub line: Option<u64>,
-    pub summary: String,
-    pub status: String,
-    /// The settlement decision on this finding, from the node's declared list.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub disposition: Option<String>,
-    /// One line of why that disposition was chosen.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reason: Option<String>,
-}
-
-/// The three severity classes named by the review doctrine. External reviewers
-/// use other words; the vocabulary below is the single translation to these.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SeverityClass {
-    Blocking,
-    ShouldFix,
-    Note,
-}
-
-/// One vocabulary map: each severity word an external reviewer may use, its
-/// doctrine class and its relative rank for bounded export. No module keeps a
-/// separate severity list.
-pub const SEVERITY_VOCABULARY: &[(&str, SeverityClass, u8)] = &[
-    ("critical", SeverityClass::Blocking, 0),
-    ("blocker", SeverityClass::Blocking, 0),
-    ("blocking", SeverityClass::Blocking, 0),
-    ("p0", SeverityClass::Blocking, 0),
-    ("high", SeverityClass::Blocking, 1),
-    ("error", SeverityClass::Blocking, 1),
-    ("p1", SeverityClass::Blocking, 1),
-    ("medium", SeverityClass::ShouldFix, 2),
-    ("moderate", SeverityClass::ShouldFix, 2),
-    ("should-fix", SeverityClass::ShouldFix, 2),
-    ("p2", SeverityClass::ShouldFix, 2),
-    ("low", SeverityClass::Note, 3),
-    ("warning", SeverityClass::Note, 3),
-    ("p3", SeverityClass::Note, 3),
-    ("info", SeverityClass::Note, 4),
-    ("informational", SeverityClass::Note, 4),
-    ("note", SeverityClass::Note, 4),
-    ("p4", SeverityClass::Note, 4),
-];
-
-fn severity_word(word: &str) -> Option<(&'static str, SeverityClass, u8)> {
-    let word = word.trim().to_ascii_lowercase();
-    SEVERITY_VOCABULARY
-        .iter()
-        .copied()
-        .find(|(known, _, _)| *known == word.as_str())
-}
-
-/// Translate a reviewer's severity word once. An unknown word is not blocking.
-pub fn severity_class(word: &str) -> Option<SeverityClass> {
-    severity_word(word).map(|(_, class, _)| class)
-}
-
-/// Relative order for bounded export; unknown words sort last.
-pub fn severity_rank(word: &str) -> u8 {
-    severity_word(word).map_or(5, |(_, _, rank)| rank)
-}
-
-/// Evidence checked by verification or synthesis before a repair writer starts.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct FindingTrigger {
-    pub sequence: String,
-    pub reach: FindingReach,
-    pub observed: bool,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum FindingReach {
-    DefaultPath,
-    OperatorMistake,
-    AttackerOrUnreachable,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct FindingTriage {
-    pub decision: String,
+#[serde(deny_unknown_fields)]
+pub struct DeliveryReviewDisposition {
+    pub operation_id: provenant_core::OperationId,
+    pub request_id: provenant_core::HumanRequestId,
+    pub answer_id: provenant_core::HumanAnswerId,
+    pub head: provenant_core::GitOid,
     pub reason: String,
-    pub worth_fixing: bool,
-    pub root_cause: String,
-    pub blocking_class: String,
-    #[serde(default)]
-    pub shared_flaw: bool,
 }
 
-impl Finding {
-    pub fn trigger(&self) -> Option<FindingTrigger> {
-        self.trigger.clone()
+impl NodeProgress {
+    /// Read the typed chair disposition retained on the reviewed node.
+    pub fn delivery_review_disposition(&self) -> Option<DeliveryReviewDisposition> {
+        self.delivery_review_disposition.clone()
     }
 
-    pub fn triage(&self) -> Option<FindingTriage> {
-        self.triage.clone()
-    }
-
-    pub fn boundary_or_data_loss(&self) -> bool {
-        self.triage.as_ref().is_some_and(|triage| {
-            matches!(triage.blocking_class.as_str(), "boundary" | "data_loss")
-        }) || self
-            .class
-            .as_deref()
-            .is_some_and(|class| matches!(class, "boundary" | "data_loss"))
-    }
-
-    pub fn default_path(&self) -> bool {
-        self.trigger.as_ref().is_some_and(|trigger| {
-            trigger.reach == FindingReach::DefaultPath && !trigger.sequence.trim().is_empty()
-        })
-    }
-
-    pub fn effective_severity(&self) -> &str {
-        if self.boundary_or_data_loss() || self.default_path() {
-            &self.severity
-        } else {
-            "note"
-        }
-    }
-
-    pub fn falsified_with_evidence(&self) -> bool {
-        self.verification.as_deref() == Some("falsified")
-            && self
-                .evidence
-                .as_deref()
-                .is_some_and(|evidence| !evidence.trim().is_empty())
-    }
-
-    pub fn rejected_boundary(&self) -> bool {
-        self.boundary_or_data_loss()
-            && (self.disposition.as_deref() == Some("rejected")
-                || self
-                    .triage
-                    .as_ref()
-                    .is_some_and(|triage| triage.decision == "rejected"))
-    }
-
-    pub fn spec_defect(&self) -> bool {
-        self.kind.as_deref() == Some("spec_defect")
+    /// Store a validated disposition without changing the original review
+    /// output or its exact-head settlement.
+    pub fn set_delivery_review_disposition(&mut self, disposition: &DeliveryReviewDisposition) {
+        self.delivery_review_disposition = Some(disposition.clone());
     }
 }
 
@@ -1734,167 +1932,13 @@ pub enum AccessMode {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PendingWriterProvisioning {
-    /// The host's graph/node owner. Present for nested provisioning; a
-    /// recovery may reuse only a checkout bearing this exact creation receipt.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub owner: Option<provenant_core::Digest>,
-    pub path: String,
-    pub source: String,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CancellationRequestReceipt {
-    pub request_id: String,
-}
-
-pub const MAX_PENDING_GRAPH_STEERS: usize = 16;
-pub const MAX_PENDING_GRAPH_STEER_BYTES: usize = 64 * 1024;
-pub const MAX_PENDING_GRAPH_STEER_METADATA_BYTES: usize = 4096;
-pub const MAX_PENDING_GRAPH_STEER_ENCODED_BYTES: usize = MAX_PENDING_GRAPH_STEER_BYTES * 6
-    + MAX_PENDING_GRAPH_STEERS * MAX_PENDING_GRAPH_STEER_METADATA_BYTES;
-
-/// One authorised graph steer waiting for its exact accepted run owner to appear.
-/// The stored requester address preserves inbox replay scope; dispatch still
-/// revalidates the launch actor, operation, WorkKey and live attempt.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PendingGraphSteer {
-    pub operation_id: provenant_core::OperationId,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub caller_operation_id: Option<provenant_core::OperationId>,
-    pub work_key: provenant_records::WorkKey,
-    pub graph_context: crate::inbox::GraphSteerContext,
-    pub requester_host: provenant_core::HostId,
-    pub requester_agent: String,
-    pub requester_actor: provenant_core::ActorId,
-    pub text: String,
-    /// Accepted text remains available for inspection after a safe refusal.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub refusal: Option<PendingSteerRefusal>,
-}
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PendingSteerRefusal {
-    TargetChanged,
-    RequesterChanged,
-    OwnerRefused,
-    Unsupported,
-}
-
-/// Durable, bounded graph-scoped inbox actions. A transparent wrapper keeps the
-/// checkpoint wire shape as an operation-keyed map and omits it when empty.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct PendingSteerQueue(std::collections::BTreeMap<String, PendingGraphSteer>);
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PendingSteerQueueError {
-    InvalidKey,
-    TooMany,
-    TooLarge,
-    OperationConflict,
-}
-
-impl PendingSteerQueue {
-    fn validate_entry(entry: &PendingGraphSteer) -> Result<(), PendingSteerQueueError> {
-        if entry.text.len() > provenant_records::control::CONTROL_TEXT_BYTES {
-            return Err(PendingSteerQueueError::TooLarge);
-        }
-        let mut metadata = entry.clone();
-        metadata.text.clear();
-        if serde_json::to_vec(&metadata)
-            .map_err(|_| PendingSteerQueueError::TooLarge)?
-            .len()
-            > MAX_PENDING_GRAPH_STEER_METADATA_BYTES
-        {
-            return Err(PendingSteerQueueError::TooLarge);
-        }
-        Ok(())
-    }
-    pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
-    }
-
-    pub fn len(&self) -> usize {
-        self.0.len()
-    }
-    pub fn has_pending(&self) -> bool {
-        self.0.values().any(|entry| entry.refusal.is_none())
-    }
-    pub fn refuse(&mut self, key: &str, reason: PendingSteerRefusal) {
-        if let Some(entry) = self.0.get_mut(key) {
-            entry.refusal = Some(reason);
-        }
-    }
-
-    pub fn iter(&self) -> impl Iterator<Item = (&String, &PendingGraphSteer)> {
-        self.0.iter()
-    }
-
-    pub fn get(&self, key: &str) -> Option<&PendingGraphSteer> {
-        self.0.get(key)
-    }
-
-    pub fn validate(&self) -> Result<(), PendingSteerQueueError> {
-        if self.0.len() > MAX_PENDING_GRAPH_STEERS {
-            return Err(PendingSteerQueueError::TooMany);
-        }
-        let mut bytes = 0usize;
-        for (key, entry) in &self.0 {
-            if key.is_empty() || key.len() > 128 || key != &entry.operation_id.to_string() {
-                return Err(PendingSteerQueueError::InvalidKey);
-            }
-            Self::validate_entry(entry)?;
-            bytes = bytes.saturating_add(entry.text.len());
-        }
-        if bytes > MAX_PENDING_GRAPH_STEER_BYTES {
-            return Err(PendingSteerQueueError::TooLarge);
-        }
-        Ok(())
-    }
-
-    pub fn enqueue(
-        &mut self,
-        key: String,
-        pending: PendingGraphSteer,
-    ) -> Result<bool, PendingSteerQueueError> {
-        self.validate()?;
-        Self::validate_entry(&pending)?;
-        if key.is_empty() || key.len() > 128 || key != pending.operation_id.to_string() {
-            return Err(PendingSteerQueueError::InvalidKey);
-        }
-        if let Some(saved) = self.0.get(&key) {
-            let mut original = saved.clone();
-            original.refusal = None;
-            return if original == pending {
-                Ok(false)
-            } else {
-                Err(PendingSteerQueueError::OperationConflict)
-            };
-        }
-        if self.0.len() >= MAX_PENDING_GRAPH_STEERS {
-            return Err(PendingSteerQueueError::TooMany);
-        }
-        if pending.text.len() > provenant_records::control::CONTROL_TEXT_BYTES
-            || self.0.values().map(|entry| entry.text.len()).sum::<usize>() + pending.text.len()
-                > MAX_PENDING_GRAPH_STEER_BYTES
-        {
-            return Err(PendingSteerQueueError::TooLarge);
-        }
-        self.0.insert(key, pending);
-        Ok(true)
-    }
-
-    pub fn remove(&mut self, key: &str) -> Option<PendingGraphSteer> {
-        self.0.remove(key)
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 // Bump STATE_FORMAT_VERSION for changes an older or newer binary cannot read.
 pub struct GraphCheckpoint {
     #[serde(flatten)]
     pub extra: provenant_records::ExtraFields,
+    /// Durable queue-control intents retained with the graph checkpoint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery_queue_controls: Option<super::QueueControlLedger>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cancellation_request_receipt: Option<CancellationRequestReceipt>,
     /// Worktree creation intents saved before the host performs Git effects.
@@ -1922,6 +1966,9 @@ pub struct GraphCheckpoint {
     /// GraphExecution and never stored in the checkpoint.
     #[serde(skip)]
     pub bases: Option<GraphBaseBinding>,
+    /// Runtime projection of execution.document.subject; never stored.
+    #[serde(skip)]
+    pub subject: Option<provenant_records::subject::PinnedSubject>,
     /// Integration head pinned when the first integration source was resolved.
     /// Synthesis and writers that start from that commit stop if it moves.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1929,6 +1976,13 @@ pub struct GraphCheckpoint {
     /// Durable admission fence. Resume observes the same attempt keys.
     #[serde(default)]
     pub cancelled: bool,
+    /// Host/project `on_stop` defaults resolved once at admission. A node's
+    /// own `on_stop` entry wins over these; old checkpoints decode to empty.
+    #[serde(default, skip_serializing_if = "provenant_records::OnStop::is_empty")]
+    pub on_stop_defaults: provenant_records::OnStop,
+    /// Exact-head evidence that permits replay-safe release after conflict recovery.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub delivery_ci_superseded: Vec<DeliveryCiSupersession>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cancel_reason: Option<String>,
     /// Why the graph waits for the chair, with the cause typed.
@@ -2053,6 +2107,22 @@ impl NodeDecisionCause {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NodeProgress {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery_loop: Option<provenant_records::graph::DeliveryLoopProgress>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub escalation: Option<provenant_records::graph::EscalationProgress>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery_hygiene: Option<DeliveryHygieneProgress>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery_publication: Option<DeliveryPublicationProgress>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery_park: Option<DeliveryParkProgress>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conflict: Option<ci::ConflictEvidence>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery_adoption: Option<super::queue_adoption::DeliveryAdoptionProgress>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery_review_disposition: Option<DeliveryReviewDisposition>,
     #[serde(flatten)]
     pub extra: provenant_records::ExtraFields,
     /// Direct children of a composite, whose individual evidence stays available.
@@ -2181,10 +2251,10 @@ pub struct NodeProgress {
     pub skip_reason: Option<String>,
     /// An actionable admission or settlement failure, retained for status.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub advance_error: Option<String>,
+    pub advance_note: Option<String>,
     /// Stable cause of an admission or settlement failure.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub advance_error_code: Option<String>,
+    pub advance_code: Option<String>,
     /// Code from the owner whose launch refusal produced the disposition.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub advance_owner_code: Option<String>,
@@ -2240,10 +2310,18 @@ pub struct GraphAttempt {
     #[serde(default, skip_serializing_if = "not_delivered")]
     pub review_substitution: bool,
     pub key: AttemptKey,
+    /// Sealed tier rung used when this attempt's route was admitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub escalation_rung: Option<usize>,
     pub route: GraphRoute,
     pub state: AttemptState,
     pub attempt_ref: Option<String>,
-    pub outcome: Option<AttemptOutcome>,
+    pub outcome: Option<GraphAttemptOutcome>,
+    /// The exact typed cause the run sealed for this attempt, copied from the
+    /// terminal record at settlement. Status and `next_step` can name it
+    /// without re-reading the run store; the next step still keys on `stop`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cause: Option<provenant_records::run::CauseKind>,
     /// Actor that first submitted this attempt. Run-store operation replay is
     /// actor-scoped, so a resume submits under it.
     pub launch_actor: String,
@@ -2372,6 +2450,33 @@ pub struct UnknownUsageEvent {
 }
 
 impl GraphCheckpoint {
+    /// Record the exact queue publication head settled by conflict recovery.
+    pub fn record_delivery_ci_supersession(
+        &mut self,
+        node_id: &str,
+        head_sha: &str,
+    ) -> Result<(), &'static str> {
+        if node_id.is_empty() || head_sha.parse::<provenant_core::GitOid>().is_err() {
+            return Err("delivery CI supersession must identify a node and exact Git head");
+        }
+        if let Some(existing) = self
+            .delivery_ci_superseded
+            .iter()
+            .find(|record| record.node_id == node_id)
+        {
+            return if existing.head_sha == head_sha {
+                Ok(())
+            } else {
+                Err("one publication node cannot supersede multiple exact CI heads")
+            };
+        }
+        self.delivery_ci_superseded.push(DeliveryCiSupersession {
+            node_id: node_id.to_owned(),
+            head_sha: head_sha.to_owned(),
+        });
+        Ok(())
+    }
+
     /// Pause the graph for the chair. The reason is cut to its bound.
     pub fn set_pause(&mut self, cause: provenant_records::pause::PauseCause, reason: &str) {
         let reason = bounded(reason, provenant_records::pause::PAUSE_REASON_BYTES);
@@ -2393,6 +2498,44 @@ impl GraphCheckpoint {
         self.pause
             .as_ref()
             .map(provenant_records::pause::Pause::reason)
+    }
+
+    /// Whether the graph pause and the active expansion pause agree (#4106).
+    ///
+    /// Only one expansion pause may be active, and when one is it must carry
+    /// the graph's typed cause. With no active expansion pause an
+    /// `InvalidPlanExpansion` graph pause would have no owner at all. This is
+    /// checked both when a stored checkpoint is admitted and when a tick reads
+    /// it, so a disagreeing pair is quarantined instead of repeated forever.
+    pub(crate) fn expansion_pause_owns_graph_pause(&self) -> bool {
+        let active: Vec<_> = self
+            .nodes
+            .iter()
+            .filter(|node| {
+                matches!(
+                    node.expansion_cause,
+                    Some(NodeDecisionCause::PlanExpansionPaused { active: true, .. })
+                )
+            })
+            .collect();
+        match active.len() {
+            0 => {
+                self.pause_cause()
+                    != Some(provenant_records::pause::PauseCause::InvalidPlanExpansion)
+            }
+            1 => Some(plans::expansion_pause_cause(active[0])) == self.pause_cause(),
+            _ => false,
+        }
+    }
+
+    /// Pause the graph for a structural limit, yielding any active expansion
+    /// pause so the typed graph pause always has a single consistent owner.
+    pub(super) fn pause_structural(&mut self, reason: &str) {
+        self.deactivate_expansion_pauses();
+        self.set_pause(
+            provenant_records::pause::PauseCause::StructuralLimit,
+            reason,
+        );
     }
 
     pub(super) fn deactivate_expansion_pauses(&mut self) {
@@ -2590,14 +2733,14 @@ pub struct GraphRun {
     pub outcome: Option<GraphOutcome>,
     pub checkpoint: GraphCheckpoint,
     /// Why the last automatic advance failed, as recorded for `status`.
-    pub advance_error: Option<String>,
+    pub advance_note: Option<String>,
 }
 
 impl Serialize for GraphRun {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeStruct;
         let fields =
-            3 + usize::from(self.outcome.is_some()) + usize::from(self.advance_error.is_some());
+            3 + usize::from(self.outcome.is_some()) + usize::from(self.advance_note.is_some());
         let mut state = serializer.serialize_struct("GraphRun", fields)?;
         state.serialize_field("status", &self.status)?;
         if let Some(outcome) = &self.outcome {
@@ -2608,8 +2751,8 @@ impl Serialize for GraphRun {
         let mut checkpoint = self.checkpoint.clone();
         checkpoint.pending_steers = Default::default();
         state.serialize_field("checkpoint", &GraphCheckpointProjection::from(&checkpoint))?;
-        if let Some(error) = &self.advance_error {
-            state.serialize_field("advance_error", error)?;
+        if let Some(error) = &self.advance_note {
+            state.serialize_field("advance_note", error)?;
         }
         state.serialize_field("waits", &super::graph_waits(&self.checkpoint))?;
         state.end()
@@ -2620,6 +2763,12 @@ impl Serialize for GraphRun {
 struct GraphCheckpointProjection<'a> {
     #[serde(flatten)]
     checkpoint: &'a GraphCheckpoint,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    subject: Option<&'a provenant_records::subject::PinnedSubject>,
+    /// Slot for a later result-read or settlement head comparison; status
+    /// reads stored data only in this batch, so it is always `None` here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    head_check: Option<provenant_records::subject::HeadCheck>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     bound_review_base: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2630,6 +2779,8 @@ impl<'a> From<&'a GraphCheckpoint> for GraphCheckpointProjection<'a> {
     fn from(checkpoint: &'a GraphCheckpoint) -> Self {
         Self {
             checkpoint,
+            subject: checkpoint.subject.as_ref(),
+            head_check: None,
             bound_review_base: checkpoint
                 .bases
                 .and_then(|bases| bases.review)
@@ -2763,5 +2914,18 @@ impl CiPollBackoff {
         )
         .delay(pending_observations)
         .as_secs()
+    }
+}
+
+#[cfg(test)]
+mod subject_wire_tests {
+    use super::GraphDocument;
+
+    #[test]
+    fn document_without_subject_keeps_its_wire_bytes() {
+        let original = r#"{"schema_version":1,"graph_id":"legacy","nodes":[]}"#;
+        let document: GraphDocument = serde_json::from_str(original).unwrap();
+        assert!(document.subject.is_none());
+        assert_eq!(serde_json::to_string(&document).unwrap(), original);
     }
 }

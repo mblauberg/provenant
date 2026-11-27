@@ -27,14 +27,15 @@ pub(crate) fn exact_directory_credential_paths(
     };
     let spec = provenant_records::AdapterSpec::get(adapter)
         .ok_or_else(|| fail("adapter has no store declaration"))?;
-    if spec.credential_files.is_empty() {
+    if spec.login.credential_files.is_empty() {
         return Err(fail("adapter declares no precise credential files"));
     }
     let mut paths = Vec::new();
     for relative in spec
+        .login
         .credential_files
         .iter()
-        .chain(spec.credential_auxiliary_files)
+        .chain(spec.login.credential_auxiliary_files)
     {
         let path = Path::new(relative);
         if path.as_os_str().is_empty()
@@ -49,7 +50,7 @@ pub(crate) fn exact_directory_credential_paths(
         }
         paths.push(directory.join(path));
     }
-    if spec.credential_profile_sibling {
+    if spec.login.credential_profile_sibling {
         paths.push(directory.with_extension("json"));
     }
     Ok(paths)
@@ -326,7 +327,7 @@ fn resolve_entry(
         })
 }
 /// Account configuration directories, in entry order. Only adapters whose
-/// accounts are separate configuration directories (`account_config_dir`:
+/// accounts are separate configuration directories (`accounts.config_dir`:
 /// Claude and Codex) qualify. For the others the registered directory is an
 /// identity, ledger or keychain location, not where the client reads skills and
 /// settings.
@@ -339,11 +340,11 @@ pub fn homes(settings: &Settings) -> Vec<provenant_config::AccountHome> {
         .values()
         .filter_map(|entry| {
             let spec = provenant_records::AdapterSpec::get(&entry.adapter)?;
-            if !spec.account_config_dir {
+            if !spec.accounts.config_dir {
                 return None;
             }
             let home = provenant_config::shared_settings::canonical(&entry.directory);
-            seen.insert((spec.name, home.clone()))
+            seen.insert((spec.identity.name, home.clone()))
                 .then(|| provenant_config::AccountHome {
                     harness: spec.id,
                     label: entry.label.clone(),
@@ -473,7 +474,7 @@ fn execute_inner(
             return Err(finding.message);
         }
         if provenant_records::AdapterSpec::get(adapter)
-            .and_then(|spec| spec.account_directory_prefix)
+            .and_then(|spec| spec.accounts.directory_prefix)
             .is_some_and(|prefix| directory != home.join(format!("{prefix}{label}")))
         {
             return Err(
@@ -481,7 +482,7 @@ fn execute_inner(
             );
         }
         if provenant_records::AdapterSpec::get(adapter)
-            .is_some_and(|spec| spec.isolated_login_keychain)
+            .is_some_and(|spec| spec.accounts.isolated_login_keychain)
         {
             check_agy_directory(&directory, home)?;
         }
@@ -512,7 +513,7 @@ fn execute_inner(
         let (key, org_fingerprint) = match detected {
             Err(provenant_providers::ProviderError::UnknownIdentity)
                 if provenant_records::AdapterSpec::get(adapter).is_some_and(|spec| {
-                    spec.quota_probe == provenant_records::QuotaProbeKind::LocalLedger
+                    spec.quota.probe == provenant_records::QuotaProbeKind::LocalLedger
                 }) =>
             {
                 (format!("{adapter}-{label}"), None)
@@ -794,7 +795,9 @@ fn edit_accounts(
     }
 }
 
-fn ensure_state_directory(path: &Path) -> Result<Directory, String> {
+/// Open the state root, creating each missing component privately. Every
+/// writer that publishes into a fresh state root goes through this one opener.
+pub fn ensure_state_directory(path: &Path) -> Result<Directory, String> {
     if !path.is_absolute() {
         return Err("state directory must be absolute".into());
     }
@@ -944,7 +947,7 @@ mod tests {
         }
         let homes: Vec<_> = homes(&settings)
             .into_iter()
-            .map(|account| (account.harness.spec().name, account.home))
+            .map(|account| (account.harness.spec().identity.name, account.home))
             .collect();
         assert_eq!(
             homes,

@@ -92,7 +92,10 @@ pub struct ResolvedHarnessTarget {
     pub skills_dir: AbsolutePath,
     pub config_file: AbsolutePath,
     pub hook_file: Option<AbsolutePath>,
-    pub instruction: Option<AbsolutePath>,
+    /// The managed instruction file. The receipt keeps its recorded key, so an
+    /// installed receipt reads unchanged and no migration is needed.
+    #[serde(rename = "instruction")]
+    pub instruction_file: Option<AbsolutePath>,
     /// The account removed every managed hook on purpose, so a later install
     /// does not add them again from its sibling accounts.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -104,7 +107,7 @@ pub const INSTALL_RECEIPT_SCHEMA_VERSION: u64 = 2;
 /// Format of the records a live attempt's supervisor or settlement reads.
 /// Bump this in any release that changes those files, so install can warn when
 /// it would swap under attempts that were started on the previous format.
-pub const LIVE_RECORD_FORMAT: u32 = 11;
+pub const LIVE_RECORD_FORMAT: u32 = 12;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct InstallReceipt {

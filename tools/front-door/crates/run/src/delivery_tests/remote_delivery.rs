@@ -153,10 +153,10 @@ fn launch_and_stop_publication_share_one_remote_refresh()
     Ok(())
 }
 
-// Regression for #3888 F1: a local-integration launch deliberately records an
-// empty remote. Stop publication must still name its own real remote, and the
-// writer's stop-work evidence must be gathered against that remote rather than
-// treating the sealed sentinel as a corrupt name.
+// Regression for #3888 F1 and #3895: a local-integration launch records a
+// typed `Local` destination and no remote. Stop publication must still name its
+// own real remote, and the writer's stop-work evidence must be gathered against
+// that remote rather than treating the local destination as a corrupt name.
 #[test]
 fn local_integration_stop_publication_uses_the_stop_remote()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
@@ -164,7 +164,7 @@ fn local_integration_stop_publication_uses_the_stop_remote()
     fixture.request = WriterDeliveryRequest {
         extra: Default::default(),
         mode: DeliveryMode::Integrate("main".into()),
-        remote: String::new(),
+        remote: provenant_records::run::Destination::Local,
         branch: "main".into(),
         open_pr: false,
         fast_forward_only: false,
@@ -177,9 +177,9 @@ fn local_integration_stop_publication_uses_the_stop_remote()
     )?
     .ok_or("stop-publish destination")?;
     let host = launch.prepare_stop_publish(&fixture.writer, &stop_request)?;
-    assert_eq!(host.delivery_remote()?, None);
+    assert_eq!(host.delivery_remote(), None);
     assert_eq!(
-        host.stop_publish_remote()?,
+        host.stop_publish_remote(),
         Some(provenant_config::RemoteName::new("origin")?)
     );
 
@@ -219,7 +219,7 @@ fn local_integration_stop_publication_uses_the_stop_remote()
 
 // The same local-integration delivery with no stop-publish binding has no
 // remote at all: settlement seals a stop-work summary with no ahead evidence,
-// without refusing the empty sealed sentinel.
+// because the sealed destination is `Local`, not a malformed name.
 #[test]
 fn local_integration_without_stop_publish_leaves_the_stop_remote_absent()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
@@ -228,14 +228,14 @@ fn local_integration_without_stop_publish_leaves_the_stop_remote_absent()
     fixture.request = WriterDeliveryRequest {
         extra: Default::default(),
         mode: DeliveryMode::Integrate("main".into()),
-        remote: String::new(),
+        remote: provenant_records::run::Destination::Local,
         branch: "main".into(),
         open_pr: false,
         fast_forward_only: false,
     };
     let launch = fixture.prepare()?;
-    assert_eq!(launch.delivery_remote()?, None);
-    assert_eq!(launch.stop_publish_remote()?, None);
+    assert_eq!(launch.delivery_remote(), None);
+    assert_eq!(launch.stop_publish_remote(), None);
 
     fixture.terminal_via_with(
         "origin",
@@ -830,6 +830,244 @@ fn graph_pr_body_uses_its_recorded_base_despite_primary_checkout_changes()
 }
 
 #[test]
+fn queue_publication_branch_is_stable_for_graph_identity()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let fixture = PrepareFixture::new()?;
+    let host = fixture.prepare()?;
+    let first = host.graph_publication_branch_for(&fixture.writer.project, "queue-item-3972")?;
+    let replay = host.graph_publication_branch_for(&fixture.writer.project, "queue-item-3972")?;
+    let other = host.graph_publication_branch_for(&fixture.writer.project, "queue-item-3973")?;
+
+    assert_eq!(first, replay);
+    assert_ne!(first, other);
+    assert!(first.starts_with("provenant/graph/"));
+    Ok(())
+}
+
+#[test]
+fn queue_publication_pushes_the_formatter_head_without_moving_integration_branch()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let fixture = PrepareFixture::new()?;
+    let base = fixture.prepare()?.head(&fixture.writer)?;
+    fixture.git(&["branch", "integration", "lane"])?;
+    let integration_before = fixture
+        .git_text(&["rev-parse", "refs/heads/integration"])?
+        .parse::<GitOid>()?;
+    fixture.commit(&fixture.writer.worktree, "formatter commit")?;
+    let writer_head = fixture
+        .git_text(&[
+            "-C",
+            fixture.writer.worktree.to_str().ok_or("writer worktree")?,
+            "rev-parse",
+            "HEAD",
+        ])?
+        .parse::<GitOid>()?;
+    assert_ne!(writer_head, integration_before);
+
+    fixture.git(&[
+        "config",
+        &format!(
+            "url.{}.insteadOf",
+            fixture.root.join("remote.git").display()
+        ),
+        "https://github.com/fixture/repo.git",
+    ])?;
+    let git = provenant_os::git::git_executable().ok_or("git")?;
+    let wrapper = fixture.root.join("git-wrapper");
+    fixture.executable(
+        &wrapper,
+        &format!(
+            "#!/bin/sh\nif [ \"$5\" = remote ] && [ \"$6\" = get-url ]; then printf 'https://github.com/fixture/repo.git\\n'; exit 0; fi\nexec '{}' \"$@\"\n",
+            git.display()
+        ),
+    )?;
+    fixture.executable(
+        &fixture.root.join("gh"),
+        "#!/bin/sh\nif [ \"$1\" = repo ]; then printf '{\"defaultBranchRef\":{\"name\":\"main\"}}\\n'; exit 0; fi\nif [ \"$2\" = list ]; then printf '[]\\n'; exit 0; fi\ncd \"$(dirname \"$0\")\" || exit 1\ncat > graph-body\nprintf 'https://github.com/fixture/repo/pull/1\\n'\n",
+    )?;
+    let mut environment = fixture.environment.clone();
+    environment.push(("PROVENANT_GIT".into(), wrapper.into_os_string()));
+    environment.retain(|(key, _)| key != "PATH");
+    environment.push((
+        "PATH".into(),
+        format!("{}:/usr/bin:/bin", fixture.root.display()).into(),
+    ));
+
+    let receipt = HostDeliveryContext::new(environment).deliver_graph_pr_at_head(
+        &fixture.writer.project,
+        "lane",
+        base,
+        writer_head,
+        "queue-item-3972",
+        None,
+        "Queue delivery after formatting",
+        &crate::forge_for("origin", "main", &[]),
+    )?;
+    let remote = fixture.root.join("remote.git");
+    let remote = remote.to_str().ok_or("bare remote")?;
+    let remote_head = fixture.git_text(&[
+        "--git-dir",
+        remote,
+        "rev-parse",
+        &format!("refs/heads/{}", receipt.branch),
+    ])?;
+    let integration_after = fixture
+        .git_text(&["rev-parse", "refs/heads/integration"])?
+        .parse::<GitOid>()?;
+
+    assert_eq!(receipt.head, writer_head);
+    assert_eq!(remote_head.parse::<GitOid>()?, writer_head);
+    assert_eq!(integration_after, integration_before);
+    Ok(())
+}
+
+#[test]
+fn adopted_graph_publication_updates_the_existing_pr_under_its_head_lease()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let fixture = PrepareFixture::new()?;
+    let expected_remote_head = fixture
+        .git_text(&["rev-parse", "refs/heads/lane"])?
+        .parse::<GitOid>()?;
+    fixture.git(&["push", "origin", "lane:refs/heads/lane"])?;
+    fixture.commit(&fixture.writer.worktree, "repair adopted pull request")?;
+    let expected_head = fixture
+        .git_text(&[
+            "-C",
+            fixture.writer.worktree.to_str().ok_or("writer worktree")?,
+            "rev-parse",
+            "HEAD",
+        ])?
+        .parse::<GitOid>()?;
+    fixture.git(&[
+        "config",
+        &format!(
+            "url.{}.insteadOf",
+            fixture.root.join("remote.git").display()
+        ),
+        "https://github.com/fixture/repo.git",
+    ])?;
+    let git = provenant_os::git::git_executable().ok_or("git")?;
+    let wrapper = fixture.root.join("git-wrapper");
+    fixture.executable(
+        &wrapper,
+        &format!(
+            "#!/bin/sh\nif [ \"$5\" = remote ] && [ \"$6\" = get-url ]; then printf 'https://github.com/fixture/repo.git\\n'; exit 0; fi\nexec '{}' \"$@\"\n",
+            git.display()
+        ),
+    )?;
+    let gh = fixture.root.join("gh");
+    fixture.executable(
+        &gh,
+        &format!(
+            r#"#!/bin/sh
+cd "$(dirname "$0")" || exit 1
+if [ "$1" = repo ]; then printf '{{"defaultBranchRef":{{"name":"main"}}}}\n'; exit 0; fi
+if [ "$1" = pr ] && [ "$2" = view ]; then
+  count=0
+  [ ! -f views ] || count=$(cat views)
+  count=$((count + 1))
+  printf '%s\n' "$count" > views
+  if [ "$count" -eq 1 ]; then oid={old_head}; else oid={new_head}; fi
+  printf '{{"url":"https://github.com/fixture/repo/pull/17","state":"OPEN","headRefName":"lane","headRefOid":"%s","headRepository":{{"nameWithOwner":"fixture/repo"}},"baseRefName":"main","baseRepository":{{"nameWithOwner":"fixture/repo"}}}}\n' "$oid"
+  exit 0
+fi
+if [ "$1" = pr ] && [ "$2" = create ]; then touch created; exit 91; fi
+exit 1
+"#,
+            old_head = expected_remote_head,
+            new_head = expected_head,
+        ),
+    )?;
+    let mut environment = fixture.environment.clone();
+    environment.push(("PROVENANT_GIT".into(), wrapper.into_os_string()));
+    environment.retain(|(key, _)| key != "PATH");
+    environment.push((
+        "PATH".into(),
+        format!("{}:/usr/bin:/bin", fixture.root.display()).into(),
+    ));
+
+    let url = "https://github.com/fixture/repo/pull/17";
+    let receipt = HostDeliveryContext::new(environment.clone()).update_adopted_graph_pr_at_head(
+        &fixture.writer.project,
+        expected_head,
+        expected_remote_head,
+        &GraphAdoptionTarget {
+            repository: "fixture/repo",
+            pull_request: 17,
+            pull_request_url: url,
+            branch: "lane",
+            base_repository: "fixture/repo",
+            base_branch: "main",
+        },
+        &crate::forge_for("origin", "main", &[]),
+    )?;
+
+    let remote_head = fixture.git_text(&[
+        "--git-dir",
+        fixture
+            .root
+            .join("remote.git")
+            .to_str()
+            .ok_or("bare remote")?,
+        "rev-parse",
+        "refs/heads/lane",
+    ])?;
+    assert_eq!(receipt.branch, "lane");
+    assert_eq!(receipt.head, expected_head);
+    assert_eq!(receipt.pull_request, url);
+    assert_eq!(remote_head.parse::<GitOid>()?, expected_head);
+    assert!(!fixture.root.join("created").exists());
+    assert_eq!(
+        std::fs::read_to_string(fixture.root.join("views"))?.trim(),
+        "2"
+    );
+    let target = GraphAdoptionTarget {
+        repository: "fixture/repo",
+        pull_request: 17,
+        pull_request_url: url,
+        branch: "lane",
+        base_repository: "fixture/repo",
+        base_branch: "main",
+    };
+    let replay = HostDeliveryContext::new(environment.clone()).update_adopted_graph_pr_at_head(
+        &fixture.writer.project,
+        expected_head,
+        expected_remote_head,
+        &target,
+        &crate::forge_for("origin", "main", &[]),
+    )?;
+    assert_eq!(replay, receipt);
+
+    fixture.commit(&fixture.writer.worktree, "concurrent update")?;
+    let concurrent_head = fixture.git_text(&["rev-parse", "refs/heads/lane"])?;
+    fixture.git(&["push", "origin", "lane:refs/heads/lane"])?;
+    assert!(
+        HostDeliveryContext::new(environment)
+            .update_adopted_graph_pr_at_head(
+                &fixture.writer.project,
+                expected_head,
+                expected_remote_head,
+                &target,
+                &crate::forge_for("origin", "main", &[]),
+            )
+            .is_err()
+    );
+    let remote_after_refusal = fixture.git_text(&[
+        "--git-dir",
+        fixture
+            .root
+            .join("remote.git")
+            .to_str()
+            .ok_or("bare remote")?,
+        "rev-parse",
+        "refs/heads/lane",
+    ])?;
+    assert_eq!(remote_after_refusal, concurrent_head);
+    assert!(!fixture.root.join("created").exists());
+    Ok(())
+}
+
+#[test]
 fn graph_pr_refreshes_forged_target_and_refuses_failed_fetch()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
     let mut fixture = PrepareFixture::new()?;
@@ -1228,8 +1466,8 @@ fn concise_delivery_preserves_alias_contract_and_refuses_injection() -> Result<(
     )?
     .ok_or(RunError::Validation("push"))?;
     assert_eq!(
-        (&*push.remote, &*push.branch, push.open_pr),
-        ("origin", "lane", false)
+        (push.remote.as_str(), &*push.branch, push.open_pr),
+        (Some("origin"), "lane", false)
     );
     assert!(
         HostDeliveryContext::destination(
@@ -1246,8 +1484,8 @@ fn concise_delivery_preserves_alias_contract_and_refuses_injection() -> Result<(
     )?
     .ok_or(RunError::Validation("integration"))?;
     assert_eq!(
-        (&*remote.remote, &*remote.branch),
-        ("origin", "integration")
+        (remote.remote.as_str(), &*remote.branch),
+        (Some("origin"), "integration")
     );
     for invalid in [
         "integrate:",
@@ -1360,6 +1598,7 @@ fn a_late_host_limit_fails_the_receipt_at_its_stage_and_keeps_the_reason()
         &db::bytes(&writer::WriterTerminal {
             schema_version: 1,
             head,
+            pushed_head: None,
             stop_work: None,
             warnings: Vec::new(),
         })?,
@@ -1376,8 +1615,8 @@ fn a_late_host_limit_fails_the_receipt_at_its_stage_and_keeps_the_reason()
     )?;
     drop(lock);
     let mut publication = tests::publication();
-    publication.outcome = Outcome::ReviewRequired;
-    publication.reason = Some("protected changes require review".into());
+    publication.fact.outcome = Outcome::ReviewRequired;
+    publication.fact.reason = Some("protected changes require review".into());
     store.publish_terminal(id, 1, &publication, &exit, &call)?;
     // The first `log` marks the commit body as built; after it, `rev-parse
     // --verify HEAD` (the push stage's head check) overruns its bound.

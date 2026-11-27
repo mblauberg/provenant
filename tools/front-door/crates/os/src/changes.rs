@@ -68,7 +68,7 @@ pub fn hint(state_dir: &Path, scopes: &[Scope]) {
                 format!(
                     "change signal not published after a committed write; readers keep their last generation until a later write or a full re-read ({error})"
                 ),
-            ));
+             provenant_records::warning::detected_source(CHANGE_SIGNAL_UNPUBLISHED)));
         });
     }
 }

@@ -1,5 +1,5 @@
 //! The one way library code reports a warning: a typed value with a stable
-//! code, routed to a capture, the command's sink or stderr.
+//! code and structured source, routed to a capture or the command's sink.
 use crate::provenance::Source;
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
@@ -17,9 +17,8 @@ pub struct Warning {
     /// What it is about: a path, key, branch, attempt or route.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subject: Option<String>,
-    /// The setting that caused it, when one did.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source: Option<Source>,
+    /// The structured cause or origin of this event.
+    pub source: Source,
     /// One command or edit that clears it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repair: Option<String>,
@@ -54,12 +53,17 @@ impl WarningCode {
 pub const CONFIG_KEY_IGNORED: WarningCode = WarningCode("CONFIG_KEY_IGNORED");
 /// A configured value was malformed, so the default applied.
 pub const CONFIG_MALFORMED: WarningCode = WarningCode("CONFIG_MALFORMED");
+/// An `on_stop` default was set for a pinned cause, whose table row cannot be
+/// overridden. The declared default was kept and named with its source.
+pub const ON_STOP_PINNED_IGNORED: WarningCode = WarningCode("ON_STOP_PINNED_IGNORED");
 /// A candidate value came from a layer its family does not list.
 pub const SETTING_LAYER_IGNORED: WarningCode = WarningCode("SETTING_LAYER_IGNORED");
 /// A name differed only by case and was folded to its canonical spelling.
 pub const NAME_CASE_FOLDED: WarningCode = WarningCode("NAME_CASE_FOLDED");
 /// A name matched a declared alias rather than its canonical spelling.
 pub const NAME_ALIAS_USED: WarningCode = WarningCode("NAME_ALIAS_USED");
+/// A target was found in a registered project other than the caller's.
+pub const CROSS_PROJECT_TARGET_FOUND: WarningCode = WarningCode("CROSS_PROJECT_TARGET_FOUND");
 /// The lane's branch is behind its base and will be updated.
 pub const BRANCH_BEHIND_BASE: WarningCode = WarningCode("BRANCH_BEHIND_BASE");
 /// An existing worktree was adopted although it had uncommitted changes.
@@ -94,6 +98,8 @@ pub const CONFIG_UNAVAILABLE: WarningCode = WarningCode("CONFIG_UNAVAILABLE");
 pub const PROJECT_DIRECTORY_IGNORED: WarningCode = WarningCode("PROJECT_DIRECTORY_IGNORED");
 /// Free disk space fell below the configured floor; collection may proceed.
 pub const DISK_FLOOR_LOW: WarningCode = WarningCode("DISK_FLOOR_LOW");
+/// Attempt scratch holds more than the configured share of free space.
+pub const ATTEMPT_SCRATCH_HIGH: WarningCode = WarningCode("ATTEMPT_SCRATCH_HIGH");
 /// Native package cache settings could not be resolved safely and were kept.
 pub const PACKAGE_CACHE_SETTINGS_UNRESOLVED: WarningCode =
     WarningCode("PACKAGE_CACHE_SETTINGS_UNRESOLVED");
@@ -112,6 +118,8 @@ pub const ACCOUNT_SWITCH_RECONCILE_FAILED: WarningCode =
 pub const CHANGE_SIGNAL_UNPUBLISHED: WarningCode = WarningCode("CHANGE_SIGNAL_UNPUBLISHED");
 /// A detached worker's process-budget probe failed; the limit is unknown.
 pub const PROCESS_BUDGET_PROBE_FAILED: WarningCode = WarningCode("PROCESS_BUDGET_PROBE_FAILED");
+/// A provider setting was outside its declared range, so the compiled default applied.
+pub const PROVIDER_SETTING_OUT_OF_RANGE: WarningCode = WarningCode("PROVIDER_SETTING_OUT_OF_RANGE");
 
 // Warnings from the remaining library crates (w2-warn-lib-b): full meaning and
 // the sites that use each code are recorded beside the conversion in that
@@ -179,6 +187,9 @@ pub const WRITER_FENCE_LIST_FAILED: WarningCode = WarningCode("WRITER_FENCE_LIST
 /// A settled writer attempt named a retained fence that is missing; abandon proceeds.
 pub const ABANDON_RETAINED_FENCE_MISSING: WarningCode =
     WarningCode("ABANDON_RETAINED_FENCE_MISSING");
+/// A dead lane's attributed process was found but cannot be proven enough to
+/// reap; it is named in status for the chair.
+pub const ORPHAN_PROCESS_ATTRIBUTED: WarningCode = WarningCode("ORPHAN_PROCESS_ATTRIBUTED");
 /// An abandoned lane left a stale Git worktree registration; the lane settled.
 pub const ABANDON_STALE_WORKTREE_REGISTRATION: WarningCode =
     WarningCode("ABANDON_STALE_WORKTREE_REGISTRATION");
@@ -223,6 +234,10 @@ pub const PRIMARY_POSITION_UNRECORDED: WarningCode = WarningCode("PRIMARY_POSITI
 pub const ADMISSION_RECORD_MALFORMED: WarningCode = WarningCode("ADMISSION_RECORD_MALFORMED");
 /// A steer targeted a settled lane and was handled by the sourced setting.
 pub const STEER_TARGET_SETTLED: WarningCode = WarningCode("STEER_TARGET_SETTLED");
+/// A dead attempt's undecodable record was preserved and its writer lease released.
+pub const UNREADABLE_RECORD_RELEASED: WarningCode = WarningCode("UNREADABLE_RECORD_RELEASED");
+/// A dead attempt's undecodable record still fences custody; liveness is unproved.
+pub const UNREADABLE_RECORD_HELD: WarningCode = WarningCode("UNREADABLE_RECORD_HELD");
 
 // Event-specific codes added when the warning slices named each site.
 // A violated policy rule warns under its own rule code (see policy.rs), so the
@@ -244,6 +259,7 @@ pub const PORT_DECLARATION_IGNORED: WarningCode = WarningCode("PORT_DECLARATION_
 /// An invalid verify port full-after duration fell back to the builtin.
 pub const PORT_DURATION_INVALID: WarningCode = WarningCode("PORT_DURATION_INVALID");
 /// An invalid `verify.static_checks` entry was dropped from the writer preamble.
+pub const PORT_LANE_CHECK_INVALID: WarningCode = WarningCode("PORT_LANE_CHECK_INVALID");
 pub const PORT_STATIC_CHECK_INVALID: WarningCode = WarningCode("PORT_STATIC_CHECK_INVALID");
 /// An installed agent's PATH would fall back from the trusted Rust toolchain.
 pub const AGENT_TOOLCHAIN_PATH: WarningCode = WarningCode("AGENT_TOOLCHAIN_PATH");
@@ -271,6 +287,10 @@ pub const LOCAL_GATE_ADVISORY: WarningCode = WarningCode("LOCAL_GATE_ADVISORY");
 pub const INSTALL_FINDING_ADVISORY: WarningCode = WarningCode("INSTALL_FINDING_ADVISORY");
 /// A wait budget exceeded its maximum and was clamped.
 pub const WAIT_BUDGET_CLAMPED: WarningCode = WarningCode("WAIT_BUDGET_CLAMPED");
+/// A wait inside a lane named no targets follows the lane's children instead.
+pub const WAIT_TARGET_FALLBACK: WarningCode = WarningCode("WAIT_TARGET_FALLBACK");
+/// A writer worktree carried an advisory that did not block the handoff.
+pub const WRITER_ADVISORY: WarningCode = WarningCode("WRITER_ADVISORY");
 /// The model catalogue could not be read; a bundled or empty catalogue applied.
 pub const MODEL_CATALOGUE_UNAVAILABLE: WarningCode = WarningCode("MODEL_CATALOGUE_UNAVAILABLE");
 /// Quota readiness could not be synchronised with its stored record.
@@ -295,6 +315,11 @@ pub const UPSTREAM_UNRESOLVED: WarningCode = WarningCode("UPSTREAM_UNRESOLVED");
 pub const BRANCH_CONFIG_UNREADABLE: WarningCode = WarningCode("BRANCH_CONFIG_UNREADABLE");
 /// A notes cursor acknowledgement failed; a page may replay.
 pub const NOTES_CURSOR_UNACKNOWLEDGED: WarningCode = WarningCode("NOTES_CURSOR_UNACKNOWLEDGED");
+/// A re-drive offered different evidence; the sealed copy was kept.
+pub const SETTLEMENT_EVIDENCE_REDRIVE_DIFFERS: WarningCode =
+    WarningCode("SETTLEMENT_EVIDENCE_REDRIVE_DIFFERS");
+/// A settlement knob had an unrecognised value, so the shipped default applied.
+pub const SETTLEMENT_POLICY_INVALID: WarningCode = WarningCode("SETTLEMENT_POLICY_INVALID");
 /// A PR journal could not be read; reconciliation covers the gap.
 pub const PR_JOURNAL_UNAVAILABLE: WarningCode = WarningCode("PR_JOURNAL_UNAVAILABLE");
 /// A build context, Git binding or repository was unavailable; build ran locally.
@@ -315,6 +340,8 @@ pub const ARGUMENT_VALUE_SUSPECT: WarningCode = WarningCode("ARGUMENT_VALUE_SUSP
 pub const PRIVATE_CHECK_DIR_UNCLEAN: WarningCode = WarningCode("PRIVATE_CHECK_DIR_UNCLEAN");
 /// A project or its roots could not be resolved for a hook.
 pub const PROJECT_UNAVAILABLE: WarningCode = WarningCode("PROJECT_UNAVAILABLE");
+/// A hook ran past its local budget and was cut short before the host timeout.
+pub const HOOK_BUDGET_OVERRUN: WarningCode = WarningCode("HOOK_BUDGET_OVERRUN");
 /// A check or local gate could not be run.
 pub const CHECK_UNAVAILABLE: WarningCode = WarningCode("CHECK_UNAVAILABLE");
 /// Import pins could not be collected for a project.
@@ -331,6 +358,23 @@ pub const AFFECTED_SELECTION_UNAVAILABLE: WarningCode =
 pub const TEMP_CHECKOUT_RETAINED: WarningCode = WarningCode("TEMP_CHECKOUT_RETAINED");
 /// A smoke-test scratch project binding could not be removed.
 pub const SMOKE_BINDING_RETAINED: WarningCode = WarningCode("SMOKE_BINDING_RETAINED");
+/// The caller project was ignored for hermetic smoke.
+pub const SMOKE_PROJECT_IGNORED: WarningCode = WarningCode("SMOKE_PROJECT_IGNORED");
+/// The retired read-source spelling now falls back to auto.
+pub const READ_SOURCE_VALUE_RENAMED: WarningCode = WarningCode("READ_SOURCE_VALUE_RENAMED");
+/// The peer does not support the smoke fixture protocol.
+pub const SMOKE_PEER_FIXTURE_UNSUPPORTED: WarningCode =
+    WarningCode("SMOKE_PEER_FIXTURE_UNSUPPORTED");
+/// A fixture directory has no ownership marker and was left in place by the sweep.
+pub const SMOKE_FIXTURE_FOREIGN: WarningCode = WarningCode("SMOKE_FIXTURE_FOREIGN");
+/// A pull request wait followed a new head.
+pub const PR_HEAD_FOLLOWED: WarningCode = WarningCode("PR_HEAD_FOLLOWED");
+/// A pull request wait has not yet pinned a head.
+pub const PR_HEAD_UNPINNED: WarningCode = WarningCode("PR_HEAD_UNPINNED");
+/// A local head was requested but the pull request branch has no local tip.
+pub const PR_HEAD_LOCAL_UNAVAILABLE: WarningCode = WarningCode("PR_HEAD_LOCAL_UNAVAILABLE");
+/// A live read source was pinned for a peer.
+pub const READ_SOURCE_PINNED_FOR_PEER: WarningCode = WarningCode("READ_SOURCE_PINNED_FOR_PEER");
 /// A build ledger rotated and some rotation entries expired.
 pub const BUILD_LEDGER_ROTATED: WarningCode = WarningCode("BUILD_LEDGER_ROTATED");
 /// The recent CI duration cache was unavailable; a slower cadence applied.
@@ -380,15 +424,34 @@ pub const RETRY_CREDENTIALS_SKIPPED: WarningCode = WarningCode("RETRY_CREDENTIAL
 /// A route model is a full `ADAPTER/ID` that the effective catalogue does not
 /// know. The declared spelling is preserved; the warning names it.
 pub const ROUTE_MODEL_NOT_CATALOGUED: WarningCode = WarningCode("ROUTE_MODEL_NOT_CATALOGUED");
+/// An overlay entry or adapter selector could not be applied to the capability
+/// matrix; the matrix still reports the compiled facts.
+pub const ADAPTER_CAPABILITIES_OVERLAY: WarningCode = WarningCode("ADAPTER_CAPABILITIES_OVERLAY");
+/// A declaration succeeded but its journal is nearly full. The claim still
+/// succeeds; the named setting is the one to raise.
+pub const DECLARATION_JOURNAL_NEAR_FULL: WarningCode = WarningCode("DECLARATION_JOURNAL_NEAR_FULL");
+
+/// Source label for an observed event whose producer has no narrower provenance.
+pub fn detected_source(code: WarningCode) -> Source {
+    Source {
+        layer: crate::provenance::Layer::Detected,
+        origin: Some(format!("warning:{}", code.as_str())),
+    }
+}
+
+/// Drain warnings emitted without a command sink or an active capture.
+pub fn take_unhandled() -> Vec<Warning> {
+    UNHANDLED.with(|warnings| std::mem::take(&mut *warnings.borrow_mut()))
+}
 
 impl Warning {
-    /// A warning with no subject, source or repair.
-    pub fn new(code: WarningCode, message: impl Into<String>) -> Self {
+    /// A warning with its structured cause.
+    pub fn new(code: WarningCode, message: impl Into<String>, source: Source) -> Self {
         Self {
             code: Cow::Borrowed(code.0),
             message: message.into(),
             subject: None,
-            source: None,
+            source,
             repair: None,
             dedup: Dedup::default(),
         }
@@ -400,9 +463,9 @@ impl Warning {
         self
     }
 
-    /// Name the setting that caused it.
+    /// Replace the initial detected-event source with a more specific cause.
     pub fn source(mut self, source: Source) -> Self {
-        self.source = Some(source);
+        self.source = source;
         self
     }
 
@@ -464,8 +527,8 @@ impl Drop for SinkGuard {
 /// The only way library code reports a warning. Routes to, in order: the
 /// innermost capture on this thread; the process sink the binary installed
 /// for this command (one command per process, so worker threads reach it);
-/// else stderr as `warning: <message>`.
-#[allow(clippy::print_stderr, clippy::disallowed_methods)]
+/// else retains it for the caller to collect with [`take_unhandled`].
+#[allow(clippy::disallowed_methods)]
 pub fn warn(w: Warning) {
     let captured = CAPTURES.with(|captures| {
         let mut stack = captures.borrow_mut();
@@ -485,7 +548,7 @@ pub fn warn(w: Warning) {
         sink.accept(w);
         return;
     }
-    eprintln!("warning: {}", w.message);
+    UNHANDLED.with(|warnings| warnings.borrow_mut().push(w));
 }
 
 /// Thread-local: collects warnings raised on this thread inside `f` (tests, or
@@ -517,14 +580,20 @@ pub fn capture<R>(f: impl FnOnce() -> R) -> (R, Vec<Warning>) {
 
 thread_local! {
     static CAPTURES: RefCell<Vec<Vec<Warning>>> = const { RefCell::new(Vec::new()) };
+    static UNHANDLED: RefCell<Vec<Warning>> = const { RefCell::new(Vec::new()) };
 }
 
 static SINK: RwLock<Option<Arc<dyn Sink>>> = RwLock::new(None);
 
 #[cfg(test)]
 mod tests {
-    use super::{Dedup, NAME_CASE_FOLDED, Sink, Warning, capture, install, warn};
+    use super::{
+        Dedup, NAME_CASE_FOLDED, Sink, Warning, capture, detected_source, install, take_unhandled,
+        warn,
+    };
     use std::sync::{Arc, Mutex};
+
+    static SINK_TEST_LOCK: Mutex<()> = Mutex::new(());
 
     #[derive(Default)]
     struct Recorder {
@@ -553,8 +622,16 @@ mod tests {
             warn(Warning::new(
                 NAME_CASE_FOLDED,
                 "folded `Writer` to `writer`",
+                detected_source(NAME_CASE_FOLDED),
             ));
-            warn(Warning::new(NAME_CASE_FOLDED, "folded `Reader` to `reader`").subject("reader"));
+            warn(
+                Warning::new(
+                    NAME_CASE_FOLDED,
+                    "folded `Reader` to `reader`",
+                    detected_source(NAME_CASE_FOLDED),
+                )
+                .subject("reader"),
+            );
         });
         assert_eq!(warnings.len(), 2);
         assert_eq!(warnings[0].code.as_ref(), NAME_CASE_FOLDED.0);
@@ -563,15 +640,43 @@ mod tests {
 
     /// Spec: docs/specs/cli.md#warnings-are-typed-values
     #[test]
+    fn warning_without_a_sink_is_retained_for_the_caller() {
+        let _lock = SINK_TEST_LOCK.lock().expect("sink test lock");
+        let _ = take_unhandled();
+        warn(Warning::new(
+            NAME_CASE_FOLDED,
+            "folded `Reader` to `reader`",
+            detected_source(NAME_CASE_FOLDED),
+        ));
+        let warnings = take_unhandled();
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings[0].source.layer, crate::provenance::Layer::Detected);
+        assert_eq!(
+            warnings[0].source.origin.as_deref(),
+            Some("warning:NAME_CASE_FOLDED")
+        );
+    }
+
+    /// Spec: docs/specs/cli.md#warnings-are-typed-values
+    #[test]
     fn nested_sinks_restore_the_previous_one() {
+        let _lock = SINK_TEST_LOCK.lock().expect("sink test lock");
         let outer = Arc::new(Recorder::default());
         let inner = Arc::new(Recorder::default());
         let outer_guard = install(outer.clone());
         {
             let _inner_guard = install(inner.clone());
-            warn(Warning::new(NAME_CASE_FOLDED, "inner"));
+            warn(Warning::new(
+                NAME_CASE_FOLDED,
+                "inner",
+                detected_source(NAME_CASE_FOLDED),
+            ));
         }
-        warn(Warning::new(NAME_CASE_FOLDED, "outer"));
+        warn(Warning::new(
+            NAME_CASE_FOLDED,
+            "outer",
+            detected_source(NAME_CASE_FOLDED),
+        ));
         assert_eq!(inner.messages(), ["inner"]);
         assert_eq!(outer.messages(), ["outer"]);
         drop(outer_guard);
@@ -580,15 +685,27 @@ mod tests {
     /// Spec: docs/specs/cli.md#warnings-are-typed-values
     #[test]
     fn a_per_change_key_is_stable_for_equal_content_and_follows_the_subject() {
-        let first = Warning::new(NAME_CASE_FOLDED, "folded")
-            .subject("writer")
-            .once_per_change();
-        let same = Warning::new(NAME_CASE_FOLDED, "folded")
-            .subject("writer")
-            .once_per_change();
-        let other = Warning::new(NAME_CASE_FOLDED, "folded")
-            .subject("reader")
-            .once_per_change();
+        let first = Warning::new(
+            NAME_CASE_FOLDED,
+            "folded",
+            detected_source(NAME_CASE_FOLDED),
+        )
+        .subject("writer")
+        .once_per_change();
+        let same = Warning::new(
+            NAME_CASE_FOLDED,
+            "folded",
+            detected_source(NAME_CASE_FOLDED),
+        )
+        .subject("writer")
+        .once_per_change();
+        let other = Warning::new(
+            NAME_CASE_FOLDED,
+            "folded",
+            detected_source(NAME_CASE_FOLDED),
+        )
+        .subject("reader")
+        .once_per_change();
         assert_eq!(first.dedup, Dedup::PerChange);
         assert_eq!(first.key(), same.key());
         assert_ne!(first.key(), other.key());

@@ -116,12 +116,17 @@ fn config_warning(path: &Path, finding: &Finding) -> provenant_records::Warning 
     use provenant_records::warning::{CONFIG_KEY_IGNORED, CONFIG_MALFORMED};
     let code = match finding.rule.as_str() {
         "unknown_key" => CONFIG_KEY_IGNORED,
+        "read_source_value_renamed" => provenant_records::warning::READ_SOURCE_VALUE_RENAMED,
         _ => CONFIG_MALFORMED,
     };
-    provenant_records::Warning::new(code, finding.message.clone())
-        .subject(format!("{}:{}", path.display(), finding.line))
-        .repair("run `provenant check config --json` and correct the reported setting")
-        .once_per_change()
+    provenant_records::Warning::new(
+        code,
+        finding.message.clone(),
+        provenant_records::warning::detected_source(code),
+    )
+    .subject(format!("{}:{}", path.display(), finding.line))
+    .repair("run `provenant check config --json` and correct the reported setting")
+    .once_per_change()
 }
 
 pub(crate) fn warn_config(path: &Path, finding: &Finding) {
@@ -149,6 +154,7 @@ pub(crate) fn warn_unknown_input_once(
                 "{}: {}: unknown configuration key; ignored",
                 warning.source, warning.key
             ),
+            provenant_records::warning::detected_source(CONFIG_KEY_IGNORED),
         )
         .subject(format!("{}: {}", warning.source, warning.key))
         .repair("remove the unknown key from the host configuration")
@@ -365,6 +371,13 @@ pub fn inspect_config<T: DeserializeOwned + Serialize>(
         Path::new("config.toml"),
         text.as_ref().map(String::as_bytes),
     );
+    let repository_path = roots.checkout().join(".provenant/config.toml");
+    let repository_text = std::fs::read_to_string(&repository_path).ok();
+    evidence.observe(
+        b"repository-config",
+        Path::new(".provenant/config.toml"),
+        repository_text.as_deref().map(str::as_bytes),
+    );
     let input_digest = evidence.finish();
     let inspection = match inspect(text.as_deref(), sections) {
         Ok(inspection) => inspection,
@@ -389,7 +402,35 @@ pub fn inspect_config<T: DeserializeOwned + Serialize>(
         }
         Err(error) => return Err(error),
     };
-    let findings = inspection.snapshot.warnings;
+    let mut findings = inspection.snapshot.warnings;
+    if repository_text
+        .as_deref()
+        .and_then(crate::read_source_value)
+        .as_deref()
+        == Some("checkout")
+    {
+        let relative =
+            provenant_core::RelativePath::parse(".provenant/config.toml").map_err(|source| {
+                ConfigError::PathEncoding {
+                    path: ".provenant/config.toml".into(),
+                    source: source.into(),
+                }
+            })?;
+        findings.push(Finding {
+            rule: "read_source_value_renamed".into(),
+            path: provenant_records::PathWire::from_relative(&relative).map_err(|source| {
+                ConfigError::PathEncoding {
+                    path: ".provenant/config.toml".into(),
+                    source,
+                }
+            })?,
+            line: 1,
+            message: format!(
+                "lanes.read_source=checkout is now live (source: {}); using auto",
+                repository_path.display()
+            ),
+        });
+    }
     Ok(ConfigInspection {
         error: inspection.error,
         check: ConfigCheck {
@@ -725,6 +766,10 @@ fn inspect<T: DeserializeOwned + Serialize>(
         "gc.graph_checkpoint_days",
         "gc.discard_archive_retention",
         "gc.cargo_target_idle",
+        "gc.attempt_scratch_max",
+        "gc.scratch_grace",
+        "gc.preview_budget",
+        "gc.scratch_warning_share",
         "gc.free_floor",
         "gc.critical_free",
         "gc.alert_below",
@@ -781,6 +826,8 @@ fn inspect<T: DeserializeOwned + Serialize>(
             "clean_config",
             "profile",
             "out_of_scope_pin",
+            "version_probe",
+            "version_probe_timeout_seconds",
         ] {
             origins.insert(format!("providers.{provider}.{field}"), compiled.clone());
         }
@@ -1475,6 +1522,17 @@ fn issue_finding(issue: &Issue) -> Result<Finding, ConfigError> {
             line: issue.location.line,
             message: format!(
                 "{key}: invalid configuration in an unused domain; run `provenant check config --json` to inspect it"
+            ),
+        });
+    }
+    if issue.rule == "read_source_value_renamed" {
+        return Ok(Finding {
+            rule: issue.rule.into(),
+            path: user_path()?,
+            line: issue.location.line,
+            message: format!(
+                "lanes.read_source=checkout is now live (source: config.toml, {}); using auto",
+                issue.location.key_path
             ),
         });
     }
@@ -2723,7 +2781,7 @@ mod warning_tests {
 
     #[test]
     fn answer_delivery_hook_arguments_are_identified() {
-        let claude = provenant_records::Harness::Claude.spec().name;
+        let claude = provenant_records::Harness::Claude.spec().identity.name;
         for command in [
             provenant_records::HookAction::PreToolUse.command(),
             provenant_records::HookAction::PostToolUse.command(),

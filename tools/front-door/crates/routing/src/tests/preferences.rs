@@ -78,11 +78,20 @@ fn mixed_capability_pool_filters_before_drawing_and_explicit_routes_refuse()
         ],
     );
     let narrow = AdapterSpec {
-        skills: None,
-        launch: LaunchCapabilities {
-            write: false,
-            network: &[NetworkAccess::Provider],
+        launch: provenant_records::AdapterLaunch {
+            skill_location: None,
             ..ADAPTER_SPECS[2].launch
+        },
+        capabilities: provenant_records::Capabilities {
+            launch: LaunchCapabilities {
+                write: provenant_records::AdapterFact::unsupported(
+                    "fixture has no write",
+                    provenant_records::ADAPTER_ROW_SOURCE,
+                ),
+                network: &[NetworkAccess::Provider],
+                ..ADAPTER_SPECS[2].capabilities.launch
+            },
+            ..ADAPTER_SPECS[2].capabilities
         },
         ..ADAPTER_SPECS[2]
     };
@@ -129,8 +138,14 @@ fn mixed_capability_pool_filters_before_drawing_and_explicit_routes_refuse()
         assert_eq!(
             query
                 .intent
-                .check_launch(&narrow, "gpt-5.3-codex-low", None)
-                .is_ok(),
+                .check_launch(
+                    &narrow,
+                    "gpt-5.3-codex-low",
+                    None,
+                    provenant_records::GapPolicy::default(),
+                )
+                .refusal()
+                .is_none(),
             expected == "cursor"
         );
         let selected = resolve(&query, &ctx)?;
@@ -159,6 +174,266 @@ fn mixed_capability_pool_filters_before_drawing_and_explicit_routes_refuse()
             expected == "codex"
         );
     }
+    Ok(())
+}
+
+#[test]
+fn a_declared_model_gap_makes_the_candidate_ineligible_and_the_pool_falls_back()
+-> Result<(), Box<dyn std::error::Error>> {
+    use provenant_records::{ADAPTER_ROW_SOURCE, AdapterFact, AdapterSpec};
+    let catalogue = Catalogue::bundled()?;
+    let mut config = RoutingConfig::default();
+    config.pools.insert(
+        "model-gap".into(),
+        vec![
+            RoutePoolMember {
+                model: ModelId::parse("codex/gpt-6-luna")?,
+                weight: 1,
+                effort: None,
+                efforts: vec![],
+                free: false,
+            },
+            RoutePoolMember {
+                model: ModelId::parse("cursor/composer-2.5")?,
+                weight: 0,
+                effort: None,
+                efforts: vec![],
+                free: false,
+            },
+        ],
+    );
+    // A command-style row that declares no model control.
+    let mut no_model = *AdapterSpec::get("codex").unwrap();
+    no_model.capabilities.launch.model =
+        AdapterFact::unsupported("no model control", ADAPTER_ROW_SOURCE);
+    let lookup = |adapter: &str| {
+        if adapter == "codex" {
+            Some(no_model)
+        } else {
+            AdapterSpec::get(adapter).copied()
+        }
+    };
+    let codex = availability();
+    let cursor = AvailabilityRecord {
+        adapter: "cursor".into(),
+        ..availability()
+    };
+    let records = [codex, cursor];
+    let access = [
+        AccessContext {
+            adapter: "codex",
+            disclosure_ref: "policy",
+            confinement_ref: "grant",
+        },
+        AccessContext {
+            adapter: "cursor",
+            disclosure_ref: "policy",
+            confinement_ref: "grant",
+        },
+    ];
+    let mut ctx = context(&catalogue, &config, now()?);
+    ctx.launch_specs = Some(&lookup);
+    ctx.availability = &records;
+    ctx.access = &access;
+    let mut query = request("cursor/composer-2.5")?;
+    query.choice = RouteChoice::NamedRoute(RouteName::parse("model-gap")?);
+    let selected = resolve(&query, &ctx)?;
+    assert_eq!(selected.adapter, "cursor");
+    let receipt = selected.pool_selection.ok_or("pool selection")?;
+    assert!(
+        receipt
+            .candidates
+            .iter()
+            .any(|candidate| candidate.model.starts_with("codex/")
+                && candidate.exclusion.is_some())
+    );
+    // The same gap on an exact pin has nowhere to move, so it reports.
+    query.choice = RouteChoice::Model(ModelId::parse("codex/gpt-6-luna")?);
+    assert!(matches!(
+        resolve(&query, &ctx),
+        Err(RoutingError::UnsupportedLaunch(_))
+    ));
+    Ok(())
+}
+
+#[test]
+fn an_exact_pin_drops_an_undeclared_effort_with_a_sourced_warning()
+-> Result<(), Box<dyn std::error::Error>> {
+    use provenant_records::{ADAPTER_ROW_SOURCE, AdapterFact, AdapterSpec};
+    let catalogue = Catalogue::bundled()?;
+    let config = RoutingConfig::default();
+    let mut no_effort = *AdapterSpec::get("codex").unwrap();
+    no_effort.capabilities.launch.effort =
+        AdapterFact::unsupported("no effort control", ADAPTER_ROW_SOURCE);
+    let lookup = |adapter: &str| {
+        if adapter == "codex" {
+            Some(no_effort)
+        } else {
+            AdapterSpec::get(adapter).copied()
+        }
+    };
+    let records = [availability()];
+    let access = [AccessContext {
+        adapter: "codex",
+        disclosure_ref: "policy",
+        confinement_ref: "grant",
+    }];
+    let mut ctx = context(&catalogue, &config, now()?);
+    ctx.launch_specs = Some(&lookup);
+    ctx.availability = &records;
+    ctx.access = &access;
+    let mut query = request("codex/gpt-6-luna")?;
+    query.effort = Some("high".into());
+    let route = resolve(&query, &ctx)?;
+    assert!(route.effort.is_none());
+    let warning = route.diagnostics.effort_warning.ok_or("effort warning")?;
+    // Invariant: an exact pin with an effort gap drops the control but keeps
+    // the requested selector, declaration source and reason in the warning.
+    assert_eq!(warning.requested, "high");
+    assert!(warning.applied.is_none());
+    assert_eq!(warning.source, ADAPTER_ROW_SOURCE);
+    assert_eq!(warning.reason, "no effort control");
+    Ok(())
+}
+
+#[test]
+fn an_adapter_entry_can_refuse_an_exact_pin_effort_gap() -> Result<(), Box<dyn std::error::Error>> {
+    use provenant_records::{
+        ADAPTER_ROW_SOURCE, AdapterFact, AdapterOverride, AdapterSpec, CapabilityOverlay,
+        GapAction, LaunchField, Layer, Source,
+    };
+    let catalogue = Catalogue::bundled()?;
+    let config = RoutingConfig {
+        capability_overlay: CapabilityOverlay {
+            entries: vec![AdapterOverride {
+                adapter: "codex".into(),
+                disable: vec![],
+                reason: Some("owner requires an effort control".into()),
+                on_gap: vec![(LaunchField::Effort, GapAction::Refuse)],
+                source: Source {
+                    layer: Layer::Project,
+                    origin: Some(".provenant/config.toml#adapter_capabilities".into()),
+                },
+            }],
+        },
+        ..RoutingConfig::default()
+    };
+    let mut no_effort = *AdapterSpec::get("codex").unwrap();
+    no_effort.capabilities.launch.effort =
+        AdapterFact::unsupported("no effort control", ADAPTER_ROW_SOURCE);
+    let lookup = |adapter: &str| {
+        if adapter == "codex" {
+            Some(no_effort)
+        } else {
+            AdapterSpec::get(adapter).copied()
+        }
+    };
+    let records = [availability()];
+    let access = [AccessContext {
+        adapter: "codex",
+        disclosure_ref: "policy",
+        confinement_ref: "grant",
+    }];
+    let mut ctx = context(&catalogue, &config, now()?);
+    ctx.launch_specs = Some(&lookup);
+    ctx.availability = &records;
+    ctx.access = &access;
+    let mut query = request("codex/gpt-6-luna")?;
+    query.effort = Some("high".into());
+    let error = match resolve(&query, &ctx) {
+        Err(RoutingError::UnsupportedLaunch(error)) => error,
+        _ => panic!("an owner refuse gap must reject the exact pin"),
+    };
+    assert!(error.contains("no effort control"));
+    assert!(
+        error.contains(
+            "action set by .provenant/config.toml#adapter_capabilities[adapter=codex].on_gap.effort (project)"
+        ),
+        "{error}"
+    );
+    Ok(())
+}
+
+#[test]
+fn an_off_effort_gap_drops_the_selector_without_a_warning() -> Result<(), Box<dyn std::error::Error>>
+{
+    use provenant_records::{ADAPTER_ROW_SOURCE, AdapterFact, AdapterSpec, policy::Strength};
+    let catalogue = Catalogue::bundled()?;
+    let mut config = RoutingConfig::default();
+    let rule = config
+        .launch_policy
+        .rules
+        .iter_mut()
+        .find(|entry| entry.rule.code == "LAUNCH_EFFORT_UNSUPPORTED")
+        .ok_or("LAUNCH_EFFORT_UNSUPPORTED is declared")?;
+    rule.rule.strength = Strength::Off;
+    let mut no_effort = *AdapterSpec::get("codex").unwrap();
+    no_effort.capabilities.launch.effort =
+        AdapterFact::unsupported("no effort control", ADAPTER_ROW_SOURCE);
+    let lookup = |adapter: &str| {
+        if adapter == "codex" {
+            Some(no_effort)
+        } else {
+            AdapterSpec::get(adapter).copied()
+        }
+    };
+    let records = [availability()];
+    let access = [AccessContext {
+        adapter: "codex",
+        disclosure_ref: "policy",
+        confinement_ref: "grant",
+    }];
+    let mut ctx = context(&catalogue, &config, now()?);
+    ctx.launch_specs = Some(&lookup);
+    ctx.availability = &records;
+    ctx.access = &access;
+    let mut query = request("codex/gpt-6-luna")?;
+    query.effort = Some("high".into());
+    let route = resolve(&query, &ctx)?;
+    assert!(route.effort.is_none());
+    assert!(route.diagnostics.effort_warning.is_none());
+    Ok(())
+}
+
+#[test]
+fn a_disabled_write_fact_refuses_with_the_overlay_source() -> Result<(), Box<dyn std::error::Error>>
+{
+    use provenant_records::{
+        AdapterOverride, CapabilityOverlay, Layer, OVERLAY_SOURCE, OverridableCapability, Source,
+    };
+    let catalogue = Catalogue::bundled()?;
+    let config = RoutingConfig {
+        capability_overlay: CapabilityOverlay {
+            entries: vec![AdapterOverride {
+                adapter: "codex".into(),
+                disable: vec![OverridableCapability::Write],
+                reason: None,
+                on_gap: vec![],
+                source: Source {
+                    layer: Layer::Project,
+                    origin: None,
+                },
+            }],
+        },
+        ..RoutingConfig::default()
+    };
+    let records = [availability()];
+    let access = [AccessContext {
+        adapter: "codex",
+        disclosure_ref: "policy",
+        confinement_ref: "grant",
+    }];
+    let mut ctx = context(&catalogue, &config, now()?);
+    ctx.availability = &records;
+    ctx.access = &access;
+    let mut query = request("codex/gpt-6-luna")?;
+    query.intent.writes = true;
+    let error = match resolve(&query, &ctx) {
+        Err(RoutingError::UnsupportedLaunch(error)) => error,
+        _ => panic!("a disabled write fact must refuse the route"),
+    };
+    assert!(error.contains("write"));
+    assert!(error.contains(OVERLAY_SOURCE));
     Ok(())
 }
 
@@ -195,7 +470,7 @@ fn image_input_preference_keeps_pool_weights_and_falls_back()
         );
         let lookup = |adapter: &str| {
             let mut spec = *AdapterSpec::get(adapter)?;
-            spec.launch.image_input = match adapter {
+            spec.capabilities.launch.image_input.value = match adapter {
                 "cursor" => cursor_image,
                 "codex" => codex_image,
                 _ => false,
@@ -770,7 +1045,13 @@ fn known_quota_offers_withhold_an_unoffered_agy_account_unpinned()
     }
     // The isolated account has no usage probe: its availability offer list is
     // empty, but its quota snapshot records which models it actually offers.
-    let availability = [agy_account("home-agy"), agy_account("isolated-agy")];
+    let availability = [
+        agy_account("home-agy"),
+        provenant_providers::AvailabilityRecord {
+            observed_unix_seconds: 90,
+            ..agy_account("isolated-agy")
+        },
+    ];
     let account_with_offers = |key: &str, models: &[&str]| {
         let scope = provenant_quota::AccountScope {
             extra: Default::default(),
@@ -1191,5 +1472,92 @@ fn resolve_selection_line_names_the_pinned_account() -> Result<(), Box<dyn std::
             .any(|row| row.account.as_deref() == Some("isolated-agy")),
         "the pinned account must appear on the selection line: {rows:?}"
     );
+    Ok(())
+}
+
+// Spec: docs/specs/routing.md#provider-model-discovery
+#[test]
+fn one_offer_owner_reports_source_age_and_supersedence() -> Result<(), Box<dyn std::error::Error>> {
+    let catalogue = Catalogue::bundled()?;
+    let config = RoutingConfig::default();
+    let model = ModelId::parse("agy/gemini-3.8-flash")?;
+    let probe = provenant_providers::AvailabilityRecord {
+        observed_models: vec!["gemini-3.8-flash".into(), "gemini-4-neon".into()],
+        observed_unix_seconds: 90,
+        ..agy_account("owner-agy")
+    };
+    let ctx = context(&catalogue, &config, now()?);
+    let policy = ctx.offer_policy();
+    let allowed = recorded_offer_models(
+        policy.inputs(Some(&probe), "agy", "owner-agy"),
+        &model,
+        &catalogue,
+        OfferSupersedence::Allow,
+    )
+    .expect("a fresh probe is offer evidence");
+    assert_eq!(allowed.source, OfferSource::Probe);
+    assert_eq!(allowed.age_seconds, 10);
+    assert!(
+        allowed.serves,
+        "a listed model is never refused because its successor is listed"
+    );
+
+    let withheld = recorded_offer_models(
+        policy.inputs(Some(&probe), "agy", "owner-agy"),
+        &model,
+        &catalogue,
+        OfferSupersedence::Withhold,
+    )
+    .expect("the same probe under the selection policy");
+    assert!(
+        !withheld.serves,
+        "selection withholds a superseded member whose successor is offered"
+    );
+
+    // A probe that ran but listed nothing defers to a fresh snapshot, whose own
+    // observation time is the age carried by the refusal.
+    let unprobed = provenant_providers::AvailabilityRecord {
+        observed_models: Vec::new(),
+        observed_unix_seconds: 90,
+        ..agy_account("owner-agy")
+    };
+    let scope = provenant_quota::AccountScope {
+        extra: Default::default(),
+        adapter: "agy".into(),
+        account_key: "owner-agy".into(),
+        label: "owner-agy".into(),
+    };
+    let mut record = provenant_quota::AccountRecord::empty(scope.clone());
+    record.snapshot = Some(provenant_quota::QuotaSnapshot {
+        extra: Default::default(),
+        schema_version: 1,
+        account: scope,
+        revision: 1,
+        status: provenant_quota::QuotaStatus::Available,
+        observed_unix_seconds: 80,
+        source_ref: "fixture".into(),
+        authority_ref: None,
+        details: Some(provenant_quota::QuotaDetails {
+            extra: Default::default(),
+            models: vec!["gemini-3.8-flash".into()],
+            ..Default::default()
+        }),
+        windows: Vec::new(),
+    });
+    let accounts = [record];
+    let ctx = RoutingContext {
+        accounts: &accounts,
+        ..context(&catalogue, &config, now()?)
+    };
+    let policy = ctx.offer_policy();
+    let snapshot = recorded_offer_models(
+        policy.inputs(Some(&unprobed), "agy", "owner-agy"),
+        &model,
+        &catalogue,
+        OfferSupersedence::Allow,
+    )
+    .expect("a fresh snapshot serves when the probe listed nothing");
+    assert_eq!(snapshot.source, OfferSource::Snapshot);
+    assert_eq!(snapshot.age_seconds, 20, "the snapshot owns its age");
     Ok(())
 }

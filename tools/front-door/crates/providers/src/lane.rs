@@ -76,7 +76,7 @@ impl crate::LaunchSpec {
     }
     /// Restore selected environment before the provider starts a shell command.
     pub fn configure_shell(&mut self, scratch: &Path, adapter: &provenant_records::AdapterSpec) {
-        let Some((relative, selector)) = adapter.shell_prefix else {
+        let Some((relative, selector)) = adapter.launch.shell_prefix else {
             return;
         };
         let path = scratch.join(relative);
@@ -463,7 +463,7 @@ pub(crate) fn git_wrapper(git: &Path, options: &GitWrapper) -> Result<Vec<u8>, P
             ProviderError::InvalidPath,
         )
     };
-    let mut bytes = b"#!/bin/sh\n".to_vec();
+    let mut bytes = b"#!/bin/sh\nunset LEFTHOOK\n".to_vec();
     if options.scrub {
         if let Some(bound) = &options.bound {
             let exports = bound_exports(bound).map_err(|_| {
@@ -523,6 +523,50 @@ pub(crate) fn git_wrapper(git: &Path, options: &GitWrapper) -> Result<Vec<u8>, P
     bytes.push(b'\n');
     bytes.extend_from_slice(
         br#"
+_provenant_git_is_hooks_path_config() {
+    case "$1" in
+        [cC][oO][rR][eE].[hH][oO][oO][kK][sS][pP][aA][tT][hH]|[cC][oO][rR][eE].[hH][oO][oO][kK][sS][pP][aA][tT][hH]=*) return 0 ;;
+    esac
+    return 1
+}
+
+_provenant_git_refuse_hook_bypass() {
+    printf '%s\n' 'Warning: Git hook bypass requested; hooks-are-part-of-push applies.' >&2
+    printf '%s\n' 'Refusing Git hook bypass; hooks are part of commit and push (rule: hooks-are-part-of-push).' >&2
+    exit 2
+}
+
+_provenant_git_check_hook_bypass() {
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --) return ;;
+            --no-verify) _provenant_git_refuse_hook_bypass ;;
+            -c|--config-env)
+                shift
+                if [ "$#" -gt 0 ] && _provenant_git_is_hooks_path_config "$1"; then
+                    _provenant_git_refuse_hook_bypass
+                fi ;;
+            -c?*)
+                _provenant_git_config=${1#-c}
+                if _provenant_git_is_hooks_path_config "$_provenant_git_config"; then
+                    _provenant_git_refuse_hook_bypass
+                fi ;;
+            --config-env=*)
+                _provenant_git_config=${1#--config-env=}
+                if _provenant_git_is_hooks_path_config "$_provenant_git_config"; then
+                    _provenant_git_refuse_hook_bypass
+                fi ;;
+        esac
+        # A trailing -c/--config-env has no value to walk past. dash treats a
+        # shift past the last argument as a fatal error, which would abort the
+        # wrapper and hide the Git command from the lane.
+        [ "$#" -gt 0 ] || break
+        shift
+    done
+}
+
+_provenant_git_check_hook_bypass "$@"
+
 _provenant_git_retry_safe() {
     [ "$#" -gt 0 ] || return 1
     _provenant_git_explicit_config=0
@@ -656,8 +700,11 @@ _provenant_git_retryable_lock() {
             *) _provenant_git_cwd=$(pwd -P) || return 1
                _provenant_git_common=$_provenant_git_cwd/$_provenant_git_common ;;
         esac
+        # A bound lane pins GIT_INDEX_FILE in the common dir while its git-dir
+        # is the linked-worktree registration.
         case "$_provenant_git_command:$_provenant_git_lock_path" in
             add:"$_provenant_git_dir"/index.lock|commit:"$_provenant_git_dir"/index.lock) ;;
+            add:"$_provenant_git_common"/index.lock|commit:"$_provenant_git_common"/index.lock) ;;
             update-ref:"$_provenant_git_dir"/refs/*.lock|update-ref:"$_provenant_git_common"/refs/*.lock) ;;
             *) return 1 ;;
         esac
@@ -1188,6 +1235,22 @@ const UNBOUND: [&str; 9] = [
 mod tests {
     use super::*;
 
+    /// Mirror the host's linked-worktree registration for a private Git store
+    /// that a fixture initialises directly.
+    fn lane_registration(common: &Path, worktree: &Path) -> std::io::Result<()> {
+        let registration = common
+            .join(provenant_core::LANE_GIT_WORKTREES_DIR)
+            .join(provenant_core::LANE_GIT_REGISTRATION);
+        std::fs::create_dir_all(&registration)?;
+        std::fs::copy(common.join("HEAD"), registration.join("HEAD"))?;
+        std::fs::write(registration.join("commondir"), b"../..\n")?;
+        std::fs::write(
+            registration.join("gitdir"),
+            format!("{}\n", worktree.join(".git").display()),
+        )?;
+        Ok(())
+    }
+
     fn test_hooks_path_reader(directory: &Path) -> std::io::Result<PathBuf> {
         use std::os::unix::fs::PermissionsExt;
 
@@ -1232,8 +1295,10 @@ mod tests {
             .collect();
         let declared: BTreeSet<_> = provenant_records::ADAPTER_SPECS
             .iter()
-            .filter(|spec| spec.install.is_some() || spec.named_entry == NamedEntry::Command)
-            .map(|spec| spec.name)
+            .filter(|spec| {
+                spec.install.is_some() || spec.identity.named_entry == NamedEntry::Command
+            })
+            .map(|spec| spec.identity.name)
             .collect();
         assert_eq!(implemented, declared);
     }
@@ -1363,6 +1428,87 @@ mod tests {
                 .unwrap()
                 .contains("GIT_EXEC_PATH")
         );
+    }
+
+    #[test]
+    #[allow(clippy::disallowed_methods)]
+    fn git_wrapper_keeps_hooks_enabled_and_rejects_bypass_options()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir()?;
+        let git = dir.path().join("git");
+        let wrapper = dir.path().join("git-wrapper");
+        std::fs::write(&git, b"#!/bin/sh\nprintf '%s\\n' \"${LEFTHOOK-unset}\"\n")?;
+        std::fs::set_permissions(&git, std::fs::Permissions::from_mode(0o700))?;
+        std::fs::write(&wrapper, git_wrapper(&git, &GitWrapper::default())?)?;
+        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o700))?;
+
+        let run = |args: &[&str]| {
+            provenant_os::fixture::git_command_at(&wrapper)
+                .args(args)
+                .env_clear()
+                .env("PATH", "/usr/bin:/bin")
+                .env("LEFTHOOK", "1")
+                .output()
+        };
+        let allowed = run(&["version"])?;
+        assert!(allowed.status.success());
+        assert_eq!(allowed.stdout, b"unset\n");
+        let pathspec = run(&["commit", "--", "--no-verify"])?;
+        assert!(pathspec.status.success());
+
+        for args in [
+            vec!["--no-verify", "commit"],
+            vec!["push", "--no-verify"],
+            vec!["-c", "core.hooksPath=/tmp/hooks", "status"],
+            vec!["-ccore.hooksPath=/tmp/hooks", "status"],
+            vec!["--config-env=core.hooksPath=HOOKS", "status"],
+        ] {
+            let refused = run(&args)?;
+            assert_eq!(refused.status.code(), Some(2), "{args:?}");
+            let stderr = String::from_utf8_lossy(&refused.stderr);
+            let warning = stderr
+                .find("Warning: Git hook bypass requested")
+                .ok_or("missing hook bypass warning")?;
+            let refusal = stderr
+                .find("rule: hooks-are-part-of-push")
+                .ok_or("missing hook bypass rule")?;
+            assert!(warning < refusal, "warning must precede refusal: {stderr}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    #[allow(clippy::disallowed_methods)]
+    fn git_wrapper_scans_a_trailing_config_option_without_aborting()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir()?;
+        let git = dir.path().join("git");
+        let wrapper = dir.path().join("git-wrapper");
+        std::fs::write(&git, b"#!/bin/sh\nprintf '%s\\n' \"$*\"\n")?;
+        std::fs::set_permissions(&git, std::fs::Permissions::from_mode(0o700))?;
+        std::fs::write(&wrapper, git_wrapper(&git, &GitWrapper::default())?)?;
+        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o700))?;
+        let run = |args: &[&str]| {
+            provenant_os::fixture::git_command_at(&wrapper)
+                .args(args)
+                .env_clear()
+                .env("PATH", "/usr/bin:/bin")
+                .output()
+        };
+        // A value-taking option with no value still reaches Git: the scan must
+        // stop, not shift past the end of the argument list (dash exits there).
+        for args in [vec!["-c"], vec!["--config-env"]] {
+            let output = run(&args)?;
+            assert!(output.status.success(), "{args:?}");
+            assert_eq!(output.stdout, format!("{}\n", args.join(" ")).into_bytes());
+        }
+        // Consuming a real value must not skip a later bypass flag.
+        let refused = run(&["-c", "a=b", "--no-verify", "commit"])?;
+        assert_eq!(refused.status.code(), Some(2));
+        Ok(())
     }
 
     #[test]
@@ -1720,6 +1866,7 @@ mod tests {
         };
         init(&repo, false)?;
         init(&scratch.join("git-common"), true)?;
+        lane_registration(&scratch.join("git-common"), &repo)?;
         fs::create_dir_all(scratch.join("git-objects"))?;
         {
             use std::io::Write as _;
@@ -1758,7 +1905,7 @@ mod tests {
             .ok_or("adapter")?;
         let base = crate::tests::fixture_access_plan(
             crate::Access::WorktreeWrite,
-            provenant_records::AdapterSpec::get(adapter).and_then(|s| s.authentication),
+            provenant_records::AdapterSpec::get(adapter).and_then(|s| s.login.authentication),
             false,
         );
         let mut permissions = base.permissions().clone();
@@ -2066,6 +2213,7 @@ mod tests {
             }
         }
         init(&sibling_scratch.join("git-common"), true)?;
+        lane_registration(&sibling_scratch.join("git-common"), &repo)?;
         fs::create_dir_all(sibling_scratch.join("git-objects/info"))?;
         fs::write(
             sibling_scratch.join("git-objects/info/alternates"),
@@ -2296,8 +2444,10 @@ mod tests {
         assert!(
             !provenant_records::AdapterSpec::get("command")
                 .expect("command")
+                .capabilities
                 .launch
                 .write
+                .value
         );
     }
 
@@ -2495,8 +2645,10 @@ mod tests {
                 assert!(
                     !provenant_records::AdapterSpec::get(id)
                         .expect("registered adapter spec")
+                        .capabilities
                         .launch
                         .write
+                        .value
                 );
                 continue;
             }
@@ -2504,7 +2656,7 @@ mod tests {
             route.account_key = None;
             let plan = crate::tests::fixture_access_plan(
                 access,
-                provenant_records::AdapterSpec::get(id).and_then(|spec| spec.authentication),
+                provenant_records::AdapterSpec::get(id).and_then(|spec| spec.login.authentication),
                 false,
             );
             let mut spec = entry.adapter.prepare(crate::tests::fixture_input(

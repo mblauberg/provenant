@@ -1,5 +1,21 @@
 include!("interface_implement_invariants.rs");
 #[test]
+fn route_overrides_skip_host_owned_delivery_nodes() {
+    use provenant_fabric_runtime::graph::GraphNode;
+    let choice = super::RouteChoice::parse(&json!("writer=junior")).unwrap();
+    for kind in ["hygiene", "publish"] {
+        let mut node: GraphNode = serde_json::from_value(json!({
+            "id":kind, "kind":kind, "access":"worktree_write", "worktree":"retained"
+        }))
+        .unwrap();
+        super::override_tier(&mut node, &choice);
+        super::override_launch(&mut node, &json!({"model":"openai/gpt-5"})).unwrap();
+        assert!(node.route.is_none());
+        assert!(node.routes.is_none());
+    }
+}
+
+#[test]
 fn tier_override_preserves_leaf_family_constraints() {
     use provenant_fabric_runtime::graph::GraphNode;
     let override_route = super::RouteChoice::Alias("senior".into());
@@ -795,7 +811,7 @@ fn tightened_retry_limit_preserves_the_checkpoint_envelope() -> Result {
     let mut target = factory
         .graph_target("g-test/reader")?
         .ok_or("retry target")?;
-    factory.prepare_retry(&mut target, &request, &document, &mut staged)?;
+    factory.prepare_retry_inner(&mut target, &request, &document, &mut staged, None)?;
     provenant_fabric_runtime::graph::admit_candidate(
         &document,
         Some(&staged),
@@ -952,7 +968,7 @@ fn branch_control_uses_the_project_worktree_layout() -> Result {
 }
 
 #[test]
-fn branch_without_base_uses_the_remote_default_branch() -> Result {
+fn branch_without_base_defers_to_the_writer_base_knob() -> Result {
     let mut node = json!({"use":"task"});
     bind_launch_controls(
         &json!({"branch":"topic"}),
@@ -961,10 +977,7 @@ fn branch_without_base_uses_the_remote_default_branch() -> Result {
         &provenant_config::PortTable::builtin(),
     )?;
     assert_eq!(node["worktree"], "/repo/.worktrees/topic");
-    assert_eq!(
-        node["attempt"]["new_worktree"]["base"],
-        "refs/remotes/origin/HEAD"
-    );
+    assert_eq!(node["attempt"]["new_worktree"]["base"], "HEAD");
     assert_eq!(node["attempt"]["new_worktree"]["default_base"], true);
     let mut explicit = json!({"use":"task"});
     bind_launch_controls(
@@ -1121,7 +1134,8 @@ fn review_fallback_warns_range_and_keeps_empty_context_free() -> Result {
     let input = json!({"op":"run","template":"review.correctness","brief":"Review","explain":true});
     let response = factory.graph_document(input.clone(), budget, &cancel)?;
     assert!(response["document"]["review_base"].is_null());
-    assert_eq!(response["document"]["review_subject_missing"], true);
+    // The admitted subject is authoritative; with no parent its base is absent.
+    assert!(response["document"]["subject"]["base"].is_null());
     let child = factory
         .child_request(&input)?
         .launch
@@ -1158,7 +1172,7 @@ fn review_fallback_warns_range_and_keeps_empty_context_free() -> Result {
             .any(|warning| {
                 warning.as_str().is_some_and(|warning| {
                     warning.contains(&format!("{base}...{head}"))
-                        && warning.contains("first parent")
+                        && warning.contains("checkout HEAD's parent")
                 })
             })
     );
@@ -1199,6 +1213,10 @@ fn review_pr_pins_merge_branch_from_any_launch_checkout() -> Result {
     git(&["add", "later.txt"])?;
     git(&["commit", "-m", "later main"])?;
     let base = git(&["rev-parse", "HEAD"])?;
+    // The head is behind the base: the review starts at their merge base, so
+    // the later base commit never reads as a revert in the review diff.
+    let merge_base = git(&["merge-base", &head, &base])?;
+    assert_ne!(merge_base, base);
     let metadata = rig.root.join("pull.json");
     std::fs::write(
         &metadata,
@@ -1261,7 +1279,7 @@ fn review_pr_pins_merge_branch_from_any_launch_checkout() -> Result {
             let request =
                 json!({"op":"run","template":template,"brief":"Review","pr":7,"explain":true});
             let response = factory.graph_document(request.clone(), budget, &cancel)?;
-            assert_eq!(response["document"]["review_base"], base);
+            assert_eq!(response["document"]["review_base"], merge_base);
             let frame = factory.relay_document(&request, budget, &cancel)?;
             assert_eq!(frame["op"], "run");
             assert_eq!(frame["input"]["pr"], 7);
@@ -1292,7 +1310,7 @@ fn review_pr_pins_merge_branch_from_any_launch_checkout() -> Result {
                 &Workers,
             )
             .map_err(|error| format!("host preparation: {error:?}"))?;
-            assert_eq!(prepared["launch"]["node"]["review_base"], base);
+            assert_eq!(prepared["launch"]["node"]["review_base"], merge_base);
             if checkout == "main" && template == "review.correctness" {
                 let repeated = super::super::read_lane_graph(
                     &holder,
@@ -1324,7 +1342,7 @@ fn review_pr_pins_merge_branch_from_any_launch_checkout() -> Result {
                 launch["explain"] = json!(false);
                 launch["name"] = json!("review-receipt-pin");
                 let receipt = factory.graph_document(launch, budget, &cancel)?;
-                assert_eq!(receipt["review_subject"]["base"], base);
+                assert_eq!(receipt["review_subject"]["base"], merge_base);
                 assert_eq!(receipt["review_subject"]["head"], head);
             }
             let document: GraphDocument = serde_json::from_value(response["document"].clone())?;
@@ -1341,10 +1359,10 @@ fn review_pr_pins_merge_branch_from_any_launch_checkout() -> Result {
             assert_ne!(child.id, another.id);
             assert_ne!(child.idempotency_key, another.idempotency_key);
             let child_node = child.launch.ok_or("missing launch")?.node;
-            assert_eq!(child_node["review_base"], base);
+            assert_eq!(child_node["review_base"], merge_base);
             let git_path = provenant_os::git::git_executable().ok_or("Git unavailable")?;
             let context =
-                provenant_run::review_diff_context_at(&git_path, &rig.project, &base, &head)?;
+                provenant_run::review_diff_context_at(&git_path, &rig.project, &merge_base, &head)?;
             assert_eq!(context.paths, ["feature.txt"]);
         }
         // `--pr` against a template with no review range is advisory
@@ -1389,41 +1407,52 @@ fn review_pr_pins_merge_branch_from_any_launch_checkout() -> Result {
 }
 
 #[test]
-fn review_ref_binds_tip_until_launch() -> Result {
+fn review_ref_binds_its_merge_base_until_launch() -> Result {
     if super::super::peer_tests::host_test(
-        "fabric::interface::tests::review_ref_binds_tip_until_launch",
+        "fabric::interface::tests::review_ref_binds_its_merge_base_until_launch",
     )? {
         return Ok(());
     }
     let rig = crate::worktree_tests::repository()?;
-    let base = crate::worktree_tests::git(&rig, &["rev-parse", "HEAD"])?;
-    crate::worktree_tests::git(&rig, &["checkout", "-b", "review-subject"])?;
-    crate::worktree_tests::git(&rig, &["commit", "--allow-empty", "-m", "subject"])?;
-    let head = crate::worktree_tests::git(&rig, &["rev-parse", "HEAD"])?;
-    crate::worktree_tests::git(&rig, &["checkout", "-b", "review-target", &base])?;
-    crate::worktree_tests::git(&rig, &["commit", "--allow-empty", "-m", "target advanced"])?;
-    let tip = crate::worktree_tests::git(&rig, &["rev-parse", "HEAD"])?;
+    let git = |args: &[&str]| crate::worktree_tests::git(&rig, args);
+    let base = git(&["rev-parse", "HEAD"])?;
+    git(&["checkout", "-b", "review-subject"])?;
+    git(&["commit", "--allow-empty", "-m", "first subject commit"])?;
+    let first = git(&["rev-parse", "HEAD"])?;
+    git(&["commit", "--allow-empty", "-m", "subject"])?;
+    let head = git(&["rev-parse", "HEAD"])?;
+    git(&["checkout", "-b", "review-target", &base])?;
+    git(&["commit", "--allow-empty", "-m", "target advanced"])?;
+    let tip = git(&["rev-parse", "HEAD"])?;
     let factory = factory(&rig)?;
     let cancel = CancelToken::new();
     let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
     let input = json!({"op":"run","name":"pinned-ref","template":"review","brief":"Review","set":{"subject":head,"review_base":"review-target"},"explain":true});
     let result = factory.graph_document(input.clone(), budget, &cancel)?;
     let child = factory.child_request(&input)?;
-    assert_eq!(result["document"]["review_base"], tip);
-    crate::worktree_tests::git(
-        &rig,
-        &["commit", "--allow-empty", "-m", "target advanced again"],
-    )?;
-    let advanced = crate::worktree_tests::git(&rig, &["rev-parse", "HEAD"])?;
+    // The head is behind the target tip, so the range starts at their merge
+    // base; the newer target commit is not part of the review.
+    assert_eq!(result["document"]["review_base"], base);
+    assert_ne!(result["document"]["review_base"], tip);
+    // The ref is resolved again at each admission: once the target merges
+    // the first subject commit, the merge base moves to it.
+    git(&[
+        "merge",
+        "--no-ff",
+        &first,
+        "-m",
+        "target merges the first commit",
+    ])?;
     let changed = factory.graph_document(input.clone(), budget, &cancel)?;
     let changed_child = factory.child_request(&input)?;
-    assert_eq!(changed["document"]["review_base"], advanced);
+    assert_eq!(changed["document"]["review_base"], first);
     assert_ne!(
         result["document"]["replay_digest"],
         changed["document"]["replay_digest"]
     );
     assert_ne!(child.idempotency_key, changed_child.idempotency_key);
-    assert_eq!(child.launch.ok_or("child")?.node["review_base"], tip);
+    // A request prepared before the move keeps the range it admitted.
+    assert_eq!(child.launch.ok_or("child")?.node["review_base"], base);
     Ok(())
 }
 
@@ -1739,7 +1768,7 @@ fn replay_digest_tracks_review_subject() -> Result {
             "type":"commit", "commit":crate::worktree_tests::git(&rig, &["rev-parse", "HEAD"])?
         })
     );
-    assert_eq!(review["document"]["review_subject_missing"], true);
+    assert!(review["document"]["subject"]["base"].is_null());
     assert!(
         review["warnings"]
             .as_array()
@@ -1829,75 +1858,6 @@ fn replay_digest_tracks_delivery_source_commit() -> Result {
 }
 
 #[test]
-fn smoke_root_commit_skips_review_without_blocking_other_nodes() -> Result {
-    let rig = crate::worktree_tests::repository()?;
-    let factory = factory(&rig)?;
-    let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
-    let cancel = CancelToken::new();
-    let preview = factory.graph_document(
-        json!({"op":"run", "template":"smoke", "set":{"smoke-write":false}, "explain":true}),
-        budget,
-        &cancel,
-    )?;
-    let skipped = preview["skipped"].as_array().ok_or("skipped rows")?;
-    assert!(
-        skipped.iter().any(|row| {
-            row["node"]
-                .as_str()
-                .is_some_and(|id| id.contains("review--"))
-                && row["reason"]
-                    .as_str()
-                    .is_some_and(|reason| reason.contains("smoke-review"))
-        }),
-        "review must be skipped: {preview}"
-    );
-    assert!(
-        !skipped.iter().any(|row| {
-            row["node"].as_str().is_some_and(|id| {
-                id.ends_with("task--read")
-                    || id.ends_with("task--retry-route")
-                    || id.ends_with("task--steer-route")
-            })
-        }),
-        "other read nodes must remain eligible: {preview}"
-    );
-    assert!(
-        preview["warnings"]
-            .as_array()
-            .is_some_and(|warnings| warnings.iter().any(|warning| {
-                warning
-                    .as_str()
-                    .is_some_and(|text| text.contains("checkout first parent is unavailable"))
-            })),
-        "the reason must be recorded: {preview}"
-    );
-
-    let base = crate::worktree_tests::git(&rig, &["rev-parse", "HEAD"])?;
-    std::fs::write(rig.project.join("subject.txt"), "subject\n")?;
-    crate::worktree_tests::git(&rig, &["add", "subject.txt"])?;
-    crate::worktree_tests::git(&rig, &["commit", "-qm", "subject"])?;
-    let with_parent = factory.graph_document(
-        json!({"op":"run", "template":"smoke", "set":{"smoke-write":false}, "explain":true}),
-        budget,
-        &cancel,
-    )?;
-    assert!(
-        !with_parent["skipped"]
-            .as_array()
-            .ok_or("skipped rows")?
-            .iter()
-            .any(|row| {
-                row["node"]
-                    .as_str()
-                    .is_some_and(|id| id.contains("review--"))
-            }),
-        "a parent must enable review: {with_parent}"
-    );
-    assert!(serde_json::to_string(&with_parent["document"])?.contains(&base));
-    Ok(())
-}
-
-#[test]
 fn smoke_graph_explains_writer_gating_for_default_remote_and_local() -> Result {
     let rig = TestRig::new()?;
     let remote_host = provenant_core::HostId::from_bytes([2; 16]);
@@ -1966,22 +1926,29 @@ fn smoke_graph_explains_writer_gating_for_default_remote_and_local() -> Result {
             .is_some_and(|id| id.ends_with("task--write"))
             && row["reason"]
                 .as_str()
-                .is_some_and(|reason| reason.contains("smoke-write"))
+                .is_some_and(|reason| reason.contains("write"))
     }));
-    // A remote launch has no caller worktree, so the facade provisions the
-    // writer from a sourced scratch branch and the peer exercises it.
+    // There is no default remote provisioning: the hermetic lifecycle creates
+    // the fixture, so a remote writer needs an explicit --branch to own a
+    // worktree. Without one the write node is skipped with a repair reason.
     assert!(
-        !skipped_writer(&preview_remote),
-        "remote smoke must run its writer from a sourced default: {preview_remote}"
+        skipped_writer(&preview_remote),
+        "remote smoke without --branch must skip its writer: {preview_remote}"
+    );
+    assert!(
+        preview_remote["warnings"]
+            .as_array()
+            .is_some_and(|warnings| warnings.iter().any(|warning| {
+                warning
+                    .as_str()
+                    .is_some_and(|text| text.contains("remote placement needs --branch B"))
+            })),
+        "the skipped remote writer must name how to enable it: {preview_remote}"
     );
     let remote_encoded = serde_json::to_string(&preview_remote["document"])?;
     assert!(
         !remote_encoded.contains(&rig.project.to_string_lossy().to_string()),
         "a caller path reached the remote document: {remote_encoded}"
-    );
-    assert!(
-        remote_encoded.contains("smoke/"),
-        "the remote writer has no sourced scratch branch: {remote_encoded}"
     );
     // A caller worktree is still refused on the remote boundary: only branch
     // and base intent may name a worktree the peer creates in its own clone.
@@ -2030,7 +1997,7 @@ fn smoke_graph_explains_writer_gating_for_default_remote_and_local() -> Result {
     let preview_remote_disabled = factory
         .graph_document(
             json!({"op":"run", "template":"smoke", "host":"peer-a",
-                "set":{"smoke-write":false}, "explain":true}),
+                "set":{"write":false}, "explain":true}),
             budget,
             &cancel,
         )
@@ -2042,7 +2009,7 @@ fn smoke_graph_explains_writer_gating_for_default_remote_and_local() -> Result {
             .is_some_and(|warnings| warnings.iter().any(|warning| {
                 warning
                     .as_str()
-                    .is_some_and(|text| text.contains("smoke-write is not enabled"))
+                    .is_some_and(|text| text.contains("write is not enabled"))
             })),
         "the skipped remote writer must name its reason: {preview_remote_disabled}"
     );
@@ -2183,15 +2150,16 @@ fn reviews_of_the_same_subject_attach_to_the_completed_attempt() -> Result {
             self.0 += 1;
             Ok(graph::AttemptObservation::Terminal {
                 attempt_ref: Some("fixture/review".into()),
-                outcome: graph::AttemptOutcome::Succeeded,
+                outcome: graph::GraphAttemptOutcome::Succeeded,
                 launched: true,
                 result: None,
                 result_warning: None,
                 result_path: None,
                 branch: None,
                 commit: None,
-                settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
+                settlement_class: Some(provenant_records::run::SettlementClass::Completed),
                 stop: None,
+                cause: None,
             })
         }
     }
@@ -2255,7 +2223,16 @@ fn reviews_of_the_same_subject_attach_to_the_completed_attempt() -> Result {
         assert_eq!(attached["timed_out"], false);
         let checkpoint: graph::GraphCheckpoint =
             serde_json::from_value(attached["checkpoint"].clone())?;
-        assert_eq!(checkpoint, first.checkpoint);
+        let mut comparable = checkpoint.clone();
+        comparable.extra.remove("subject");
+        assert_eq!(comparable, first.checkpoint);
+        assert_eq!(
+            checkpoint.extra["subject"]["head"],
+            first.checkpoint.nodes[0]
+                .source_commit
+                .as_deref()
+                .unwrap_or_default()
+        );
         let attempts: Vec<_> = checkpoint
             .nodes
             .iter()
@@ -2293,7 +2270,7 @@ fn a_named_launch_with_the_same_digest_returns_its_graph_without_launching() -> 
     let launch = || {
         barrier.wait();
         provenant_cli::run::with_deferred_provider_launch(|| {
-            factory.launch_submission(document.clone(), &json!({}), budget, &cancel, None)
+            factory.launch_submission(document.clone(), &json!({}), None, budget, &cancel, None)
         })
     };
     let results = std::thread::scope(|scope| {
@@ -2326,8 +2303,14 @@ fn a_named_launch_with_the_same_digest_returns_its_graph_without_launching() -> 
     )?
     .ok_or("checkpoint")?;
     assert_eq!(saved.nodes[0].attempts.len(), 1);
-    let replay =
-        factory.launch_submission(document, &json!({"wait_seconds":30}), budget, &cancel, None)?;
+    let replay = factory.launch_submission(
+        document,
+        &json!({"wait_seconds":30}),
+        None,
+        budget,
+        &cancel,
+        None,
+    )?;
     assert_eq!(replay["replayed"], true);
     assert_eq!(replay["timed_out"], false);
     let after = FileJournal::read_checkpoint(
@@ -2775,7 +2758,7 @@ fn writer_controls_preserve_new_branch_and_refuse_conflicting_access() -> Result
 }
 
 #[test]
-fn plain_read_only_task_pins_fetched_upstream_and_local_source_is_honoured() -> Result {
+fn plain_read_only_task_pins_fetched_upstream_and_live_source_is_honoured() -> Result {
     let rig = TestRig::new()?;
     let remote = rig.root.join("remote.git");
     let remote = remote.to_str().ok_or("remote path")?;
@@ -2836,16 +2819,16 @@ fn plain_read_only_task_pins_fetched_upstream_and_local_source_is_honoured() -> 
         "the launch must name the source ref it used: {warnings:?}"
     );
 
-    // An explicit local source keeps the stale checkout as the subject.
-    let local = submit(Some("local"))?;
-    let node = &local["document"]["nodes"][0];
+    // An explicit live source keeps the stale checkout as the subject.
+    let live = submit(Some("live"))?;
+    let node = &live["document"]["nodes"][0];
     assert!(node["source"].is_null(), "{node}");
-    let local_warnings = local["warnings"].as_array().ok_or("local warnings")?;
+    let live_warnings = live["warnings"].as_array().ok_or("live warnings")?;
     assert!(
-        !local_warnings
+        !live_warnings
             .iter()
             .any(|warning| warning.as_str().is_some_and(|text| text.contains(&default))),
-        "a local source must not report an upstream pin: {local_warnings:?}"
+        "a live source must not report an upstream pin: {live_warnings:?}"
     );
     Ok(())
 }
@@ -2992,13 +2975,13 @@ fn writer_roles_follow_the_lowered_graph_and_its_conditions() {
     };
     // A bundled writer template lowers to a worktree writer.
     assert!(lowered_writes_worktree(&lower(json!({"use":"implement"}))));
-    // The bundled smoke template carries a writer under `smoke-write`,
+    // The bundled smoke template carries a writer under `write`,
     // which defaults to false: the same launch stays read-only until the
     // condition holds.
     assert!(!lowered_writes_worktree(&lower(json!({"use":"smoke"}))));
     assert!(lowered_writes_worktree(&lower(json!({
         "use":"smoke",
-        "with":{"smoke-write":true, "worktree":"/tmp/writer"}
+        "with":{"write":true, "worktree":"/tmp/writer"}
     }))));
 }
 
@@ -3064,9 +3047,23 @@ fn read_source_choices_pin_the_commit_and_name_their_layer() -> Result {
         pinned["warnings"]
     );
 
-    let checkout = submit(Some("checkout"), None)?;
+    let checkout = submit(Some("live"), None)?;
     assert!(checkout["document"]["nodes"][0]["source"].is_null());
     assert!(checkout["read_source"]["commit"].is_null());
+
+    let repository_config = rig.project.join(".provenant");
+    std::fs::create_dir_all(&repository_config)?;
+    let repository_file = repository_config.join("config.toml");
+    std::fs::write(&repository_file, "[knobs]\nlanes.read_source='checkout'\n")?;
+    let (result, warnings) = provenant_records::warning::capture(|| submit(None, None));
+    let result = result?;
+    assert_eq!(result["read_source"]["value"], json!("auto"));
+    assert!(
+        warnings.iter().any(|warning| warning.code.as_ref()
+            == provenant_records::warning::READ_SOURCE_VALUE_RENAMED.0)
+    );
+    assert!(std::fs::read_to_string(&repository_file)?.contains("checkout"));
+    std::fs::remove_file(repository_file)?;
 
     let explicit = submit(Some("refs/remotes/origin/master"), None)?;
     assert_eq!(
@@ -3079,15 +3076,142 @@ fn read_source_choices_pin_the_commit_and_name_their_layer() -> Result {
         json!("refs/remotes/origin/master")
     );
 
-    let flag = submit(None, Some("upstream"))?;
+    let flag = submit(None, Some("default_branch"))?;
     assert_eq!(
         flag["document"]["nodes"][0]["source"]["commit"],
         json!(default)
     );
     assert_eq!(flag["read_source"]["source"], json!("launch"));
-    let flag = submit(None, Some("local"))?;
+    let flag = submit(None, Some("live"))?;
     assert!(flag["document"]["nodes"][0]["source"].is_null());
     Ok(())
+}
+
+/// `lanes.writer_base` replaces the compiled origin default: a sole remote
+/// named `upstream` supplies the base of a `--branch` writer, `checkout` keeps
+/// the caller checkout's HEAD, and an explicit `--base` always wins over the
+/// knob. The admitted base is what provisioning creates the branch from.
+/// Spec: docs/specs/run-launch.md#inputs-and-resources
+#[test]
+fn writer_base_knob_resolves_the_sole_remote_and_launch_base_wins() -> Result {
+    let rig = TestRig::new()?;
+    let remote = rig.root.join("upstream.git");
+    let remote = remote.to_str().ok_or("remote path")?;
+    git(&rig, &["init", "-q", "--bare", remote])?;
+    git(
+        &rig,
+        &["-C", remote, "symbolic-ref", "HEAD", "refs/heads/main"],
+    )?;
+    git(&rig, &["config", "user.name", "Test"])?;
+    git(&rig, &["config", "user.email", "test@example.invalid"])?;
+    std::fs::write(rig.project.join("file"), "one\n")?;
+    git(&rig, &["add", "file"])?;
+    git(&rig, &["commit", "-q", "-m", "one"])?;
+    let base = git(&rig, &["rev-parse", "HEAD"])?;
+    git(&rig, &["branch", "-M", "main"])?;
+    git(&rig, &["remote", "add", "upstream", remote])?;
+    git(&rig, &["push", "-q", "upstream", "main"])?;
+    git(&rig, &["remote", "set-head", "upstream", "main"])?;
+    // The caller checkout moves past the remote default branch, so the
+    // checkout and default-branch bases name different commits.
+    std::fs::write(rig.project.join("file"), "two\n")?;
+    git(&rig, &["commit", "-q", "-am", "two"])?;
+    let checkout_head = git(&rig, &["rev-parse", "HEAD"])?;
+    assert_ne!(checkout_head, base);
+    // The admitted writer base is the commit provisioning creates the
+    // branch from, never a ref re-read at creation time.
+    fn provisioning_bases(value: &Value, bases: &mut Vec<Value>) {
+        match value {
+            Value::Object(map) => {
+                if let Some(base) = map.get("new_worktree").and_then(|spec| spec.get("base")) {
+                    bases.push(base.clone());
+                }
+                map.values()
+                    .for_each(|value| provisioning_bases(value, bases));
+            }
+            Value::Array(items) => items
+                .iter()
+                .for_each(|value| provisioning_bases(value, bases)),
+            _ => {}
+        }
+    }
+    let provisioned = |response: &Value| {
+        let mut bases = Vec::new();
+        // `submission_patch` mirrors the canonical document nodes. Count the
+        // admitted provision once, from the canonical node list.
+        provisioning_bases(&response["document"]["nodes"], &mut bases);
+        bases
+    };
+
+    let factory = factory(&rig)?;
+    let cancel = CancelToken::new();
+    let budget = WaitBudget::cli(factory.clock.mono_now(), 10)?;
+    let submit = |knob: Option<&str>, base: Option<&str>| -> Result<Value> {
+        let mut config = "schema_version=1\n[gc]\nfree_floor='1B'\n".to_owned();
+        if let Some(knob) = knob {
+            config.push_str(&format!("[knobs]\nlanes.writer_base='{knob}'\n"));
+        }
+        std::fs::write(rig.state.join("config.toml"), config)?;
+        let mut input = json!({
+            "op":"run","template":"task","brief":"Review the tree","explain":true,
+            "branch":"topic"
+        });
+        if let Some(base) = base {
+            input["base"] = json!(base);
+        }
+        Ok(factory.graph_document(input, budget, &cancel)?)
+    };
+
+    let pinned = submit(None, None)?;
+    assert_eq!(pinned["writer_base"]["commit"], json!(base), "{pinned}");
+    assert!(
+        pinned["writer_base"]["source"]
+            .as_str()
+            .is_some_and(|source| source.contains("default_branch")),
+        "the report must name the effective value and layer: {pinned}"
+    );
+
+    assert_eq!(provisioned(&pinned), vec![json!(base)], "{pinned}");
+
+    let checkout = submit(Some("checkout"), None)?;
+    assert_eq!(
+        checkout["writer_base"]["commit"],
+        json!(checkout_head),
+        "{checkout}"
+    );
+    assert_eq!(
+        provisioned(&checkout),
+        vec![json!(checkout_head)],
+        "{checkout}"
+    );
+
+    let explicit = submit(Some("checkout"), Some(&base))?;
+    assert_eq!(explicit["writer_base"]["commit"], json!(base));
+    assert!(
+        explicit["writer_base"]["source"]
+            .as_str()
+            .is_some_and(|source| source.contains("--base")),
+        "the launch layer must be named: {explicit}"
+    );
+    Ok(())
+}
+
+#[test]
+fn writer_base_value_reads_both_toml_shapes() {
+    assert_eq!(
+        super::super::source_policy::writer_base_value("[knobs]\n'lanes.writer_base'='checkout'\n"),
+        Some("checkout".to_owned())
+    );
+    assert_eq!(
+        super::super::source_policy::writer_base_value(
+            "[knobs.lanes]\nwriter_base='refs/heads/topic'\n"
+        ),
+        Some("refs/heads/topic".to_owned())
+    );
+    assert_eq!(
+        super::super::source_policy::writer_base_value("[knobs]\nlanes.read_source='auto'\n"),
+        None
+    );
 }
 
 /// An explicit `default_branch` pins the fetched default, not the current
@@ -3141,7 +3265,7 @@ fn default_branch_pins_the_forge_default_not_the_feature_upstream() -> Result {
 
     for chosen in [
         submit(Some("default_branch"), None)?,
-        submit(None, Some("upstream"))?,
+        submit(None, Some("default_branch"))?,
     ] {
         let commit = chosen["document"]["nodes"][0]["source"]["commit"].clone();
         assert_eq!(
@@ -3155,12 +3279,15 @@ fn default_branch_pins_the_forge_default_not_the_feature_upstream() -> Result {
             "the tracking upstream is not the default branch: {chosen}"
         );
     }
-    // With no source setting the advisory pin keeps this level checkout.
+    // With no source setting the admission subject pins this level checkout.
     let automatic = submit(None, None)?;
-    assert!(
-        automatic["document"]["nodes"][0]["source"].is_null(),
-        "{automatic}"
+    assert_eq!(
+        automatic["document"]["nodes"][0]["source"]["commit"],
+        json!(feature),
+        "automatic admission pins the observed checkout subject: {automatic}"
     );
+    assert_eq!(automatic["subject"]["head"], json!(feature));
+    assert_eq!(automatic["subject"]["origin"]["name"], "feature");
     Ok(())
 }
 
@@ -4061,6 +4188,73 @@ fn child_launch_retains_agent_roots_after_template_parameters_are_bound() -> Res
 }
 
 #[test]
+// Spec: docs/specs/cli.md#run-explain-reports-peer-placement — a peer-owned
+// writer is proposed on the peer, never admitted against the caller checkout.
+fn peer_placed_writer_explain_is_proposed_on_the_peer() -> Result {
+    let rig = TestRig::new()?;
+    let remote_host = provenant_core::HostId::from_bytes([2; 16]);
+    let roots = crate::roots::child(&rig.home, &rig.project, rig.state.clone())?;
+    let mut context = Context::open_inspection(roots, &rig.home, &rig.project)?;
+    context.in_lane = false;
+    context.config.peers.insert(
+        "workshop".into(),
+        provenant_fabric_runtime::config::Peer {
+            host: remote_host,
+            destination: "workshop".into(),
+            remote_executable: None,
+            connect_timeout_seconds: 10,
+        },
+    );
+    let factory = Factory {
+        context,
+        project_attribution: false,
+        clock: SystemClock,
+        backoff: ThreadPause,
+        executor: SystemExecutor::new(1)?,
+        home: rig.home.clone(),
+        cwd: rig.project.clone(),
+        assets: rig.project.clone(),
+        host_launch: None,
+        workers: &Workers,
+    };
+    let budget = WaitBudget::cli(factory.clock.mono_now(), 10)?;
+    let preview = factory.graph_document(
+        json!({"op":"run","template":"smoke","host":"workshop",
+            "branch":"smoke/peer", "base":"HEAD", "explain":true}),
+        budget,
+        &CancelToken::new(),
+    )?;
+    let rows = preview["source_admission"]
+        .as_array()
+        .ok_or("source admission rows")?;
+    assert!(
+        rows.iter().all(|row| row["status"] != "refused"),
+        "a peer-placed writer must not be refused against the caller root: {preview}"
+    );
+    let writer = rows
+        .iter()
+        .find(|row| {
+            row["node"]
+                .as_str()
+                .is_some_and(|node| node.ends_with("write"))
+        })
+        .ok_or("writer admission row")?;
+    assert_eq!(writer["status"], json!("pending_registration"), "{preview}");
+    assert_eq!(writer["host"], json!("workshop"), "{preview}");
+    let path = writer["path"].as_str().ok_or("writer path")?;
+    assert!(
+        !path.contains(&rig.project.to_string_lossy().to_string()),
+        "a caller path reached the peer writer admission: {path}"
+    );
+    assert!(path.starts_with("workshop/"), "{path}");
+    assert!(
+        path.contains("smoke"),
+        "the peer writer's branch must name its provisioned worktree: {path}"
+    );
+    Ok(())
+}
+
+#[test]
 fn explanation_and_preparation_share_worktree_admission() -> Result {
     use provenant_cli::run::{SourceAdmissionMode, admit_source_root};
     let rig = crate::worktree_tests::repository()?;
@@ -4414,15 +4608,16 @@ fn writer_sourced_template_review_selects_shape_and_pins_every_stage() -> Result
                 .push(b"```findings\n{\"schema_version\":1,\"findings\":[]}\n```\nVERDICT: PASS\n");
             Ok(graph::AttemptObservation::Terminal {
                 attempt_ref: Some(format!("fixture/{}", key.node_id)),
-                outcome: graph::AttemptOutcome::Succeeded,
+                outcome: graph::GraphAttemptOutcome::Succeeded,
                 launched: true,
                 result: Some(Box::new(result.finish())),
                 result_warning: None,
                 result_path: None,
                 branch: writer.then(|| "slice".into()),
                 commit: writer.then(|| self.commit.clone()),
-                settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
+                settlement_class: Some(provenant_records::run::SettlementClass::Completed),
                 stop: None,
+                cause: None,
             })
         }
     }
@@ -4791,6 +4986,7 @@ fn review_explain_applies_family_floor_to_launched_legs_and_reports_exclusions()
     let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
     let family = provenant_records::AdapterSpec::get("codex")
         .ok_or("adapter")?
+        .identity
         .family;
     let input = json!({
         "op": "run", "explain": true,
@@ -4895,6 +5091,7 @@ fn review_child_refuses_unknown_tier_under_advisory_default() -> Result {
     let factory = factory(&rig)?;
     let family = provenant_records::AdapterSpec::get("codex")
         .ok_or("adapter")?
+        .identity
         .family;
     // No `diversity` key: the advisory default must refuse the tier too.
     let child = json!({
@@ -4917,5 +5114,213 @@ fn review_child_refuses_unknown_tier_under_advisory_default() -> Result {
     );
     assert!(reason.contains("valid tiers: "), "{reason}");
     assert!(!reason.contains("not both"), "{reason}");
+    Ok(())
+}
+
+/// Invariant 1: one subject per origin survives a source move. Every origin
+/// the host can carry carries its pinned head into the lane; a later commit or
+/// push on the source cannot change what the admitted graph reads, and status
+/// projects that same subject with its policy source (#4021).
+#[test]
+fn one_subject_per_origin_survives_a_push() -> Result {
+    use provenant_fabric_runtime::graph::{self, AttemptOwner, GraphJournal, SourceBinding};
+    use provenant_records::subject::{PinnedSubject, SubjectOrigin, SubjectPolicy};
+
+    #[derive(Default)]
+    struct Journal(Option<graph::GraphCheckpoint>);
+    impl GraphJournal for Journal {
+        type Error = std::convert::Infallible;
+        fn load(
+            &mut self,
+            _: &str,
+        ) -> std::result::Result<Option<graph::GraphCheckpoint>, Self::Error> {
+            Ok(self.0.clone())
+        }
+        fn save(
+            &mut self,
+            checkpoint: &graph::GraphCheckpoint,
+        ) -> std::result::Result<(), Self::Error> {
+            self.0 = Some(checkpoint.clone());
+            Ok(())
+        }
+    }
+
+    struct Owner {
+        captured: Vec<Option<String>>,
+    }
+    impl AttemptOwner for Owner {
+        type Error = std::convert::Infallible;
+        fn worktree_layout(&self) -> provenant_config::WorktreeLayoutPort {
+            provenant_config::PortTable::builtin().worktree_layout
+        }
+        fn actor(&self) -> String {
+            "subject-origin-fixture".into()
+        }
+        fn bind_writer_worktree(
+            &mut self,
+            _: &str,
+        ) -> std::result::Result<Option<graph::WriterWorktreeBinding>, Self::Error> {
+            Ok(None)
+        }
+        fn observe_or_start(
+            &mut self,
+            _: &graph::AttemptKey,
+            node: graph::NodeInput<'_>,
+            _: &graph::GraphRoute,
+            access: graph::AccessMode,
+            _: Option<&str>,
+            _: graph::Replay<'_>,
+        ) -> std::result::Result<graph::AttemptObservation, Self::Error> {
+            assert_eq!(access, graph::AccessMode::ReadOnly);
+            self.captured.push(node.source_commit.map(str::to_owned));
+            let mut result =
+                provenant_records::result_capture::ResultCapture::new(node.required_verdict);
+            result
+                .push(b"```findings\n{\"schema_version\":1,\"findings\":[]}\n```\nVERDICT: PASS\n");
+            Ok(graph::AttemptObservation::Terminal {
+                attempt_ref: Some("fixture/reader".into()),
+                outcome: graph::GraphAttemptOutcome::Succeeded,
+                launched: true,
+                result: Some(Box::new(result.finish())),
+                result_warning: None,
+                result_path: None,
+                branch: None,
+                commit: None,
+                settlement_class: Some(provenant_records::run::SettlementClass::Completed),
+                stop: None,
+                cause: None,
+            })
+        }
+    }
+
+    let rig = crate::worktree_tests::repository()?;
+    let head = git(&rig, &["rev-parse", "HEAD"])?;
+    // The source advances after admission. A live read would see this commit,
+    // but the admitted subject keeps naming the original head for every origin.
+    git(&rig, &["commit", "--allow-empty", "-m", "later head"])?;
+    assert_ne!(git(&rig, &["rev-parse", "HEAD"])?, head);
+    let journal_rig = TestRig::new()?;
+    let journal_factory = factory(&journal_rig)?;
+    let cancel = CancelToken::new();
+    let budget = WaitBudget::cli(journal_factory.clock.mono_now(), 10)?;
+
+    let origins = [
+        SubjectOrigin::LocalRef {
+            name: "main".into(),
+        },
+        SubjectOrigin::RemoteTracking {
+            name: "refs/remotes/origin/main".into(),
+        },
+        SubjectOrigin::ForgePr {
+            repository: "owner/repo".into(),
+            number: 7,
+        },
+        SubjectOrigin::Fixture {
+            nonce: "0123456789ab".into(),
+        },
+        SubjectOrigin::Explicit,
+    ];
+    for (index, origin) in origins.into_iter().enumerate() {
+        let expected = PinnedSubject {
+            extra: Default::default(),
+            base: None,
+            head: provenant_core::GitOid::parse(&head)?,
+            origin,
+            pinned_at: provenant_core::WallTime::from_micros(1)?,
+            policy: SubjectPolicy::Pinned,
+            repository: None,
+            base_ref: None,
+            policy_source: Some(provenant_records::Source::at(
+                provenant_records::Layer::Launch,
+                format!("test source {index}"),
+            )),
+            followed_from: Vec::new(),
+        };
+        let document: GraphDocument = serde_json::from_value(json!({
+            "schema_version": 2,
+            "graph_id": format!("subject-origin-{index}"),
+            "subject": expected,
+            "nodes": [{
+                "id": "reader", "access": "read_only", "prompt": "Read the pinned subject",
+                "route": {"adapter": "fixture", "model": "fixture/model"},
+                "source": {"type": "commit", "commit": head}
+            }]
+        }))?;
+        assert_eq!(document.subject, Some(expected.clone()));
+        assert_eq!(
+            document.nodes[0].source,
+            Some(SourceBinding::Commit {
+                commit: head.clone()
+            })
+        );
+
+        let mut owner = Owner {
+            captured: Vec::new(),
+        };
+        let run = graph::advance_with_budget(
+            &document,
+            &mut owner,
+            &mut Journal::default(),
+            &provenant_fabric_runtime::config::GraphLimits::default(),
+            &provenant_fabric_runtime::config::GraphBudget::default(),
+        )?;
+        assert_eq!(run.status, graph::GraphStatus::Complete, "{index}: {run:?}");
+        assert_eq!(owner.captured, vec![Some(head.clone())], "{index}");
+
+        // Persist through the real journal and reload as status does: the
+        // stored checkpoint subject is hydrated from the admitted document,
+        // never from the in-memory run.
+        let mut journal = FileJournal::open(
+            &journal_factory.context.roots.state,
+            journal_factory.context.identity.project,
+            &document.graph_id,
+            budget,
+            &cancel,
+            &journal_factory.clock,
+        )?;
+        journal.bind(provenant_fabric_runtime::graph::GraphExecution {
+            peer_origin_context: None,
+            peer_submission_digest: None,
+            requester_path: None,
+            extra: Default::default(),
+            bases: None,
+            directory: journal_factory.cwd.clone(),
+            document: document.clone(),
+        })?;
+        let mut checkpoint = run.checkpoint.clone();
+        checkpoint.subject = None;
+        journal.prepare_fixture_checkpoint(&mut checkpoint)?;
+        journal.save(&checkpoint)?;
+        drop(journal);
+        let reloaded = FileJournal::read_status_checkpoint(
+            &journal_factory.context.roots.state,
+            journal_factory.context.identity.project,
+            &document.graph_id,
+        )?
+        .ok_or("reloaded checkpoint")?;
+        assert_eq!(reloaded.subject, Some(expected.clone()), "{index}");
+        let subject = reloaded.subject.as_ref().ok_or("reloaded subject")?;
+        let wire = serde_json::to_value(subject)?;
+        assert!(
+            wire["policy_source"]["layer"].is_string(),
+            "every admitted subject names its policy source: {index}: {wire}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn explain_uses_the_declared_adapter_for_an_uncanonicalised_model() -> Result {
+    use provenant_fabric_runtime::graph::GraphNode;
+    let rig = TestRig::new()?;
+    let factory = factory(&rig)?;
+    let node: GraphNode = serde_json::from_value(json!({
+        "id":"exact", "access":"read_only", "prompt":"inspect",
+        "route":{"adapter":"codex","model":"unprefixed-model"}
+    }))?;
+    let rows = factory.explain_node_routes(&[node]);
+    assert_eq!(rows[0]["adapter"], "codex");
+    assert_eq!(rows[0]["model"], "unprefixed-model");
+    assert_eq!(rows[0]["sources"]["adapter"], "node field");
     Ok(())
 }

@@ -60,14 +60,42 @@ path in the JSON warnings and human output. Each save keeps the text it
 replaces as a bounded, hashed revision. Hooks are advisory:
 they emit only their own key's checkpoint, and mark a missing or slow
 source unavailable, never empty. Autosave never writes the chair's
-`checkpoint.md`.
+`checkpoint.md`. Session-start inventory reads are bounded and paged: each child has one deadline
+and one maximum page. Custody and lane inventories flush a page header before
+presence observations and flush each inspected row with its cursor. A deadline
+preserves complete rows and offers a continuation from the last inspected row,
+including when that row was filtered out; an interrupted first row resumes the
+page from its start. Custody continuation preserves the selected chair session
+on every page. Lane pages use ordered index scans and defer the host census
+until a non-terminal row needs it. A source that cannot produce its header is
+reported unavailable, never empty, and the hook still returns inside its budget.
 Hook state carries custody-ledger, lane and worktree rows. Inside a lane,
-hook context is one line directing progress to the lane handoff, and chair
-checkpoint text, standing grants and save commands are withheld; outside a lane
-it carries the chair checkpoint guidance.
-- Why: restoring the wrong or a lost checkpoint misdirects an agent, and absent
-  evidence must not read as an empty queue.
+hook context is one line directing progress to the lane handoff; for a native
+subagent marked by a non-empty `agent_id` or agent transcript path it is empty.
+In both, chair checkpoint text, standing grants and save commands are withheld;
+outside them it carries the chair checkpoint guidance. `agent_type` alone does
+not mark a subagent because top-level `--agent` sessions also provide it.
+When the digest is shown, the autosave's duplicate custody section is withheld
+so the custody list is printed once. If output must be bounded, derived sections
+shrink first: the chair's `## Intent` (up to 3 KiB) and `## Now` (up to 1 KiB)
+stay intact while the derived digest and then the checkpoint excerpt give way.
+A fresh checkpoint with nothing actionable drops the "no save needed by
+freshness policy" boilerplate.
+- Why: restoring the wrong or a lost checkpoint misdirects an agent, absent
+  evidence must not read as an empty queue, and repeated custody or cut Intent/Now
+  wastes the bounded hook output.
 - Owner: `crates/workflow/src/session.rs`, `crates/workflow/src/session/state.rs`
+
+### Bounded restore after compaction
+
+The [session skill](../../skills/session/SKILL.md) restores after compaction in
+three bounded steps: read the hook context, run one cursor-bounded state read
+(`provenant status --session-stream --cursor <cursor>`), then act against the
+owners. It reads state output, never its own driver or tool source, and does not
+re-derive a wait by polling; `orchestrate` owns the wait rule.
+- Why: open-ended re-orientation after compaction spends turns re-reading source
+  instead of state, and a wait already reports its own event.
+- Owner: `skills/session/SKILL.md`
 
 ### Structured summary revisions and inbox coverage
 

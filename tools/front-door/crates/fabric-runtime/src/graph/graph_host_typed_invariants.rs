@@ -69,7 +69,15 @@ fn graph_document_host_fields_round_trip_reject_wrong_types_and_keep_unknowns() 
             json!({"shape":"standard", "minimum_family_counts":{"openai":2}}),
             json!(false),
         ),
-        field("review_subject_missing", json!(true), json!("true")),
+        field(
+            "subject",
+            json!({
+                "head": "a".repeat(40),
+                "origin": {"kind":"local_ref","name":"HEAD"},
+                "pinned_at": "2000-01-01T00:00:00.000000Z"
+            }),
+            json!(false),
+        ),
         field("exclude", json!(["codex"]), json!("codex")),
         field("template_library", json!({}), json!([])),
         field("template_layers", json!({}), json!([])),

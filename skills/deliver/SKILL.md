@@ -29,7 +29,7 @@ rules below for restructuring.
   its durable home (`engineering-docs`).
 - Move every caller and delete the old shape without compatibility code.
   Persisted state follows the owning repository's format policy.
-- When the spec is wrong, cite the evidence in the handoff `decisions` and take
+- When the spec is wrong, cite the evidence in the declaration `decisions` and take
   the best-evidenced option within write scope, recording why it beat the
   alternative. If no option serves the outcome, return the evidence to `scope`.
 
@@ -45,7 +45,9 @@ and report the ownership and dependency delta.
 
 Give the repair writer the output of `provenant ci failures pr N` (several
 numbers at once for several PRs) and `provenant pr status N`. Raw job-log reads
-spend the forge quota and miss the failure summary.
+spend the forge quota and miss the failure summary. When the REST quota is
+exhausted, read checks and releases through `gh api graphql`, which has a
+separate quota.
 
 ## Judging review findings
 
@@ -57,6 +59,19 @@ flaw is fixed once and its twin elsewhere is caught. The chair may overrule a
 changes verdict with the reason on the pull request; a dispute at a real
 boundary or over data loss needs a test or a second lens. After a shared flaw
 or a third round, ask whether the design is wrong.
+
+A blocking finding names the invariant it breaks: set the top-level `class` on
+every finding to that invariant, so a repeated flaw is recognised by cause and
+routes to principal design rather than another patch round. A fix round returns
+invariants, not patched sites: for each invariant the writer sweeps for every
+site, changes them all and reports `sweep`, `sites` and `pin` in its
+`repair_items`, where `pin` names the test that holds the invariant. Round two
+reviews that delta against the named invariants, not a fresh full panel. A
+split verdict on one head goes to one adjudication node and returns one verdict;
+the split does not start another round, though an upheld changes-request still
+needs repair.
+
+Spec: docs/specs/fabric.md#fix-round-invariants-and-split-verdict-adjudication
 
 ## Work without CI
 

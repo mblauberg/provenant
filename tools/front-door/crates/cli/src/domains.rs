@@ -14,6 +14,9 @@ pub struct Domains {
     pub steward: crate::steward::Settings,
     #[serde(default)]
     pub wait: crate::wait::Settings,
+    #[serde(default)]
+    pub smoke: crate::smoke::Settings,
+    pub adapter: crate::adapter_capabilities::Settings,
     pub accounts: provenant_providers::accounts::Settings,
     pub quota: provenant_quota::Settings,
     pub routing: provenant_routing::RoutingConfig,
@@ -24,6 +27,8 @@ pub struct Domains {
     pub pr: PrSettings,
     #[serde(default)]
     pub lanes: LanesSettings,
+    #[serde(default)]
+    pub hooks: provenant_config::HookSettings,
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -753,9 +758,9 @@ pub struct ProjectLanesConfig {
     pub user_skills: Option<UserSkillsMode>,
     #[serde(default)]
     pub shared_paths: Vec<PathBuf>,
-    /// Capabilities granted by default to this project's writer lanes.
+    /// Capability grants for this project's writer lanes.
     #[serde(default)]
-    pub capabilities: Vec<String>,
+    pub grants: Vec<String>,
     #[serde(default)]
     pub exec_roots: Vec<PathBuf>,
 }
@@ -794,13 +799,18 @@ const LANES_SECTION: DomainSection = DomainSection::new::<LanesSettings>(
     FieldMetadata::new("skill_stage_max_bytes", "int"),
     FieldMetadata::enumeration("projects.{project}.user_skills", &["discover", "off"]),
     FieldMetadata::new("projects.{project}.shared_paths", "array"),
-    FieldMetadata::new("projects.{project}.capabilities", "array"),
+    FieldMetadata::new("projects.{project}.grants", "array"),
     FieldMetadata::new("projects.{project}.exec_roots", "array"),
 ]);
 
-static ENTRIES: [DomainSection; 10] = [
+// A slice keeps the section count derived from the entries themselves. A
+// hand-maintained array length went stale when two branches each added a
+// section, breaking the build; there is no length here to forget to update.
+static ENTRIES: &[DomainSection] = &[
     provenant_config::policy::SECTION,
     crate::wait::SECTION,
+    crate::smoke::SECTION,
+    crate::adapter_capabilities::SECTION,
     provenant_providers::accounts::SECTION,
     provenant_quota::SECTION,
     provenant_routing::SECTION,
@@ -809,8 +819,9 @@ static ENTRIES: [DomainSection; 10] = [
     PR_SECTION,
     LANES_SECTION,
     crate::steward::SECTION,
+    provenant_config::HOOKS_SECTION,
 ];
-pub static SECTIONS: DomainSections<Domains> = DomainSections::new(&ENTRIES);
+pub static SECTIONS: DomainSections<Domains> = DomainSections::new(ENTRIES);
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
@@ -862,6 +873,11 @@ mod tests {
                 typed_paths::<provenant_config::policy::Settings>(),
             ),
             ("wait", typed_paths::<crate::wait::Settings>()),
+            ("smoke", typed_paths::<crate::smoke::Settings>()),
+            (
+                "adapter",
+                typed_paths::<crate::adapter_capabilities::Settings>(),
+            ),
             (
                 "accounts",
                 typed_paths::<provenant_providers::accounts::Settings>(),
@@ -879,6 +895,7 @@ mod tests {
             ("pr", typed_paths::<PrSettings>()),
             ("lanes", typed_paths::<LanesSettings>()),
             ("steward", typed_paths::<crate::steward::Settings>()),
+            ("hooks", typed_paths::<provenant_config::HookSettings>()),
         ]
         .into_iter()
         .flat_map(|(name, paths)| {
@@ -887,6 +904,25 @@ mod tests {
                 .map(move |path| format!("domains.{name}.{path}"))
         })
         .collect()
+    }
+
+    // An integration that drops a section silently loses its defaults and
+    // origins. Pin the full set by name so a merge cannot keep only one side's
+    // additions (the smoke and hooks sections are the two that collided).
+    #[test]
+    fn every_domain_section_is_registered_once() {
+        let expected = [
+            "policy", "wait", "smoke", "accounts", "quota", "routing", "fabric", "run", "pr",
+            "lanes", "steward", "hooks",
+        ];
+        for name in expected {
+            let count = SECTIONS
+                .entries
+                .iter()
+                .filter(|section| section.name == name)
+                .count();
+            assert_eq!(count, 1, "domain section {name} must be registered once");
+        }
     }
 
     // Spec: docs/specs/cli.md#configuration-schema-completeness
@@ -913,6 +949,17 @@ mod tests {
             "deserializable domain settings without field metadata:\n{}",
             missing.join("\n")
         );
+    }
+
+    #[test]
+    fn adapter_capability_settings_are_registered() {
+        assert!(SECTIONS.entries.iter().any(|section| {
+            section.name == "adapter"
+                && section
+                    .fields
+                    .iter()
+                    .any(|field| field.path == "capabilities.measurements")
+        }));
     }
 
     // Spec: docs/specs/cli.md#configuration-schema-completeness
@@ -1130,6 +1177,56 @@ mod tests {
     }
 
     #[test]
+    fn wait_head_settings_show_host_and_project_sources() {
+        let temp = tempfile::tempdir().unwrap();
+        let roots = roots(&temp);
+        std::fs::create_dir_all(roots.state.as_path()).unwrap();
+        let edited = edit(
+            &roots,
+            json!({
+                "domains.wait.pr_head_policy": "follow_latest",
+                "domains.wait.pr_head_source": "forge",
+                "domains.wait.pr_head_unpinned": "refuse",
+                "domains.wait.projects.demo.pr_head_policy": "pinned",
+            }),
+        )
+        .unwrap();
+        let current = provenant_config::read_with_domains(&roots, &SECTIONS).unwrap();
+        let schema = provenant_config::schema(&current, &SECTIONS, String::new()).unwrap();
+        let field = |path: &str| {
+            schema
+                .fields
+                .iter()
+                .find(|field| field.path == path)
+                .unwrap()
+        };
+        for path in [
+            "domains.wait.pr_head_policy",
+            "domains.wait.pr_head_source",
+            "domains.wait.pr_head_unpinned",
+        ] {
+            assert_eq!(field(path).source, provenant_config::Layer::Host, "{path}");
+        }
+        let effective = edited.config.domains.wait.effective_pr_head(Some("demo"));
+        assert_eq!(
+            effective.policy,
+            provenant_records::subject::SubjectPolicy::Pinned,
+            "a project row beats the host value"
+        );
+        assert_eq!(
+            effective.policy_key,
+            "domains.wait.projects.demo.pr_head_policy"
+        );
+        assert!(
+            matches!(
+                edited.config.origins.get(&effective.policy_key),
+                Some(provenant_config::Origin::User { .. })
+            ),
+            "the source names the project row's file"
+        );
+    }
+
+    #[test]
     fn login_warning_default_and_override_report_their_origins() {
         let temp = tempfile::tempdir().unwrap();
         let roots = roots(&temp);
@@ -1262,6 +1359,34 @@ mod tests {
         assert_eq!(
             (grace.min, grace.max, &grace.default),
             (Some(0), Some(600), &json!(60))
+        );
+        let pr_head_policy = field("domains.wait.pr_head_policy");
+        assert_eq!(
+            (pr_head_policy.kind, &pr_head_policy.default),
+            ("enum", &json!("pinned"))
+        );
+        let pr_head_source = field("domains.wait.pr_head_source");
+        assert_eq!(
+            (pr_head_source.kind, &pr_head_source.default),
+            ("enum", &json!("auto"))
+        );
+        let pr_head_unpinned = field("domains.wait.pr_head_unpinned");
+        assert_eq!(
+            (pr_head_unpinned.kind, &pr_head_unpinned.default),
+            ("enum", &json!("first_sample"))
+        );
+        for path in [
+            "domains.wait.projects.{project}.pr_head_policy",
+            "domains.wait.projects.{project}.pr_head_source",
+            "domains.wait.projects.{project}.pr_head_unpinned",
+        ] {
+            assert_eq!(field(path).kind, "enum");
+        }
+        let adapter_samples = field("domains.adapter.capabilities.measurement_samples");
+        assert_eq!(adapter_samples.kind, "int");
+        assert_eq!(
+            (adapter_samples.min, adapter_samples.max),
+            (Some(1), Some(2000))
         );
         let idle = field("gc.idle");
         assert_eq!(
@@ -1454,13 +1579,13 @@ mod tests {
         let (config, _) = provenant_config::show(&roots, &SECTIONS).unwrap();
         assert_eq!(config.domains.lanes.skill_stage_max_bytes, 16 * 1024 * 1024);
         assert!(ProjectLanesConfig::default().shared_paths.is_empty());
-        assert!(ProjectLanesConfig::default().capabilities.is_empty());
+        assert!(ProjectLanesConfig::default().grants.is_empty());
         assert!(ProjectLanesConfig::default().exec_roots.is_empty());
         let edited = edit(
             &roots,
             json!({
                 "domains.lanes.projects.example.shared_paths": [".agent-run/locks", "~/locks"],
-                "domains.lanes.projects.example.capabilities": ["postgres"],
+                "domains.lanes.projects.example.grants": ["postgres"],
                 "domains.lanes.projects.example.exec_roots": [".local-tools"],
                 "domains.lanes.skill_stage_max_bytes": 1024,
             }),
@@ -1472,11 +1597,11 @@ mod tests {
             [PathBuf::from(".agent-run/locks"), PathBuf::from("~/locks")]
         );
         assert_eq!(project.exec_roots, [PathBuf::from(".local-tools")]);
-        assert_eq!(project.capabilities, ["postgres"]);
+        assert_eq!(project.grants, ["postgres"]);
         assert_eq!(edited.config.domains.lanes.skill_stage_max_bytes, 1024);
         for key in [
             "domains.lanes.projects.example.shared_paths",
-            "domains.lanes.projects.example.capabilities",
+            "domains.lanes.projects.example.grants",
             "domains.lanes.projects.example.exec_roots",
             "domains.lanes.skill_stage_max_bytes",
         ] {

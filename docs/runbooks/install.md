@@ -154,27 +154,45 @@ once and applied to every smoke node. Adding `--dry-run` previews it without
 upgrading.
 The preview runs the currently installed binary's own `run smoke --explain`, not
 the candidate, so it shows the graph shape and route resolution that binary
-would launch; the candidate's graph is exercised only after it installs. The
-scratch fixture commits a base and a fixture change, and both verification modes
-bind that commit as the review nodes' `diff_base`, so the review nodes have a
-non-empty range; its write node runs in a worktree the verification creates on a
-branch of that fixture. On a peer the writer runs in a worktree the peer creates
-in its own clone from a scratch branch supplied by the launch's sourced default;
-pass `--branch B --base REF` to override it, while a caller worktree path is
-refused. A manual
-`run smoke` with no `diff_base` uses the checkout's first parent as a fixed
-review range and warns with its source. If the parent is unavailable, it skips
-review with a reason; supply `--set diff_base=BASE` to enable review.
-The scratch
-project's host binding is removed when the verification ends, including on
-failure, so the deleted fixture never
+would launch; the candidate's graph is exercised only after it installs. It
+passes the same writer branch and base as the real verify, so the previewed
+writer starts from the fixture rather than falling back to the caller checkout.
+The lifecycle creates one deterministic fixture under `domains.smoke.fixture_root`
+(default `.local/state/provenant-smoke`, home-relative, owner-only) on every
+target host; a home-relative fixture is one a peer can project as a cross-host
+project, which a fixture in the system temporary directory never is. A
+six-byte nonce names it; fixed author, committer and timestamps make the same
+nonce yield the same two commits on any host, and a `.git/provenant-smoke.json`
+marker lets the sweep remove only fixtures it owns. The fixture carries a nonce
+line absent from the caller checkout and the bundled template, so a reader that
+reconstructs an answer from source cannot pass. Its write node runs in a worktree
+the verification creates on a branch of that fixture. On a peer the writer runs
+in a worktree the peer creates in its own clone from a scratch branch supplied by
+the launch's sourced default; pass `--branch B --base REF` to override it, while
+a caller worktree path is refused. A remote reader builds the same fixture under
+its own home through the `smoke_fixture` protocol, so a stale peer clone still
+reads a valid tree; no caller path or staged bytes cross the wire. A peer below
+`SMOKE_FIXTURE_PROTOCOL` yields an unverified result instead of a pass, and
+`domains.smoke.unverified` chooses whether that fails the command. `diff_base`
+defaults to the fixture head; a caller value must resolve inside the fixture.
+The result reports five phases (fixture, launch, wait, status, cleanup) and the
+effective values and sources of the `domains.smoke` keys. The fixture's host
+binding is forgotten and its directory removed when verification ends, on
+success, failure and refused launch, so the deleted fixture never
 becomes a registered project. The human view leads with one status line per host
 (`upgraded`, `verified` or `failed - reason`), the smoke host prints its graph
 verdict instead of `run`/`wait`/`status` envelopes, and repeated
 `native_capability_unavailable` notices collapse to a count; `--full` restores
 every captured line. A failed `UPGRADE_FAILED` message names each failing host
-once with its bounded reason. The renderer drops human text when an error is
-set, so run `provenant upgrade --verify --json` for the full per-host detail.
+once with its bounded reason. For a failed smoke, that reason names the graph
+id, the node that actually failed (not the dependant whose `upstream_blocked`
+note just says which node blocked it), that node's code and message, and a next
+command `provenant status GRAPH` for the same graph. The smoke graph is
+ephemeral — its scratch binding is removed at the end of verification, failure
+included — so the command names the graph in the report; to reread live state,
+re-run `provenant upgrade --verify` with the same host and settings. The
+renderer drops human text when an error is set, so run
+`provenant upgrade --verify --json` for the full per-host detail.
 The smoke builds its own scratch checkout, so a verification run from outside a
 Git checkout is not refused just for that reason. `provenant run smoke` by hand, from any checkout,
 runs only the read-only
@@ -208,7 +226,9 @@ is still installed and the previous app is left untouched.
 Set `PROVENANT_APPS_DIR` to an absolute directory to keep the app somewhere
 other than `~/Applications`; install, upgrade, doctor and the installer all
 honour it. LaunchServices opens the console by bundle identifier regardless of
-the directory.
+the directory. When the directory moves, the installer warns if a bundle is
+still in `~/Applications`: it never removes the old bundle without the owner's
+say-so, but a leftover can still be launched and may be stale.
 
 ### Test a candidate binary
 

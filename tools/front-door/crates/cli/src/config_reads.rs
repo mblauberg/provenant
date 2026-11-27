@@ -20,7 +20,8 @@ macro_rules! reads {
 }
 reads! {
     "help" => [], "root" => [], "process-tree" => [], "ci" => [],
-    "events" => ["fabric"], "notes" => ["fabric"],
+    "adapter" => ["adapter"],
+    "events" => ["fabric"], "notes" => ["fabric"], "declare" => ["run"],
     "ask" => ["fabric", "accounts"], "inbox" => ["fabric", "accounts"],
     "answer" => ["fabric", "accounts"], "accounts" => ["accounts"],
     "adopt" => ["fabric"], "release" => ["fabric"],
@@ -29,16 +30,19 @@ reads! {
     "accounts set" => ["accounts", "quota"],
     "accounts sync" => ["accounts", "fabric"],
     "hosts" => ["fabric"],
-    "hosts doctor" => ["fabric", "accounts", "quota", "routing"], "fabric" => ["fabric", "routing", "accounts", "lanes", "run", "quota", "policy", "wait"],
+    "doctor" => ["fabric", "accounts", "quota", "routing", "hooks"],
+    "hosts doctor" => ["fabric", "accounts", "quota", "routing", "hooks"], "fabric" => ["fabric", "routing", "accounts", "lanes", "run", "quota", "policy", "wait"],
     "fabric context" => ["fabric", "wait"],
-    "install" => ["accounts", "fabric"], "upgrade" => ["accounts", "fabric"],
+    "install" => ["accounts", "fabric", "hooks"], "upgrade" => ["accounts", "fabric", "smoke"],
+    "hooks" => ["hooks"],
     "uninstall" => ["accounts", "fabric"],
     // `init` resolves its port table and forge context directly; it reads no
     // config.toml domain, so unrelated invalid domains cannot refuse it.
     "init" => [],
     "route" => ["routing", "accounts", "quota", "policy", "fabric"],
     "route preferences" => ["routing"],
-    "run" => ["fabric", "run", "routing", "accounts", "quota", "lanes", "policy", "wait"],
+    // `run smoke` and `upgrade --verify` share the smoke lifecycle and its domain.
+    "run" => ["fabric", "run", "routing", "accounts", "quota", "lanes", "policy", "wait", "smoke"],
     "run admission" => ["policy"],
     "status" => ["fabric"], "wait" => ["wait", "fabric"],
     "land" => ["pr", "routing", "fabric", "run"],
@@ -50,13 +54,13 @@ reads! {
     "reconcile" => ["fabric", "run", "routing", "accounts", "quota", "lanes", "policy"],
     "telemetry" => ["accounts", "routing"], "native" => ["accounts"],
     "quota" => ["accounts", "quota"], "console" => ["fabric"],
-    "chair" => ["fabric", "accounts", "routing", "quota"], "worktree" => [],
+    "chair" => ["fabric", "accounts", "routing", "quota", "hooks"], "worktree" => [],
     "pr" => ["fabric", "routing", "accounts", "pr"],
     "pr contributions" => ["fabric"],
     "gc" => ["fabric"], "tick" => ["fabric", "quota", "accounts", "routing", "steward"],
     "disk" => [], "cloud" => ["accounts"], "workflow" => ["routing"],
-    "tracker" => [], "verify" => [], "build" => [], "check" => [], "check install" => ["accounts"],
-    "check providers" => ["accounts", "quota", "wait", "fabric", "run", "routing", "lanes", "policy"], "hook" => ["fabric", "run", "pr"],
+    "tracker" => [], "verify" => [], "build" => [], "check" => [], "check install" => ["accounts", "hooks"],
+    "check providers" => ["accounts", "quota", "wait", "fabric", "run", "routing", "lanes", "policy"], "hook" => ["fabric", "run", "pr", "hooks"],
     "internal" => ["fabric", "run", "routing", "accounts", "quota", "lanes", "policy", "steward", "wait"],
     "knobs" => [], "admit" => []
 }
@@ -149,6 +153,22 @@ pub fn sections_for(
     })
 }
 
+/// Effective `[[adapter_capabilities]]` entries for one read, from the host
+/// state and project layers the compatibility table also reads. An invalid row
+/// warns as an ignored config key and is skipped; it never refuses the caller.
+pub fn capability_overlay(roots: &Roots) -> provenant_records::CapabilityOverlay {
+    let (overlay, warnings) = provenant_config::adapter_capabilities::effective(
+        roots.state.as_path(),
+        Some(roots.checkout()),
+    );
+    for warning in warnings {
+        provenant_records::warning::warn(
+            warning.into_typed(provenant_records::warning::CONFIG_KEY_IGNORED),
+        );
+    }
+    overlay
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
@@ -180,6 +200,31 @@ mod tests {
             );
         }
     }
+    // Spec: docs/specs/cli.md#warnings-are-typed-values
+    #[test]
+    fn capability_overlay_warnings_carry_a_structured_source() {
+        let temp = tempfile::tempdir().unwrap();
+        let roots = roots(&temp);
+        std::fs::create_dir_all(roots.state.as_path()).unwrap();
+        std::fs::write(
+            roots.state.as_path().join("config.toml"),
+            "[[adapter_capabilities]]\nadapter = \"no-such-adapter\"\ndisable = [\"model\"]\n",
+        )
+        .unwrap();
+        let (_, warnings) = provenant_records::warning::capture(|| capability_overlay(&roots));
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert_eq!(
+            warnings[0].code.as_ref(),
+            provenant_records::warning::CONFIG_KEY_IGNORED.as_str()
+        );
+        assert_eq!(warnings[0].source.layer, Layer::Detected, "{warnings:?}");
+        assert_eq!(
+            warnings[0].source.origin.as_deref(),
+            Some("warning:CONFIG_KEY_IGNORED"),
+            "{warnings:?}"
+        );
+    }
+
     #[test]
     fn every_command_declares_its_config_and_unrelated_domains_cannot_refuse_it() {
         let temp = tempfile::tempdir().unwrap();
@@ -285,6 +330,39 @@ mod tests {
             config.origins.get("domains.wait.local_interval_ms"),
             Some(provenant_config::Origin::Compiled { .. })
         ));
+    }
+
+    // A skipped entry warns with the config layer and key that caused it; a
+    // valid entry in the same table still applies.
+    #[test]
+    fn invalid_capability_overlay_entry_warns_with_its_layer_and_key_without_refusing() {
+        let temp = tempfile::tempdir().unwrap();
+        let roots = roots(&temp);
+        std::fs::create_dir_all(roots.state.as_path()).unwrap();
+        std::fs::write(
+            roots.state.as_path().join("config.toml"),
+            "schema_version = 1\n\
+             [[adapter_capabilities]]\n\
+             adapter = 'codex'\n\
+             disable = ['write']\n\
+             [[adapter_capabilities]]\n\
+             adapter = 'not-an-adapter'\n",
+        )
+        .unwrap();
+        let (overlay, warnings) =
+            provenant_records::warning::capture(|| capability_overlay(&roots));
+        assert_eq!(overlay.entries.len(), 1, "{overlay:?}");
+        assert_eq!(overlay.entries[0].adapter, "codex");
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert_eq!(
+            warnings[0].code.as_ref(),
+            provenant_records::warning::CONFIG_KEY_IGNORED.as_str()
+        );
+        assert_eq!(warnings[0].source.layer, Layer::Host);
+        assert_eq!(
+            warnings[0].source.origin.as_deref(),
+            Some("adapter_capabilities[not-an-adapter]")
+        );
     }
 
     #[test]

@@ -2,7 +2,14 @@ use super::*;
 use provenant_confinement::worktrees::{self, WorktreeCreate, WorktreeOrigin, WorktreeOwner};
 use provenant_core::Clock;
 use provenant_os::fixture::run_git;
+use std::os::unix::fs::DirBuilderExt;
 use std::path::Path;
+
+fn create_private_state_root(path: &Path) -> std::io::Result<()> {
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true).mode(0o700);
+    builder.create(path)
+}
 
 /// Initialise `project` with one empty commit, through the scrubbed fixture Git.
 fn init_base_repository(project: &Path) -> std::io::Result<()> {
@@ -22,12 +29,7 @@ fn graph_writer_resume_uses_the_committed_terminal_head_and_original_source()
     let mut inputs = provenant_core::RootInputs::new(home.clone(), project.clone());
     inputs.state_dir = Some(execution.state_root.as_path().into());
     let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
-    std::fs::create_dir_all(roots.state.as_path())?;
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(
-        roots.state.as_path(),
-        std::fs::Permissions::from_mode(0o700),
-    )?;
+    create_private_state_root(roots.state.as_path())?;
     init_base_repository(&project)?;
     let clock = crate::tests::clock();
     let cancel = provenant_core::CancelToken::new();
@@ -243,12 +245,7 @@ fn resume_preserves_explicit_worktrees_and_settled_lane_ownership()
     let mut inputs = provenant_core::RootInputs::new(home.clone(), project.clone());
     inputs.state_dir = Some(execution.state_root.as_path().into());
     let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
-    std::fs::create_dir_all(roots.state.as_path())?;
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(
-        roots.state.as_path(),
-        std::fs::Permissions::from_mode(0o700),
-    )?;
+    create_private_state_root(roots.state.as_path())?;
     init_base_repository(&project)?;
     let clock = crate::tests::clock();
     let cancel = provenant_core::CancelToken::new();
@@ -329,6 +326,7 @@ fn resume_preserves_explicit_worktrees_and_settled_lane_ownership()
             RunStore::scope(&record),
             &provenant_records::policy::Policy::default(),
         )?;
+        let mut prior_terminalized = false;
         if origin == Some(WorktreeOrigin::Lane) {
             let launch = crate::prepare_writer(&writer, &store.writer_registry, project_id)?;
             assert!(matches!(
@@ -346,6 +344,39 @@ fn resume_preserves_explicit_worktrees_and_settled_lane_ownership()
             owner_store.create(&owner, &call)?;
             assert!(matches!(
                 store.check_writer_lineage(&record, &launch.worktree, &call),
+                Err(RunError::Nonterminal)
+            ));
+            store.withdraw(
+                prior,
+                AttemptState::Queued {
+                    extra: Default::default(),
+                },
+                Outcome::Cancelled,
+                "fixture prior terminal while retained owner remains active",
+                clock.wall_now()?,
+                &call,
+            )?;
+            prior_terminalized = true;
+            let terminal = store.record(prior, &call)?;
+            let mut queue_task = original.request.task.clone();
+            let queue_context = queue_task.context.as_mut().ok_or("queue graph context")?;
+            queue_context.graph_id = Some("active-retained-writer-queue".into());
+            queue_context.node_id = Some("repair".into());
+            queue_context.attempt = Some(1);
+            queue_context.writer_predecessor = Some(prior);
+            queue_context.graph_template_launch = true;
+            queue_context.delivery_queue_writer_adoption = true;
+            queue_task.source_head = queue_task
+                .source_head
+                .as_ref()
+                .or(queue_task.head.as_ref())
+                .cloned();
+            queue_task.head = terminal
+                .head
+                .map(|head| head.to_string())
+                .or_else(|| queue_task.head.clone());
+            assert!(matches!(
+                store.check_launch_writer_lineage(&terminal, &queue_task, &launch.worktree, &call),
                 Err(RunError::Nonterminal)
             ));
             let owner_id = AttemptId::from_bytes([120; 16]);
@@ -418,16 +449,18 @@ fn resume_preserves_explicit_worktrees_and_settled_lane_ownership()
             crate::writer::seal_writer_ownership(&attempt, &launch.worktree)?;
         }
         std::fs::write(info.path.join("pending.txt"), "keep these edits")?;
-        store.withdraw(
-            prior,
-            AttemptState::Queued {
-                extra: Default::default(),
-            },
-            Outcome::Cancelled,
-            "fixture",
-            clock.wall_now()?,
-            &call,
-        )?;
+        if !prior_terminalized {
+            store.withdraw(
+                prior,
+                AttemptState::Queued {
+                    extra: Default::default(),
+                },
+                Outcome::Cancelled,
+                "fixture",
+                clock.wall_now()?,
+                &call,
+            )?;
+        }
         let next = Resume {
             extend: Vec::new(),
             prior,
@@ -510,6 +543,55 @@ fn resume_preserves_explicit_worktrees_and_settled_lane_ownership()
             adopted.head = Some("3".repeat(40));
             store.check_launch_writer_lineage(&graph_record, &adopted, &tree.worktree, &call)?;
         }
+        let prior_task = store.request(prior, &call)?.task;
+        let mut queue_graph = crate::tests::input();
+        queue_graph.attempt_id = AttemptId::from_bytes([230 + index as u8; 16]);
+        queue_graph.operation_id = format!("queue-adoption-{index}").parse()?;
+        queue_graph.request.task = prior_task.clone();
+        let queue_context = queue_graph
+            .request
+            .task
+            .context
+            .as_mut()
+            .ok_or("queue graph context")?;
+        queue_context.graph_id = Some(format!("delivery-queue-{index}"));
+        queue_context.node_id = Some(format!("repair-{index}"));
+        queue_context.attempt = Some(1);
+        queue_context.writer_predecessor = Some(prior);
+        queue_context.graph_template_launch = true;
+        queue_context.delivery_queue_writer_adoption = true;
+        let previous_record = store.record(prior, &call)?;
+        queue_graph.request.task.source_head = prior_task
+            .source_head
+            .as_ref()
+            .or(prior_task.head.as_ref())
+            .cloned();
+        queue_graph.request.task.head = previous_record
+            .head
+            .map(|head| head.to_string())
+            .or_else(|| prior_task.head.clone());
+        store.create(&queue_graph, &call)?;
+        let queue_record = store.record(queue_graph.attempt_id, &call)?;
+        let queue_tree = crate::prepare_writer(&writer, &store.writer_registry, project_id)?;
+        store.check_launch_writer_lineage(
+            &queue_record,
+            &queue_graph.request.task,
+            &queue_tree.worktree,
+            &call,
+        )?;
+        let mut unmarked_queue_task = queue_graph.request.task.clone();
+        unmarked_queue_task
+            .context
+            .as_mut()
+            .ok_or("queue graph context")?
+            .delivery_queue_writer_adoption = false;
+        // Cross-graph adoption is also valid without the queue marker (#3987).
+        store.check_launch_writer_lineage(
+            &queue_record,
+            &unmarked_queue_task,
+            &queue_tree.worktree,
+            &call,
+        )?;
         assert_eq!(
             store
                 .request(resumed.attempt_id, &call)?
@@ -573,12 +655,7 @@ fn resume_refuses_a_worktree_reused_by_another_lane()
     let mut inputs = provenant_core::RootInputs::new(home.clone(), project.clone());
     inputs.state_dir = Some(execution.state_root.as_path().into());
     let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
-    std::fs::create_dir_all(roots.state.as_path())?;
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(
-        roots.state.as_path(),
-        std::fs::Permissions::from_mode(0o700),
-    )?;
+    create_private_state_root(roots.state.as_path())?;
     init_base_repository(&project)?;
     let clock = crate::tests::clock();
     let cancel = provenant_core::CancelToken::new();
@@ -586,7 +663,7 @@ fn resume_refuses_a_worktree_reused_by_another_lane()
     original.request.task.deliver = Some(WriterDeliveryRequest {
         extra: Default::default(),
         mode: DeliveryMode::Pr,
-        remote: "origin".into(),
+        remote: provenant_records::run::Destination::from_name("origin").expect("fixture remote"),
         branch: "old-lane".into(),
         open_pr: true,
         fast_forward_only: false,

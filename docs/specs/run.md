@@ -16,6 +16,16 @@ inputs and allocates a new name for different ones ([graph naming](run-launch.md
 Each attempt has a unique work key, including its graph-assigned attempt number.
 - Why: lost replies and concurrent requests must not duplicate work or identity.
 
+## Unsupported launch fields
+
+`UNSUPPORTED` covers refusing launch fields only: a declared write, network, resume or
+skill-location gap, or a model gap with no eligible fallback. A degraded model, effort or
+image-input gap is reported in the route diagnostics and the result, not as `UNSUPPORTED`.
+Admission checks the adapter's row facts; an owner's capability overlay and gap policy apply
+at routing and preparation, before the provider starts.
+- Why: an error code must name a refused launch input, not a degraded control the launch can
+  proceed without.
+
 ## Host Cargo home
 
 Every lane uses the host-resolved `CARGO_HOME` (the host process's environment,
@@ -31,14 +41,15 @@ the read-only Cargo home and `PROVENANT_CARGO_SOURCE_WRITES`. `credentials` and 
 are always denied read and write, including in relocated homes; host `config` files are read-only
 data.
 
-## Lanes do not build
+## Lane verification
 
-Lanes format and coordinate only. The chair runs one warm host-owned integrated
-check per epic through the build port, capped by `[admission.build].slots`, and
-CI runs clippy and the tests. `lanes.verification` sets the format-only writer
-preamble. Lane Cargo output is bounded by `lanes.cargo_cache_max` and collected
-after `gc.cargo_target_idle`; `domains.fabric.lanes.cargo_source_writes`
-controls writes to the shared source caches.
+Writer lanes run the commands and scopes declared in the project's `verify.lane`
+port. A valid declaration is authoritative over the resolved legacy
+`lanes.verification` format-only scope; its tiers, commands, scopes and source
+also appear in the launch receipt. With no valid declaration writers run the
+repository formatter and declared pre-commit hooks. Git hooks are part of
+commit and push. Build admission and shared caches remain subject to host
+policy.
 
 ## Publication order
 
@@ -86,6 +97,17 @@ index, refs, worktree files and mtimes are never written. Nothing in a slot is c
 and a nonzero `slot_changes` count is reported on stderr. Stream output maps slot paths to
 the worktree; no `--message-format` flag is injected.
 
+The slot's Cargo target uses `build.target` (default `toolchain,worktree`).
+`toolchain` is derived from the compiler selected by Cargo, including an
+explicit `+toolchain` argument, so a warm cache built by another compiler
+cannot be reused by a pinned build. `worktree` sets a checkout-specific
+workspace-only rustc wrapper, giving workspace members separate fingerprints
+while dependencies stay in the shared target. An empty key (`shared`) restores
+the legacy shared target. `rustc -vV` release of
+the last warm job is kept in `slot.json`; `check config` reports the configured
+source layer and warns when that release differs from the repository's
+`rust-toolchain.toml` pin.
+
 A job runs locally, with its `exception` recorded and a warning, when it is sandboxed, not
 eligible, offload is off, staging or the pool is unavailable or quarantined, or no snapshot
 exists. A pool problem warns and runs locally; it never fails the chair's check.
@@ -113,15 +135,16 @@ and never fails the tick.
 | OS purges Caches | slot recreated with its record |
 | ledger unwritable | row goes to the attempt scratch ledger and the report counts it missing |
 
-- Why: the chair and landing share one strategy, one outcome row and one host cap; lanes do not build.
+- Why: the chair and landing share one strategy, one outcome row and one host cap.
 - Owner: `crates/run/src/build/`, `src/admit.rs`, `src/verify.rs`, `src/pr/landing/gate.rs`
 
 ## Verification and admission
 
-A writer preamble describes its verification scope (`lanes.verification`,
-default `targeted`) but the lane performs no build; the summary names what the
-chair's integrated check and CI will run. A brief line `Verification scope:
-check|targeted|full` overrides the paragraph and names source `brief`.
+A writer preamble renders the project's `verify.lane` entries with their tier,
+argv, scope and source. Invalid entries warn and are omitted; without a usable
+entry the resolved `lanes.verification` scope or formatter and declared
+pre-commit hooks remain in force. The launch receipt records the same effective
+valid entries and source as the writer preamble.
 
 Admission attribution has host scope and serves the chair's host-owned warm
 check. Before confinement each lane registers under
@@ -300,20 +323,27 @@ chair, and no successor writer starts while custody is uncertain. A restart pres
 worktree and archives prior attempts. See [routing](routing.md) for route selection.
 - Why: one decision keeps stop handling consistent and protects writer custody.
 
-A writer's declared stop settles as `stopped_early`, or, when its final handoff is blocked,
+A writer's declared stop settles as `stopped_early`, or, when its final declaration is blocked,
 as `blocked_environment` or `blocked_dependency` per its `blocked_on`, else `blocked` (an owner
-decision, a missing capability or no kind given). The node's advance code records whether the
-stop left committed work: `writer_declared_stop` when the head moved past its source commit,
-`stopped_no_work` otherwise. Both take the `stopped_early` row unless the node overrides it:
-a new route in a fresh session on the retained worktree. A junior route escalates to senior;
-otherwise a declared route not yet launched is used, and an alias route may resolve again.
+decision, a missing capability or no kind given). Both take the `stopped_early` row unless the node
+overrides it: a new route in a fresh session on the retained worktree. A junior route escalates to
+senior; otherwise a declared route not yet launched is used, and an alias route may resolve again.
 
-A lane's graph outcome is classified from evidence, not from the stop path that reported it:
-commits ahead of the node's input head count whether or not they were pushed, and a sealed `done`
-handoff closes the brief. Neither a terminal cause nor a partial signal may call a lane with new
-commits `stopped_no_work`; with a done handoff and a moved head the node succeeds even when a stop
-was recorded. The same observed refs decide the advance code: `writer_declared_stop` when a stop
-left new commits, `stopped_no_work` only when it left none.
+A lane's outcome is projected from its sealed settlement class and the verified delivery evidence.
+No-work requires a known, unchanged head: the head must equal the launch pin, and the cause must be
+`StoppedNoWork`. A `Moved` or `Unknown` head never produces no-work, so a lane that committed and
+pushed before declaring `blocked` stays `blocked`. A verified pushed head with a moved input head
+and a sealed `done` handoff closes the writer brief, even when a provisional failed settlement
+reason was recorded (#4065). These facts are part of the terminal observation; no remote ref is
+re-read during graph projection. Graph-owned overrides — a result warning, failed or not-attempted
+delivery, and a configured deadline — apply above the projection, and the sealed stop agrees with
+the projected cause.
+
+The settlement-derived advance codes are `declared_stop` and `stopped_no_work`, owned by
+`records::graph::GraphAttemptOutcome::advance_code`. Every other advance code comes from the owner or a
+launch refusal. A real precondition failure on a successful-looking attempt is reported with its
+settlement class as a named cause, never bare `other_failure`. Findings counts are not a writer
+success criterion: a writer without a findings contract is not failed for absent findings.
 
 With no different route, a stop that can continue on its own route (`stopped_early`,
 `lane_token_lost`, `context_handoff`) takes the same route with a fresh session on the
@@ -335,6 +365,7 @@ chair as an environment problem; `blocked_dependency` pauses as a wait. Neither 
 | Cause | Default | Pinned | Retries |
 | --- | --- | --- | --- |
 | `stopped_early` | `new_route` | no | 0 |
+| `stopped_no_work` | `new_route` | no | 0 |
 | `blocked` | `chair` | yes | 0 |
 | `blocked_environment` | `chair` | no | 1 |
 | `blocked_dependency` | `chair` | no | 0 |
@@ -381,3 +412,16 @@ chair as an environment problem; `blocked_dependency` pauses as a wait. Neither 
 | `quarantined` | `chair` | no | 0 |
 | `steered` | `chair` | yes | 0 |
 | `unclassified` | `new_route` | no | 1 |
+
+`model_unavailable` is a route-level depletion, not an adapter failure. The
+typed outcome is preserved through settlement, and the stop moves to the next
+eligible candidate in the same tier as `usage_limited` does, with the rung,
+target and tier of the hand-off recorded on the restart. An exact model pinned
+without a pool still has a tier: the first tier in `depletion.tiers` whose pool
+serves the stopped model's family stands in, so a capacity stop can hand off.
+Only a pinned exact model with no fallback allowed refuses. A pinned-route
+refusal names cause-neutral options: another eligible entry in `node.routes`,
+an applicable depletion ladder configured through `depletion.rungs` and
+`depletion.tiers`, or removing the route's account/model pin. The per-cause
+`on_stop` setting does not add a fallback when the cause already defaults to
+`new_route`.

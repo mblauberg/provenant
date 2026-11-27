@@ -185,23 +185,49 @@ open descriptor is reported as ownership unproven. An open path is not proof of
 lock ownership; unknown holders stay explicit uncertainty; a timeout alone
 never authorises settlement or an unrelated signal. This observation covers the
 custody writer-lock path, not arbitrary repository locks, and cannot be persisted
-when the guardian dies before publishing an exit. An unrecorded, unsandboxed
-detached process may therefore be neither reaped nor reported.
+when the guardian dies before publishing an exit. The durable attempt tag
+recorded at spawn narrows this: a detached process is named in status from its
+recorded group/session or its inherited mark, though an OS mark is required to
+reap one that setsid leaves outside the recorded tree.
 - Why: a leftover descendant could still write the worktree, and a chair
   cannot clean up what status no longer names.
 
+The provider's identity gate stays closed until the guardian has durably
+published the attempt attribution and provider identity in the reservation.
+Failure to publish rejects the still-gated spawn. The record names the boot,
+process group and session, and whether an OS containment mark is in effect. The
+provider also receives the attempt id as an internal, non-secret environment
+mark, inherited across fork, exec and setsid. Recovery reads that mark from
+`/proc/<pid>/environ` on Linux and `KERN_PROCARGS2` on macOS. A host with no
+containment warns once per change with the setting source
+(`LAUNCH_PROCESS_ATTRIBUTION_NONE`, default `warn`, configurable off);
+`config show --full` names the setting and its layer. Where an OS mark survives
+a double-fork and setsid, recovery reaps marked escapees. Without one, the
+recorded group/session and the inherited mark still let reconcile name a
+detached process after guardian death: it is reported in status as an escaped
+PID (and named in a settled exit's `unresolved_pids`) but never signalled,
+because attribution alone does not prove ownership. If the operating system
+cannot expose a process's arguments or environment, that process cannot be
+matched by its inherited mark. An `ORPHAN_PROCESS_ATTRIBUTED` attempt warning
+keeps the PIDs visible in status while the fence holds.
+The emitted typed warning identifies this observed condition with a detected
+source and the attempt as its subject.
+
 When a lane is killed before its guardian can publish an exit, `reconcile` ends
 its recorded process tree under writer exclusion once the guardian's published
-identity is proven absent. Candidates are the provider and descendant
+identity is proven absent. Reap candidates are the provider and descendant
 identities the reservation recorded and live processes carrying the attempt's
 sandbox mark; each identity is revalidated before TERM and again before KILL. A live guardian fences the
 reap, a survivor keeps the attempt fenced and is reported with its PID, and no
-exit is invented. Bare PIDs, process groups, sessions and descriptor paths grant
-no signal authority.
+exit is invented. Live processes found only by the durable group/session tag
+join that report, never the signal set. Bare PIDs, process groups, sessions and
+descriptor paths grant no signal authority.
 - Why: an account-limit kill must not leave a detached service holding the
   repository's heavy lock, but a recycled PID or a sibling's process must never
-  be signalled to clear it.
-- Owner: `crates/supervisor/src/custody/orphans.rs`, `crates/run/src/controls.rs`
+  be signalled to clear it; an unsandboxed host must still name what it cannot
+  prove.
+- Owner: `crates/supervisor/src/custody/orphans.rs`, `crates/run/src/controls.rs`,
+  `crates/run/src/launch.rs`
 
 ### Retention is bounded and event-driven
 
@@ -276,13 +302,11 @@ replayable authority.
 
 ### Build context
 
-Lanes have no Cargo shims and receive no host build context: they never
-compile, seed or admit a build. The chair's host-owned warm check and
-`provenant verify` tiers use the one `slots` strategy, bounded by
-`[admission.build].slots`; layered `build.*` ports are in
-[state](state.md#configuration). `.worktrees/.cargo/config.toml` is the single
-mechanism that disables lane cargo.
-- Why: one build model keeps lane custody independent of host compilation.
+Lane verification follows the project's `verify.lane` declarations and local
+policy. The chair's host-owned warm check and `provenant verify` tiers use the
+`slots` strategy, bounded by `[admission.build].slots`; layered `build.*` ports
+are in [state](state.md#configuration).
+- Why: one host build model keeps lane custody independent of host compilation.
 - Owner: `src/admit.rs`; `src/verify.rs`; `crates/run/src/build/`
 
 ## Permission policy
@@ -397,9 +421,18 @@ stay read-only to lanes. The host imports verified objects and moves the branch
 by compare-and-swap ([launch custody](run-launch.md#admission-and-custody)). The
 lane Git wrapper binds commands that implicitly target its worktree; commands
 with an explicit repository selector, other repositories and transport endpoints
-pass through unchanged.
-- Why: ordinary Git works in the lane while other lanes' refs and the host's Git
-  behaviour stay protected.
+pass through unchanged. The bound private Git directory is a registration below
+the attempt's private common directory (`worktrees/lane`), with its backlink and
+head, so `--git-dir` differs from `--git-common-dir` and `git worktree list`
+resolves the lane checkout. Tooling that clears `GIT_*` and re-enters through the
+shim still sees an ordinary registered linked worktree; refs, objects and the
+index stay in the attempt's private store. The wrapper unsets `LEFTHOOK` and
+warns then refuses `--no-verify` and `core.hooksPath` overrides before
+forwarding; a trailing value-taking option still reaches Git instead of
+aborting the wrapper.
+- Why: ordinary Git and repository checkout guards work in the lane while
+  hooks cannot be skipped and other lanes' refs and the host's Git behaviour
+  stay protected.
 
 ### Native environment and sandbox tool stores
 

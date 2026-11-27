@@ -12,6 +12,11 @@ mod membership;
 
 /// Why a PR whose CI never reported checks stayed pending. Shared by the
 /// graph gate's CI summary and by `wait --pr` at a timeout.
+/// A pinned pull request moved after its admitted head was observed.
+pub const PR_HEAD_MOVED: &str = "pr_head_moved";
+/// A pull request wait refused to proceed without a head at admission.
+pub const HEAD_UNPINNED: &str = "head_unpinned";
+
 pub(crate) const NO_CHECKS_NEXT: &str =
     "check the workflow triggers or push an empty commit to start CI";
 
@@ -426,6 +431,7 @@ pub(crate) fn observe_ci(
     project: &Path,
     target: &str,
     names: &[String],
+    delivery_queue: bool,
     failed_checks_max_bytes: usize,
     max_failed_checks: usize,
 ) -> provenant_fabric_runtime::graph::CiObservation {
@@ -434,9 +440,19 @@ pub(crate) fn observe_ci(
         project,
         target,
         names,
+        delivery_queue,
         failed_checks_max_bytes,
         max_failed_checks,
     )
+}
+
+/// Observe mergeability before a graph waits on CI for the same published head.
+pub(crate) fn observe_conflict(
+    state: &Path,
+    project: &Path,
+    target: &str,
+) -> provenant_fabric_runtime::graph::ConflictObservation {
+    ci::observe_conflict(state, project, target)
 }
 
 /// The longest check name a status or failure line carries.
@@ -463,20 +479,20 @@ fn display_check_url(url: &str) -> Option<String> {
     .then(|| url.to_owned())
 }
 
-/// A conflicting pull request never starts CI, so say so rather than report
-/// its checks as missing. A settled result keeps its state.
+/// Report conflicts even if a check result exists: the conflict gate runs
+/// before CI and routes the retained writer to merge the base.
 fn mark_conflict(
     observation: &mut provenant_fabric_runtime::graph::CiObservation,
     read_mergeable: impl FnOnce() -> Option<String>,
 ) {
     use provenant_fabric_runtime::graph::CiState;
-    if !matches!(observation.state, CiState::Passed | CiState::Failed)
-        && read_mergeable().as_deref() == Some("CONFLICTING")
-    {
+    if read_mergeable().as_deref() == Some("CONFLICTING") {
         observation.state = CiState::Conflict;
-        observation
-            .summary
-            .push_str(" next: rebase the branch onto its base and push");
+        observation.failed_checks.clear();
+        observation.summary = format!(
+            "pull request conflicts with its base; next: {}",
+            provenant_fabric_runtime::graph::CONFLICT_GUIDANCE
+        );
     }
 }
 
@@ -484,12 +500,19 @@ fn mark_conflict(
 #[allow(dead_code)] // The worktree driver includes this module without libtest.
 fn observe_ci_with(
     names: &[String],
+    delivery_queue: bool,
     resolve: impl FnOnce() -> Option<Vec<String>>,
     read_checks: impl FnOnce() -> Option<Vec<Check>>,
     read_mergeable: impl FnOnce() -> Option<String>,
 ) -> provenant_fabric_runtime::graph::CiObservation {
+    let resolved = names.is_empty().then(resolve);
+    let policy_unavailable =
+        delivery_queue && names.is_empty() && resolved.as_ref().is_some_and(Option::is_none);
     let required = if names.is_empty() {
-        resolve().map(|names| ("branch-required", names))
+        resolved
+            .flatten()
+            .filter(|names| !names.is_empty())
+            .map(|names| ("branch-required", names))
     } else {
         Some(("configured", names.to_vec()))
     };
@@ -499,6 +522,12 @@ fn observe_ci_with(
             .as_ref()
             .map(|(policy, names)| (*policy, names.as_slice())),
     );
+    if policy_unavailable {
+        observation.state = provenant_fabric_runtime::graph::CiState::Pending;
+        observation.summary =
+            "policy=required-unavailable; waiting for the branch check policy".into();
+        observation.failed_checks.clear();
+    }
     mark_conflict(&mut observation, read_mergeable);
     observation
 }
@@ -518,7 +547,6 @@ pub(super) fn required_checks(state: &Path, project: &Path, target: &str) -> Opt
         .ok()
     })
     .map(|policy| policy.checks.into_iter().map(|check| check.name).collect())
-    .filter(|names: &Vec<String>| !names.is_empty())
 }
 
 /// A required check, optionally pinned to the GitHub App that must report it.
@@ -780,6 +808,7 @@ fn summarise_ci(
     let policy = required.map_or("all-reported", |(policy, _)| policy);
     let Some(checks) = checks else {
         return CiObservation {
+            quota_reset_at: None,
             extra: Default::default(),
             state: CiState::Unavailable,
             summary: format!("policy={policy} checks unavailable"),
@@ -831,6 +860,7 @@ fn summarise_ci(
         String::new()
     };
     CiObservation {
+        quota_reset_at: None,
         extra: Default::default(),
         state,
         summary: format!(
@@ -926,14 +956,14 @@ pub(crate) fn wait_line_observed(
             provenant_records::warning::Warning::new(
                 provenant_records::warning::ACTIONS_RUNS_UNAVAILABLE,
                 "Actions runs unavailable for this head (no runs found); using observed checks only",
-            )
+             provenant_records::warning::detected_source(provenant_records::warning::ACTIONS_RUNS_UNAVAILABLE))
             .subject(line.head.clone()),
         ),
         Err(error) => provenant_records::warning::warn(
             provenant_records::warning::Warning::new(
                 provenant_records::warning::ACTIONS_RUNS_UNAVAILABLE,
                 format!("Actions runs unavailable for this head ({error}); using observed checks only"),
-            )
+             provenant_records::warning::detected_source(provenant_records::warning::ACTIONS_RUNS_UNAVAILABLE))
             .subject(line.head.clone()),
         ),
     }

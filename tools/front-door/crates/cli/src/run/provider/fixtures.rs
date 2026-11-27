@@ -125,6 +125,34 @@ pub(crate) fn start_fabric_relay(
     let graph_clock = provenant_os::clock::SystemClock::new();
     let graph_holder = context.clone();
     let notes_holder = context.clone();
+    // The journal bound is a host fact: it is resolved here from the host's
+    // configuration, never from a lane-supplied payload. The lane can only
+    // append within this bound; a project value wins over the host value.
+    let declaration_limit = {
+        let project = context.project_id.to_string();
+        match crate::config_reads::read_for(&ctx.roots, "handoff") {
+            Ok(config) => crate::declaration::DeclarationSettings::resolve(
+                &config,
+                &project,
+                ctx.roots.state.as_path(),
+            )
+            .limit(),
+            Err(error) => {
+                provenant_records::warning::warn(
+                    provenant_records::warning::Warning::new(
+                        provenant_records::warning::CONFIG_UNAVAILABLE,
+                        format!(
+                            "handoff journal settings unavailable ({error}); using compiled defaults"
+                        ),
+                        provenant_records::warning::detected_source(provenant_records::warning::CONFIG_UNAVAILABLE),
+                    )
+                    .subject("domains.run.declaration_journal_bytes")
+                    .once_per_change(),
+                );
+                provenant_records::declaration::DeclarationLimit::shipped()
+            }
+        }
+    };
     provenant_fabric_runtime::relay::HostRelay::start_with_peer_graph(
         LaneRuntime::fabric_socket(context.attempt_id),
         provenant_records::Limits {
@@ -133,6 +161,14 @@ pub(crate) fn start_fabric_relay(
             max_members: 100_000,
         },
         move |call, cancel, within| {
+            if let provenant_fabric_runtime::relay::ToolCall::Declare(input) = &call {
+                return crate::declaration::serve_lane(
+                    &ctx,
+                    &notes_holder,
+                    input.clone(),
+                    &declaration_limit,
+                );
+            }
             if let provenant_fabric_runtime::relay::ToolCall::Notes(input) = call {
                 return crate::notes::serve_lane(&ctx, &notes_holder, input, &clock, cancel);
             }

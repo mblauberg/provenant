@@ -8,15 +8,15 @@ fn settlement_and_selection_share_the_stop_rule_and_custody_guards() {
     let limits = crate::config::GraphLimits::default();
     for (outcome, failure) in [
         (
-            AttemptOutcome::AuthRequired,
+            GraphAttemptOutcome::AuthRequired,
             PreparationFailure::AuthRequired,
         ),
         (
-            AttemptOutcome::UsageLimited,
+            GraphAttemptOutcome::UsageLimited,
             PreparationFailure::UsageLimited,
         ),
         (
-            AttemptOutcome::AdapterUnavailable,
+            GraphAttemptOutcome::AdapterUnavailable,
             PreparationFailure::AdapterUnavailable,
         ),
     ] {
@@ -73,7 +73,7 @@ fn settlement_and_selection_share_the_stop_rule_and_custody_guards() {
                         }),
                     };
                     let selected = next_attempt::next_attempt_transition(
-                        node, &progress, &limits, None, &facts,
+                        node, &progress, &limits, None, None, &facts,
                     );
                     let advances = matches!(
                         selected,

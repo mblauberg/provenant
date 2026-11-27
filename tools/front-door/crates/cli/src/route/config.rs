@@ -222,6 +222,7 @@ pub(super) fn set_pool(roots: &Roots, request: &RouteSet) -> Result<(), EdgeErro
             Warning::new(
                 CONFIG_KEY_IGNORED,
                 "model is absent from bundled and discovered catalogues (source=user)",
+                provenant_records::warning::detected_source(CONFIG_KEY_IGNORED),
             )
             .subject(model.as_str()),
         );
@@ -931,7 +932,7 @@ pub(super) fn execute_in(
                                 == Some(r.account.account_key.as_str())
                                 || (route.account_key.is_none()
                                     && provenant_records::AdapterSpec::get(&route.adapter)
-                                        .is_some_and(|spec| spec.allowance_prefix.is_some())
+                                        .is_some_and(|spec| spec.quota.allowance_prefix.is_some())
                                     && snapshot_governs(
                                         &route.adapter,
                                         r.snapshot
@@ -974,8 +975,21 @@ pub(super) fn execute_in(
                         )
                     },
                 );
-                let (mut recorded_readiness, offered_exclusions) =
-                    filter_unoffered_readiness(recorded, &model, context.catalogue, records);
+                let offer_policy = provenant_routing::OfferEvidencePolicy {
+                    accounts: records,
+                    freshness: &context.config.freshness,
+                    quota_policies: policies,
+                    catalogue_revision: context.catalogue.revision(),
+                    now_seconds: now.unix_seconds(),
+                };
+                let (mut recorded_readiness, offered_exclusions) = filter_unoffered_readiness(
+                    recorded,
+                    &model,
+                    context.catalogue,
+                    &offer_policy,
+                    context.availability,
+                    query.account.as_deref(),
+                );
                 let pools = context.catalogue.admission_pools(&model);
                 let quota_evidence = quota_observations(
                     context.catalogue,

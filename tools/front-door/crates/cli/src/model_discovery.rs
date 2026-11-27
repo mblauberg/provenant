@@ -14,7 +14,7 @@ const LIMIT: u64 = 4 * 1024 * 1024;
 fn discovery_providers() -> impl Iterator<Item = (&'static AdapterSpec, &'static [&'static str])> {
     provenant_records::ADAPTER_SPECS
         .iter()
-        .filter_map(|spec| spec.model_discovery.map(|argv| (spec, argv)))
+        .filter_map(|spec| spec.identity.model_discovery.map(|argv| (spec, argv)))
 }
 
 fn read(roots: &Roots, adapter: &str) -> Option<DiscoverySnapshot> {
@@ -63,7 +63,7 @@ pub(crate) fn discovered_canonical_models(roots: &Roots, adapter: &str) -> Vec<S
 
 pub(crate) fn effective(roots: &Roots) -> Result<Catalogue, RoutingError> {
     let snapshots: Vec<_> = discovery_providers()
-        .filter_map(|(spec, _)| read(roots, spec.name))
+        .filter_map(|(spec, _)| read(roots, spec.identity.name))
         .collect();
     let bundled = Catalogue::bundled()?;
     let project = roots.checkout();
@@ -75,6 +75,9 @@ pub(crate) fn effective(roots: &Roots) -> Result<Catalogue, RoutingError> {
             warn(Warning::new(
                 provenant_records::warning::MODEL_CATALOGUE_UNAVAILABLE,
                 "invalid provider model discovery cache; using bundled catalogue",
+                provenant_records::warning::detected_source(
+                    provenant_records::warning::MODEL_CATALOGUE_UNAVAILABLE,
+                ),
             ));
             Ok(bundled.with_overlays(&layers, warnings))
         }
@@ -118,11 +121,11 @@ fn refresh_resolving(
     let mut threads = Vec::new();
     let mut pending = std::collections::BTreeSet::new();
     for (spec, args) in discovery_providers() {
-        let adapter = spec.name;
+        let adapter = spec.identity.name;
         if !enabled.iter().any(|id| id == adapter) {
             continue;
         }
-        let Ok(binary) = resolve(spec.binary) else {
+        let Ok(binary) = resolve(spec.identity.binary) else {
             continue;
         };
         pending.insert(adapter);
@@ -199,12 +202,12 @@ fn refresh_with(
 ) -> Vec<String> {
     let mut messages = Vec::new();
     for (spec, args) in discovery_providers() {
-        let adapter = spec.name;
-        let binary = spec.binary;
+        let adapter = spec.identity.name;
+        let binary = spec.identity.binary;
         if filter.is_some_and(|filter| filter != adapter) {
             continue;
         }
-        let snapshot = probe(binary, args).and_then(|bytes| match spec.model_listing {
+        let snapshot = probe(binary, args).and_then(|bytes| match spec.identity.model_listing {
             Some(ModelListingFormat::CodexJson) => {
                 provenant_routing::parse_codex_models(&bytes, now).ok()
             }

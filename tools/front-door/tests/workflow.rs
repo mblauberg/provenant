@@ -617,6 +617,8 @@ fn chair_log_cli_retention_replay_and_lane_refusal() -> Result {
     assert_eq!(page["data"]["entries"][0]["markdown"], "Second");
     assert_eq!(page["data"]["total_pruned"], 1);
     assert_eq!(append(&rig, &first, "first", 0)?["data"], original["data"]);
+    let declared = rig.lane_project()?;
+    rig.env.push(declared);
     rig.env.push(("PROVENANT_LANE_DEPTH".into(), "1".into()));
     let refused = append(&rig, &first, "lane", 1)?;
     assert_eq!(refused["error"]["code"], "IN_LANE", "{refused}");
@@ -712,6 +714,8 @@ fn a_lane_cannot_register_or_overwrite_a_chair() -> Result {
     rig.env.retain(|(key, _)| key != "PROVENANT_AGENT_LABEL");
     rig.env
         .push(("PROVENANT_AGENT_LABEL".into(), "lane-attempt".into()));
+    let declared = rig.lane_project()?;
+    rig.env.push(declared);
     rig.env.push(("PROVENANT_LANE_DEPTH".into(), "1".into()));
     let before = state_snapshot(&rig.state.join("workflow"))?;
     for session in ["chair", "lane"] {

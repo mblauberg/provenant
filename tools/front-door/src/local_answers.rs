@@ -62,7 +62,7 @@ impl LocalReader<'_> {
             host,
             self.config,
             self.agent_label,
-            Some(self.harness.spec().name),
+            Some(self.harness.spec().identity.name),
         )?;
         if found.record.host != host || found.record.chair_actor != address.actor {
             return Ok(None);
@@ -199,6 +199,7 @@ mod tests {
         let answered = service.execute(
             InboxInput::Answer {
                 extra: Default::default(),
+                queue_control: None,
                 id: receipt.request_id,
                 action: AnswerAction::Reply,
                 option_id: None,

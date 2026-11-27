@@ -16,8 +16,9 @@ fn request(
     Ok(serde_json::to_string(&(request, delivery))?)
 }
 
-// Tests take the request instead of starting a detached process.
-#[cfg(test)]
+// The worktree harness takes the request instead of starting a detached
+// process, both as libtest and when linked from the fixture-gated library.
+#[cfg(any(test, feature = "fixture"))]
 thread_local! {
     pub(crate) static SPAWNED: std::cell::RefCell<Result<Vec<String>, String>> =
         const { std::cell::RefCell::new(Ok(Vec::new())) };
@@ -29,7 +30,7 @@ pub(crate) fn spawn(
     delivery: Option<&provenant_run::WriterDeliveryReceipt>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let request = request(settled, delivery)?;
-    #[cfg(test)]
+    #[cfg(any(test, feature = "fixture"))]
     return SPAWNED.with_borrow_mut(|spawned| match spawned {
         Ok(spawned) => {
             spawned.push(request);
@@ -37,7 +38,7 @@ pub(crate) fn spawn(
         }
         Err(error) => Err(error.clone().into()),
     });
-    #[cfg(not(test))]
+    #[cfg(not(any(test, feature = "fixture")))]
     {
         let argv = [
             std::env::current_exe()?.into_os_string(),
@@ -83,6 +84,9 @@ pub(crate) fn run(
             provenant_records::warning::Warning::new(
                 provenant_records::warning::GC_SCHEDULE_FAILED,
                 format!("settlement free-floor sweep failed: {error}"),
+                provenant_records::warning::detected_source(
+                    provenant_records::warning::GC_SCHEDULE_FAILED,
+                ),
             )
             .once_per_change(),
         );
@@ -225,23 +229,21 @@ fn delivered_removal_evidence(
         let Ok(Some(destination)) = provenant_run::HostDeliveryContext::destination_for_remote(
             request.mode.clone(),
             &request.branch,
-            &request.remote,
+            request.remote.remote_name().cloned(),
         ) else {
             return false;
         };
-        let remote = destination.remote;
         let branch = destination.branch;
         let target_ref = format!("refs/heads/{branch}");
-        let expected_reference = if remote.is_empty() {
-            target_ref.clone()
-        } else {
-            format!("refs/remotes/{remote}/{branch}")
+        let expected_reference = match destination.remote.as_str() {
+            None => target_ref.clone(),
+            Some(remote) => format!("refs/remotes/{remote}/{branch}"),
         };
-        request.remote == remote
+        request.remote == destination.remote
             && request.branch == branch
             && reference == expected_reference
             && receipt.integration.as_ref().is_some_and(|integration| {
-                integration.remote == remote && integration.target == target_ref
+                integration.remote == destination.remote && integration.target == target_ref
             })
     });
     if integration_matches {
@@ -440,6 +442,9 @@ fn release_settled_cache(
                     "private cache release for {}: {error}",
                     writer.worktree.display()
                 ),
+                provenant_records::warning::detected_source(
+                    provenant_records::warning::PRIVATE_CACHE_RELEASE_FAILED,
+                ),
             )
             .subject(writer.worktree.display().to_string()),
         );
@@ -603,6 +608,9 @@ pub(crate) fn collect_unsettled(
                         format!(
                             "settled lane collection failed for {}: {error}",
                             worktree.display()
+                        ),
+                        provenant_records::warning::detected_source(
+                            provenant_records::warning::SETTLED_LANE_COLLECTION_FAILED,
                         ),
                     )
                     .subject(worktree.display().to_string()),
@@ -962,12 +970,9 @@ fn collect_owned_worktree_with(
                             provenant_run::WriterDeliveryState::Delivered { .. }
                         )
                     })
-                    .map(|receipt| {
-                        if receipt.remote.is_empty() {
-                            format!("refs/heads/{}", receipt.branch)
-                        } else {
-                            format!("refs/remotes/{}/{}", receipt.remote, receipt.branch)
-                        }
+                    .map(|receipt| match receipt.remote.as_str() {
+                        None => format!("refs/heads/{}", receipt.branch),
+                        Some(remote) => format!("refs/remotes/{remote}/{}", receipt.branch),
                     });
                 let Some(head) = record.head.or_else(|| {
                     (record.provider_launched == Some(false))
@@ -1348,7 +1353,7 @@ mod removal_tests {
         let make_request = |mode, remote: &str, branch: &str, open_pr| WriterDeliveryRequest {
             extra: Default::default(),
             mode,
-            remote: remote.into(),
+            remote: provenant_records::run::Destination::from_name(remote).expect("fixture remote"),
             branch: branch.into(),
             open_pr,
             fast_forward_only: false,
@@ -1357,7 +1362,8 @@ mod removal_tests {
             |remote: &str, branch: &str, integration| provenant_run::WriterDeliveryReceipt {
                 extra: Default::default(),
                 schema_version: 1,
-                remote: remote.into(),
+                remote: provenant_records::run::Destination::from_name(remote)
+                    .expect("fixture remote"),
                 branch: branch.into(),
                 head: Some(head),
                 review_acceptance: None,
@@ -1369,7 +1375,8 @@ mod removal_tests {
             };
         let lane_integration = Some(WriterIntegration {
             extra: Default::default(),
-            remote: "origin".into(),
+            remote: provenant_records::run::Destination::from_name("origin")
+                .expect("fixture remote"),
             push_url: Some("https://example.invalid/repo".into()),
             target: "refs/heads/topic".into(),
             previous: None,
@@ -1407,7 +1414,8 @@ mod removal_tests {
             "main",
             Some(WriterIntegration {
                 extra: Default::default(),
-                remote: "origin".into(),
+                remote: provenant_records::run::Destination::from_name("origin")
+                    .expect("fixture remote"),
                 push_url: Some("https://example.invalid/repo".into()),
                 target: "refs/heads/main".into(),
                 previous: Some(target),

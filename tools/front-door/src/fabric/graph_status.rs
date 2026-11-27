@@ -32,6 +32,13 @@ pub(crate) struct NodeDigest {
     pub handoff_status: Option<String>,
     pub open_asks: Vec<Value>,
     pub evidence_error: Option<String>,
+    pub delivery_loop: Value,
+    pub escalation: Value,
+    pub delivery_park: Value,
+    pub wait_source: Option<String>,
+    pub item: Option<String>,
+    pub active_lane: Option<String>,
+    pub last_event_source: Option<String>,
 }
 
 fn text(value: &Value, limit: usize) -> Option<String> {
@@ -219,6 +226,15 @@ pub(crate) fn node_digests(rows: &[Value]) -> Vec<NodeDigest> {
             };
             let open_asks = node["open_asks"].as_array().cloned().unwrap_or_default();
             let evidence_error = text(&attempt["evidence_error"], 200);
+            let delivery_loop = node["delivery_loop"].clone();
+            let escalation = node["escalation"].clone();
+            let delivery_park = node["delivery_park"].clone();
+            let wait_source = text(&node["wait_source"], 128);
+            let item = text(&delivery_park["item"], 256);
+            let active_lane = (attempt_presence.as_deref() == Some("live"))
+                .then(|| text(&attempt["attempt_id"], 256))
+                .flatten();
+            let last_event_source = text(&attempt["last_event_source"], 128);
             let current_state = lane_state(
                 &state,
                 attempt_state.as_deref(),
@@ -271,14 +287,45 @@ pub(crate) fn node_digests(rows: &[Value]) -> Vec<NodeDigest> {
                 },
                 result_path.as_deref().unwrap_or("-")
             ));
-            if let Some(presence) = &attempt_presence {
-                line.push_str(&format!(" attempt_presence={presence}"));
+            // The checkpoint head is an observation, not a fresh forge read.
+            if let Some(head) = text(&attempt["head"], 128).or_else(|| text(&node["head"], 128)) {
+                line.push_str(&format!(" head={head}/recorded"));
+            }
+            if let Some(item) = &item {
+                line.push_str(&format!(" item={item}"));
+            }
+            if let Some(lane) = &active_lane {
+                line.push_str(&format!(" active_lane={lane}"));
             }
             if stalled {
+                line.push_str(" stalled");
+            }
+            if stalled || last_event_at.is_some() {
                 line.push_str(&format!(
-                    " stalled last_event={}",
+                    " last_event={}",
                     last_event_at.as_deref().unwrap_or("unknown")
                 ));
+                if let Some(source) = &last_event_source {
+                    line.push_str(&format!(" ({source})"));
+                }
+            }
+            if let Some(round) = delivery_loop["round"].as_u64() {
+                line.push_str(&format!(" round={round}"));
+            }
+            if let Some(rung) = escalation["rung"].as_u64() {
+                line.push_str(&format!(" rung={rung}"));
+            }
+            if let Some(source) = &wait_source {
+                line.push_str(&format!(" wait_source={source}"));
+            }
+            if let Some(reason) = text(&delivery_park["reason"], 128) {
+                line.push_str(&format!(" parked={reason}"));
+            }
+            if let Some(handoff) = text(&delivery_park["handoff"], 1024) {
+                line.push_str(&format!(" parked_handoff={handoff}"));
+            }
+            if let Some(presence) = &attempt_presence {
+                line.push_str(&format!(" attempt_presence={presence}"));
             }
             if let Some(verdict) = &review_verdict {
                 line.push_str(&format!(" verdict={verdict}"));
@@ -349,6 +396,13 @@ pub(crate) fn node_digests(rows: &[Value]) -> Vec<NodeDigest> {
                 handoff_status,
                 open_asks,
                 evidence_error,
+                delivery_loop,
+                escalation,
+                delivery_park,
+                wait_source,
+                item,
+                active_lane,
+                last_event_source,
             })
         })
         .collect();
@@ -411,15 +465,15 @@ pub(super) fn graph_snapshot(
     } else {
         GraphStatus::Pending
     };
-    let advance_error = checkpoint
+    let advance_note = checkpoint
         .nodes
         .iter()
-        .find_map(|node| node.advance_error.clone());
+        .find_map(|node| node.advance_note.clone());
     GraphRun {
         status,
         outcome: (status == GraphStatus::Complete).then(|| checkpoint.outcome()),
         checkpoint,
-        advance_error,
+        advance_note,
     }
 }
 
@@ -551,6 +605,77 @@ mod tests {
     }
 
     #[test]
+    fn delivery_and_stall_share_one_selected_attempt_event() {
+        use provenant_core::ProjectId;
+        use provenant_records::WorkKey;
+        use serde_json::json;
+
+        let key = json!(WorkKey::new(ProjectId::from_bytes([9; 16]), "g", "n", 1).unwrap());
+        for stalled in [false, true] {
+            let rows = vec![
+                json!({"kind":"node","work_key":key,"state":"running"}),
+                json!({"kind":"attempt","work_key":key,"state":"running","presence":"live",
+                    "stalled":stalled,"last_event_at":"2026-11-26T04:58:00Z",
+                    "last_event_source":"output"}),
+            ];
+            let digest = super::node_digests(&rows).remove(0);
+            assert_eq!(
+                digest.last_event_at.as_deref(),
+                Some("2026-11-26T04:58:00Z")
+            );
+            assert_eq!(digest.last_event_source.as_deref(), Some("output"));
+            assert_eq!(digest.line.matches("last_event=").count(), 1);
+            assert!(
+                digest
+                    .line
+                    .contains("last_event=2026-11-26T04:58:00Z (output)")
+            );
+            assert_eq!(digest.line.contains(" stalled last_event="), stalled);
+        }
+    }
+
+    #[test]
+    fn digest_labels_the_recorded_head_as_an_observation() {
+        use provenant_core::ProjectId;
+        use provenant_records::WorkKey;
+        use serde_json::json;
+
+        let key = WorkKey::new(ProjectId::from_bytes([7; 16]), "graph", "task", 1).unwrap();
+        let rows = vec![json!({"kind":"node", "work_key":key, "state":"waiting", "head":"abc123"})];
+        let digest = super::node_digests(&rows).remove(0);
+        assert!(digest.line.contains("head=abc123/recorded"));
+    }
+
+    #[test]
+    fn delivery_digest_retains_recorded_progress_and_park() {
+        use provenant_core::ProjectId;
+        use provenant_records::WorkKey;
+        use serde_json::json;
+
+        let key = WorkKey::new(ProjectId::from_bytes([7; 16]), "graph", "task", 1).unwrap();
+        let rows = vec![json!({"kind":"node", "work_key":key, "state":"blocked",
+            "head":"abc123", "delivery_loop":{"round":2},
+            "escalation":{"rung":1}, "wait_source":"graph checkpoint",
+            "delivery_park":{"item":"issue-42", "reason":"ci_unavailable", "handoff":"inspect CI"}})];
+        let digest = super::node_digests(&rows).remove(0);
+        assert_eq!(digest.item.as_deref(), Some("issue-42"));
+        assert_eq!(digest.delivery_loop["round"], 2);
+        assert_eq!(digest.escalation["rung"], 1);
+        assert_eq!(digest.delivery_park["handoff"], "inspect CI");
+        for text in [
+            "head=abc123/recorded",
+            "item=issue-42",
+            "round=2",
+            "rung=1",
+            "wait_source=graph checkpoint",
+            "parked=ci_unavailable",
+            "parked_handoff=inspect CI",
+        ] {
+            assert!(digest.line.contains(text));
+        }
+    }
+
+    #[test]
     fn digest_line_keeps_a_long_refusal_reason_whole() {
         // A worktree_missing refusal names its path; the renderer, not the
         // digest builder, decides how much of it a bounded view shows.
@@ -592,8 +717,8 @@ mod tests {
             }),
             json!({
                 "kind":"attempt","work_key":key,"state":"terminal",
-                "outcome":"rejected","terminal_cause":"handoff_refused",
-                "cause_code":"handoff_refused","result_path":null,
+                "outcome":"rejected","cause":"launch_handoff_refused",
+                "cause_code":"launch_handoff_refused","result_path":null,
                 "reason":"writer lineage: invalid run record: graph predecessor writer or source"
             }),
         ];
@@ -614,7 +739,7 @@ mod tests {
             digest.line
         );
         assert!(
-            !digest.line.contains("cause=handoff_refused"),
+            !digest.line.contains("cause=launch_handoff_refused"),
             "the refused attempt replaced the successful one: {}",
             digest.line
         );

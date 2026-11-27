@@ -15,6 +15,7 @@ use thiserror::Error;
 
 /// Wire names of the relayed coordination requests.
 const NOTES: &str = "notes";
+pub const DECLARE: &str = "declare";
 const MAIL: &str = "fabric_mail";
 const EVENTS: &str = "fabric_events";
 const CLAIM: &str = "fabric_custody";
@@ -22,6 +23,7 @@ const CLAIM: &str = "fabric_custody";
 /// A parsed relay request. Inputs are the runtime's exact serde contracts.
 pub enum ToolCall {
     Notes(crate::notes::Input),
+    Declare(provenant_records::declaration::DeclarationInput),
     Mail(MailInput, Option<OperationId>),
     Events(EventsInput, Option<OperationId>),
     Claim(ClaimInput, Option<OperationId>),
@@ -41,6 +43,7 @@ impl ToolCall {
     pub fn name(&self) -> &'static str {
         match self {
             Self::Notes(..) => NOTES,
+            Self::Declare(..) => DECLARE,
             Self::Mail(..) => MAIL,
             Self::Events(..) => EVENTS,
             Self::Claim(..) => CLAIM,
@@ -95,12 +98,14 @@ impl ToolCall {
             Self::Events(input, id) => Some((Mutation::Events(input.clone()), id.clone())),
             Self::Claim(input, id) => Some((Mutation::Claim(input.clone()), id.clone())),
             Self::Notes(_) => None,
+            Self::Declare(_) => None,
         }
     }
 
     pub(crate) fn lane_request(&self) -> Result<super::host::Request, ServiceError> {
         let (mut arguments, id) = match self {
             Self::Notes(input) => (serde_json::to_value(input)?, &None),
+            Self::Declare(input) => (serde_json::to_value(input)?, &None),
             Self::Mail(input, id) => (serde_json::to_value(input)?, id),
             Self::Events(input, id) => (serde_json::to_value(input)?, id),
             Self::Claim(input, id) => (serde_json::to_value(input)?, id),
@@ -169,6 +174,11 @@ impl ToolCall {
                 message: "notes require the host-bound notes owner".into(),
                 data: Value::Null,
             }),
+            Self::Declare(_) => Err(ServiceError::Cli {
+                code: "declaration_host_missing".into(),
+                message: "declare requires the host-bound declaration owner".into(),
+                data: Value::Null,
+            }),
             Self::Mail(input, _) => Ok(serde_json::to_value(
                 coordination.mail(input, budget, cancel)?,
             )?),
@@ -187,6 +197,13 @@ impl ToolCall {
         if name == NOTES {
             return serde_json::from_value(arguments)
                 .map(Self::Notes)
+                .map_err(|_| InvalidInput::Arguments {
+                    path: "arguments".into(),
+                });
+        }
+        if name == DECLARE {
+            return serde_json::from_value(arguments)
+                .map(Self::Declare)
                 .map_err(|_| InvalidInput::Arguments {
                     path: "arguments".into(),
                 });

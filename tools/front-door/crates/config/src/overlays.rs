@@ -52,11 +52,30 @@ impl fmt::Display for OverlayWarning {
     }
 }
 
+impl OverlayWarning {
+    /// The typed warning one read emits for a skipped entry. The config layer
+    /// and key that caused the skip are the warning's structured source, so a
+    /// consumer sees why the entry was ignored without reading the prose.
+    pub fn into_typed(self, code: provenant_records::WarningCode) -> provenant_records::Warning {
+        provenant_records::Warning::new(
+            code,
+            self.to_string(),
+            provenant_records::warning::detected_source(code),
+        )
+        .subject(self.key.clone())
+        .source(provenant_records::Source {
+            layer: self.source,
+            origin: Some(self.key),
+        })
+    }
+}
+
 /// One layer's config text plus the source to attribute its entries to.
 #[derive(Debug, Clone)]
 pub struct OverlayLayer {
     pub source: Layer,
     pub text: String,
+    pub path: std::path::PathBuf,
 }
 
 /// Read one named overlay table from the host and project config layers, in
@@ -104,7 +123,7 @@ pub fn read_layers(
             ));
             continue;
         }
-        layers.push(OverlayLayer { source, text });
+        layers.push(OverlayLayer { source, text, path });
     }
     // The one declaration owns the order: stable sorting keeps host and
     // host-project (both reported as Host) in the order they were read.

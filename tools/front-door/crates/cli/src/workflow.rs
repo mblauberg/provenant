@@ -148,7 +148,7 @@ pub struct Handoff {
     #[arg(long)]
     pub no_checkpoint: bool,
     /// Provider for the new session; only `claude` is supported
-    #[arg(long, default_value = provenant_records::Harness::Claude.spec().name)]
+    #[arg(long, default_value = provenant_records::Harness::Claude.spec().identity.name)]
     pub provider: String,
     /// Model for the new session
     #[arg(long)]
@@ -335,7 +335,14 @@ fn request<T: serde::de::DeserializeOwned + Serialize>(
 
 fn report_input_warnings(warnings: Vec<provenant_records::InputWarning>) {
     for warning in warnings {
-        warn(Warning::new(CONFIG_KEY_IGNORED, warning.to_string()).subject(warning.key));
+        warn(
+            Warning::new(
+                CONFIG_KEY_IGNORED,
+                warning.to_string(),
+                provenant_records::warning::detected_source(CONFIG_KEY_IGNORED),
+            )
+            .subject(warning.key),
+        );
     }
 }
 
@@ -345,6 +352,7 @@ fn report_text_warning(message: impl Into<String>) {
     warn(Warning::new(
         provenant_records::warning::SESSION_ADVISORY,
         message,
+        provenant_records::warning::detected_source(provenant_records::warning::SESSION_ADVISORY),
     ));
 }
 

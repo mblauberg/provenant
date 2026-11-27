@@ -216,6 +216,7 @@ fn current_attempt_reservation_preserves_uncommitted_work() -> TestResult {
         census_incomplete: true,
         omitted_descendants: 0,
         sandboxed: false,
+        attribution: None,
         extra: Default::default(),
     };
     let reservation_path = evidence_path.join("reservation.json");
@@ -1880,6 +1881,9 @@ struct Sandbox(Vec<i64>);
 impl orphans::OrphanProbe for Sandbox {
     fn in_attempt_sandbox(&self, pid: i64, asked: &Scope) -> bool {
         *asked == scope() && self.0.contains(&pid)
+    }
+    fn in_attempt_attribution(&self, _: i64, _: &Scope) -> bool {
+        false
     }
     fn signal(&self, _: &ProcessIdentity, _: bool) -> bool {
         false

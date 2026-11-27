@@ -19,8 +19,8 @@ fn synthesis_stops_when_the_pinned_integration_head_moves() {
         let mut owner = FakeOwner {
             integration_heads: [pin.clone(), second].into(),
             observations: [
-                terminal(AttemptOutcome::Succeeded),
-                terminal(AttemptOutcome::Succeeded),
+                terminal(GraphAttemptOutcome::Succeeded),
+                terminal(GraphAttemptOutcome::Succeeded),
             ]
             .into(),
             ..Default::default()
@@ -30,7 +30,7 @@ fn synthesis_stops_when_the_pinned_integration_head_moves() {
         assert_eq!(run.checkpoint.integration_pin, Some(pin.clone()));
         if !expected {
             assert_eq!(
-                run.checkpoint.nodes[1].advance_error_code.as_deref(),
+                run.checkpoint.nodes[1].advance_code.as_deref(),
                 Some("integration_head_moved")
             );
             assert_eq!(owner.calls.len(), 1);
@@ -55,8 +55,8 @@ fn source_and_read_roots_survive_retry_and_replay() {
             AttemptObservation::Pending {
                 attempt_ref: Some("existing".into()),
             },
-            preparation_refusal("existing", AttemptOutcome::AuthRequired),
-            terminal(AttemptOutcome::Succeeded),
+            preparation_refusal("existing", GraphAttemptOutcome::AuthRequired),
+            terminal(GraphAttemptOutcome::Succeeded),
         ]
         .into(),
         ..Default::default()
@@ -100,7 +100,7 @@ fn reader_review_base_resolves_in_its_bound_source_writer_and_replays() {
     reader.review_base = Some("moving-ref".into());
     let mut document = graph(vec![reader, writer]);
     document.schema_version = 2;
-    let mut written = terminal(AttemptOutcome::Succeeded);
+    let mut written = terminal(GraphAttemptOutcome::Succeeded);
     if let AttemptObservation::Terminal { commit, .. } = &mut written {
         *commit = Some(predecessor.clone());
     }
@@ -114,7 +114,7 @@ fn reader_review_base_resolves_in_its_bound_source_writer_and_replays() {
             AttemptObservation::Pending {
                 attempt_ref: Some("host/reader".into()),
             },
-            terminal(AttemptOutcome::Succeeded),
+            terminal(GraphAttemptOutcome::Succeeded),
         ]),
         ..Default::default()
     };
@@ -296,7 +296,7 @@ fn a_writer_with_a_false_launch_condition_is_never_bound() {
     writer.access = AccessMode::WorktreeWrite;
     writer.worktree = Some("lane".into());
     writer.when = vec![WhenTerm {
-        name: "smoke-write".into(),
+        name: "write".into(),
         expected: "true".into(),
         actual: "false".into(),
     }];
@@ -309,12 +309,12 @@ fn a_writer_with_a_false_launch_condition_is_never_bound() {
         progress
             .skip_reason
             .as_deref()
-            .is_some_and(|reason| reason.contains("smoke-write")),
+            .is_some_and(|reason| reason.contains("write")),
         "{progress:?}"
     );
     assert!(progress.writer_binding.is_none(), "{progress:?}");
-    assert_eq!(progress.advance_error_code.as_deref(), None);
-    assert!(run.advance_error.is_none(), "{run:?}");
+    assert_eq!(progress.advance_code.as_deref(), None);
+    assert!(run.advance_note.is_none(), "{run:?}");
     assert_eq!(owner.implicit_bindings, 0);
 }
 
@@ -326,7 +326,7 @@ fn implicit_writer_binding_applies_to_schema_one_when_host_supports_it() {
     let document = graph(vec![writer]);
     let mut owner = FakeOwner {
         implicit_head: Some("1".repeat(40)),
-        observations: VecDeque::from([terminal(AttemptOutcome::Succeeded)]),
+        observations: VecDeque::from([terminal(GraphAttemptOutcome::Succeeded)]),
         ..Default::default()
     };
     let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
@@ -352,8 +352,8 @@ fn implicit_writer_binds_before_its_dependency_settles() {
             AttemptObservation::Pending {
                 attempt_ref: Some("host/gate".into()),
             },
-            terminal(AttemptOutcome::Succeeded),
-            terminal(AttemptOutcome::Succeeded),
+            terminal(GraphAttemptOutcome::Succeeded),
+            terminal(GraphAttemptOutcome::Succeeded),
         ]),
         ..Default::default()
     };
@@ -412,7 +412,7 @@ fn implicit_writer_source_is_bound_at_admission_and_survives_replay() {
             AttemptObservation::Pending {
                 attempt_ref: Some("host/attempt".into()),
             },
-            terminal(AttemptOutcome::Succeeded),
+            terminal(GraphAttemptOutcome::Succeeded),
         ]),
         ..Default::default()
     };
@@ -458,7 +458,7 @@ fn source_requires_upstream_commit_and_fails_before_launch_when_missing() {
     });
     let document = graph(vec![node("author", route("writer")), child]);
     let mut owner = FakeOwner {
-        observations: [terminal(AttemptOutcome::Succeeded)].into(),
+        observations: [terminal(GraphAttemptOutcome::Succeeded)].into(),
         ..Default::default()
     };
     let mut journal = MemoryJournal::default();
@@ -466,7 +466,7 @@ fn source_requires_upstream_commit_and_fails_before_launch_when_missing() {
     assert_eq!(owner.calls.len(), 1);
     assert_eq!(run.checkpoint.nodes[1].state, NodeState::Failed);
     assert_eq!(
-        run.checkpoint.nodes[1].advance_error.as_deref(),
+        run.checkpoint.nodes[1].advance_note.as_deref(),
         Some("node review: source commit unavailable or invalid")
     );
     assert_eq!(
@@ -496,12 +496,12 @@ fn settled_source_consumer_keeps_composite_export_when_member_retries() {
     }))
     .unwrap();
     let first_commit = "1".repeat(40);
-    let mut first_writer = terminal(AttemptOutcome::Succeeded);
+    let mut first_writer = terminal(GraphAttemptOutcome::Succeeded);
     if let AttemptObservation::Terminal { commit, .. } = &mut first_writer {
         *commit = Some(first_commit.clone());
     }
     let mut owner = FakeOwner {
-        observations: VecDeque::from([first_writer, terminal(AttemptOutcome::Succeeded)]),
+        observations: VecDeque::from([first_writer, terminal(GraphAttemptOutcome::Succeeded)]),
         ..Default::default()
     };
     let mut journal = MemoryJournal::default();
@@ -585,7 +585,7 @@ fn settled_source_consumer_keeps_composite_export_when_member_retries() {
     let restored: GraphCheckpoint =
         serde_json::from_slice(&serde_json::to_vec(&checkpoint).unwrap()).unwrap();
     let second_commit = "2".repeat(40);
-    let mut second_writer = terminal(AttemptOutcome::Succeeded);
+    let mut second_writer = terminal(GraphAttemptOutcome::Succeeded);
     if let AttemptObservation::Terminal { commit, .. } = &mut second_writer {
         *commit = Some(second_commit.clone());
     }
@@ -651,9 +651,9 @@ fn composite_inherits_inputs_and_combines_results_from_parallel_children() {
     .unwrap();
     let mut owner = FakeOwner {
         observations: [
-            terminal_with_result(AttemptOutcome::Succeeded, "initial evidence"),
-            terminal_with_result(AttemptOutcome::Succeeded, "evidence A"),
-            terminal_with_result(AttemptOutcome::Succeeded, "evidence B"),
+            terminal_with_result(GraphAttemptOutcome::Succeeded, "initial evidence"),
+            terminal_with_result(GraphAttemptOutcome::Succeeded, "evidence A"),
+            terminal_with_result(GraphAttemptOutcome::Succeeded, "evidence B"),
         ]
         .into(),
         ..Default::default()
@@ -727,9 +727,9 @@ fn required_composite_findings_need_complete_member_evidence() {
         })).unwrap();
         let mut owner = FakeOwner {
             observations: VecDeque::from([
-                terminal_with_result(AttemptOutcome::Succeeded, empty),
-                terminal_with_result(AttemptOutcome::Succeeded, second),
-                terminal(AttemptOutcome::Succeeded),
+                terminal_with_result(GraphAttemptOutcome::Succeeded, empty),
+                terminal_with_result(GraphAttemptOutcome::Succeeded, second),
+                terminal(GraphAttemptOutcome::Succeeded),
             ]),
             ..Default::default()
         };
@@ -747,7 +747,7 @@ fn required_composite_findings_need_complete_member_evidence() {
         } else {
             assert_eq!(consumer.state, NodeState::Failed);
             assert_eq!(
-                consumer.advance_error_code.as_deref(),
+                consumer.advance_code.as_deref(),
                 Some("required_input_unavailable")
             );
             assert!(consumer.attempts.is_empty());
@@ -776,7 +776,7 @@ fn crash_mid_composite_resumes_without_rerunning_settled_children() {
     // reference, and the settled child must never rerun.
     let mut crashing = FakeOwner {
         observations: [
-            terminal_with_result(AttemptOutcome::Succeeded, "evidence A"),
+            terminal_with_result(GraphAttemptOutcome::Succeeded, "evidence A"),
             AttemptObservation::Pending { attempt_ref: None },
         ]
         .into(),
@@ -797,7 +797,7 @@ fn crash_mid_composite_resumes_without_rerunning_settled_children() {
     );
     let mut resumed = FakeOwner {
         observations: [terminal_with_result(
-            AttemptOutcome::Succeeded,
+            GraphAttemptOutcome::Succeeded,
             "evidence B",
         )]
         .into(),
@@ -870,7 +870,7 @@ fn composite_running_status_does_not_consume_an_attempt_slot() {
     // A refused admission is terminal for the node; it has no queued state.
     assert_eq!(member("b").state, NodeState::Failed);
     assert_eq!(
-        member("b").advance_error_code.as_deref(),
+        member("b").advance_code.as_deref(),
         Some("concurrency_cap")
     );
 }
@@ -1017,7 +1017,7 @@ fn loop_expansion_safety_refusal_names_bound_and_owner_at_each_boundary() {
         &Default::default(),
     );
     assert!(
-        matches!(result, Err(GraphError::Admission(AdmissionError::Composite(ref actual))) if actual == &reason)
+        matches!(result, Err(GraphError::Admission(AdmissionError::Plan(ref actual))) if actual == &reason)
     );
     assert!(owner.calls.is_empty());
 }
@@ -1053,8 +1053,18 @@ fn composite_depth_uses_the_same_bound_in_preflight_and_runtime() {
     let mut owner = FakeOwner::default();
     // Spec: docs/specs/fabric.md#graph-admission-and-refusal-causes
     let mut journal = MemoryJournal::default();
-    let error = advance_with_budget(&document, &mut owner, &mut journal, &limits, &Default::default()).unwrap_err();
-    assert!(matches!(error, GraphError::Candidate(CandidateError::Structural(_))));
+    let error = advance_with_budget(
+        &document,
+        &mut owner,
+        &mut journal,
+        &limits,
+        &Default::default(),
+    )
+    .unwrap_err();
+    assert!(matches!(
+        error,
+        GraphError::Candidate(CandidateError::Structural(_))
+    ));
     assert!(journal.0.is_none());
     assert!(owner.calls.is_empty());
 }
@@ -1106,8 +1116,8 @@ fn composite_rejects_ambiguous_exports_and_blocks_on_child_failure() {
     document.nodes[0].composite.as_mut().unwrap().exports.pop();
     let mut owner = FakeOwner {
         observations: [
-            terminal(AttemptOutcome::TaskFailed),
-            terminal(AttemptOutcome::Succeeded),
+            terminal(GraphAttemptOutcome::TaskFailed),
+            terminal(GraphAttemptOutcome::Succeeded),
         ]
         .into(),
         ..Default::default()
@@ -1118,7 +1128,7 @@ fn composite_rejects_ambiguous_exports_and_blocks_on_child_failure() {
         run.checkpoint.nodes.last().unwrap().state,
         NodeState::Blocked
     );
-    assert_eq!(run.checkpoint.nodes.last().unwrap().advance_error, None);
+    assert_eq!(run.checkpoint.nodes.last().unwrap().advance_note, None);
     assert!(!run.checkpoint.successful());
     assert_eq!(
         advance(&document, &mut FakeOwner::default(), &mut journal)
@@ -1187,7 +1197,7 @@ fn batch_concurrency_cap_pins_max_running_and_sets_cap_wait_reason() {
     // When s1 settles as succeeded, next advance admits s3
     let mut owner2 = FakeOwner {
         observations: [
-            terminal(AttemptOutcome::Succeeded),
+            terminal(GraphAttemptOutcome::Succeeded),
             AttemptObservation::Pending { attempt_ref: None },
             AttemptObservation::Pending { attempt_ref: None },
         ]
@@ -1226,12 +1236,34 @@ fn batch_cap_counts_nested_slice_attempts() {
     };
     let mut journal = MemoryJournal::default();
     let run = advance(&document, &mut owner, &mut journal).unwrap();
-    let first = run.checkpoint.nodes.iter().find(|n| n.id == "slices--first--plan").unwrap();
-    let second = run.checkpoint.nodes.iter().find(|n| n.id == "slices--second--plan").unwrap();
+    let first = run
+        .checkpoint
+        .nodes
+        .iter()
+        .find(|n| n.id == "slices--first--plan")
+        .unwrap();
+    let second = run
+        .checkpoint
+        .nodes
+        .iter()
+        .find(|n| n.id == "slices--second--plan")
+        .unwrap();
     assert_eq!(first.state, NodeState::Running);
     assert_eq!(second.state, NodeState::Pending);
     assert_eq!(second.wait_reason.as_deref(), Some("cap"));
-    assert_eq!(journal.load("nested-cap-test").unwrap().unwrap().nodes.iter().find(|n| n.id == second.id).unwrap().wait_reason.as_deref(), Some("cap"));
+    assert_eq!(
+        journal
+            .load("nested-cap-test")
+            .unwrap()
+            .unwrap()
+            .nodes
+            .iter()
+            .find(|n| n.id == second.id)
+            .unwrap()
+            .wait_reason
+            .as_deref(),
+        Some("cap")
+    );
 }
 
 #[test]
@@ -1276,7 +1308,7 @@ fn batch_after_ordering_sets_after_wait_reason_until_satisfied() {
     // When first settles as Succeeded, second becomes Running
     let mut owner2 = FakeOwner {
         observations: [
-            terminal(AttemptOutcome::Succeeded),
+            terminal(GraphAttemptOutcome::Succeeded),
             AttemptObservation::Pending { attempt_ref: None },
         ]
         .into(),
@@ -1332,7 +1364,7 @@ fn batch_merge_conflict_isolation_pauses_only_conflicted_slice() {
         observations: [
             AttemptObservation::Terminal {
                 attempt_ref: None,
-                outcome: AttemptOutcome::OtherFailure,
+                outcome: GraphAttemptOutcome::OtherFailure,
                 launched: true,
                 result: None,
                 result_warning: Some(conflict_warning),
@@ -1340,7 +1372,8 @@ fn batch_merge_conflict_isolation_pauses_only_conflicted_slice() {
                 branch: None,
                 commit: None,
                 stop: Some(provenant_records::StopCause::Blocked),
-                settlement_reason: None,
+                settlement_class: None,
+            cause: None,
             },
             AttemptObservation::Pending { attempt_ref: None },
         ]
@@ -1355,10 +1388,10 @@ fn batch_merge_conflict_isolation_pauses_only_conflicted_slice() {
             .find(|n| n.id == format!("slices--{id}"))
             .unwrap()
     };
-    // s1 is Blocked with advance_error_code = "merge_conflict" and advance_error naming the files
+    // s1 is Blocked with advance_code = "merge_conflict" and advance_note naming the files
     assert_eq!(node("s1").state, NodeState::Blocked);
-    assert_eq!(node("s1").advance_error_code.as_deref(), Some("merge_conflict"));
-    let err = node("s1").advance_error.as_deref().unwrap();
+    assert_eq!(node("s1").advance_code.as_deref(), Some("merge_conflict"));
+    let err = node("s1").advance_note.as_deref().unwrap();
     assert!(err.contains("src/main.rs") && err.contains("Cargo.toml"), "{err}");
 
     // s2 is still running! The graph is not paused!

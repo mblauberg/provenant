@@ -1,23 +1,96 @@
 //! Document-based graph service shared by the CLI and the lane relay.
-use super::writer_base::{
-    DEFAULT_WRITER_BASE, bind_default_read_only_source, bind_writer_base_source,
-    resolve_writer_base,
+use super::source_policy::{read_source_report, writer_base_report};
+use super::subject::{
+    ReadPlan, SubjectAdmission, bind_provisioning_base, bind_read_source,
+    resolve_reused_worktree_base,
 };
 use super::*;
 use provenant_fabric_runtime::graph::{
-    FileJournal, GraphDocument, GraphJournal, GraphStatus, Layer, Template, TemplateLibrary,
+    AccessMode, FileJournal, GraphDocument, GraphJournal, GraphNode, GraphStatus, Layer,
+    QueueKnobs, SourceBinding, Template, TemplateLibrary,
     patch::{self, LiveGraph, Patch, PatchContext},
 };
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
+
+pub(super) mod observation;
+pub(super) use observation::wait_submission;
+use observation::{launch_retry_due, observation_clock_error, wait_graph_updates};
 
 /// A `wait_seconds` that is not a usable wait budget.
 fn wait_seconds_invalid() -> FacadeError {
     FacadeError::invalid(InvalidInputDetail::Field("wait_seconds".into()))
 }
 
-fn graph_input_reason(reason: impl std::fmt::Display) -> FacadeError {
+pub(super) fn graph_input_reason(reason: impl std::fmt::Display) -> FacadeError {
     FacadeError::invalid(InvalidInputDetail::graph_reason(reason))
+}
+
+pub(super) fn seal_delivery_queue_knobs(
+    config: &provenant_fabric_runtime::config::QueueConfig,
+    origins: &BTreeMap<String, provenant_config::Origin>,
+    authored: Option<&QueueKnobs>,
+) -> Result<QueueKnobs, FacadeError> {
+    use provenant_fabric_runtime::graph::template::seal_queue_knobs;
+    use provenant_fabric_runtime::graph::{
+        QUEUE_CI_SLOTS_KEY, QUEUE_MAX_PARALLEL_KEY, QUEUE_PREP_RETRIES_KEY,
+    };
+    use provenant_records::{Layer, Sourced};
+
+    let mut candidates = BTreeMap::<&str, Vec<Sourced<usize>>>::new();
+    for (key, value) in [
+        (QUEUE_MAX_PARALLEL_KEY, config.max_parallel),
+        (QUEUE_CI_SLOTS_KEY, config.ci_slots),
+        (QUEUE_PREP_RETRIES_KEY, config.prep_retries),
+    ] {
+        let source = provenant_cli::config_reads::origin_source(origins.get(key), key);
+        if matches!(source.layer, Layer::Host | Layer::Project) {
+            candidates
+                .entry(key)
+                .or_default()
+                .push(Sourced { value, source });
+        }
+    }
+    if let Some(authored) = authored {
+        for (key, value) in [
+            (QUEUE_MAX_PARALLEL_KEY, authored.max_parallel.clone()),
+            (QUEUE_CI_SLOTS_KEY, authored.ci_slots.clone()),
+            (QUEUE_PREP_RETRIES_KEY, authored.prep_retries.clone()),
+        ] {
+            candidates.entry(key).or_default().push(value);
+        }
+    }
+    let knobs = seal_queue_knobs(&candidates);
+    knobs.validate().map_err(graph_input_reason)?;
+    Ok(knobs)
+}
+
+fn seal_document_queue(
+    document: &mut GraphDocument,
+    config: Option<(
+        &provenant_fabric_runtime::config::QueueConfig,
+        &BTreeMap<String, provenant_config::Origin>,
+    )>,
+    config_error: Option<&str>,
+) -> Result<(), FacadeError> {
+    let Some(authored) = document.queue.clone() else {
+        return Ok(());
+    };
+    let sealed = match config {
+        Some((queue_config, origins)) => {
+            seal_delivery_queue_knobs(queue_config, origins, Some(&authored))?
+        }
+        None => {
+            warn_operator(format!(
+                "delivery queue configuration unavailable; using compiled defaults: {}",
+                config_error.unwrap_or("unknown configuration error")
+            ));
+            seal_delivery_queue_knobs(&Default::default(), &BTreeMap::new(), Some(&authored))?
+        }
+    };
+    document.queue = Some(sealed);
+    document.schema_version = document.schema_version.max(2);
+    Ok(())
 }
 
 // Preserve the parser's field path and message for actionable diagnostics.
@@ -125,295 +198,6 @@ fn required<'a>(input: &'a Value, field: &str) -> Result<&'a str, FacadeError> {
         .ok_or_else(|| FacadeError::invalid(InvalidInputDetail::Field(field.into())))
 }
 
-fn graph_run_has_remote_pending(
-    run: &provenant_fabric_runtime::graph::GraphRun,
-    local_host: Option<provenant_core::HostId>,
-    target: Option<&super::unified::GraphTarget>,
-) -> bool {
-    use provenant_fabric_runtime::graph::AttemptState;
-    run.checkpoint
-        .nodes
-        .iter()
-        .filter(|node| {
-            target.is_none_or(|target| {
-                target
-                    .node
-                    .as_ref()
-                    .is_none_or(|id| &node.id == id || node.subtree_cancel.as_deref() == Some(id))
-            })
-        })
-        .flat_map(|node| node.recorded_attempts())
-        .filter(|attempt| {
-            attempt.state != AttemptState::Terminal
-                && target
-                    .and_then(|target| target.attempt.as_deref())
-                    .is_none_or(|reference| attempt.attempt_ref.as_deref() == Some(reference))
-        })
-        .any(|attempt| {
-            let Some(reference) = attempt.attempt_ref.as_deref() else {
-                return false;
-            };
-            let Some(local_host) = local_host.as_ref() else {
-                return true;
-            };
-            !reference
-                .split_once('/')
-                .and_then(|(owner, _)| owner.parse::<provenant_core::HostId>().ok())
-                .is_some_and(|owner| &owner == local_host)
-        })
-}
-
-fn observation_clock_error(error: provenant_core::TimeError) -> FacadeError {
-    FacadeError::StateCorruptDetail {
-        detail: format!("graph observation clock: {error}"),
-    }
-}
-
-fn next_launch_retry_delay(
-    run: &provenant_fabric_runtime::graph::GraphRun,
-    clock: &(impl provenant_core::Clock + ?Sized),
-) -> Result<Option<std::time::Duration>, provenant_core::TimeError> {
-    let wake_at = run
-        .checkpoint
-        .nodes
-        .iter()
-        .filter_map(|node| node.launch_retry.as_ref()?.wake_at)
-        .min();
-    let Some(wake_at) = wake_at else {
-        return Ok(None);
-    };
-    let now = clock.wall_now()?;
-    Ok(Some(std::time::Duration::from_micros(
-        wake_at.as_micros().saturating_sub(now.as_micros()).max(0) as u64,
-    )))
-}
-
-fn launch_retry_due(
-    run: &provenant_fabric_runtime::graph::GraphRun,
-    clock: &(impl provenant_core::Clock + ?Sized),
-) -> Result<bool, provenant_core::TimeError> {
-    let wake_at = run
-        .checkpoint
-        .nodes
-        .iter()
-        .filter_map(|node| node.launch_retry.as_ref()?.wake_at)
-        .min();
-    let Some(wake_at) = wake_at else {
-        return Ok(false);
-    };
-    Ok(clock.wall_now()? >= wake_at)
-}
-
-pub(super) fn graph_wait_needs_refresh(
-    wake: crate::status_wait::ObservationWake,
-    launch_retry_due: bool,
-) -> bool {
-    use crate::status_wait::ObservationWake;
-    match wake {
-        ObservationWake::Changed | ObservationWake::PacedFallback => true,
-        ObservationWake::NativeTimeout => launch_retry_due,
-        ObservationWake::Woken | ObservationWake::Cancelled => false,
-    }
-}
-
-#[derive(Default)]
-struct GraphObservationHistory {
-    remote_source_seen: bool,
-    reader_woken: bool,
-}
-impl GraphObservationHistory {
-    fn record(
-        &mut self,
-        run: &provenant_fabric_runtime::graph::GraphRun,
-        local_host: Option<provenant_core::HostId>,
-        target: Option<&super::unified::GraphTarget>,
-    ) -> bool {
-        let remote_pending = graph_run_has_remote_pending(run, local_host, target);
-        self.remote_source_seen |= remote_pending;
-        remote_pending
-    }
-
-    fn report(&self, observation: &crate::status_wait::LocalObservation) -> String {
-        observation.report(self.remote_source_seen)
-    }
-}
-
-fn interval_micros(interval: std::time::Duration) -> u64 {
-    u64::try_from(interval.as_micros()).unwrap_or(u64::MAX)
-}
-
-pub(super) fn next_remote_deadline(
-    previous: Option<u64>,
-    remote_pending: bool,
-    remote_due: bool,
-    now: u64,
-    interval: u64,
-) -> Option<u64> {
-    if !remote_pending {
-        None
-    } else if previous.is_none() || remote_due {
-        Some(now.saturating_add(interval))
-    } else {
-        previous
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn wait_graph_updates<C: provenant_core::Clock + ?Sized>(
-    mut run: provenant_fabric_runtime::graph::GraphRun,
-    wait: WaitBudget,
-    clock: &C,
-    cancel: &CancelToken,
-    observation: &mut crate::status_wait::LocalObservation,
-    local_host: Option<provenant_core::HostId>,
-    remote_target: Option<&super::unified::GraphTarget>,
-    watch_launch_retries: bool,
-    mut active: impl FnMut(&provenant_fabric_runtime::graph::GraphRun) -> bool,
-    mut observe: impl FnMut(
-        &provenant_fabric_runtime::graph::GraphRun,
-    ) -> Result<provenant_fabric_runtime::graph::GraphRun, FacadeError>,
-    mut observe_remote: impl FnMut(
-        &provenant_fabric_runtime::graph::GraphRun,
-    ) -> Result<(), FacadeError>,
-) -> Result<
-    (
-        provenant_fabric_runtime::graph::GraphRun,
-        GraphObservationHistory,
-    ),
-    FacadeError,
-> {
-    use crate::status_wait::ObservationWake;
-    let interval = observation.interval();
-    let mut history = GraphObservationHistory::default();
-    let mut remote_pending = history.record(&run, local_host, remote_target);
-    let mut remote_deadline = next_remote_deadline(
-        None,
-        remote_pending,
-        false,
-        clock.mono_now().as_micros(),
-        interval_micros(interval),
-    );
-
-    // The observer is registered before this refresh, closing the race between
-    // submission/stop and the first status read.
-    if active(&run) && !cancel.is_cancelled() && wait.remaining(clock.mono_now()).as_micros() > 0 {
-        run = observe(&run)?;
-        remote_pending = history.record(&run, local_host, remote_target);
-        if remote_pending {
-            observe_remote(&run)?;
-        }
-        remote_deadline = next_remote_deadline(
-            remote_deadline,
-            remote_pending,
-            remote_pending,
-            clock.mono_now().as_micros(),
-            interval_micros(interval),
-        );
-    }
-
-    while active(&run) && !cancel.is_cancelled() {
-        let now = clock.mono_now();
-        let remaining = wait.remaining(now).as_micros();
-        if remaining == 0 {
-            break;
-        }
-        let retry_due = watch_launch_retries
-            && launch_retry_due(&run, clock).map_err(observation_clock_error)?;
-        let remote_due = remote_deadline.is_some_and(|deadline| now.as_micros() >= deadline);
-        if retry_due || remote_due {
-            if retry_due {
-                run = observe(&run)?;
-                remote_pending = history.record(&run, local_host, remote_target);
-            }
-            if remote_due && remote_pending {
-                observe_remote(&run)?;
-            }
-            remote_deadline = next_remote_deadline(
-                remote_deadline,
-                remote_pending,
-                remote_due,
-                clock.mono_now().as_micros(),
-                interval_micros(interval),
-            );
-            continue;
-        }
-
-        let mut maximum_micros = remaining;
-        if watch_launch_retries
-            && let Some(delay) =
-                next_launch_retry_delay(&run, clock).map_err(observation_clock_error)?
-        {
-            maximum_micros = maximum_micros.min(interval_micros(delay));
-        }
-        if let Some(deadline) = remote_deadline {
-            maximum_micros = maximum_micros.min(deadline.saturating_sub(now.as_micros()));
-        }
-        let wake = observation
-            .wait(
-                std::time::Duration::from_micros(maximum_micros),
-                cancel,
-                clock,
-            )
-            .map_err(|error| FacadeError::StateCorruptDetail {
-                detail: format!("graph observation clock: {error}"),
-            })?;
-        if matches!(wake, ObservationWake::Woken | ObservationWake::Cancelled) {
-            history.reader_woken = true;
-            break;
-        }
-        if wait.remaining(clock.mono_now()).as_micros() == 0 {
-            break;
-        }
-        let now = clock.mono_now();
-        let retry_due = watch_launch_retries
-            && launch_retry_due(&run, clock).map_err(observation_clock_error)?;
-        let remote_due = remote_deadline.is_some_and(|deadline| now.as_micros() >= deadline);
-        if graph_wait_needs_refresh(wake, retry_due) {
-            run = observe(&run)?;
-            remote_pending = history.record(&run, local_host, remote_target);
-        }
-        if remote_due && remote_pending {
-            observe_remote(&run)?;
-        }
-        remote_deadline = next_remote_deadline(
-            remote_deadline,
-            remote_pending,
-            remote_due,
-            clock.mono_now().as_micros(),
-            interval_micros(interval),
-        );
-    }
-    Ok((run, history))
-}
-
-/// Observe a submitted graph within the caller's original wait budget.
-#[allow(clippy::too_many_arguments)]
-pub(super) fn wait_submission<C: provenant_core::Clock + ?Sized>(
-    run: provenant_fabric_runtime::graph::GraphRun,
-    wait: WaitBudget,
-    clock: &C,
-    cancel: &CancelToken,
-    observation: &mut crate::status_wait::LocalObservation,
-    local_host: Option<provenant_core::HostId>,
-    mut observe: impl FnMut(&str) -> Result<provenant_fabric_runtime::graph::GraphRun, FacadeError>,
-    observe_remote: impl FnMut(&provenant_fabric_runtime::graph::GraphRun) -> Result<(), FacadeError>,
-) -> Result<(provenant_fabric_runtime::graph::GraphRun, String, bool), FacadeError> {
-    let (run, history) = wait_graph_updates(
-        run,
-        wait,
-        clock,
-        cancel,
-        observation,
-        local_host,
-        None,
-        true,
-        |run| run.status == GraphStatus::Pending,
-        |run| observe(&run.checkpoint.graph_id),
-        observe_remote,
-    )?;
-    Ok((run, history.report(observation), !history.reader_woken))
-}
-
 fn control_receipt_unfinished(
     run: &provenant_fabric_runtime::graph::GraphRun,
     target: &super::unified::GraphTarget,
@@ -437,7 +221,7 @@ fn control_receipt_unfinished(
 }
 
 /// Attempt settings are reserved launch controls, not template parameters.
-fn launch_input(input: &Value) -> Result<Value, FacadeError> {
+pub(super) fn launch_input(input: &Value) -> Result<Value, FacadeError> {
     let mut input = input.clone();
     let invalid = || FacadeError::invalid(InvalidInputDetail::Field("attempt".into()));
     let mut attempt = input.get("attempt").cloned().unwrap_or_else(|| json!({}));
@@ -552,6 +336,8 @@ fn override_launch(
             provenant_fabric_runtime::graph::NodeKind::Gate
                 | provenant_fabric_runtime::graph::NodeKind::Decide
                 | provenant_fabric_runtime::graph::NodeKind::Land
+                | provenant_fabric_runtime::graph::NodeKind::Hygiene
+                | provenant_fabric_runtime::graph::NodeKind::Publish
         )
     ) {
         let invalid = || FacadeError::invalid(InvalidInputDetail::Field("route".into()));
@@ -646,6 +432,88 @@ fn bind_review_base(node: &mut provenant_fabric_runtime::graph::GraphNode, base:
     if let Some(composite) = &mut node.composite {
         for child in &mut composite.nodes {
             bind_review_base(child, base);
+        }
+    }
+}
+
+/// Whether a node, or one of its members, carries a review protocol. A
+/// composite boundary owns no protocol of its own; its lens members do.
+fn carries_review_protocol(node: &GraphNode) -> bool {
+    node.review_behaviour.is_some()
+        || node.delivery_review.is_some()
+        || node.role.as_deref().is_some_and(|role| {
+            role == "lens" || role.starts_with("lens.") || role.starts_with("review.")
+        })
+        || node.template.as_deref().is_some_and(|name| {
+            name == "findings-panel" || name == "review-panel" || name.starts_with("review")
+        })
+        || node
+            .composite
+            .as_ref()
+            .is_some_and(|composite| composite.nodes.iter().any(carries_review_protocol))
+        || node
+            .loop_body
+            .as_ref()
+            .is_some_and(|loop_spec| loop_spec.body.iter().any(carries_review_protocol))
+}
+
+/// Whether a node reads one named writer by node source and carries a review
+/// protocol. Only those nodes compare base..head; other readers of a writer's
+/// head (hygiene, publication, conflict) have no review range to resolve.
+fn is_node_sourced_review_of(node: &GraphNode, writer: &str) -> bool {
+    matches!(&node.source, Some(SourceBinding::Node { node }) if node == writer)
+        && node.access == AccessMode::ReadOnly
+        && carries_review_protocol(node)
+}
+
+fn has_node_sourced_review(node: &GraphNode, writer: &str) -> bool {
+    is_node_sourced_review_of(node, writer)
+        || node.composite.as_ref().is_some_and(|composite| {
+            composite
+                .nodes
+                .iter()
+                .any(|child| has_node_sourced_review(child, writer))
+        })
+        || node.loop_body.as_ref().is_some_and(|loop_spec| {
+            loop_spec
+                .body
+                .iter()
+                .any(|child| has_node_sourced_review(child, writer))
+        })
+}
+
+/// Whether this writer has a node-sourced review without a panel-specific or
+/// graph-authored comparison base.
+fn has_unbased_node_sourced_review(node: &GraphNode, writer: &str) -> bool {
+    (is_node_sourced_review_of(node, writer) && node.review_base.is_none())
+        || node.composite.as_ref().is_some_and(|composite| {
+            composite
+                .nodes
+                .iter()
+                .any(|child| has_unbased_node_sourced_review(child, writer))
+        })
+        || node.loop_body.as_ref().is_some_and(|loop_spec| {
+            loop_spec
+                .body
+                .iter()
+                .any(|child| has_unbased_node_sourced_review(child, writer))
+        })
+}
+
+/// Any review node that sources `writer` gets the resolved base. The composite
+/// boundary and its members are both pinned so every lens receives base..head.
+fn bind_writer_review_base(node: &mut GraphNode, writer: &str, base: &str) {
+    if is_node_sourced_review_of(node, writer) {
+        bind_review_base(node, base);
+    }
+    if let Some(composite) = &mut node.composite {
+        for child in &mut composite.nodes {
+            bind_writer_review_base(child, writer, base);
+        }
+    }
+    if let Some(loop_spec) = &mut node.loop_body {
+        for child in &mut loop_spec.body {
+            bind_writer_review_base(child, writer, base);
         }
     }
 }
@@ -748,67 +616,6 @@ fn bind_review_warning(node: &mut provenant_fabric_runtime::graph::GraphNode, wa
 
 /// Launch controls that bind a writer; a composite template can take none of them.
 const LAUNCH_CONTROLS: [&str; 5] = ["access", "worktree", "branch", "base", "write_scope"];
-
-/// The `--source` flag is the launch layer of `lanes.read_source`. A host or
-/// project knob supplies the value and the fetch-first flag; `auto` (including
-/// the compiled default) keeps the advisory pin of a checkout behind its
-/// fetched upstream.
-fn read_source_choice(
-    input: &Value,
-    config: &provenant_config::ResolvedConfig<provenant_cli::domains::Domains>,
-) -> provenant_cli::run::ReadSourceChoice {
-    use provenant_cli::run::ReadSourceChoice;
-    use provenant_records::Layer;
-
-    let mut choice = ReadSourceChoice::automatic();
-    if let Some(knob) = config.knobs.get(ReadSourceChoice::KNOB) {
-        let value = knob.value.as_str().unwrap_or_default();
-        // `auto` is the registry name for the compiled default, so an explicit
-        // setting of it still resolves the advisory pin. config schema reports
-        // the same value as this resolver uses.
-        choice.value = if knob.source.layer == Layer::Default || value == "auto" {
-            String::new()
-        } else {
-            value.to_owned()
-        };
-        choice.layer = knob.source.layer;
-        choice.origin = Some(format!("config.toml#{}", ReadSourceChoice::KNOB));
-    }
-    if let Some(flag) = config.knobs.get("lanes.read_source_fetch_first") {
-        choice.fetch_first = flag.value.as_bool().unwrap_or(false);
-    }
-    match input.get("source").and_then(Value::as_str) {
-        Some("local") => {
-            choice.value = "checkout".into();
-            choice.layer = Layer::Launch;
-            choice.origin = Some("--source".into());
-        }
-        Some("upstream") => {
-            choice.value = "default_branch".into();
-            choice.layer = Layer::Launch;
-            choice.origin = Some("--source".into());
-        }
-        _ => {}
-    }
-    choice
-}
-
-/// One shape for the commit a read-only launch reads, in both `run --explain`
-/// (its status) and the launch result. The source names the layer that chose
-/// the ref; `commit` is null when the choice keeps the local checkout.
-fn read_source_report(
-    selected: Option<&provenant_cli::run::ReadOnlySourceRef>,
-    choice: &provenant_cli::run::ReadSourceChoice,
-) -> Value {
-    json!({
-        "value": choice.value,
-        "fetch_first": choice.fetch_first,
-        "source": choice.layer.as_str(),
-        "origin": choice.origin,
-        "commit": selected.map(|selected| selected.commit.to_string()),
-        "reference": selected.map(|selected| selected.reference.clone()),
-    })
-}
 
 /// The resolved node a template or `use` launch runs, taken before the graph
 /// id is chosen. Its lowered roles decide whether the launch is a writer.
@@ -957,7 +764,9 @@ fn bind_launch_controls(
                 .as_str()
                 .filter(|value| !value.is_empty())
                 .ok_or_else(|| invalid("base"))?,
-            None => DEFAULT_WRITER_BASE,
+            // The real default is resolved at admission from `lanes.writer_base`;
+            // `default_base` tells provisioning to resolve it again on the peer.
+            None => "HEAD",
         };
         provenant_confinement::repo::GitRevision::new(base).map_err(|_| invalid("base"))?;
         let worktree = ports
@@ -1002,8 +811,8 @@ mod launch_report_tests {
     #[test]
     fn launch_report_distinguishes_refusal_mixed_and_fallback() {
         let rows = vec![
-            json!({"kind":"attempt", "attempt_id":"host/one", "settlement_reason":"pre_launch_refusal", "preparation_failure":"auth_required"}),
-            json!({"kind":"attempt", "attempt_id":"host/two", "settlement_reason":"pre_launch_refusal", "preparation_failure":"usage_limited"}),
+            json!({"kind":"attempt", "attempt_id":"host/one", "settlement_class":"pre_launch_refusal", "preparation_failure":"auth_required"}),
+            json!({"kind":"attempt", "attempt_id":"host/two", "settlement_class":"pre_launch_refusal", "preparation_failure":"usage_limited"}),
         ];
         let attempt = |id: &str, launched: bool| json!({"attempt_ref":id,"launched":launched});
         let mut all = json!({"status":"complete","outcome":"failed","checkpoint":{"nodes":[{"attempts":[attempt("host/one", false)]},{"attempts":[attempt("host/two", false)]}]}});
@@ -1061,7 +870,7 @@ mod launch_report_tests {
 fn report_launch_refusals(result: &mut Value, rows: &[Value]) {
     let refusals: Vec<_> = rows
         .iter()
-        .filter(|row| row["kind"] == "attempt" && row["settlement_reason"] == "pre_launch_refusal")
+        .filter(|row| row["kind"] == "attempt" && row["settlement_class"] == "pre_launch_refusal")
         .cloned()
         .collect();
     if refusals.is_empty() {
@@ -1231,6 +1040,9 @@ impl Factory {
                         format!(
                             "full config unavailable ({error}); using the owner's resolved policy"
                         ),
+                        provenant_records::warning::detected_source(
+                            provenant_records::warning::CONFIG_UNAVAILABLE,
+                        ),
                     )
                     .subject(self.context.identity.project.to_string()),
                 );
@@ -1249,30 +1061,38 @@ impl Factory {
         )
     }
 
-    fn validate_host_placement(
-        &self,
-        node: &provenant_fabric_runtime::graph::GraphNode,
-    ) -> Result<(), FacadeError> {
-        if !provenant_fabric_runtime::graph::when::holds(&node.when) {
-            return Ok(());
-        }
-        if let Some(name) = node
+    /// Resolve a node's declared host to this host or a configured peer. The
+    /// placement check and the read-only explanation share this resolution, so
+    /// an unknown name is refused in both and an alias is never mistaken for a
+    /// peer (or the reverse).
+    fn node_host(&self, node: &GraphNode) -> Result<Option<provenant_core::HostId>, FacadeError> {
+        let Some(name) = node
             .attempt
             .as_ref()
             .and_then(|attempt| attempt.host.as_deref())
+        else {
+            return Ok(None);
+        };
+        let local = self.context.identity.host;
+        if matches!(name, "local" | "localhost")
+            || name
+                .parse::<provenant_core::HostId>()
+                .is_ok_and(|host| host == local)
         {
+            return Ok(Some(local));
+        }
+        self.context
+            .peer_host(name)
+            .map(Some)
+            .ok_or(FacadeError::UnknownHost)
+    }
+
+    fn validate_host_placement(&self, node: &GraphNode) -> Result<(), FacadeError> {
+        if !provenant_fabric_runtime::graph::when::holds(&node.when) {
+            return Ok(());
+        }
+        if let Some(host) = self.node_host(node)? {
             let local = self.context.identity.host;
-            let host = if matches!(name, "local" | "localhost")
-                || name
-                    .parse::<provenant_core::HostId>()
-                    .is_ok_and(|host| host == local)
-            {
-                local
-            } else {
-                self.context
-                    .peer_host(name)
-                    .ok_or(FacadeError::UnknownHost)?
-            };
             if host == local
                 && node.access == provenant_fabric_runtime::graph::AccessMode::WorktreeWrite
                 && node.worktree.as_deref().is_none_or(str::is_empty)
@@ -1547,6 +1367,13 @@ impl Factory {
         use provenant_fabric_runtime::graph::relay::{ChildLaunch, ChildRequest};
         let input = self.apply_pr_repair(launch_input(input)?)?;
         let input = &input;
+        if input.get("template").and_then(Value::as_str) == Some("deliver")
+            && input.get("over").is_some_and(|value| !value.is_null())
+        {
+            return Err(graph_input_reason(
+                "deliver --over is only supported by the top-level durable queue dispatcher",
+            ));
+        }
         let invalid = || FacadeError::invalid(InvalidInputDetail::Field("document".into()));
         let raw = input.get("document").filter(|value| !value.is_null());
         if raw.is_some_and(|value| !value.is_object()) {
@@ -1658,6 +1485,7 @@ impl Factory {
                 None => json!({"use":"task"}),
             }
         };
+        // Top-level queue selectors are dispatched before this nested-run compiler.
         let library = self.template_library(Some(&inline))?;
         let template_name = input
             .get("template")
@@ -1669,7 +1497,7 @@ impl Factory {
             .map_err(|_| invalid())?
             .accepts_review_range();
         let review_subject = self.review_subject(input, review, &CancelToken::new())?;
-        let idempotency_key = if let Some(subject) = &review_subject
+        let idempotency_key = if let Some((subject, _)) = &review_subject
             && name.is_some()
             && input
                 .get("idempotency_key")
@@ -1677,8 +1505,8 @@ impl Factory {
                 .is_none()
         {
             let mut pinned = input.clone();
-            pinned["review_subject"] = json!({"base":subject.base,"head":subject.head});
-            submission_digest(&pinned, Some(&subject.head), None)?
+            pinned["subject"] = json!({"base":subject.base,"head":subject.head});
+            submission_digest(&pinned, Some(&subject.head.to_string()), None)?
         } else {
             idempotency_key
         };
@@ -1729,9 +1557,14 @@ impl Factory {
             &self.context.port_table,
         )?;
         node["id"] = json!(key);
-        let range = review_subject
+        let range = review_subject.as_ref().and_then(|(subject, _)| {
+            subject
+                .base
+                .map(|base| (base.to_string(), subject.head.to_string()))
+        });
+        let range = range
             .as_ref()
-            .map(|subject| (subject.base.as_str(), subject.head.as_str()));
+            .map(|(base, head)| (base.as_str(), head.as_str()));
         let resolvers = self.launch_resolvers_for_tier(raw, route.as_ref(), range)?;
         let mut compiled = provenant_fabric_runtime::graph::template::Compiler {
             library: &library,
@@ -1750,12 +1583,16 @@ impl Factory {
         }
         let mut typed = serde_json::from_value(compiled).map_err(|_| invalid())?;
         override_launch(&mut typed, input)?;
-        if let Some(subject) = &review_subject {
-            if subject.base != subject.head {
-                bind_submission_subject(&mut typed, Some(subject.base.as_str()), &subject.head);
-                bind_review_base(&mut typed, &subject.base);
+        if let Some((subject, warning)) = &review_subject {
+            if let Some(base) = subject.base {
+                bind_submission_subject(
+                    &mut typed,
+                    Some(&base.to_string()),
+                    &subject.head.to_string(),
+                );
+                bind_review_base(&mut typed, &base.to_string());
             }
-            if let Some(warning) = &subject.warning {
+            if let Some(warning) = warning {
                 warn_operator(warning);
                 bind_review_warning(&mut typed, warning);
             }
@@ -1838,7 +1675,7 @@ impl Factory {
                     provenant_records::warning::Warning::new(
                         provenant_records::warning::WORKTREE_INVENTORY_UNAVAILABLE,
                         format!("repository worktree inventory unavailable ({reason}); read roots are limited to the current directory"),
-                    )
+                     provenant_records::warning::detected_source(provenant_records::warning::WORKTREE_INVENTORY_UNAVAILABLE))
                     .subject(self.cwd.display().to_string()),
                 );
                 vec![self.cwd.clone()]
@@ -1932,7 +1769,21 @@ impl Factory {
         cancel: &CancelToken,
         announce: Option<super::graph_execution::Announce<'_>>,
     ) -> Result<Value, FacadeError> {
+        if input.get("queue_control").is_some() {
+            if self.context.in_lane || self.context.inspection_only {
+                return Err(FacadeError::ConfinementRefused { resource: None });
+            }
+            return super::queue_controls::handle_graph_operation(self, input, budget, cancel);
+        }
         let operation = required(&input, "op")?;
+        if operation == "run"
+            && input.get("template").and_then(Value::as_str) == Some("deliver")
+            && input.get("over").is_some_and(|value| !value.is_null())
+        {
+            return Err(graph_input_reason(
+                "deliver --over must enter through the top-level durable queue dispatcher",
+            ));
+        }
         let warnings = if matches!(operation, "edit" | "retry") {
             self.graph_input_warnings(&input)?
         } else {
@@ -2073,8 +1924,103 @@ impl Factory {
         cancel: &CancelToken,
         announce: Option<super::graph_execution::Announce<'_>>,
     ) -> Result<Value, FacadeError> {
+        if super::queue_dispatch::is_queue_submission(input) {
+            return super::queue_dispatch::submit_queue(self, input, budget, cancel, announce);
+        }
         let submitted = input;
-        let mut input = self.apply_pr_repair(launch_input(input)?)?;
+        let prepared = launch_input(input)?;
+        let queue_launch = if prepared.get("queue_item").is_some() {
+            let registry =
+                super::queue_registry::QueueRegistry::open(self.context.roots.state.as_path())
+                    .map_err(|_| FacadeError::StateCorrupt)?;
+            let project = self.context.identity.project.to_string();
+            let execution_directory = self.cwd.to_string_lossy().into_owned();
+            Some(
+                registry
+                    .authorise_launch(
+                        &project,
+                        &execution_directory,
+                        &prepared,
+                        budget,
+                        cancel,
+                        &self.clock,
+                    )
+                    .map_err(|_| FacadeError::Conflict)?,
+            )
+        } else {
+            None
+        };
+        let queue_replay_digest = queue_launch
+            .as_ref()
+            .map(|_| submission_digest(&prepared, None, None))
+            .transpose()?;
+        if let Some(launch) = &queue_launch
+            && let Some(execution) = FileJournal::execution(
+                &self.context.roots.state,
+                self.context.identity.project,
+                &launch.item.graph_id,
+            )
+            .map_err(graph_journal_error)?
+        {
+            if !super::queue_scheduler::matches_item_execution(
+                &launch.queue.queue_id,
+                &launch.item,
+                &execution,
+            )
+            .map_err(|_| FacadeError::StateCorrupt)?
+            {
+                return Err(FacadeError::Conflict);
+            }
+            let run = self.graph(
+                GraphInput::Status {
+                    extra: Default::default(),
+                    id: launch.item.graph_id.clone(),
+                },
+                budget,
+                cancel,
+            )?;
+            let mut result = encode(run)?;
+            result["timed_out"] = json!(false);
+            result["named"] = json!({"requested":launch.item.graph_id, "graph":launch.item.graph_id, "replayed":true});
+            return Ok(result);
+        }
+        let mut input = self.apply_pr_repair(prepared)?;
+        if let Some(launch) = &queue_launch {
+            let branch = if let Some(adoption) = &launch.item.adoption {
+                adoption
+                    .get("branch")
+                    .and_then(Value::as_str)
+                    .ok_or(FacadeError::StateCorrupt)?
+                    .to_owned()
+            } else {
+                format!("queue/{}", launch.item.graph_id)
+            };
+            provenant_confinement::repo::GitRefName::branch(&branch)
+                .map_err(|_| FacadeError::StateCorrupt)?;
+            let worktree = if let Some(adoption) = &launch.item.adoption {
+                PathBuf::from(
+                    adoption
+                        .get("worktree")
+                        .and_then(Value::as_str)
+                        .filter(|path| Path::new(path).is_absolute())
+                        .ok_or(FacadeError::StateCorrupt)?,
+                )
+            } else {
+                self.context.project_root.join(
+                    self.context
+                        .port_table
+                        .managed_writer_path(&branch)
+                        .map_err(|_| FacadeError::StateCorrupt)?,
+                )
+            };
+            if input.get("set").is_none_or(Value::is_null) {
+                input["set"] = json!({});
+            }
+            input["set"]
+                .as_object_mut()
+                .ok_or(FacadeError::StateCorrupt)?
+                .insert("worktree".into(), json!(worktree));
+        }
         let raw_owned = input.get("document").cloned();
         let raw = raw_owned.as_ref();
         let mut input_warnings = self.graph_input_warnings(&input)?;
@@ -2155,22 +2101,64 @@ impl Factory {
         let input = &input;
         let source_choice = input.get("source").filter(|value| !value.is_null());
         if let Some(choice) = source_choice
-            && !matches!(choice.as_str(), Some("upstream" | "local"))
+            && choice
+                .as_str()
+                .is_none_or(|value| provenant_cli::run::ReadSource::parse(value).is_err())
         {
             return Err(FacadeError::invalid(InvalidInputDetail::Field(
                 "source".into(),
             )));
         }
-        // Review ranges are launch controls: resolve them on the host before
-        // admitting a graph, and bind immutable object IDs into its identity.
+        // One subject per admission: review ranges, read sources and writer
+        // bases are resolved together, once, and bound into this graph's
+        // identity. Nothing below re-reads a ref or re-resolves a source.
+        // The authored document's own review field is not the launch contract;
+        // only the selected template's acceptance decides review resolution.
         let review_launch = declared.accepts_review_range();
-        let review_subject = self.review_subject(input, review_launch, cancel)?;
-        let review_pin = review_subject
+        let remote = input
+            .get("host")
+            .and_then(Value::as_str)
+            .is_some_and(|host| !host.is_empty() && !matches!(host, "local" | "localhost"));
+        // A managed queue item has no checkout yet. Resolve its writer base
+        // from the same default a provisioned `queue/<id>` branch would use,
+        // so that one commit is pinned into the item branch and worktree
+        // intent at the single admission point. Adopted items carry their own
+        // base and keep resolving it from the real checkout.
+        let queue_base_input = queue_launch
             .as_ref()
+            .filter(|launch| launch.item.adoption.is_none())
+            .map(|launch| {
+                let mut selection = input.clone();
+                selection["branch"] = json!(format!("queue/{}", launch.item.graph_id));
+                selection
+            });
+        let SubjectAdmission {
+            subject,
+            writer_base,
+            read,
+            warnings: subject_warnings,
+            review_warning,
+            read_source,
+            writer_base_setting,
+            read_pin,
+            writer_warnings,
+        } = self.admit_subject(
+            input,
+            queue_base_input.as_ref(),
+            review_launch,
+            remote,
+            cancel,
+        )?;
+        input_warnings.extend(subject_warnings);
+        let review_pin = subject
+            .as_ref()
+            .filter(|_| review_launch)
             .map(|subject| json!({"base":subject.base,"head":subject.head}));
-        let git = provenant_os::git::git_executable();
-        let mut resolved_head = review_subject.as_ref().map(|subject| subject.head.clone());
-        let resolved_review_base = review_subject.as_ref().map(|subject| subject.base.clone());
+        let mut resolved_head = subject.as_ref().map(|subject| subject.head.to_string());
+        let resolved_review_base = subject
+            .as_ref()
+            .and_then(|subject| subject.base)
+            .map(|base| base.to_string());
         let review_range = resolved_review_base
             .as_deref()
             .zip(resolved_head.as_deref());
@@ -2184,20 +2172,11 @@ impl Factory {
             limits: &self.context.config.graph.limits,
             worktree_layout: self.context.port_table.worktree_layout.clone(),
         };
-        // The read source is one sourced setting: `--source` is its launch
-        // layer and the host/project knob supplies the ref and fetch flag. An
-        // unreadable configuration is advisory; the compiled default keeps the
-        // stale-checkout pin.
-        let read_config = provenant_cli::config_reads::read_for(&self.context.roots, "run").ok();
-        let read_source = read_config
-            .as_ref()
-            .map(|config| read_source_choice(input, config))
-            .unwrap_or_default();
-        if read_config.is_none() {
-            warn_operator(
-                "could not read the run configuration; lanes.read_source keeps its compiled default",
-            );
-        }
+        // Admission resolved the sourced read-source and writer-base settings
+        // once; the queue settings below read the same run configuration.
+        let read_config_result = provenant_cli::config_reads::read_for(&self.context.roots, "run");
+        let read_config_error = read_config_result.as_ref().err().map(ToString::to_string);
+        let read_config = read_config_result.ok();
         // Resolve the graph a template launch runs before sealing its identity.
         // Writer-ness is the resolved roles' answer, not one launch key's.
         let template_launch = if raw.is_none() || lane_document.is_some() {
@@ -2216,73 +2195,27 @@ impl Factory {
             Some(launch) => launch.writes_worktree(&library, &resolver)?,
             None => false,
         };
-        // Resolve the one base a writer starts from before sealing its identity.
-        // Its read-only members read that base; only a writer that names no base
-        // falls back to the caller checkout, and only then does a read-only
-        // source pin still apply to it.
-        let writer_base = if writer_launch {
-            Some(resolve_writer_base(
-                input,
-                &self.context.project_root,
-                &self.cwd,
-                self.context.roots.state.as_path(),
-                &read_source,
-                git.as_deref(),
-            ))
-        } else {
-            None
-        };
-        if let Some(warning) = writer_base
-            .as_ref()
-            .and_then(|base| base.fallback_warning(&self.cwd))
-        {
-            input_warnings.push(warning);
+        // Admission produced the writer base, the read subject and the pin it
+        // came from; writer-ness decides which one this launch keeps. A writer
+        // starts from its resolved base, which is then the graph's only read
+        // commit, so a moving checkout HEAD never enters a writer's identity. A
+        // review keeps its range subject either way.
+        let mut writer_base = writer_base.filter(|_| writer_launch);
+        if writer_launch {
+            input_warnings.extend(writer_warnings);
         }
-        // A plain read-only task from a checkout behind its fetched upstream
-        // reviews that upstream head, not its stale local tree. Explicit source
-        // choices, authored documents, review ranges and a writer with a known
-        // base keep resolving their own subject. A writer with no base still
-        // pins its read-only members, but never its own identity. Absent Git
-        // evidence stays advisory.
-        let default_source = if review_subject.is_none()
-            && raw.is_none()
-            && writer_base
-                .as_ref()
-                .is_none_or(|base| base.commit.is_none())
-        {
-            provenant_cli::run::read_only_source_ref(
-                self.context.roots.state.as_path(),
-                &self.cwd,
-                &read_source,
-            )
+        let subject = subject.filter(|_| review_launch || writer_base.is_none());
+        let default_source =
+            read_pin.filter(|_| raw.is_none() && subject.is_some() && !review_launch);
+        // The commit the launch starts from belongs to its identity.
+        let source_commit = if review_launch {
+            resolved_head.clone()
         } else {
-            None
+            writer_base
+                .map(|base| base.to_string())
+                .or_else(|| subject.as_ref().map(|subject| subject.head.to_string()))
         };
-        // The commit the launch starts from belongs to its identity: a writer
-        // starts from its base, a reader from its resolved source. A checkout
-        // with no commit yet simply has none.
-        let source_commit = resolved_head.clone().or_else(|| {
-            if writer_launch {
-                writer_base
-                    .as_ref()
-                    .and_then(|base| base.commit.clone())
-                    .or_else(|| {
-                        git.as_deref().and_then(|git| {
-                            provenant_run::resolve_git_base(git, &self.cwd, "HEAD").ok()
-                        })
-                    })
-            } else {
-                default_source
-                    .as_ref()
-                    .map(|selected| selected.commit.to_string())
-                    .or_else(|| {
-                        git.as_deref().and_then(|git| {
-                            provenant_run::resolve_git_base(git, &self.cwd, "HEAD").ok()
-                        })
-                    })
-            }
-        });
-        if resolved_head.is_none() && raw.and_then(|document| document.get("graph_id")).is_none() {
+        if !review_launch {
             resolved_head = source_commit.clone();
         }
         // The name is a handle; the digest of the launch decides whether it is
@@ -2291,6 +2224,42 @@ impl Factory {
             raw.and_then(|document| document.get("graph_id"))
                 .and_then(Value::as_str)
         });
+        // A queue item owns one fixed graph handle. Its launch digest remains
+        // part of the submission identity, so journal custody can accept an
+        // exact replay and reject a competing launch under the same handle.
+        let strict_queue_id = input
+            .get("queue_item")
+            .map(|item| {
+                let valid = item.is_object()
+                    && item["queue_id"]
+                        .as_str()
+                        .is_some_and(|value| !value.is_empty())
+                    && item["launch_digest"]
+                        .as_str()
+                        .is_some_and(|value| value.starts_with("sha256:"))
+                    && ["project", "tracker", "item"].iter().all(|field| {
+                        item["identity"][field]
+                            .as_str()
+                            .is_some_and(|value| !value.is_empty())
+                    });
+                let graph_id = item["graph_id"].as_str().filter(|value| !value.is_empty());
+                if valid && graph_id.is_some() {
+                    Ok(graph_id)
+                } else {
+                    Err(FacadeError::invalid(InvalidInputDetail::Field(
+                        "queue_item".into(),
+                    )))
+                }
+            })
+            .transpose()?;
+        let strict_queue_id = strict_queue_id.flatten();
+        if let Some(queue_id) = strict_queue_id
+            && requested.is_none_or(|name| name != queue_id)
+        {
+            return Err(FacadeError::invalid(InvalidInputDetail::Field(
+                "queue_item.graph_id".into(),
+            )));
+        }
         let (base, named) = match requested {
             Some(name) => {
                 let folded = provenant_fabric_runtime::graph::template::fold_graph_name(name)
@@ -2307,11 +2276,13 @@ impl Factory {
         templates["$implement_plan_default"] = json!(self.context.config.implement.plan);
         templates["$batch_max_parallel_default"] = json!(self.context.config.batch.max_parallel);
         let mut identity_input = input.clone();
-        if let Some(subject) = &review_subject {
-            identity_input["review_subject"] = json!({"base":subject.base,"head":subject.head});
+        if let Some(subject) = &subject {
+            identity_input["subject"] = json!({"base":subject.base,"head":subject.head});
         }
-        let digest =
-            submission_digest(&identity_input, source_commit.as_deref(), Some(&templates))?;
+        let digest = match queue_replay_digest {
+            Some(digest) => digest,
+            None => submission_digest(&identity_input, source_commit.as_deref(), Some(&templates))?,
+        };
         let explain = input["explain"] == true;
         let (generated_id, taken) = if explain {
             (
@@ -2338,6 +2309,9 @@ impl Factory {
                 .map_err(graph_input_reason)?
             {
                 NameDecision::Replay(id) => {
+                    if strict_queue_id.is_some_and(|queue_id| id != queue_id) {
+                        return Err(FacadeError::Conflict);
+                    }
                     // The same input is the same launch: report that graph as
                     // it stands and start nothing. Advancing it stays with the
                     // scheduler and explicit recovery.
@@ -2354,7 +2328,12 @@ impl Factory {
                     result["named"] = json!({"requested":requested, "graph":id, "replayed":true});
                     return Ok(result);
                 }
-                NameDecision::Create { id, taken } => (id, taken),
+                NameDecision::Create { id, taken } => {
+                    if strict_queue_id.is_some_and(|queue_id| id != queue_id) {
+                        return Err(FacadeError::Conflict);
+                    }
+                    (id, taken)
+                }
             }
         };
         let id = generated_id.as_str();
@@ -2394,20 +2373,13 @@ impl Factory {
         };
         // Borrow the optional base: the prompt binding below still needs it
         // after the document has been given its own copy.
-        if review_launch
-            && let Some(base) = resolved_review_base
-                .as_deref()
-                .filter(|base| Some(*base) != resolved_head.as_deref())
-        {
-            document.review_base = Some(base.to_owned());
+        // The host overwrites any caller-supplied subject and review base with
+        // the one it admitted. Both are full object IDs from Git.
+        if let Some(base) = subject.as_ref().and_then(|subject| subject.base) {
+            document.review_base = Some(base.to_string());
             document.schema_version = document.schema_version.max(2);
         }
-        if review_subject
-            .as_ref()
-            .is_some_and(|subject| subject.warning.is_some() && subject.base == subject.head)
-        {
-            document.review_subject_missing = true;
-        }
+        document.subject = subject.clone();
         document.template_layers = library.snapshot_layers();
         document.template_library = library.snapshot();
         document.template_resolvers = resolver;
@@ -2415,6 +2387,7 @@ impl Factory {
             let mut compiled = encode(&document)?;
             for key in [
                 "limits",
+                "queue",
                 "delivery",
                 "review_base",
                 "context",
@@ -2431,6 +2404,90 @@ impl Factory {
                 }
             }
             document = decode_input(compiled, "document")?;
+        }
+        // #4064: a writer that reuses an existing worktree has no launch-level
+        // base. Resolve one from the node (declared base, the branch's upstream,
+        // else its merge base with the default branch) so a findings-panel that
+        // sources that writer compares base..pushed head instead of an empty
+        // range. A plain writer stays advisory: only a node-sourced review
+        // needs the base to be present before launch.
+        // Admission now resolves its own git internally; this later lookup of a
+        // reused worktree's upstream/merge-base still needs the executable, so
+        // bind it here rather than relying on a name that no longer exists.
+        let git = provenant_os::git::git_executable();
+        let mut reused_writer_bases = Vec::new();
+        for node in &document.nodes {
+            if node.access == AccessMode::WorktreeWrite && node.worktree.is_some() {
+                reused_writer_bases.push((
+                    node.id.clone(),
+                    resolve_reused_worktree_base(
+                        node,
+                        &self.context.project_root,
+                        &self.cwd,
+                        self.context.roots.state.as_path(),
+                        &read_source,
+                        git.as_deref(),
+                    ),
+                ));
+            }
+        }
+        // The source that chose a reused writer's base, when it became the
+        // launch's writer base; the report names it instead of the knob.
+        let mut writer_base_source = None;
+        for (writer_id, base) in &reused_writer_bases {
+            if writer_base.is_none()
+                && reused_writer_bases.len() == 1
+                && let Some(base) = base.as_ref()
+                && let Some(commit) = base
+                    .commit
+                    .as_deref()
+                    .and_then(|commit| provenant_core::GitOid::parse(commit).ok())
+            {
+                writer_base = Some(commit);
+                writer_base_source = Some(base.source.label());
+            }
+            match base.as_ref().and_then(|base| base.commit.as_deref()) {
+                Some(commit) => {
+                    let has_review = document
+                        .nodes
+                        .iter()
+                        .any(|node| has_node_sourced_review(node, writer_id));
+                    for node in &mut document.nodes {
+                        bind_writer_review_base(node, writer_id, commit);
+                    }
+                    if has_review {
+                        document.schema_version = document.schema_version.max(2);
+                    }
+                }
+                None if document.review_base.is_none()
+                    && document
+                        .nodes
+                        .iter()
+                        .any(|node| has_unbased_node_sourced_review(node, writer_id)) =>
+                {
+                    return Err(FacadeError::invalid(InvalidInputDetail::Field(format!(
+                        "review_base_unresolved: writer {writer_id} reuses a worktree with no declared base, upstream or default-branch merge base; declare base on the node or supply review_base"
+                    ))));
+                }
+                None => {}
+            }
+        }
+        // NameDecision::Replay returns above. A graph_id in the raw document
+        // can still name a new full-document submission, so queue presence is
+        // the only selector here.
+        let queue_config = read_config
+            .as_ref()
+            .map(|config| (&config.domains.fabric.queue, &config.origins));
+        seal_document_queue(&mut document, queue_config, read_config_error.as_deref())?;
+        // The admitted base is a GitOid; bind_item takes a borrowed ref string.
+        let writer_base_commit = writer_base.as_ref().map(|base| base.to_string());
+        if let Some(launch) = &queue_launch {
+            super::queue_delivery::bind_item(
+                self,
+                launch,
+                &mut document,
+                writer_base_commit.as_deref(),
+            )?;
         }
         // Template compilation selected a schema before document metadata was
         // applied; a retained review base requires the schema-2 representation.
@@ -2476,19 +2533,26 @@ impl Factory {
                 provenant_fabric_runtime::graph::minimum_schema_version(&document),
             ));
         }
-        let writer_commit = writer_base.as_ref().and_then(|base| base.commit.as_deref());
-        if let Some(commit) = writer_commit {
-            let commit = commit.to_owned();
+        // A writer's read-only members take its base; every other pinned read
+        // node takes the admitted subject's head. A live checkout keeps its
+        // working tree and carries no source binding at all.
+        let read_commit = writer_base.or_else(|| {
+            subject
+                .as_ref()
+                .filter(|_| read == ReadPlan::Pinned)
+                .map(|subject| subject.head)
+        });
+        // A local writer provisions its new worktree from the admitted base.
+        // A peer resolves its own default, since this commit may not exist in
+        // its clone; `default_base` tells it to.
+        if !remote && let Some(commit) = writer_base.map(|commit| commit.to_string()) {
             for node in &mut document.nodes {
-                bind_writer_base_source(node, &commit);
+                bind_provisioning_base(node, &commit);
             }
-            document.schema_version = document.schema_version.max(u64::from(
-                provenant_fabric_runtime::graph::minimum_schema_version(&document),
-            ));
-        } else if let Some(selected) = &default_source {
-            let commit = selected.commit.to_string();
+        }
+        if let Some(commit) = read_commit.map(|commit| commit.to_string()) {
             for node in &mut document.nodes {
-                bind_default_read_only_source(node, &commit);
+                bind_read_source(node, &commit);
             }
             document.schema_version = document.schema_version.max(u64::from(
                 provenant_fabric_runtime::graph::minimum_schema_version(&document),
@@ -2506,10 +2570,7 @@ impl Factory {
                 bind_review_warning(node, &warning);
             }
         }
-        if let Some(warning) = review_subject
-            .as_ref()
-            .and_then(|subject| subject.warning.as_ref())
-        {
+        if let Some(warning) = &review_warning {
             for node in &mut document.nodes {
                 bind_review_warning(node, warning);
             }
@@ -2565,9 +2626,6 @@ impl Factory {
             Some(&self.requester_lane_path()?),
         )
         .map_err(FacadeError::graph_candidate)?;
-        if let Some(warning) = review_subject.and_then(|subject| subject.warning) {
-            input_warnings.push(warning);
-        }
         if !writer_launch && let Some(selected) = &default_source {
             let warning =
                 provenant_cli::run::read_only_source_warning(&self.cwd, selected, &read_source);
@@ -2602,6 +2660,10 @@ impl Factory {
             // Explain runs the launch's pre-attempt admission checks, so an
             // explanation that passes means the same input admits a launch.
             super::graph_execution::validate_explain_submission(self, &document, &expanded)?;
+            let settlement_knobs = provenant_run::settlement_policy::SettlementConfig::from_knobs(
+                &config.knobs,
+                self.context.roots.state.as_path(),
+            );
             let mut writer_budgets = Vec::new();
             for node in &expanded.nodes {
                 if node.access != provenant_fabric_runtime::graph::AccessMode::WorktreeWrite
@@ -2655,19 +2717,48 @@ impl Factory {
                         "gh_budget": provenant_run::gh_budget(&profile),
                         "ci_scope": provenant_run::ResolvedCiScope::resolve(&profile).receipt(),
                         "pr_policy": provenant_run::ResolvedPrPolicy::resolve(&profile).receipt(),
+                        // The value a launch on this route seals, with the
+                        // matched model policy as its route layer.
+                        "settlement": provenant_run::settlement_policy::explain(
+                            &settlement_knobs
+                                .clone()
+                                .with_route(&route_settlement_layer(&config, route)),
+                        ),
                     }));
                 }
             }
+            let capability_gaps = provenant_cli::adapter_capabilities::explain_capability_gaps(
+                &self.context.roots,
+                &self.context.identity.project.to_string(),
+                &config,
+                &expanded.nodes,
+            );
+            let node_routes = self.explain_node_routes(&expanded.nodes);
             let source_admission = self.explain_source_admission(&expanded.nodes)?;
             let refused = source_admission
                 .iter()
                 .any(|row| row["status"] == "refused");
+            let reused_writer_bases = reused_writer_bases
+                .iter()
+                .map(|(node, base)| {
+                    json!({
+                        "node": node,
+                        "commit": base.as_ref().and_then(|base| base.commit.as_deref()),
+                        "source": base.as_ref().map(|base| base.source.label()),
+                    })
+                })
+                .collect::<Vec<_>>();
             return Ok(json!({
                 "document":document, "skipped":skipped, "writer_budgets":writer_budgets,
+                "capability_gaps": capability_gaps,
+                "reused_writer_bases": reused_writer_bases,
+                "node_routes": node_routes,
                 "status": if refused { "refused" } else if source_admission.is_empty() { "admitted" } else { "pending_route" },
                 "credential_admission": if source_admission.is_empty() { "not_applicable" } else { "pending_route" },
                 "source_admission": source_admission, "warnings": warnings,
+                "subject": subject,
                 "read_source": read_source_report(default_source.as_ref(), &read_source),
+                "writer_base": writer_base_report(writer_base.as_ref(), &writer_base_setting, writer_base_source),
                 // The silence threshold is a host default with a named source,
                 // just like the other settings an explanation reports.
                 "stall": {
@@ -2684,6 +2775,11 @@ impl Factory {
                         }))
                     }).collect::<serde_json::Map<String, Value>>(),
                 },
+                // Settlement knobs are sealed with the evidence, so an
+                // explanation shows the same layers the holder will seal. The
+                // host and project layers are here; each writer budget row
+                // adds its route's model policy.
+                "settlement": provenant_run::settlement_policy::explain(&settlement_knobs),
                 "implement_plan": {
                     "value": input.pointer("/set/plan").or_else(|| input.pointer("/document/with/plan")).cloned().unwrap_or(json!(self.context.config.implement.plan)),
                     "source": if input.pointer("/set/plan").or_else(|| input.pointer("/document/with/plan")).is_some() { json!("parameter (--plan or --set)") } else {
@@ -2698,10 +2794,19 @@ impl Factory {
                 },
             }));
         }
-        let mut result = match self.launch_submission(document, input, budget, cancel, announce) {
+        let mut result = match self.launch_submission(
+            document,
+            input,
+            queue_launch.as_ref(),
+            budget,
+            cancel,
+            announce,
+        ) {
             // A concurrent launch bound this name to other input between the
             // choice and the bind. Choose again: the family now includes it.
-            Err(FacadeError::Conflict) if self.name_taken_by_other_input(id, &digest) => {
+            Err(FacadeError::Conflict)
+                if strict_queue_id.is_none() && self.name_taken_by_other_input(id, &digest) =>
+            {
                 return self.submit_document(submitted, budget, cancel, announce);
             }
             result => result?,
@@ -2713,8 +2818,14 @@ impl Factory {
         if let Some(pin) = review_pin {
             result["review_subject"] = pin;
         }
+        result["subject"] = json!(subject);
         result["warnings"] = json!(warnings);
         result["read_source"] = read_source_report(default_source.as_ref(), &read_source);
+        result["writer_base"] = writer_base_report(
+            writer_base.as_ref(),
+            &writer_base_setting,
+            writer_base_source,
+        );
         result["named"] = json!({
             "requested": requested, "graph": id, "replayed": replayed, "superseded": taken,
         });
@@ -2862,133 +2973,14 @@ impl Factory {
             parameters["integration_branch"] = branch.clone();
         }
         if bundled_smoke {
-            let is_remote = input
-                .get("host")
-                .and_then(Value::as_str)
-                .is_some_and(|h| !h.is_empty() && !matches!(h, "local" | "localhost"));
-            let controls = smoke_writer
-                .as_object()
-                .is_some_and(|node| !node.is_empty());
-            if controls {
-                // A remote graph must not retain or transmit a caller path.
-                // `--branch`/`--base` name a worktree the peer creates in its
-                // own clone, so they are admitted; only a caller path is not.
-                if is_remote && first_control == Some(&"worktree") {
-                    return Err(FacadeError::invalid(InvalidInputDetail::Field(
-                        "worktree".into(),
-                    )));
-                }
-                // A control and a `--set` of the same binding are two
-                // answers to one question.
-                if ["worktree", "write_attempt"]
-                    .iter()
-                    .any(|name| overrides.get(*name).is_some())
-                {
-                    return Err(FacadeError::invalid(InvalidInputDetail::Field(
-                        "set".into(),
-                    )));
-                }
-                parameters["worktree"] = smoke_writer["worktree"].clone();
-                if let Some(attempt) = smoke_writer.get("attempt") {
-                    parameters["write_attempt"] = attempt.clone();
-                }
-            }
-            // A peer-owned writer is provisioned from a branch and a base ref,
-            // never from a caller path. Drop the host path while retaining the
-            // branch intent so the peer can create its own worktree.
-            if is_remote {
-                parameters["worktree"] = json!("");
-            }
-            let requested = parameters.get("smoke-write").is_some();
-            let write_disabled = requested && parameters["smoke-write"] == json!(false);
-            // A remote launch carries no caller worktree. Provision a scratch
-            // branch from a sourced default so verification exercises the
-            // remote writer even when the caller supplies no --branch; an
-            // explicit --branch/--base or --set write_attempt still wins.
-            if is_remote
-                && !write_disabled
-                && !parameters
-                    .get("write_attempt")
-                    .and_then(|attempt| attempt.get("new_worktree"))
-                    .is_some()
-            {
-                let branch = input
-                    .get("name")
-                    .and_then(Value::as_str)
-                    .filter(|name| !name.is_empty())
-                    .map(|name| format!("smoke/{name}"))
-                    .unwrap_or_else(|| "smoke/verify".to_owned());
-                let explicit_base = input
-                    .get("base")
-                    .and_then(Value::as_str)
-                    .filter(|base| !base.is_empty())
-                    .map(str::to_owned);
-                let base = explicit_base.as_deref().unwrap_or(DEFAULT_WRITER_BASE);
-                let mut attempt = parameters
-                    .get("write_attempt")
-                    .cloned()
-                    .unwrap_or_else(|| json!({}));
-                let object = attempt.as_object_mut().ok_or_else(|| {
-                    FacadeError::invalid(InvalidInputDetail::Field("write_attempt".into()))
-                })?;
-                let mut provision = json!({"branch":branch,"base":base});
-                if explicit_base.is_none() {
-                    provision["default_base"] = json!(true);
-                }
-                object.insert("new_worktree".into(), provision);
-                parameters["write_attempt"] = attempt;
-                input_warnings.push(format!(
-                    "remote smoke writer uses scratch branch {branch} from {base} (source: default smoke placement); pass --branch B --base REF to override"
-                ));
-            }
-            // Without an explicit base, a first parent supplies a distinct
-            // review range. A root commit (or unavailable Git) has no such
-            // range, so omit review rather than launching an empty one.
-            if parameters
-                .get("diff_base")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .is_empty()
-            {
-                if let Some(base) = provenant_os::git::git_executable()
-                    .and_then(|git| provenant_run::resolve_git_base(&git, &self.cwd, "HEAD^").ok())
-                {
-                    parameters["diff_base"] = json!(base);
-                    input_warnings.push(format!(
-                        "smoke review uses base {base} (source: checkout first parent); pass --set diff_base=BASE to override"
-                    ));
-                } else {
-                    parameters["smoke-review"] = json!(false);
-                    input_warnings.push(
-                        "smoke skipped review: no diff_base supplied and checkout first parent is unavailable; pass --set diff_base=BASE to enable review".into(),
-                    );
-                }
-            }
-            let peer_owned_writer = is_remote
-                && parameters
-                    .get("write_attempt")
-                    .and_then(|attempt| attempt.get("new_worktree"))
-                    .is_some();
-            if !requested {
-                let worktree = parameters
-                    .get("worktree")
-                    .and_then(Value::as_str)
-                    .unwrap_or("");
-                parameters["smoke-write"] =
-                    json!(peer_owned_writer || (!is_remote && !worktree.is_empty()));
-            }
-            if parameters["smoke-write"] != json!(true) {
-                let reason = if requested {
-                    "smoke-write is not enabled"
-                } else if is_remote {
-                    "remote placement needs --branch B to provision a peer-owned worktree; caller paths are not accepted"
-                } else {
-                    "no writer worktree supplied; pass --worktree PATH or --branch B to run it"
-                };
-                input_warnings.push(format!(
-                    "smoke skipped node write: {reason}; other eligible nodes still run"
-                ));
-            }
+            smoke::configure(
+                input,
+                &mut parameters,
+                &overrides,
+                &smoke_writer,
+                first_control.copied(),
+                input_warnings,
+            )?;
         }
         node["with"] = parameters;
         Ok(TemplateLaunch {
@@ -2998,6 +2990,215 @@ impl Factory {
                 .and_then(Value::as_str)
                 .map(str::to_owned),
         })
+    }
+
+    /// Read-only route preview for `run --explain`. An exact node route or a
+    /// policy's configured model resolves to one spelling; a pool is shown as
+    /// its candidates, because the weighted pick, account and credential stay
+    /// launch-only. Every value names the field, policy, pool or default that
+    /// supplied it so pool routing can be checked before launch.
+    fn explain_node_routes(
+        &self,
+        nodes: &[provenant_fabric_runtime::graph::GraphNode],
+    ) -> Vec<Value> {
+        use provenant_fabric_runtime::graph::{GraphRoute, GraphRouteSelector, NodeKind};
+        // The provider check returns the route list together with the account
+        // settings; this preview only needs the list's named routes and pools.
+        let listed = provenant_cli::route::provider_check_routes(&self.context.roots)
+            .ok()
+            .map(|(routes, _accounts)| routes);
+        let optional = |value: Option<String>| value.map_or(Value::Null, Value::String);
+        let adapter_of = |model: &str| model.split_once('/').map(|(adapter, _)| adapter.to_owned());
+        let mut rows = Vec::new();
+        for node in nodes {
+            if !provenant_fabric_runtime::graph::when::holds(&node.when)
+                || node.composite.is_some()
+                || node.condition.is_some()
+                || node.decide.is_some()
+                || node.loop_body.is_some()
+                || node.land.is_some()
+                || matches!(
+                    node.kind,
+                    Some(
+                        NodeKind::Composite
+                            | NodeKind::Gate
+                            | NodeKind::Loop
+                            | NodeKind::Decide
+                            | NodeKind::Land
+                            | NodeKind::Hygiene
+                            | NodeKind::Publish
+                    )
+                )
+            {
+                continue;
+            }
+            let declared: Vec<Option<&GraphRoute>> = node
+                .routes
+                .as_ref()
+                .map(|routes| routes.iter().map(Some).collect())
+                .unwrap_or_else(|| vec![node.route.as_ref()]);
+            for (index, route) in declared.into_iter().enumerate() {
+                let Some(route) = route else {
+                    rows.push(json!({
+                        "node": node.id, "index": index,
+                        "adapter": Value::Null, "model": Value::Null, "effort": Value::Null,
+                        "sources": {"adapter":"default","model":"default","effort":"default"},
+                        "selection": "default", "candidates": []
+                    }));
+                    continue;
+                };
+                let effort = route.effort.clone();
+                let node_effort = effort.is_some();
+                let (adapter, model, resolved_effort, sources, selection, candidates, route_name): (
+                    Value,
+                    Value,
+                    Value,
+                    Value,
+                    &str,
+                    Value,
+                    Value,
+                ) = match route.selector() {
+                    GraphRouteSelector::Model(model) => (
+                        optional(route.adapter.clone().or_else(|| adapter_of(model))),
+                        Value::String(model.to_owned()),
+                        optional(effort),
+                        json!({
+                            "adapter":"node field","model":"node field",
+                            "effort": if node_effort { "node field" } else { "default" }
+                        }),
+                        "node field",
+                        json!([]),
+                        Value::Null,
+                    ),
+                    GraphRouteSelector::Adapter(name) => (
+                        route
+                            .adapter
+                            .clone()
+                            .map_or(Value::Null, Value::String),
+                        Value::Null,
+                        optional(effort),
+                        json!({
+                            "adapter":"node field","model":"node field",
+                            "effort": if node_effort { "node field" } else { "default" }
+                        }),
+                        "node field",
+                        json!([]),
+                        Value::String(name.to_owned()),
+                    ),
+                    GraphRouteSelector::Alias(alias) => {
+                        let alias = alias.unwrap_or_default();
+                        match listed
+                            .as_ref()
+                            .and_then(|list| list.named_routes.get(alias))
+                        {
+                            Some(named) => {
+                                let model = named.model.as_str().to_owned();
+                                let policy_effort = effort.clone().or_else(|| named.effort.clone());
+                                (
+                                    adapter_of(&model).map_or(Value::Null, Value::String),
+                                    Value::String(model.clone()),
+                                    optional(policy_effort),
+                                    json!({
+                                        "adapter":"policy","model":"policy",
+                                        "effort": if node_effort { "node field" }
+                                            else if named.effort.is_some() { "policy" }
+                                            else { "default" },
+                                        "origin": named.source.clone(),
+                                    }),
+                                    "policy",
+                                    json!([model]),
+                                    Value::Null,
+                                )
+                            }
+                            None => match listed.as_ref().and_then(|list| list.pools.get(alias)) {
+                                Some(pool) => {
+                                    let models: Vec<String> = pool
+                                        .iter()
+                                        .map(|member| member.model.as_str().to_owned())
+                                        .collect();
+                                    let common_effort = pool
+                                        .first()
+                                        .and_then(|member| member.effort.clone())
+                                        .filter(|value| {
+                                            pool.iter()
+                                                .all(|member| member.effort.as_ref() == Some(value))
+                                        });
+                                    let candidates: Vec<Value> = pool
+                                        .iter()
+                                        .map(|member| {
+                                            let model = member.model.as_str();
+                                            let member_effort = effort
+                                                .clone()
+                                                .or_else(|| member.effort.clone());
+                                            json!({
+                                                "model": model,
+                                                "adapter": adapter_of(model),
+                                                "effort": member_effort,
+                                                "sources": {
+                                                    "model": "pool",
+                                                    "adapter": "pool",
+                                                    "effort": if node_effort { "node field" }
+                                                        else if member.effort.is_some() { "pool" }
+                                                        else { "default" }
+                                                }
+                                            })
+                                        })
+                                        .collect();
+                                    let common_adapter = models
+                                        .first()
+                                        .and_then(|model| adapter_of(model))
+                                        .filter(|adapter| {
+                                            models.iter().all(|model| {
+                                                adapter_of(model).as_deref()
+                                                    == Some(adapter.as_str())
+                                            })
+                                        });
+                                    (
+                                        common_adapter.map_or(Value::Null, Value::String),
+                                        Value::Null,
+                                        optional(effort.clone().or(common_effort)),
+                                        json!({
+                                            "adapter":"pool","model":"pool",
+                                            "effort": if node_effort { "node field" }
+                                                else if pool.iter().any(|member| member.effort.is_some()) { "pool" }
+                                                else { "default" },
+                                            "origin": format!("pool {alias}"),
+                                        }),
+                                        "pool",
+                                        json!(candidates),
+                                        Value::Null,
+                                    )
+                                }
+                                None => (
+                                    Value::Null,
+                                    Value::Null,
+                                    optional(effort),
+                                    json!({
+                                        "adapter":"default","model":"default",
+                                        "effort": if node_effort { "node field" } else { "default" }
+                                    }),
+                                    "default",
+                                    json!([]),
+                                    Value::Null,
+                                ),
+                            },
+                        }
+                    }
+                };
+                rows.push(json!({
+                    "node": node.id,
+                    "index": index,
+                    "adapter": adapter,
+                    "model": model,
+                    "effort": resolved_effort,
+                    "sources": sources,
+                    "selection": selection,
+                    "candidates": candidates,
+                    "route_name": route_name,
+                }));
+            }
+        }
+        rows
     }
 
     /// Inspect source and state admission without preparing a provider. The
@@ -3035,6 +3236,43 @@ impl Factory {
                     writer_root.join(path)
                 }
             };
+            // A peer-placed writer is provisioned on the peer from a branch
+            // and a base ref. It has no local path to admit: resolving its
+            // empty worktree against this checkout would treat the caller's
+            // root as the writer and refuse it for the caller's state root
+            // (#4103). Report the peer's own provisioned worktree as proposed
+            // and leave credential admission to the peer's launch.
+            if self
+                .node_host(node)?
+                .is_some_and(|host| host != self.context.identity.host)
+                && node.access == AccessMode::WorktreeWrite
+                && node
+                    .attempt
+                    .as_ref()
+                    .is_some_and(|attempt| attempt.new_worktree.is_some())
+            {
+                let label = node
+                    .attempt
+                    .as_ref()
+                    .and_then(|attempt| attempt.host.as_deref())
+                    .unwrap_or("peer");
+                let relative = node
+                    .attempt
+                    .as_ref()
+                    .and_then(|attempt| attempt.new_worktree.as_ref())
+                    .and_then(|worktree| {
+                        self.context
+                            .port_table
+                            .managed_writer_path(&worktree.branch)
+                            .ok()
+                    })
+                    .unwrap_or_else(|| PathBuf::from("writer"));
+                let path = PathBuf::from(label).join(relative);
+                rows.push(json!({"node":node.id, "host":label, "path":path,
+                    "status":"pending_registration", "credential_admission":"pending_route",
+                    "warnings":[]}));
+                continue;
+            }
             let access = provenant_cli::Access {
                 mode: None,
                 worktree: (node.access
@@ -3126,6 +3364,7 @@ impl Factory {
         &self,
         document: GraphDocument,
         input: &Value,
+        queue_launch: Option<&super::queue_registry::AuthorisedQueueLaunch>,
         budget: WaitBudget,
         cancel: &CancelToken,
         announce: Option<super::graph_execution::Announce<'_>>,
@@ -3151,6 +3390,7 @@ impl Factory {
             announce,
             Some(&mut replayed),
             None,
+            queue_launch,
         )?;
         let (run, wait_observation, observation_wait, remote_read_allowed) = if replayed {
             (run, None, None, true)
@@ -3237,6 +3477,9 @@ impl Factory {
             .load(&id)
             .map_err(graph_journal_error)?
             .ok_or(FacadeError::NotFound)?;
+        if super::queue_controls::drop_fence_active(&checkpoint)? {
+            return Err(graph_input_reason("dropped queue items cannot be edited"));
+        }
         let library = self.template_library(None)?;
         let resolver = self.launch_resolvers(Some(&encode(&execution.document)?))?;
         let catalogue = provenant_cli::route::effective_catalogue(&self.context.roots).ok();
@@ -3283,7 +3526,7 @@ impl Factory {
         )
     }
 
-    fn retry_document(
+    pub(super) fn retry_document(
         &self,
         input: &Value,
         budget: WaitBudget,
@@ -3334,13 +3577,33 @@ impl Factory {
         self.control_receipt(run, &target, input, budget, cancel, false)
     }
 
-    pub(super) fn prepare_retry(
+    pub(super) fn prepare_retry_with_journal(
         &self,
         target: &mut super::unified::GraphTarget,
         input: &Value,
         document: &GraphDocument,
         checkpoint: &mut provenant_fabric_runtime::graph::GraphCheckpoint,
+        journal: &mut FileJournal,
     ) -> Result<(), FacadeError> {
+        self.prepare_retry_inner(target, input, document, checkpoint, Some(journal))
+    }
+
+    fn prepare_retry_inner(
+        &self,
+        target: &mut super::unified::GraphTarget,
+        input: &Value,
+        document: &GraphDocument,
+        checkpoint: &mut provenant_fabric_runtime::graph::GraphCheckpoint,
+        mut journal: Option<&mut FileJournal>,
+    ) -> Result<(), FacadeError> {
+        if super::queue_controls::drop_fence_active(checkpoint)? {
+            return Err(graph_input_reason("dropped queue items cannot be retried"));
+        }
+        if input.get("queue_accept_retry").is_some() && target.node.is_none() {
+            return Err(graph_input_reason(
+                "accept gate retry requires one exact node target",
+            ));
+        }
         if provenant_redact::mode().masks_egress()
             && let Some(brief) = input.get("brief").and_then(Value::as_str)
         {
@@ -3411,6 +3674,95 @@ impl Factory {
                     }
                 },
             };
+            if let Some(marker) = input.get("queue_accept_retry") {
+                if input.get("queue_control").is_some() || brief_given || !extensions_empty {
+                    return Err(graph_input_reason(
+                        "accept gate retry cannot carry another control, brief, or extension",
+                    ));
+                }
+                let (operation_key, operation_digest) =
+                    super::queue_controls::authorise_accept_gate_retry(
+                        checkpoint, &id, &node, marker,
+                    )?;
+                let journal = journal.as_deref_mut().ok_or(FacadeError::StateCorrupt)?;
+                journal.save(checkpoint).map_err(graph_journal_error)?;
+                let library = self.template_library(None)?;
+                let resolver = self.launch_resolvers(Some(&encode(document)?))?;
+                patch::retry_node_and_dependants_with_key(
+                    &mut LiveGraph {
+                        document,
+                        checkpoint,
+                    },
+                    &node,
+                    None,
+                    &PatchContext {
+                        catalogue: None,
+                        library: &library,
+                        resolvers: &resolver,
+                        journal: None,
+                        limits: &self.context.config.graph.limits,
+                        worktree_layout: self.context.port_table.worktree_layout.clone(),
+                    },
+                    &operation_key,
+                    &operation_digest,
+                )
+                .map_err(retry_patch_error)?;
+                target.node = Some(node);
+                journal.save(checkpoint).map_err(graph_journal_error)?;
+                return Ok(());
+            }
+            if let Some(control) = input.get("queue_control") {
+                let metadata = super::queue_controls::decode_metadata(control)?;
+                if !matches!(
+                    metadata.action,
+                    super::queue_controls::Action::Retry | super::queue_controls::Action::Fix
+                ) {
+                    return Err(graph_input_reason(
+                        "queue retry metadata requires the retry or fix action",
+                    ));
+                }
+                let payload = super::queue_controls::without_queue_control(input)?;
+                let operation_digest = super::queue_controls::control_digest(
+                    &metadata,
+                    &id,
+                    Some(&node),
+                    None,
+                    &payload,
+                )?;
+                let (terminal, _) = super::queue_controls::reserve_retry_control(
+                    checkpoint, document, &id, &node, &metadata, &payload,
+                )?;
+                let journal = journal.ok_or(FacadeError::StateCorrupt)?;
+                if terminal {
+                    journal.save(checkpoint).map_err(graph_journal_error)?;
+                    return Err(FacadeError::Conflict);
+                }
+                journal.save(checkpoint).map_err(graph_journal_error)?;
+                let library = self.template_library(None)?;
+                let resolver = self.launch_resolvers(Some(&encode(document)?))?;
+                patch::retry_node_and_dependants_with_key(
+                    &mut LiveGraph {
+                        document,
+                        checkpoint,
+                    },
+                    &node,
+                    input.get("brief").and_then(Value::as_str),
+                    &PatchContext {
+                        catalogue: None,
+                        library: &library,
+                        resolvers: &resolver,
+                        journal: None,
+                        limits: &self.context.config.graph.limits,
+                        worktree_layout: self.context.port_table.worktree_layout.clone(),
+                    },
+                    &metadata.operation_id.to_string(),
+                    &operation_digest,
+                )
+                .map_err(retry_patch_error)?;
+                target.node = Some(node);
+                journal.save(checkpoint).map_err(graph_journal_error)?;
+                return Ok(());
+            }
             // A previous retry may have committed its reset before its resume
             // failed. Resume that already admitted retry rather than archive
             // its predecessor a second time.
@@ -3584,38 +3936,6 @@ impl Factory {
             });
         }
         Ok(receipt)
-    }
-
-    fn observe_remote_graph_attempts(
-        &self,
-        run: &provenant_fabric_runtime::graph::GraphRun,
-        target: &super::unified::GraphTarget,
-        budget: WaitBudget,
-        cancel: &CancelToken,
-    ) -> Result<(), FacadeError> {
-        if cancel.is_cancelled() || budget.remaining(self.clock.mono_now()).as_micros() == 0 {
-            return Ok(());
-        }
-        let mut rows = super::unified::status_rows(run, target);
-        let local_host = self.context.identity.host;
-        rows.retain(|row| {
-            row["kind"] == "attempt"
-                && row["attempt_id"].as_str().is_some_and(|reference| {
-                    reference.split_once('/').is_some_and(|(owner, _)| {
-                        owner.parse::<provenant_core::HostId>() != Ok(local_host)
-                    })
-                })
-        });
-        if rows.is_empty() {
-            return Ok(());
-        }
-        super::unified::enrich_status_rows_within(
-            &mut rows,
-            &self.context,
-            &self.clock,
-            cancel,
-            budget,
-        )
     }
 
     fn wait_cadence(&self) -> Result<provenant_cli::wait::LocalCadence, FacadeError> {
@@ -3924,7 +4244,7 @@ fn typed_binding(
 /// The host digest of a launch: everything the caller chose except the name and
 /// how long to wait, the effective templates it runs, and the commit the launch
 /// started from. Equal digests are the same launch.
-fn submission_digest(
+pub(super) fn submission_digest(
     input: &Value,
     source_commit: Option<&str>,
     templates: Option<&Value>,
@@ -4070,11 +4390,17 @@ fn route_choice(input: &Value, raw: Option<&Value>) -> Result<Option<RouteChoice
 
 #[path = "interface_route.rs"]
 mod route;
+#[path = "interface_smoke.rs"]
+mod smoke;
 use route::override_tier;
 
 fn add(row: &mut Value, key: &str, value: u64) {
     row[key] = json!(row[key].as_u64().unwrap_or(0).saturating_add(value));
 }
+
+#[cfg(test)]
+#[path = "interface_queue_config_tests.rs"]
+mod queue_config_tests;
 
 #[cfg(test)]
 #[path = "interface_writer_source_tests.rs"]
@@ -4100,7 +4426,43 @@ pub(super) fn warn_operator(warning: impl std::fmt::Display) {
         provenant_records::warning::Warning::new(
             provenant_records::warning::LAUNCH_ADVISORY,
             warning.to_string(),
+            provenant_records::warning::detected_source(
+                provenant_records::warning::LAUNCH_ADVISORY,
+            ),
         )
         .once_per_change(),
     );
+}
+
+/// The `lanes.settlement.*` route layer the model policy gives a concrete
+/// route, as launch would seal it. A tier alias or an unparsable model has no
+/// concrete policy yet, so it adds nothing. Rules match against the bundled
+/// catalogue here; a rule keyed on a discovered-only model shows at launch.
+fn route_settlement_layer(
+    config: &provenant_config::ResolvedConfig<provenant_cli::domains::Domains>,
+    route: Option<&provenant_fabric_runtime::graph::GraphRoute>,
+) -> Vec<provenant_records::settlement::policy::RouteLayerValue> {
+    let Some(route) = route else {
+        return Vec::new();
+    };
+    let label = match (route.adapter.as_deref(), route.model.as_deref()) {
+        (_, Some(model)) if model.contains('/') => model.to_owned(),
+        (Some(adapter), Some(model)) => format!("{adapter}/{model}"),
+        _ => return Vec::new(),
+    };
+    let (Ok(model), Ok(catalogue), Ok(now)) = (
+        provenant_routing::ModelId::parse(&label),
+        provenant_routing::Catalogue::bundled(),
+        provenant_core::Clock::wall_now(&provenant_os::clock::SystemClock),
+    ) else {
+        return Vec::new();
+    };
+    config
+        .domains
+        .routing
+        .model_policy
+        .effective(&catalogue, &model, route.account_key.as_deref(), now)
+        .policy
+        .lanes
+        .route_layer()
 }

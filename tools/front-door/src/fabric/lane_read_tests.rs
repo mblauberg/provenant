@@ -31,8 +31,72 @@ fn lane_reader_process() -> Result {
         provenant_cli::parse(arguments.into_iter().map(Into::into))
     });
     let actual = crate::dispatch(parsed, &crate::System, warnings);
-    assert_eq!(actual, expected);
+    assert_lane_exit(actual, expected, || {
+        use provenant_supervisor::census::{
+            ProcessObservation, ProcessObserver, SystemProcessObserver,
+        };
+        use std::fmt::Write as _;
+        let observer = SystemProcessObserver;
+        let mut pid = i64::from(std::process::id());
+        let mut diagnostic = format!("relay ancestry diagnostic: client pid {pid}\n");
+        if let Ok(attempt) = std::env::var(provenant_core::consumer_env::PARENT_ATTEMPT_ID)
+            && let Ok(attempt) = attempt.parse()
+        {
+            let path = provenant_providers::LaneRuntime::fabric_socket(attempt);
+            match provenant_os::sys::connect_unix_within(
+                &path,
+                std::time::Instant::now() + std::time::Duration::from_secs(1),
+                &CancelToken::new(),
+            ) {
+                Ok(stream) => {
+                    let _ = writeln!(
+                        diagnostic,
+                        "relay ancestry diagnostic: socket peer {:?}",
+                        provenant_os::pid::unix_peer_pid(&stream)
+                    );
+                }
+                Err(error) => {
+                    let _ = writeln!(
+                        diagnostic,
+                        "relay ancestry diagnostic: socket connect {error}"
+                    );
+                }
+            }
+        }
+        for _ in 0..32 {
+            let observation = observer.observe(pid);
+            let _ = writeln!(
+                diagnostic,
+                "relay ancestry diagnostic: pid {pid}: {observation:?}"
+            );
+            match observation {
+                ProcessObservation::Present(fact)
+                    if fact.parent_pid > 0 && fact.parent_pid != pid =>
+                {
+                    pid = fact.parent_pid;
+                }
+                _ => break,
+            }
+        }
+        diagnostic
+    });
     Ok(())
+}
+
+fn assert_lane_exit(actual: u8, expected: u8, diagnostic: impl FnOnce() -> String) {
+    if actual != expected {
+        assert_eq!(actual, expected, "{}", diagnostic());
+    }
+}
+
+#[test]
+fn lane_exit_failure_preserves_diagnostic() {
+    let failure = std::panic::catch_unwind(|| {
+        assert_lane_exit(1, 0, || "relay ancestry evidence".to_owned());
+    })
+    .expect_err("mismatched exit must fail");
+    let message = failure.downcast_ref::<String>().expect("assertion message");
+    assert!(message.contains("relay ancestry evidence"), "{message}");
 }
 
 fn lane_command(rig: &TestRig, arguments: &[&str], expected: u8) -> Result<Value> {
@@ -221,39 +285,41 @@ fn settled_attempt(
         model: Some("gpt-6-luna".into()),
         ..Default::default()
     };
+    let outcome = if success {
+        provenant_records::run::Outcome::Succeeded
+    } else {
+        provenant_records::run::Outcome::Failed
+    };
+    let mut fact = provenant_records::settlement::classify::settle(
+        &provenant_records::settlement::SettlementEvidence::fixture(
+            provenant_records::settlement::LaneRole::Reader,
+            outcome,
+            None,
+        ),
+    );
+    if !success {
+        fact.reason = Some("fixture child provider failed".into());
+    }
     store.publish_terminal(
         id,
         record.revision,
         &provenant_run::TerminalPublication {
-            handoff: Ok(None),
-            terminal_cause: None,
-            terminal_note: None,
-            outcome: if success {
-                provenant_records::run::Outcome::Succeeded
-            } else {
-                provenant_records::run::Outcome::Failed
-            },
+            fact,
+            evidence: None,
             started_at: Some(record.queued_at),
             finished_at: clock.wall_now()?,
             provider_ms: Some(1),
-            reason: if success {
-                None
-            } else {
-                Some("fixture child provider failed".into())
-            },
             result: if success {
                 "child result reached parent"
             } else {
                 "child provider failure details"
             },
-            complete: true,
             redacted: false,
             resolved_route: Some(route.clone()),
             applied_route: Some(route.clone()),
             observed_route: Some(route),
             usage: Default::default(),
             session: None,
-            partial_signals: Vec::new(),
         },
         &exit,
         &call,
@@ -340,7 +406,7 @@ fn bind_sibling_graph(
         "schema_version":2,"graph_id":graph,"plan_digest":"fixture",
         "nodes":[
             {"id":"parent--success","state":"succeeded","attempts":[{"key":{"graph_id":graph,"node_id":"parent--success","route_index":0,"attempt":1},"launched":true,"route":{"alias":"junior"},"state":"terminal","attempt_ref":reference(success),"launch_actor":"fixture","outcome":"succeeded"}]},
-            {"id":"parent--failure","state":"failed","advance_error_code":"launch_refused","advance_owner_code":"command_unavailable","advance_error":"configure the fixture provider command","attempts":[{"key":{"graph_id":graph,"node_id":"parent--failure","route_index":0,"attempt":1},"launched":true,"route":{"alias":"junior"},"state":"terminal","attempt_ref":reference(failure),"launch_actor":"fixture","outcome":"task_failed"}]}
+            {"id":"parent--failure","state":"failed","advance_code":"launch_refused","advance_owner_code":"command_unavailable","advance_note":"configure the fixture provider command","attempts":[{"key":{"graph_id":graph,"node_id":"parent--failure","route_index":0,"attempt":1},"launched":true,"route":{"alias":"junior"},"state":"terminal","attempt_ref":reference(failure),"launch_actor":"fixture","outcome":"task_failed"}]}
         ]
     }))?;
     journal.bind(GraphExecution {
@@ -377,7 +443,7 @@ fn parent_reads_child_result_failure_status_and_trace_through_host_relay() -> Re
         "nodes":[
             {"id":"parent","state":"running","attempts":[{"key":{"graph_id":graph,"node_id":"parent","route_index":0, "attempt": 1},"launched":true,"route":{"alias":"senior"},"state":"running","attempt_ref":reference(caller),"launch_actor":"fixture"}]},
             {"id":"parent--success","state":"succeeded","attempts":[{"key":{"graph_id":graph,"node_id":"parent--success","route_index":0, "attempt": 1},"launched":true,"route":{"alias":"junior"},"state":"terminal","attempt_ref":reference(success),"launch_actor":"fixture","outcome":"succeeded"}]},
-            {"id":"parent--failure","state":"failed","advance_error_code":"launch_refused","advance_owner_code":"command_unavailable","advance_error":"configure the fixture provider command","attempts":[{"key":{"graph_id":graph,"node_id":"parent--failure","route_index":0, "attempt": 1},"launched":true,"route":{"alias":"junior"},"state":"terminal","attempt_ref":reference(failure),"launch_actor":"fixture","outcome":"task_failed"}]}
+            {"id":"parent--failure","state":"failed","advance_code":"launch_refused","advance_owner_code":"command_unavailable","advance_note":"configure the fixture provider command","attempts":[{"key":{"graph_id":graph,"node_id":"parent--failure","route_index":0, "attempt": 1},"launched":true,"route":{"alias":"junior"},"state":"terminal","attempt_ref":reference(failure),"launch_actor":"fixture","outcome":"task_failed"}]}
         ]
     }))?;
     let document: GraphDocument = serde_json::from_value(
@@ -695,6 +761,9 @@ fn parent_reads_child_result_failure_status_and_trace_through_host_relay() -> Re
             )
         },
     );
+    // Only a bind-time permission failure is an environment prerequisite: a
+    // `relay_peer_refused` from the lane CLI is a real defect even when a
+    // process census is inconclusive, so it must fail the test.
     let relay = match relay {
         Ok(relay) => relay,
         Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
@@ -706,7 +775,9 @@ fn parent_reads_child_result_failure_status_and_trace_through_host_relay() -> Re
         Err(error) => return Err(error.into()),
     };
     let child_state = rig.state.join("children").join(caller.to_string());
-    std::fs::create_dir_all(&child_state)?;
+    provenant_os::fixture::private_state_dir(&child_state)?;
+    let declared = rig.lane_project()?;
+    rig.env.push(declared);
     rig.env.extend([
         (
             provenant_core::RUN_STATE_DIRECTORY_ENV.into(),

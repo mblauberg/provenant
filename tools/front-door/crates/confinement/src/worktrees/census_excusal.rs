@@ -473,6 +473,9 @@ pub(super) fn excuse_unreadable(
         Warning::new(
             provenant_records::warning::UNREADABLE_PROCESS_NON_OCCUPYING,
             format!("unreadable process cannot occupy a lane worktree ({reason}); path={path}"),
+            provenant_records::warning::detected_source(
+                provenant_records::warning::UNREADABLE_PROCESS_NON_OCCUPYING,
+            ),
         )
         .subject(format!("process {pid}")),
     );
@@ -501,7 +504,7 @@ pub(super) fn warn_unreadable_processes(boot: &str, pids: &BTreeSet<i64>) {
                 Warning::new(
                     UNREADABLE_PROCESS_CENSUS,
                     "process could not be inspected (EPERM); custody is unknown for this process (no observed cwd or descriptor under candidate worktrees)",
-                )
+                 provenant_records::warning::detected_source(UNREADABLE_PROCESS_CENSUS))
                 .subject(format!("process {pid}")),
             );
         }
@@ -513,7 +516,7 @@ pub(super) fn warn_unreadable_processes(boot: &str, pids: &BTreeSet<i64>) {
                     "{} process(es) could not be inspected (EPERM); custody is unknown for those processes (no observed cwd or descriptor under candidate worktrees)",
                     fresh.len()
                 ),
-            )
+             provenant_records::warning::detected_source(UNREADABLE_PROCESS_CENSUS))
             .subject(format!("{} unreadable processes", fresh.len())),
         );
     }

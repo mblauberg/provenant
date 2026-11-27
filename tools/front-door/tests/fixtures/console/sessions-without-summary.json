@@ -29,8 +29,8 @@
           "schema_version": 1
         },
         "role": "chair",
-        "summary_line": "Console checkpoint",
-        "summary_source": "title"
+        "summary_line": null,
+        "summary_source": "unavailable"
       }
     ],
     "snapshot": "sha256:7ffa1a4dcbac2b9c9e95a2b559da36b564600c99e7be2f699a595b8ab1fda1d2",

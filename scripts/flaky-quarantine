@@ -11,6 +11,11 @@ from pathlib import Path
 
 
 DEFAULT_CONFIG = Path(__file__).resolve().parents[1] / "tools/front-door/.config/quarantine.toml"
+# A quarantine must never silently disable a suite. Both TOML entries and
+# issue-backed entries count towards the same cap.
+MAX_ENTRIES = 10
+# main-health writes this marker into each flaky-test issue it opens.
+ISSUE_MARKER = "<!-- provenant-flaky:v1 -->"
 PACKAGE_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 TEST_RE = re.compile(r"^[A-Za-z0-9_:]+$")
 DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
@@ -52,6 +57,36 @@ def parse_config(raw):
     return {"test": entries}
 
 
+def parse_issues(raw):
+    """Read quarantine entries from `gh issue list --json number,body`.
+
+    An issue is an entry only when its body carries the exact marker; an
+    ordinary issue that happens to mention a test cannot quarantine it.
+    """
+    payload = json.loads(raw)
+    pages = payload if isinstance(payload, list) else [payload]
+    entries = []
+    for page in pages:
+        if not isinstance(page, list):
+            continue
+        for issue in page:
+            body = issue.get("body") or ""
+            if ISSUE_MARKER not in body or not isinstance(issue.get("number"), int):
+                continue
+            fields = {}
+            for line in body.splitlines():
+                line = line.strip().lstrip("-").strip()
+                if ":" not in line:
+                    continue
+                key, value = (part.strip() for part in line.split(":", 1))
+                if key in {"package", "name", "owner", "expires"}:
+                    fields[key] = value
+            if all(fields.get(key) for key in ("package", "name", "owner", "expires")):
+                fields["issue"] = f"#{issue['number']}"
+                entries.append(fields)
+    return {"test": entries}
+
+
 def read_tests(raw):
     summary = json.loads(raw)
     tests = set()
@@ -64,6 +99,11 @@ def read_tests(raw):
 def make_filter(config, tests, today, partial_inventory=False):
     entries = config.get("test", [])
     errors = []
+    if len(entries) > MAX_ENTRIES:
+        raise ValueError(
+            f"quarantine holds {len(entries)} tests, over the cap of {MAX_ENTRIES}; "
+            "retire an expired or fixed test before adding another"
+        )
     filters = []
     seen = set()
     for number, entry in enumerate(entries, 1):
@@ -115,6 +155,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("--test-list", type=Path, action="append", help="Use saved nextest JSON listings")
+    parser.add_argument("--issue-list", type=Path, action="append", default=[], help="Use saved gh issue-list JSON for issue-backed entries")
     parser.add_argument("--partial-inventory", action="store_true", help="Warn for identities missing from an incomplete inventory")
     parser.add_argument("--filter-only", action="store_true", help="Validate entries without resolving test identities")
     parser.add_argument("--today", type=dt.date.fromisoformat, default=dt.date.today())
@@ -122,6 +163,8 @@ def main():
 
     try:
         config = parse_config(args.config.read_text(encoding="utf-8"))
+        for path in args.issue_list:
+            config["test"].extend(parse_issues(path.read_text(encoding="utf-8"))["test"])
         entries = config.get("test", [])
         if not entries:
             print("")

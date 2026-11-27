@@ -156,6 +156,21 @@ pub(super) fn make_outputs_with_upstream(
         .and_then(|value| serde_json::from_value(value.clone()).ok())
         .unwrap_or_default();
     let handoff = result.and_then(|capture| capture.handoff.as_ref().ok().and_then(Option::as_ref));
+    let report_handoff = result.and_then(|capture| {
+        if capture.handoff.is_err() {
+            return None;
+        }
+        match plans::reported_handoff(capture) {
+            Ok(handoff) => handoff,
+            Err(error) => {
+                warnings.push(bounded(
+                    &format!("handoff_checkpoint_unavailable: {error}"),
+                    WARNING_BYTES,
+                ));
+                None
+            }
+        }
+    });
     let remaining = handoff.map_or(partial_remaining.as_slice(), |handoff| {
         handoff.remaining.as_slice()
     });
@@ -320,6 +335,9 @@ pub(super) fn make_outputs_with_upstream(
         compact_disposition_findings: None,
         full_disposition_findings: None,
         verdict_error,
+        hygiene: None,
+        publication: None,
+        handoff: report_handoff,
         schema_version: 2,
         decide_outcome: None,
         result,
@@ -2087,7 +2105,9 @@ mod alias_tests {
         let text = String::from_utf8_lossy(b"Report.\n```handoff\n{\"schema_version\":2,\"status\":\"done\",\"note\":\"done\",\"remaining\":[],\"decisions\":[],\"verify\":[],\"spec_concerns\":[{\"criterion\":\"Keep old format\",\"claim\":\"Format is retired\",\"evidence\":\"Approved scope removes reader\",\"proposed_change\":\"Use current format\",\"status\":\"as_written\"}]}\n```\n").into_owned();
         capture.push(text.as_bytes());
         let mut captured = capture.finish();
-        captured.handoff = provenant_records::handoff::Handoff::from_turns(&text, &[]);
+        captured.handoff =
+            provenant_records::handoff::Handoff::from_json(text.lines().nth(2).unwrap().as_bytes())
+                .map(Some);
         let outputs = make_outputs(Some(&captured), None, None, None, None);
         let checkpoint: GraphCheckpoint = serde_json::from_value(serde_json::json!({
             "schema_version":1,"graph_id":"g","plan_digest":"digest","asks":[],
@@ -2105,9 +2125,9 @@ mod alias_tests {
             serde_json::from_str(text.lines().nth(2).unwrap()).unwrap();
         malformed["verify"] = serde_json::json!([false]);
         malformed["remaining"] = serde_json::json!(["Finish the work"]);
-        captured.handoff = provenant_records::handoff::Handoff::from_result(&format!(
-            "```handoff\n{malformed}\n```"
-        ));
+        captured.handoff =
+            provenant_records::handoff::Handoff::from_json(malformed.to_string().as_bytes())
+                .map(Some);
         let partial = make_outputs(Some(&captured), None, None, None, None);
         assert_eq!(
             partial.remaining.as_deref(),
@@ -2135,7 +2155,9 @@ mod alias_tests {
         let text = format!("```handoff\n{full_handoff}\n```\n");
         capture.push(text.as_bytes());
         let mut captured = capture.finish();
-        captured.handoff = provenant_records::handoff::Handoff::from_turns(&text, &[]);
+        captured.handoff =
+            provenant_records::handoff::Handoff::from_json(full_handoff.to_string().as_bytes())
+                .map(Some);
         assert_eq!(
             captured
                 .handoff
@@ -2184,7 +2206,9 @@ mod alias_tests {
         let text = format!("```handoff\n{no_concerns}\n```\n");
         capture.push(text.as_bytes());
         let mut captured = capture.finish();
-        captured.handoff = provenant_records::handoff::Handoff::from_turns(&text, &[]);
+        captured.handoff =
+            provenant_records::handoff::Handoff::from_json(no_concerns.to_string().as_bytes())
+                .map(Some);
         let outputs = make_outputs(Some(&captured), None, None, None, None);
         assert_eq!(outputs.remaining.as_ref().unwrap(), &vec!["r".repeat(4090)]);
         assert!(outputs.spec_concerns.is_none());

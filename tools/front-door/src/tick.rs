@@ -444,6 +444,9 @@ pub(crate) fn gc_worker(globals: &Globals, workers: &dyn WorkerObserver) -> u8 {
                 provenant_records::warning::Warning::new(
                     provenant_records::warning::BUILD_HYGIENE_ADVISORY,
                     warning,
+                    provenant_records::warning::detected_source(
+                        provenant_records::warning::BUILD_HYGIENE_ADVISORY,
+                    ),
                 )
                 .once_per_change(),
             );
@@ -541,6 +544,9 @@ fn schedule_build_hygiene(resolved: &crate::roots::Resolved) -> Vec<String> {
                 format!(
                     "build ledger rotated; {} rotation(s) expired",
                     report.expired_ledgers
+                ),
+                provenant_records::warning::detected_source(
+                    provenant_records::warning::BUILD_LEDGER_ROTATED,
                 ),
             )
             .once_per_change(),
@@ -721,6 +727,19 @@ fn reap_before_index<E>(
     index()
 }
 
+/// Graph advancement is a pass of its own and completes before forge polling
+/// starts. Keeping the passes in this order means a slow forge page cannot put
+/// graph settlement behind a long poll; the wait's terminal-remote recovery
+/// covers the case where the next scheduled tick itself is delayed.
+fn graph_pass_before_forge<T>(
+    graphs: impl FnOnce() -> T,
+    forge: impl FnOnce() -> Task,
+) -> (T, Task) {
+    let graphs = graphs();
+    let forge = forge();
+    (graphs, forge)
+}
+
 fn tick(
     globals: &Globals,
     workers: &'static dyn WorkerObserver,
@@ -738,12 +757,23 @@ fn tick(
     let clock = SystemClock;
     let now = clock.wall_now()?;
     let settlement = Task::run("settlement", || reap_projects(&resolved));
-    let graphs =
-        crate::fabric::tick_graphs(&resolved, now, workers).unwrap_or_else(|error| Graphs {
-            advanced: 0,
-            errors: vec![error.to_string()],
-            warnings: Vec::new(),
-        });
+    // Graph tick includes queue-owned replay, pending-item claims and lease reconciliation.
+    let (graphs, forge_events) = graph_pass_before_forge(
+        || {
+            crate::fabric::tick_graphs(&resolved, now, workers).unwrap_or_else(|error| Graphs {
+                advanced: 0,
+                errors: vec![error.to_string()],
+                warnings: Vec::new(),
+            })
+        },
+        || {
+            Task::run("forge_events", || {
+                crate::event_delivery::tick(&resolved)
+                    .map(|()| "observed")
+                    .map_err(|error| error.to_string())
+            })
+        },
+    );
     // Task errors are isolated: a failed graph or collection must not prevent
     // later hooks from running. GC cadence is serialised across manual ticks
     // and launchd invocations, separately from each graph's journal custody.
@@ -782,11 +812,7 @@ fn tick(
         gc,
         steward::run(&config.domains.steward, &resolved, workers),
         settlement,
-        Task::run("forge_events", || {
-            crate::event_delivery::tick(&resolved)
-                .map(|()| "observed")
-                .map_err(|error| error.to_string())
-        }),
+        forge_events,
         Task::idle("notice_batch_flush", "unwired"),
         Task::idle("quota_refresh", "unwired"),
     ];
@@ -879,6 +905,26 @@ mod tests {
         );
         assert!(result.is_err());
         assert!(reaped.get());
+    }
+
+    // Spec: docs/specs/cli.md#graph-wait-recovery
+    #[test]
+    fn graph_advancement_is_a_pass_before_forge_polling() {
+        let order = std::cell::RefCell::new(Vec::new());
+        let (graphs, forge) = graph_pass_before_forge(
+            || {
+                order.borrow_mut().push("graphs");
+                3
+            },
+            || {
+                order.borrow_mut().push("forge_events");
+                Task::idle("forge_events", "observed")
+            },
+        );
+        assert_eq!(graphs, 3);
+        assert_eq!(forge.task, "forge_events");
+        assert_eq!(forge.state, "observed");
+        assert_eq!(order.into_inner(), vec!["graphs", "forge_events"]);
     }
 
     // Spec: docs/specs/supervisor.md#tick-driven-settlement

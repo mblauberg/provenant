@@ -6,33 +6,7 @@ use provenant_records::inbox::*;
 #[allow(clippy::disallowed_methods)] // Native deadlines are part of this store API.
 fn invalid_hook_candidates_do_not_block_valid_answers() {
     use std::time::{Duration, Instant};
-    const CHILD: &str = "PROVENANT_INVALID_ANSWER_DIAGNOSTIC_TEST";
-    if std::env::var_os(CHILD).is_none() {
-        let output = std::process::Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "tests::human_inbox::invalid_hook_candidates_do_not_block_valid_answers",
-                "--nocapture",
-            ])
-            .env(CHILD, "1")
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        for n in [1, 2] {
-            let diagnostic = format!(
-                "answer delivery: skipping invalid answer {}",
-                HumanAnswerId::from_bytes([n; 16])
-            );
-            // Both the observation and transaction boundaries diagnose the row.
-            assert_eq!(stderr.matches(&diagnostic).count(), 2, "{stderr}");
-        }
-        return;
-    }
+    let _ = provenant_records::warning::take_unhandled();
     let f = Fixture::new();
     let store = f.open();
     let target = AnswerTarget {
@@ -162,35 +136,29 @@ fn invalid_hook_candidates_do_not_block_valid_answers() {
             .items
             .is_empty()
     );
+    let warnings = provenant_records::warning::take_unhandled();
+    for n in [1, 2] {
+        let subject = format!("answer {}", HumanAnswerId::from_bytes([n; 16]));
+        assert_eq!(
+            warnings
+                .iter()
+                .filter(|warning| {
+                    warning.code == provenant_records::warning::ANSWER_DELIVERY_SKIPPED.as_str()
+                        && warning.subject.as_deref() == Some(subject.as_str())
+                })
+                .count(),
+            2,
+            "both observation and transaction boundaries report the invalid answer: {warnings:?}"
+        );
+    }
 }
 
 #[test]
 #[allow(clippy::disallowed_methods)] // Native deadlines are part of this store API.
 fn hook_page_reports_individually_oversized_answer_and_revisits_overflow() {
     use std::time::{Duration, Instant};
-    const CHILD: &str = "PROVENANT_OVERSIZED_PAGE_TEST";
     let oversized_id = HumanAnswerId::from_bytes([3; 16]);
-    if std::env::var_os(CHILD).is_none() {
-        let output = std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "tests::human_inbox::hook_page_reports_individually_oversized_answer_and_revisits_overflow", "--nocapture"])
-            .env(CHILD, "1")
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        assert_eq!(
-            stderr.matches(&format!(
-                "answer delivery: answer {oversized_id} exceeds internal page limit; retained for Fabric mail"
-            )).count(),
-            1,
-            "{stderr}"
-        );
-        return;
-    }
+    let _ = provenant_records::warning::take_unhandled();
     let f = Fixture::new();
     let store = f.open();
     let target = AnswerTarget {
@@ -296,6 +264,19 @@ fn hook_page_reports_individually_oversized_answer_and_revisits_overflow() {
         [&existing_id], |row| row.get(0),
     ).unwrap();
     assert_eq!(error, "prior failure");
+    let warnings = provenant_records::warning::take_unhandled();
+    let subject = format!("answer {oversized_id}");
+    assert_eq!(
+        warnings
+            .iter()
+            .filter(|warning| {
+                warning.code == provenant_records::warning::ANSWER_DELIVERY_RETAINED.as_str()
+                    && warning.subject.as_deref() == Some(subject.as_str())
+            })
+            .count(),
+        1,
+        "the oversized answer is reported once: {warnings:?}"
+    );
 }
 
 #[test]
@@ -685,7 +666,7 @@ fn a_fresh_store_matches_its_schema_and_other_versions_are_refused_unchanged() {
             "{name}"
         );
         drop(db);
-        for version in [crate::db::SCHEMA.version - 1, crate::db::SCHEMA.version + 1] {
+        for version in [crate::db::SCHEMA.version - 2, crate::db::SCHEMA.version + 1] {
             let db = rusqlite::Connection::open(&path).unwrap();
             db.execute_batch(&format!(
                 "PRAGMA journal_mode=DELETE; PRAGMA user_version={version}"
@@ -875,4 +856,35 @@ fn request_correlation_expiry_filter_precedes_page_limit() {
     let bounded = store.pending_human_requests(1, 1_048_576, &call).unwrap();
     assert!(bounded.items.is_empty());
     assert!(bounded.truncated);
+}
+
+#[test]
+fn version_18_embedded_run_causes_are_migrated() {
+    let f = Fixture::new();
+    drop(f.open());
+    let path = f.root.as_path().join("fabric/fabric.sqlite3");
+    let db = rusqlite::Connection::open(&path).unwrap();
+    let detail = serde_json::json!({"event":{"change":{"state":"terminal","terminal_cause":"handoff_refused"}}}).to_string();
+    let record = serde_json::json!({"detail": detail});
+    db.execute(
+        "INSERT INTO events(project, dedup, record) VALUES (?1, ?2, ?3)",
+        rusqlite::params!["fixture", "migration", serde_json::to_vec(&record).unwrap()],
+    )
+    .unwrap();
+    db.pragma_update(None, "user_version", 18).unwrap();
+    drop(db);
+    drop(f.open());
+    let db = rusqlite::Connection::open(&path).unwrap();
+    let bytes: Vec<u8> = db
+        .query_row(
+            "SELECT record FROM events WHERE dedup='migration'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let record: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let detail: serde_json::Value =
+        serde_json::from_str(record["detail"].as_str().unwrap()).unwrap();
+    assert_eq!(detail["event"]["change"]["cause"], "launch_handoff_refused");
+    assert!(detail["event"]["change"].get("terminal_cause").is_none());
 }

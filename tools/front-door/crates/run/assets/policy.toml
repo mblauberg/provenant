@@ -1276,15 +1276,6 @@ knob = "policy.GRAPH_HOST_NATIVE_FALLBACK"
 justification = "A host-native route without a fallback warns."
 
 [[rule]]
-code = "LAUNCH_FIELD_UNSUPPORTED"
-site = "cli/src/run/provider/preparation.rs#check_launch"
-boundary = "none"
-strength = "warn"
-refusable = true
-knob = "policy.LAUNCH_FIELD_UNSUPPORTED"
-justification = "A non-write launch field (model, effort, network, resume, skills) unsupported by the route is dropped with a warning; write support stays an authority refusal."
-
-[[rule]]
 code = "SECRET_SHAPED_INPUT"
 site = "fabric-runtime/src/graph/refusal.rs#input_warnings"
 boundary = "none"
@@ -1417,6 +1408,14 @@ knob = "policy.LAUNCH_SANDBOX_UNAVAILABLE_NONE"
 justification = "An unavailable sandbox warns and proceeds for host access."
 
 [[rule]]
+code = "LAUNCH_PROCESS_ATTRIBUTION_NONE"
+site = "run/src/launch.rs#bind_sandbox_backend"
+boundary = "none"
+strength = "warn"
+knob = "policy.LAUNCH_PROCESS_ATTRIBUTION_NONE"
+justification = "An unsandboxed lane records its spawned group and session as a durable attempt tag so reconcile can report a detached process; without an OS mark the process cannot be proven and signalled. The setting source is named in each warning."
+
+[[rule]]
 code = "CONTINUATION_LINK_NONE"
 site = "cli/src/run/provider/continuation.rs#copy_tree"
 boundary = "none"
@@ -1440,3 +1439,66 @@ strength = "warn"
 refusable = true
 knob = "policy.PR_ATTEMPT_STATE"
 justification = "Opening a pull request is not an authority act: an attempt that did not end succeeded or review_required warns and opens from its recorded branch and head; refuse selects a configured stop."
+
+[[rule]]
+code = "HARNESS_VERSION_UNSUPPORTED"
+site = "routing/src/compatibility.rs#policy_code"
+boundary = "none"
+strength = "warn"
+refusable = true
+knob = "policy.HARNESS_VERSION_UNSUPPORTED"
+justification = "A harness version an overlay marks unsupported warns by default; refuse selects a configured stop at launch and in check providers."
+
+[[rule]]
+code = "HARNESS_VERSION_BROKEN"
+site = "routing/src/compatibility.rs#policy_code"
+boundary = "none"
+strength = "warn"
+refusable = true
+knob = "policy.HARNESS_VERSION_BROKEN"
+justification = "A harness version an overlay marks broken warns by default; refuse selects a configured stop at launch and in check providers."
+
+[[rule]]
+code = "LAUNCH_MODEL_UNSUPPORTED"
+site = "records/src/adapters.rs#check_launch"
+boundary = "none"
+strength = "warn"
+refusable = true
+knob = "policy.LAUNCH_MODEL_UNSUPPORTED"
+justification = "A model gap degrades to an ineligible candidate with a fallback by default; refuse makes the configured stop explicit, and off drops the warning."
+
+[[rule]]
+code = "LAUNCH_EFFORT_UNSUPPORTED"
+site = "records/src/adapters.rs#check_launch"
+boundary = "none"
+strength = "warn"
+refusable = true
+knob = "policy.LAUNCH_EFFORT_UNSUPPORTED"
+justification = "An effort gap drops the control with a sourced warning by default; refuse makes the configured stop explicit, and off drops the control silently."
+
+[[rule]]
+code = "LAUNCH_IMAGE_INPUT_UNSUPPORTED"
+site = "records/src/adapters.rs#check_launch"
+boundary = "none"
+strength = "warn"
+refusable = true
+knob = "policy.LAUNCH_IMAGE_INPUT_UNSUPPORTED"
+justification = "Attachments stay readable with a sourced warning when image input is absent; refuse makes the configured stop explicit, and off drops the warning."
+
+[[rule]]
+code = "SETTLEMENT_EVIDENCE_REDRIVE_DIFFERS"
+site = "run/src/evidence.rs#seal_evidence"
+boundary = "none"
+strength = "warn"
+refusable = false
+knob = "policy.SETTLEMENT_EVIDENCE_REDRIVE_DIFFERS"
+justification = "A crash re-drive that assembles different settlement evidence keeps the sealed copy and warns; the sealed copy always wins and a refusal would strand custody on an attempt whose decision was already sealed."
+
+[[rule]]
+code = "DECLARATION_JOURNAL_NEAR_FULL"
+site = "cli/src/declaration.rs#run"
+boundary = "none"
+strength = "warn"
+refusable = false
+knob = "policy.DECLARATION_JOURNAL_NEAR_FULL"
+justification = "A declaration below 10% of its journal bound still succeeds and warns; the declaration is the sealed record, so a refusal would drop the lane's result. Off silences the warning without changing the bound."

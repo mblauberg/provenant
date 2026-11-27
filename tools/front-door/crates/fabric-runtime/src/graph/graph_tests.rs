@@ -116,6 +116,14 @@ struct FakeOwner {
     fallback_custody_pending: bool,
     fail_fallback_evidence: bool,
     fallback_cause: Option<provenant_records::RouteExclusionReason>,
+    hygiene_outcomes: VecDeque<provenant_records::graph::HygieneOutcome>,
+    hygiene_calls: usize,
+    hygiene_requests: Vec<(String, String, String)>,
+    publication_receipts: VecDeque<DeliveryPublication>,
+    publication_calls: usize,
+    publication_requests: Vec<(String, String, String, Option<String>)>,
+    park_calls: Vec<String>,
+    park_receipt: Option<provenant_core::HumanRequestId>,
 }
 
 /// An inbox reply from `chair`, choosing `option` or sending `text`.
@@ -304,6 +312,47 @@ impl AttemptOwner for FakeOwner {
     fn actor(&self) -> String {
         self.actor.clone()
     }
+    fn run_hygiene(
+        &mut self,
+        request: HygieneRequest<'_>,
+    ) -> Result<HygieneExecution, Self::Error> {
+        self.hygiene_calls += 1;
+        self.hygiene_requests.push((
+            request.operation_id.to_owned(),
+            request.input_head.to_owned(),
+            request.expected_head.to_owned(),
+        ));
+        let outcome = self.hygiene_outcomes.pop_front().ok_or(NoObservation)?;
+        Ok(HygieneExecution {
+            outcome,
+            branch: Some("retained-branch".into()),
+            formatter_source: Some("repository".into()),
+            diagnostic: None,
+        })
+    }
+    fn publish_delivery(
+        &mut self,
+        request: PublicationRequest<'_>,
+    ) -> Result<Option<DeliveryPublication>, Self::Error> {
+        self.publication_calls += 1;
+        self.publication_requests.push((
+            request.operation_id.to_owned(),
+            request.expected_head.to_owned(),
+            request.source_branch.to_owned(),
+            request.expected_remote_head.map(str::to_owned),
+        ));
+        self.publication_receipts
+            .pop_front()
+            .map(Some)
+            .ok_or(NoObservation)
+    }
+    fn park_delivery(
+        &mut self,
+        request: DeliveryParkRequest<'_>,
+    ) -> Result<Option<provenant_core::HumanRequestId>, Self::Error> {
+        self.park_calls.push(request.operation_id.to_owned());
+        Ok(self.park_receipt)
+    }
     fn file_ask(&mut self, filing: AskFiling<'_>) -> Result<AskFiled, Self::Error> {
         let id = &filing.ask.ask_id;
         let first = self.filed.iter().find(|ask| &ask.ask_id == id);
@@ -470,9 +519,11 @@ impl AttemptOwner for FakeOwner {
         {
             use provenant_records::run::PreparationFailure;
             let evidence = match outcome {
-                AttemptOutcome::AuthRequired => Some(PreparationFailure::AuthRequired),
-                AttemptOutcome::UsageLimited => Some(PreparationFailure::UsageLimited),
-                AttemptOutcome::AdapterUnavailable => Some(PreparationFailure::AdapterUnavailable),
+                GraphAttemptOutcome::AuthRequired => Some(PreparationFailure::AuthRequired),
+                GraphAttemptOutcome::UsageLimited => Some(PreparationFailure::UsageLimited),
+                GraphAttemptOutcome::AdapterUnavailable => {
+                    Some(PreparationFailure::AdapterUnavailable)
+                }
                 _ => None,
             };
             if let Some(evidence) = evidence
@@ -576,10 +627,35 @@ fn node(id: &str, route: GraphRoute) -> GraphNode {
     }
 }
 
+#[test]
+fn ci_admission_wait_retains_bounded_deadline_across_restart() {
+    let mut document = graph(Vec::new());
+    document.queue_ci_wait = Some(provenant_records::Sourced {
+        value: 55,
+        source: provenant_records::Source {
+            layer: provenant_records::Layer::Default,
+            origin: None,
+        },
+    });
+    let now = provenant_core::WallTime::from_micros(10_000_000).unwrap();
+    let wait = start_delivery_ci_wait::<FakeOwner, MemoryJournal>(&document, "publish", Some(now))
+        .unwrap();
+    let restored: DeliveryCiAdmissionWait =
+        serde_json::from_value(serde_json::to_value(&wait).unwrap()).unwrap();
+    assert_eq!(restored.deadline.as_micros(), 65_000_000);
+    let before = provenant_core::WallTime::from_micros(64_500_000).unwrap();
+    let wake = delivery_ci_wait_retry_at(&restored, before);
+    assert_eq!(wake, restored.deadline);
+    assert!(!delivery_ci_wait_expired(&restored, Some(before)));
+    assert!(delivery_ci_wait_expired(&restored, Some(wake)));
+}
+
 fn graph(nodes: Vec<GraphNode>) -> GraphDocument {
     GraphDocument {
+        queue_ci_wait: None,
+        queue: None,
         review: None,
-        review_subject_missing: false,
+        subject: None,
         exclude: Vec::new(),
         network: None,
         capability: Vec::new(),
@@ -624,15 +700,16 @@ fn lens_then_verify(strength: Option<FamilyStrength>) -> GraphDocument {
 fn done_as(reference: &str) -> AttemptObservation {
     AttemptObservation::Terminal {
         attempt_ref: Some(reference.into()),
-        outcome: AttemptOutcome::Succeeded,
+        outcome: GraphAttemptOutcome::Succeeded,
         launched: true,
         result: None,
         result_warning: None,
         result_path: None,
         branch: None,
         commit: None,
-        settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
+        settlement_class: Some(provenant_records::run::SettlementClass::Completed),
         stop: None,
+        cause: None,
     }
 }
 
@@ -756,7 +833,7 @@ fn synthesis_run(text: &str) -> NodeProgress {
     let mut synthesis = node("synthesis", route("first"));
     synthesis.dispositions = DISPOSITIONS.map(String::from).to_vec();
     let mut owner = FakeOwner {
-        observations: [terminal_with_result(AttemptOutcome::Succeeded, text)].into(),
+        observations: [terminal_with_result(GraphAttemptOutcome::Succeeded, text)].into(),
         ..Default::default()
     };
     advance(
@@ -805,10 +882,10 @@ fn partial_review(minimum: usize) -> (GraphDocument, FakeOwner) {
     .unwrap();
     let owner = FakeOwner {
         observations: VecDeque::from([
-            terminal_with_result(AttemptOutcome::Succeeded, ok),
-            terminal_with_result(AttemptOutcome::Succeeded, "LENS-B-NO-FINDINGS"),
-            terminal(AttemptOutcome::AdapterUnavailable),
-            terminal_with_result(AttemptOutcome::Succeeded, "verified"),
+            terminal_with_result(GraphAttemptOutcome::Succeeded, ok),
+            terminal_with_result(GraphAttemptOutcome::Succeeded, "LENS-B-NO-FINDINGS"),
+            terminal(GraphAttemptOutcome::AdapterUnavailable),
+            terminal_with_result(GraphAttemptOutcome::Succeeded, "verified"),
         ]),
         ..Default::default()
     };
@@ -850,7 +927,7 @@ fn verdict_fixture(
             |line| format!("VERDICT: {line}"),
         );
         capture.push(text.as_bytes());
-        let mut observation = terminal(AttemptOutcome::Succeeded);
+        let mut observation = terminal(GraphAttemptOutcome::Succeeded);
         if let AttemptObservation::Terminal { result, .. } = &mut observation {
             *result = Some(Box::new(capture.finish()));
         }
@@ -861,7 +938,7 @@ fn verdict_fixture(
     (graph(nodes), owner)
 }
 
-fn terminal(outcome: AttemptOutcome) -> AttemptObservation {
+fn terminal(outcome: GraphAttemptOutcome) -> AttemptObservation {
     AttemptObservation::Terminal {
         attempt_ref: None,
         outcome,
@@ -871,12 +948,13 @@ fn terminal(outcome: AttemptOutcome) -> AttemptObservation {
         result_path: None,
         branch: None,
         commit: None,
-        settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
+        settlement_class: Some(provenant_records::run::SettlementClass::Completed),
         stop: None,
+        cause: None,
     }
 }
 
-fn preparation_refusal(reference: &str, outcome: AttemptOutcome) -> AttemptObservation {
+fn preparation_refusal(reference: &str, outcome: GraphAttemptOutcome) -> AttemptObservation {
     AttemptObservation::Terminal {
         attempt_ref: Some(reference.into()),
         outcome,
@@ -886,12 +964,13 @@ fn preparation_refusal(reference: &str, outcome: AttemptOutcome) -> AttemptObser
         result_path: None,
         branch: None,
         commit: None,
-        settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
+        settlement_class: Some(provenant_records::run::SettlementClass::Completed),
         stop: None,
+        cause: None,
     }
 }
 
-fn terminal_with_result(outcome: AttemptOutcome, result: &str) -> AttemptObservation {
+fn terminal_with_result(outcome: GraphAttemptOutcome, result: &str) -> AttemptObservation {
     AttemptObservation::Terminal {
         attempt_ref: None,
         outcome,
@@ -901,13 +980,14 @@ fn terminal_with_result(outcome: AttemptOutcome, result: &str) -> AttemptObserva
         result_path: None,
         branch: None,
         commit: None,
-        settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
+        settlement_class: Some(provenant_records::run::SettlementClass::Completed),
         stop: None,
+        cause: None,
     }
 }
 
 fn terminal_from(result: &str, attempt_ref: &str) -> AttemptObservation {
-    let mut observation = terminal_with_result(AttemptOutcome::Succeeded, result);
+    let mut observation = terminal_with_result(GraphAttemptOutcome::Succeeded, result);
     if let AttemptObservation::Terminal {
         attempt_ref: slot, ..
     } = &mut observation
@@ -932,7 +1012,7 @@ fn parent_and_child(
     let owner = FakeOwner {
         observations: VecDeque::from([
             terminal_from("short excerpt", "host-a/attempt-1"),
-            terminal(AttemptOutcome::Succeeded),
+            terminal(GraphAttemptOutcome::Succeeded),
         ]),
         materialise,
         ..Default::default()
@@ -943,9 +1023,14 @@ fn parent_and_child(
 fn capture(text: &str) -> crate::result_capture::CapturedResult {
     let mut capture = crate::result_capture::ResultCapture::new(Some("VERDICT: PASS"));
     capture.push(text.as_bytes());
-    // The sealed handoff a settled attempt carries, as the fixture text declares it.
+    // This fixture supplies the sealed handoff separately from captured text.
     let mut result = capture.finish();
-    result.handoff = provenant_records::handoff::Handoff::from_turns(text, &[]);
+    result.handoff = text
+        .split_once("```handoff\n")
+        .and_then(|(_, remainder)| remainder.split_once("\n```").map(|(json, _)| json))
+        .map_or(Ok(None), |json| {
+            provenant_records::handoff::Handoff::from_json(json.as_bytes()).map(Some)
+        });
     result
 }
 
@@ -953,7 +1038,7 @@ fn check_fallback(
     case: &str,
     access: AccessMode,
     launched: bool,
-    outcome: AttemptOutcome,
+    outcome: GraphAttemptOutcome,
     expected: bool,
 ) {
     let mut task = node("node", route("first"));
@@ -973,10 +1058,11 @@ fn check_fallback(
                 result_path: None,
                 branch: None,
                 commit: None,
-                settlement_reason: Some(provenant_records::run::SettlementReason::Completed),
+                settlement_class: Some(provenant_records::run::SettlementClass::Completed),
                 stop: None,
+                cause: None,
             },
-            terminal(AttemptOutcome::Succeeded),
+            terminal(GraphAttemptOutcome::Succeeded),
         ]),
         ..FakeOwner::default()
     };
@@ -988,9 +1074,10 @@ fn check_fallback(
         && launched
         && matches!(
             outcome,
-            AttemptOutcome::AuthRequired
-                | AttemptOutcome::UsageLimited
-                | AttemptOutcome::AdapterUnavailable
+            GraphAttemptOutcome::AuthRequired
+                | GraphAttemptOutcome::UsageLimited
+                | GraphAttemptOutcome::ModelUnavailable
+                | GraphAttemptOutcome::AdapterUnavailable
         );
     assert_eq!(
         owner.calls.len(),
@@ -1012,7 +1099,7 @@ fn check_fallback(
         "{case}"
     );
 
-    let successful_outcome = outcome == AttemptOutcome::ReviewRequired;
+    let successful_outcome = outcome == GraphAttemptOutcome::ReviewRequired;
     assert_eq!(
         run.checkpoint.nodes[0].state,
         if expected || restarted || successful_outcome {

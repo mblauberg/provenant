@@ -137,14 +137,17 @@ fn preflight_warns_with_count_and_path_for_unregistered_legacy_custody()
 }
 
 #[test]
-fn preflight_warns_and_names_live_attempts_when_record_format_changes()
+fn preflight_warns_and_names_live_attempts_after_delivery_record_format_change()
 -> Result<(), Box<dyn std::error::Error>> {
     use super::*;
     use provenant_core::{AttemptId, ProjectId};
     use provenant_os::clock::SystemClock;
 
     let tmp = tempfile::tempdir()?;
-    let roots = roots_with_receipt(tmp.path(), Some(provenant_records::LIVE_RECORD_FORMAT - 1))?;
+    // Format 11 is the installed format before typed delivery destinations.
+    // Keeping it literal makes this test fail if the live format is not bumped.
+    const PRIOR_LIVE_RECORD_FORMAT: u32 = 11;
+    let roots = roots_with_receipt(tmp.path(), Some(PRIOR_LIVE_RECORD_FORMAT))?;
     let attempt = AttemptId::from_bytes([4; 16]);
     create_live_attempt(&roots, ProjectId::from_bytes([1; 16]), attempt)?;
 
@@ -158,7 +161,7 @@ fn preflight_warns_and_names_live_attempts_when_record_format_changes()
     let warning = warn_live_record_change(&roots, &context)
         .expect("a format change with live attempts warns");
     let current = provenant_records::LIVE_RECORD_FORMAT;
-    let change = format!("format {} → {current}", current - 1);
+    let change = format!("format {PRIOR_LIVE_RECORD_FORMAT} → {current}");
     assert!(warning.contains(&change), "{warning}");
     assert!(warning.contains("live attempts:"), "{warning}");
     assert!(warning.contains(&attempt.to_string()), "{warning}");
@@ -335,7 +338,7 @@ fn verify_execs_the_installed_binary() -> Result<(), Box<dyn std::error::Error>>
         ),
     )?;
     std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755))?;
-    let runner = UpgradeRunner {
+    let runner = ChildRunner {
         executor: provenant_os::exec::SystemExecutor::new(1)?,
         environment: std::env::vars_os().collect(),
         cwd: home,
@@ -416,7 +419,7 @@ fn verify_smoke_runs_outside_a_checkout_without_requiring_one()
         ),
     )?;
     std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755))?;
-    let runner = UpgradeRunner {
+    let runner = ChildRunner {
         executor: provenant_os::exec::SystemExecutor::new(1)?,
         environment: std::env::vars_os().collect(),
         cwd: home,
@@ -477,399 +480,497 @@ fn install_retires_the_cargo_target_seed_directory_once() -> Result<(), Box<dyn 
     Ok(())
 }
 
-// Spec: docs/specs/supervisor.md#tick-driven-settlement
-#[test]
-fn smoke_cleanup_forgets_the_scratch_project_binding() -> Result<(), Box<dyn std::error::Error>> {
-    use super::*;
-    use provenant_confinement::{UtilityBudget, UtilityRuntime};
+use super::*;
 
-    // $TMPDIR on a real macOS host is /var/folders, a symlink to
-    // /private/var. The child binds the canonical common directory, so the
-    // scratch path the parent holds and the binding id differ unless the
-    // id is resolved through that canonical form.
-    let temp = tempfile::tempdir()?;
-    let real = temp.path().join("real");
-    std::fs::create_dir(&real)?;
-    let link = temp.path().join("link");
-    std::os::unix::fs::symlink(&real, &link)?;
-    let root = std::fs::canonicalize(&real)?;
-    let mut inputs = provenant_core::RootInputs::new(root.join("home"), root.join("checkout"));
-    inputs.state_dir = Some(root.join("state"));
-    let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
-    provenant_os::fixture::private_state_dir(roots.state.as_path())?;
-
-    let scratch = crate::scratch_dir::ScratchDir::new_in(&link, "provenant-smoke-project-")?;
-    provenant_os::fixture::run_git(scratch.path(), &["init", "-q"])?;
-    std::fs::write(scratch.path().join("fixture.txt"), b"smoke fixture\n")?;
-    // The warning #3812 saw comes from a scratch fixture's ports.json. It
-    // must not be reachable through the host registry after cleanup.
-    std::fs::write(scratch.path().join("ports.json"), b"not a port table\n")?;
-    provenant_os::fixture::run_git(scratch.path(), &["add", "fixture.txt"])?;
-    provenant_os::fixture::run_git(scratch.path(), &["commit", "-qm", "smoke fixture"])?;
-
-    // Bind through the path the smoke child's `run` uses: `Context::open`
-    // resolves the canonical common directory with the utility and binds
-    // that location.
-    let git = provenant_os::git::git_executable().ok_or("Git unavailable")?;
-    let git_home = roots.state.as_path().join("tmp/git-home");
-    provenant_os::fixture::private_state_dir(&git_home)?;
-    let runtime = UtilityRuntime::new(&git, &git_home, roots.state.as_path())?;
-    let executor = provenant_os::exec::SystemExecutor::new(1)?;
-    let discovered = runtime.project_location(
-        &executor,
-        scratch.path(),
-        UtilityBudget::bounded(std::time::Duration::from_secs(5))?,
-        &CancelToken::new(),
-    )?;
-    let binding = provenant_config::bind_project(&roots, discovered.location.clone())?;
-    let record = provenant_config::project_binding_dir(roots.state.as_path(), binding.project_id())
-        .join("project.json");
-    assert!(
-        record.is_file(),
-        "the child path publishes {}",
-        record.display()
+// The worktree driver includes this module without registering these tests.
+#[allow(dead_code)]
+fn smoke_program(
+    root: &std::path::Path,
+    status_summary: &str,
+) -> Result<(std::path::PathBuf, std::path::PathBuf), Box<dyn std::error::Error>> {
+    use std::os::unix::fs::PermissionsExt;
+    let program = root.join("provenant");
+    let calls = root.join("calls");
+    let script = format!(
+        r##"#!/bin/sh
+printf '%s\n' "$*" >> '{calls}'
+args="$*"
+project=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --project) project="$2"; shift 2;;
+    *) shift;;
+  esac
+done
+nonce=$(sed -n 's/^nonce: //p' "$project/fixture.txt" 2>/dev/null || true)
+summary="{status_summary}"
+case "$args" in
+  *' run smoke '*)
+    printf '%s\n' '{{"schema_version":1,"command":"run","data":{{"status":"pending"}}}}'
+    ;;
+  *' wait '*)
+    printf '%s\n' '{{"schema_version":1,"command":"wait","data":{{"status":"complete"}}}}'
+    ;;
+  *' status '*)
+    printf '{{"schema_version":1,"command":"status","data":{{"rows":[{{"kind":"node","node_id":"read","state":"succeeded","result_summary":"%s"}},{{"kind":"node","node_id":"review-write","state":"succeeded","result_summary":"%s"}},{{"kind":"node","node_id":"write","state":"succeeded"}}]}}}}\n' "$summary" "$summary"
+    ;;
+  *) exit 77;;
+esac
+"##,
+        calls = calls.display(),
+        status_summary = status_summary
     );
+    std::fs::write(&program, script)?;
+    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755))?;
+    Ok((program, calls))
+}
 
-    let resolved = smoke_project_binding(roots.state.as_path(), scratch.path())?;
-    assert_eq!(
-        resolved,
-        binding.project_id(),
-        "host_project_dir must name the binding the child published"
-    );
+#[allow(dead_code)]
+fn smoke_runner(cwd: &std::path::Path) -> Result<ChildRunner, Box<dyn std::error::Error>> {
+    Ok(ChildRunner {
+        executor: provenant_os::exec::SystemExecutor::new(1)?,
+        environment: std::env::vars_os().collect(),
+        cwd: cwd.to_path_buf(),
+    })
+}
 
-    // Cleanup cannot depend on the fixture still existing: the graph may
-    // remove the scratch, or a preparation process may outlive the run.
-    drop(scratch);
-    forget_smoke_binding(roots.state.as_path(), resolved).map_err(std::io::Error::other)?;
-    assert!(!record.exists(), "{} survived cleanup", record.display());
-    assert!(provenant_config::lookup_project(&roots, &discovered.location)?.is_none());
-    let registered = provenant_config::registered_projects(&roots)?;
-    assert!(
-        registered
-            .iter()
-            .all(|binding| !binding.common_dir().starts_with(&root)),
-        "tick must not find a scratch fixture in the host registry: {registered:?}"
-    );
-    // A second cleanup is not an error: the smoke run may have created none.
-    forget_smoke_binding(roots.state.as_path(), resolved).map_err(std::io::Error::other)?;
-    Ok(())
+#[allow(dead_code)]
+fn smoke_upgrade(host: Option<String>, set: Vec<String>) -> cli::Upgrade {
+    cli::Upgrade {
+        yes: false,
+        from_source: None,
+        hosts: "all".into(),
+        verify: true,
+        verify_only: false,
+        dry_run: false,
+        host,
+        route: None,
+        set,
+    }
+}
+
+// Extract the fixture from the first child invocation, so cleanup checks cannot
+// silently pass against a made-up path when the launch omitted its project.
+#[allow(dead_code)]
+fn smoke_recorded_project(recorded: &str) -> Option<std::path::PathBuf> {
+    recorded
+        .lines()
+        .next()?
+        .split_once("--project ")?
+        .1
+        .split_whitespace()
+        .next()
+        .map(std::path::PathBuf::from)
 }
 
 #[test]
-fn smoke_cleanup_reports_an_unresolved_binding() -> Result<(), Box<dyn std::error::Error>> {
-    use super::*;
-
-    let temp = tempfile::tempdir()?;
-    let state = temp.path().join("state");
-    provenant_os::fixture::private_state_dir(&state)?;
-    let not_a_checkout = temp.path().join("not-a-checkout");
-    std::fs::create_dir(&not_a_checkout)?;
-    let error = smoke_project_binding(&state, &not_a_checkout)
-        .expect_err("an unresolvable binding must be reported, never silent success");
-    assert!(error.contains("cannot resolve"), "{error}");
-    Ok(())
+fn smoke_cleanup_checks_the_launched_fixture() {
+    assert_eq!(
+        smoke_recorded_project("run smoke --project /tmp/fixture --json\n"),
+        Some(std::path::PathBuf::from("/tmp/fixture"))
+    );
+    assert_eq!(smoke_recorded_project("run smoke --json\n"), None);
+    assert_eq!(smoke_recorded_project("run smoke --project "), None);
 }
 
 #[test]
 fn smoke_cleanup_warnings_never_hide_or_replace_the_smoke_result() {
-    use super::*;
-
-    // A passed smoke stays passed, but the cleanup warning is part of a
-    // failed smoke's report instead of being swallowed.
     assert_eq!(
-        report_smoke_cleanup(Ok("smoke ok".to_owned()), Err("missing record".into())),
+        crate::smoke::report_smoke_cleanup(Ok("smoke ok".to_owned()), Err("missing record".into())),
         Ok("smoke ok".to_owned())
     );
-    let error =
-        report_smoke_cleanup::<String>(Err("node failed".to_owned()), Err("missing record".into()))
-            .expect_err("a failed smoke stays failed");
+    let error = crate::smoke::report_smoke_cleanup::<String>(
+        Err("node failed".to_owned()),
+        Err("missing record".into()),
+    )
+    .expect_err("a failed smoke stays failed");
     assert!(error.contains("node failed"), "{error}");
     assert!(error.contains("missing record"), "{error}");
 }
 
 #[test]
-fn smoke_wait_and_status_use_the_scratch_project() -> Result<(), Box<dyn std::error::Error>> {
-    use super::*;
-    use std::os::unix::fs::PermissionsExt;
+// Spec: docs/specs/fabric.md#hermetic-smoke — the same nonce yields the same
+// commits in two different homes, so a peer can reproduce the fixture.
+fn smoke_fixture_is_deterministic_per_nonce() -> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let nonce = "0123456789ab";
+    let root = provenant_cli::smoke::Settings::default().root();
+    let mut commits = Vec::new();
+    for name in ["home-a", "home-b"] {
+        let home = temp.path().join(name);
+        std::fs::create_dir(&home)?;
+        let state = temp.path().join(format!("{name}-state"));
+        provenant_os::fixture::private_state_dir(&state)?;
+        commits.push(crate::smoke::create_fixture(&state, &home, nonce, &root)?);
+    }
+    assert_eq!(commits[0], commits[1], "nonce must determine both OIDs");
+    Ok(())
+}
 
-    let tmp = tempfile::tempdir()?;
-    let state = tmp.path().join("state");
-    provenant_os::fixture::private_state_dir(&state)?;
-    let home = tmp.path().join("home");
-    std::fs::create_dir(&home)?;
-    let scratch = tmp.path().join("scratch");
-    std::fs::create_dir(&scratch)?;
-    let calls = tmp.path().join("calls");
-    let launcher = tmp.path().join("provenant");
-    std::fs::write(
-        &launcher,
-        format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\ncase \" $* \" in *' run smoke '*) printf '%s\\n' '{{\"status\":\"pending\"}}';; *' wait '*) printf '%s\\n' '{{\"status\":\"complete\"}}';; *' status '*) printf '%s\\n' '{{\"status\":\"complete\"}}';; *) exit 77;; esac\n",
-            calls.display()
-        ),
-    )?;
-    std::fs::set_permissions(&launcher, std::fs::Permissions::from_mode(0o755))?;
-    let runner = UpgradeRunner {
-        executor: provenant_os::exec::SystemExecutor::new(1)?,
-        environment: std::env::vars_os().collect(),
-        // The home directory is not the scratch project, so wait and
-        // status only find the graph when they carry its --project.
-        cwd: home.clone(),
-    };
-    let output = verify_smoke_with(
-        &runner,
-        &launcher,
-        &state,
-        &scratch,
-        &cli::Upgrade {
-            yes: false,
-            from_source: None,
-            hosts: "all".into(),
-            verify: true,
-            verify_only: false,
-            dry_run: false,
-            host: None,
-            route: None,
-            set: Vec::new(),
-        },
-    )?;
-    assert!(output.contains("complete"), "{output}");
-
-    let calls = std::fs::read_to_string(&calls)?;
-    let lines: Vec<&str> = calls.lines().collect();
-    assert_eq!(lines.len(), 3, "{calls}");
-    assert!(lines[0].contains(" run smoke "), "{calls}");
-    let project = lines[0]
-        .split_once("--project ")
-        .and_then(|(_, rest)| rest.split_whitespace().next())
-        .expect("run names its project");
-    for line in &lines[1..] {
+#[test]
+// Spec: docs/specs/state.md#managed-install — a smoke run forgets its fixture
+// binding and removes the directory on success, failure and refused launch.
+fn smoke_removes_its_fixture_and_binding() -> Result<(), Box<dyn std::error::Error>> {
+    // success: a passing run; failure: a completed run whose status lacks the
+    // nonce; refused: the launch command itself exits non-zero.
+    for (name, refused, summary) in [
+        ("success", false, "nonce: $nonce"),
+        ("failure", false, "nonce: absent"),
+        ("refused", true, ""),
+    ] {
+        let temp = tempfile::tempdir()?;
+        let home = temp.path().join("home");
+        std::fs::create_dir(&home)?;
+        let state = temp.path().join("state");
+        provenant_os::fixture::private_state_dir(&state)?;
+        let (program, calls) = if refused {
+            {
+                let program = temp.path().join("provenant");
+                let calls = temp.path().join("calls");
+                std::fs::write(
+                    &program,
+                    format!(
+                        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nexit 42\n",
+                        calls.display()
+                    ),
+                )?;
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755))?;
+                (program, calls)
+            }
+        } else {
+            smoke_program(temp.path(), summary)?
+        };
+        let runner = smoke_runner(&home)?;
+        let result = crate::smoke::run_lifecycle(
+            &provenant_os::clock::SystemClock::new(),
+            &runner,
+            &program,
+            &state,
+            &home,
+            &smoke_upgrade(None, Vec::new()),
+        );
+        let outcome = result.map_err(|error| std::io::Error::other(format!("{name}: {error}")))?;
+        if name == "success" {
+            assert_eq!(outcome.verdict, crate::smoke::SmokeVerdict::Passed);
+        } else {
+            assert!(
+                matches!(&outcome.verdict, crate::smoke::SmokeVerdict::Failed { .. }),
+                "{name} must fail"
+            );
+        }
+        let recorded = std::fs::read_to_string(&calls).unwrap_or_default();
+        let fixture = smoke_recorded_project(&recorded).ok_or("project argument")?;
+        assert!(!fixture.exists(), "{name}: fixture survived cleanup");
+        let roots = crate::roots::child(&home, &home, state.clone())?;
+        let bindings = provenant_config::registered_projects(&roots)?;
         assert!(
-            line.contains(&format!("--project {project}")),
-            "wait and status must name the launched project: {line}"
+            bindings
+                .iter()
+                .all(|binding| !binding.common_dir().starts_with(&fixture)),
+            "{name}: fixture binding survived cleanup: {bindings:?}"
         );
     }
     Ok(())
 }
 
 #[test]
-fn smoke_verify_gives_the_review_a_non_empty_range() -> Result<(), Box<dyn std::error::Error>> {
-    use super::*;
-    use std::os::unix::fs::PermissionsExt;
-
-    let tmp = tempfile::tempdir()?;
-    let state = tmp.path().join("state");
+// Spec: docs/specs/fabric.md#hermetic-smoke — the fixture replaces the caller
+// checkout, however it was selected.
+fn smoke_never_reads_the_caller_checkout() -> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let home = temp.path().join("home");
+    std::fs::create_dir(&home)?;
+    let state = temp.path().join("state");
     provenant_os::fixture::private_state_dir(&state)?;
-    let scratch = tmp.path().join("scratch");
-    std::fs::create_dir(&scratch)?;
-    let calls = tmp.path().join("calls");
-    let launcher = tmp.path().join("provenant");
-    // The launch must name a base the live fixture can resolve to an
-    // ancestor of HEAD; an empty range stops the run before any provider.
-    std::fs::write(
-        &launcher,
-        format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nargs=\"$*\"\nproject=\"\"\ndiff_base=\"\"\nwhile [ $# -gt 0 ]; do\n  case \"$1\" in\n    --project) project=\"$2\"; shift 2;;\n    --set) case \"$2\" in diff_base=*) diff_base=\"${{2#diff_base=}}\";; esac; shift 2;;\n    *) shift;;\n  esac\ndone\ncase \" $args \" in\n  *' run smoke '*)\n    [ -n \"$project\" ] || exit 90\n    [ -n \"$diff_base\" ] || exit 91\n    head=$(git -C \"$project\" rev-parse HEAD) || exit 92\n    base=$(git -C \"$project\" rev-parse \"$diff_base\") || exit 93\n    [ \"$base\" != \"$head\" ] || exit 94\n    [ \"$(git -C \"$project\" merge-base \"$base\" \"$head\")\" = \"$base\" ] || exit 95\n    printf '%s\\n' '{{\"status\":\"pending\"}}';;\n  *' wait '*) printf '%s\\n' '{{\"status\":\"complete\"}}';;\n  *' status '*) printf '%s\\n' '{{\"status\":\"complete\"}}';;\n  *) exit 77;;\nesac\n",
-            calls.display()
-        ),
+    let (program, calls) = smoke_program(temp.path(), "nonce: $nonce")?;
+    let repo = temp.path().join("caller");
+    std::fs::create_dir(&repo)?;
+    provenant_os::fixture::run_git(&repo, &["init", "-q", "-b", "main"])?;
+    std::fs::write(repo.join("keep.txt"), "caller\n")?;
+    provenant_os::fixture::run_git(&repo, &["add", "keep.txt"])?;
+    provenant_os::fixture::run_git(&repo, &["commit", "-qm", "caller base"])?;
+    std::fs::write(repo.join("keep.txt"), "caller head\n")?;
+    provenant_os::fixture::run_git(&repo, &["commit", "-qam", "caller head"])?;
+    let caller_head = String::from_utf8_lossy(&provenant_os::fixture::run_git(
+        &repo,
+        &["rev-parse", "HEAD"],
+    )?)
+    .trim()
+    .to_owned();
+    let detached = temp.path().join("detached");
+    provenant_os::fixture::run_git(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "--detach",
+            detached.to_str().ok_or("path")?,
+            "HEAD^",
+        ],
     )?;
-    std::fs::set_permissions(&launcher, std::fs::Permissions::from_mode(0o755))?;
-    let runner = UpgradeRunner {
-        executor: provenant_os::exec::SystemExecutor::new(1)?,
-        environment: std::env::vars_os().collect(),
-        cwd: tmp.path().to_owned(),
-    };
-    let output = verify_smoke_with(
-        &runner,
-        &launcher,
-        &state,
-        &scratch,
-        &cli::Upgrade {
-            yes: false,
-            from_source: None,
-            hosts: "all".into(),
-            verify: true,
-            verify_only: false,
-            dry_run: false,
-            host: None,
-            route: None,
-            set: Vec::new(),
-        },
-    )?;
-    assert!(output.contains("complete"), "{output}");
-    let calls = std::fs::read_to_string(&calls)?;
-    let run = calls.lines().next().ok_or("run call")?;
-    assert!(run.contains(" run smoke "), "{calls}");
-    assert!(run.contains(" --base HEAD "), "{calls}");
-    assert!(run.contains(" --set diff_base="), "{calls}");
+    let plain = temp.path().join("plain");
+    std::fs::create_dir(&plain)?;
+    let root = provenant_cli::smoke::Settings::default().root();
+    for cwd in [repo.clone(), detached, plain] {
+        std::fs::write(&calls, "")?;
+        let runner = smoke_runner(&cwd)?;
+        crate::smoke::run_lifecycle(
+            &provenant_os::clock::SystemClock::new(),
+            &runner,
+            &program,
+            &state,
+            &home,
+            &smoke_upgrade(None, Vec::new()),
+        )
+        .map_err(std::io::Error::other)?;
+        let recorded = std::fs::read_to_string(&calls)?;
+        let run = recorded.lines().next().ok_or("run argv")?;
+        let project = run
+            .split_once("--project ")
+            .and_then(|(_, rest)| rest.split_whitespace().next())
+            .ok_or("project argument")?;
+        assert!(
+            std::path::Path::new(project).starts_with(crate::smoke::fixture_root(&home, &root)),
+            "{run} did not use the fixture root"
+        );
+        assert!(!run.contains(&caller_head), "{run} leaked the caller OID");
+    }
     Ok(())
 }
 
 #[test]
-fn remote_smoke_verify_carries_the_writer_branch_and_staged_fixture()
--> Result<(), Box<dyn std::error::Error>> {
-    use super::*;
-    use std::os::unix::fs::PermissionsExt;
-
-    let tmp = tempfile::tempdir()?;
-    let state = tmp.path().join("state");
+// Spec: docs/specs/fabric.md#hermetic-smoke — a verdict without the nonce is
+// a false pass and must fail verification.
+fn smoke_fails_without_the_nonce() -> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let home = temp.path().join("home");
+    std::fs::create_dir(&home)?;
+    let state = temp.path().join("state");
     provenant_os::fixture::private_state_dir(&state)?;
-    let scratch = tmp.path().join("scratch");
-    std::fs::create_dir(&scratch)?;
-    let calls = tmp.path().join("calls");
-    let launcher = tmp.path().join("provenant");
-    // Check the staged fixture inside the launch, while smoke_project's
-    // ScratchDir is still alive: verify_smoke_with drops it on return and the
-    // directory is removed, so reading the path afterwards would always fail.
-    std::fs::write(
-        &launcher,
-        format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nargs=\"$*\"\nproject=\"\"\nwhile [ $# -gt 0 ]; do\n  case \"$1\" in\n    --project) project=\"$2\"; shift 2;;\n    *) shift;;\n  esac\ndone\ncase \" $args \" in\n  *' run smoke '*)\n    [ -n \"$project\" ] || exit 90\n    [ -f \"$project/fixture.txt\" ] || exit 91\n    grep -qx 'smoke fixture' \"$project/fixture.txt\" || exit 92\n    printf '%s\\n' '{{\"node\":\"smoke/read\"}}' '{{\"node\":\"smoke/review\"}}' '{{\"node\":\"smoke/write\"}}'; printf '%s\\n' '{{\"status\":\"pending\"}}';;\n  *' wait '*|*' status '*) printf '%s\\n' '{{\"status\":\"complete\"}}';;\n  *) exit 77;;\nesac\n",
-            calls.display()
-        ),
-    )?;
-    std::fs::set_permissions(&launcher, std::fs::Permissions::from_mode(0o755))?;
-    let runner = UpgradeRunner {
-        executor: provenant_os::exec::SystemExecutor::new(1)?,
-        environment: std::env::vars_os().collect(),
-        cwd: tmp.path().to_owned(),
-    };
-    let output = verify_smoke_with(
+    let (program, _) = smoke_program(temp.path(), "no nonce here")?;
+    let runner = smoke_runner(&home)?;
+    let outcome = crate::smoke::run_lifecycle(
+        &provenant_os::clock::SystemClock::new(),
         &runner,
-        &launcher,
+        &program,
         &state,
-        &scratch,
-        &cli::Upgrade {
-            yes: false,
-            from_source: None,
-            hosts: "all".into(),
-            verify: true,
-            verify_only: false,
-            dry_run: false,
-            host: Some("peer-a".into()),
-            route: None,
-            set: Vec::new(),
-        },
+        &home,
+        &smoke_upgrade(None, Vec::new()),
     )?;
-    assert!(output.contains("\"node\":\"smoke/write\""), "{output}");
-    assert!(output.contains("complete"), "{output}");
-    let calls = std::fs::read_to_string(&calls)?;
-    let run = calls.lines().next().ok_or("run call")?;
-    assert!(run.contains(" run smoke "), "{calls}");
-    assert!(run.contains(" --host peer-a "), "{calls}");
-    assert!(run.contains(" --branch smoke/"), "{calls}");
-    assert!(run.contains(" --base HEAD "), "{calls}");
-    assert!(run.contains(" --set diff_base="), "{calls}");
-    // The launch itself verified that the scratch project it names carries the
-    // staged fixture at the path its brief declares. That check has to happen
-    // during the run: the scratch is removed when verification ends.
+    let crate::smoke::SmokeVerdict::Failed { row, reason } = &outcome.verdict else {
+        panic!("the nonce is absent, so the smoke must fail");
+    };
+    assert_eq!(row.as_str(), "read");
+    assert!(reason.contains("read"), "{reason}");
+    assert!(
+        outcome.text().contains("\"verdict\":\"failed\""),
+        "{}",
+        outcome.text()
+    );
+    Ok(())
+}
+
+#[test]
+fn smoke_wait_and_status_name_the_fixture_project() -> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let home = temp.path().join("home");
+    std::fs::create_dir(&home)?;
+    let state = temp.path().join("state");
+    provenant_os::fixture::private_state_dir(&state)?;
+    let (program, calls) = smoke_program(temp.path(), "nonce: $nonce")?;
+    let runner = smoke_runner(&home)?;
+    let outcome = crate::smoke::run_lifecycle(
+        &provenant_os::clock::SystemClock::new(),
+        &runner,
+        &program,
+        &state,
+        &home,
+        &smoke_upgrade(None, Vec::new()),
+    )?;
+    assert!(outcome.output.contains("complete"), "{}", outcome.text());
+    let calls = std::fs::read_to_string(calls)?;
+    let lines: Vec<&str> = calls.lines().collect();
+    assert_eq!(lines.len(), 3, "{calls}");
+    assert!(lines[0].contains(" run smoke "), "{calls}");
+    let project = lines[0]
+        .split_once("--project ")
+        .and_then(|(_, rest)| rest.split_whitespace().next())
+        .ok_or("run names its project")?;
+    for line in &lines[1..] {
+        assert!(line.contains(&format!("--project {project}")), "{line}");
+    }
+    Ok(())
+}
+
+#[test]
+fn smoke_lifecycle_pins_the_review_to_the_fixture_head() -> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let home = temp.path().join("home");
+    std::fs::create_dir(&home)?;
+    let state = temp.path().join("state");
+    provenant_os::fixture::private_state_dir(&state)?;
+    let (program, calls) = smoke_program(temp.path(), "nonce: $nonce")?;
+    let runner = smoke_runner(&home)?;
+    crate::smoke::run_lifecycle(
+        &provenant_os::clock::SystemClock::new(),
+        &runner,
+        &program,
+        &state,
+        &home,
+        &smoke_upgrade(None, Vec::new()),
+    )?;
+    let run = std::fs::read_to_string(calls)?
+        .lines()
+        .next()
+        .ok_or("run argv")?
+        .to_owned();
+    let argument = |name: &str| -> Option<String> {
+        run.split_whitespace()
+            .collect::<Vec<_>>()
+            .windows(2)
+            .find(|pair| pair[0] == name)
+            .map(|pair| pair[1].to_owned())
+    };
+    let head = argument("--base").ok_or("--base argument")?;
+    assert_eq!(head.len(), 40, "{run}");
+    let diff_base = run
+        .split("--set diff_base=")
+        .nth(1)
+        .and_then(|rest| rest.split_whitespace().next())
+        .ok_or("diff_base argument")?;
+    let fixture_base = run
+        .split("--set fixture_base=")
+        .nth(1)
+        .and_then(|rest| rest.split_whitespace().next())
+        .ok_or("fixture_base argument")?;
+    assert_eq!(diff_base, head, "{run}");
+    assert_eq!(fixture_base.len(), 40, "{run}");
+    assert_ne!(fixture_base, head, "{run}");
+    Ok(())
+}
+
+#[test]
+fn remote_smoke_carries_the_writer_branch_and_fixture_nonce()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let home = temp.path().join("home");
+    std::fs::create_dir(&home)?;
+    let state = temp.path().join("state");
+    provenant_os::fixture::private_state_dir(&state)?;
+    let (program, calls) = smoke_program(temp.path(), "nonce: $nonce")?;
+    let runner = smoke_runner(&home)?;
+    let outcome = crate::smoke::run_lifecycle(
+        &provenant_os::clock::SystemClock::new(),
+        &runner,
+        &program,
+        &state,
+        &home,
+        &smoke_upgrade(None, Vec::new()),
+    )?;
+    let run = std::fs::read_to_string(calls)?
+        .lines()
+        .next()
+        .ok_or("run argv")?
+        .to_owned();
+    assert!(run.contains(" run smoke "), "{run}");
+    assert!(run.contains(" --branch smoke/"), "{run}");
+    let project = run
+        .split_once("--project ")
+        .and_then(|(_, rest)| rest.split_whitespace().next())
+        .ok_or("project argument")?;
+    // The stub echoes the nonce it read from the fixture into every summary,
+    // so a passing verdict proves the lanes saw this run's fixture. The
+    // fixture itself is removed on every path once the smoke settles.
+    assert!(
+        !matches!(outcome.verdict, crate::smoke::SmokeVerdict::Failed { .. }),
+        "{}",
+        outcome.text()
+    );
+    assert!(
+        !std::path::Path::new(project).exists(),
+        "the fixture project outlived its smoke: {project}"
+    );
     Ok(())
 }
 
 #[test]
 fn failed_smoke_node_is_reported_by_verify() -> Result<(), Box<dyn std::error::Error>> {
-    // Spec: docs/specs/fabric.md#bundled-template-declarations — a failed
-    // smoke node is reported by its own node id, including the retry-route
-    // and steer-route probes.
-    use super::*;
     use std::os::unix::fs::PermissionsExt;
 
-    let tmp = tempfile::tempdir()?;
-    let state = tmp.path().join("state");
-    std::fs::create_dir(&state)?;
-    // The host state root is private in an installed host, and project
-    // bindings refuse a public one.
-    std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700))?;
-    let launcher = tmp.path().join("provenant");
+    let temp = tempfile::tempdir()?;
+    let home = temp.path().join("home");
+    std::fs::create_dir(&home)?;
+    let state = temp.path().join("state");
+    provenant_os::fixture::private_state_dir(&state)?;
+    let program = temp.path().join("provenant");
     std::fs::write(
-        &launcher,
-        "#!/bin/sh\ncase \" $* \" in *\" run smoke \"*) printf '%s\\n' '{\"node\":\"smoke/write\",\"state\":\"failed\"}' '{\"node\":\"smoke/retry-route\",\"state\":\"failed\"}' '{\"node\":\"smoke/steer-route\",\"state\":\"failed\"}'; exit 1;; esac\nexit 0\n",
+        &program,
+        "#!/bin/sh\ncase \" $* \" in *\" run smoke \"*) printf '%s\\n' '{\"node\":\"smoke/write\",\"state\":\"failed\"}' '{\"node\":\"smoke/retry-probe\",\"state\":\"failed\"}' '{\"node\":\"smoke/steer-probe\",\"state\":\"failed\"}'; exit 1;; esac\nexit 0\n",
     )?;
-    std::fs::set_permissions(&launcher, std::fs::Permissions::from_mode(0o755))?;
-    let runner = UpgradeRunner {
-        executor: provenant_os::exec::SystemExecutor::new(1)?,
-        environment: std::env::vars_os().collect(),
-        cwd: tmp.path().to_owned(),
-    };
-    let error = match verify_smoke_with(
+    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755))?;
+    let runner = smoke_runner(&home)?;
+    let outcome = crate::smoke::run_lifecycle(
+        &provenant_os::clock::SystemClock::new(),
         &runner,
-        &launcher,
+        &program,
         &state,
-        tmp.path(),
-        &cli::Upgrade {
-            yes: false,
-            from_source: None,
-            hosts: "all".into(),
-            verify: true,
-            verify_only: false,
-            dry_run: false,
-            host: None,
-            route: None,
-            set: Vec::new(),
-        },
-    ) {
-        Err(error) => error,
-        Ok(_) => {
-            return Err(std::io::Error::other("failed smoke node unexpectedly succeeded").into());
-        }
-    };
-    assert!(error.contains("\"node\":\"smoke/write\""));
-    assert!(error.contains("\"node\":\"smoke/retry-route\""), "{error}");
-    assert!(error.contains("\"node\":\"smoke/steer-route\""), "{error}");
-    assert!(error.contains("failed"));
+        &home,
+        &smoke_upgrade(None, Vec::new()),
+    )?;
+    assert!(
+        matches!(&outcome.verdict, crate::smoke::SmokeVerdict::Failed { .. }),
+        "a failed smoke node must fail verification"
+    );
+    let text = outcome.text();
+    assert!(text.contains("\"node\":\"smoke/write\""), "{text}");
+    assert!(text.contains("\"node\":\"smoke/retry-probe\""), "{text}");
+    assert!(text.contains("\"node\":\"smoke/steer-probe\""), "{text}");
     Ok(())
 }
 
 #[test]
 fn smoke_dry_run_previews_nodes_without_launching() -> Result<(), Box<dyn std::error::Error>> {
-    // Spec: docs/specs/fabric.md#bundled-template-declarations — the dry run
-    // lists every node the bundled smoke template declares, by node id.
-    use super::*;
     use std::os::unix::fs::PermissionsExt;
 
-    let tmp = tempfile::tempdir()?;
-    let state = tmp.path().join("state");
-    std::fs::create_dir(&state)?;
-    // The host state root is private in an installed host, and project
-    // bindings refuse a public one.
-    std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700))?;
-    let launcher = tmp.path().join("provenant");
-    let calls = tmp.path().join("calls");
+    let temp = tempfile::tempdir()?;
+    let home = temp.path().join("home");
+    std::fs::create_dir(&home)?;
+    let state = temp.path().join("state");
+    provenant_os::fixture::private_state_dir(&state)?;
+    let launcher = temp.path().join("provenant");
+    let calls = temp.path().join("calls");
     std::fs::write(
         &launcher,
         format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\n[ \"$1\" = --project ] || exit 78\n[ \"$2\" != \"$PWD\" ] || exit 79\n[ -f \"$2/fixture.txt\" ] || exit 80\ngit -C \"$2\" rev-parse --verify HEAD >/dev/null || exit 81\ncase \"$*\" in *'run smoke --explain'*) printf '%s\\n' '{{\"nodes\":[{{\"id\":\"read\"}},{{\"id\":\"review\"}},{{\"id\":\"write\"}},{{\"id\":\"retry-route\"}},{{\"id\":\"steer-route\"}}]}}';; *) exit 77;; esac\n",
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\ncase \"$*\" in *'run smoke --explain'*) printf '%s\\n' '{{\"nodes\":[{{\"id\":\"read\"}},{{\"id\":\"write\"}},{{\"id\":\"review-write\"}},{{\"id\":\"review-fixture\"}},{{\"id\":\"retry-probe\"}},{{\"id\":\"steer-probe\"}}]}}';; *) exit 77;; esac\n",
             calls.display()
         ),
     )?;
     std::fs::set_permissions(&launcher, std::fs::Permissions::from_mode(0o755))?;
-    let runner = UpgradeRunner {
-        executor: provenant_os::exec::SystemExecutor::new(1)?,
-        environment: std::env::vars_os().collect(),
-        cwd: tmp.path().to_owned(),
-    };
-    let output = preview_smoke(
+    let runner = smoke_runner(&home)?;
+    let output = super::preview_smoke(
         &runner,
         &launcher,
         &state,
-        &cli::Upgrade {
-            yes: false,
-            from_source: None,
-            hosts: "all".into(),
-            verify: true,
-            verify_only: false,
-            dry_run: true,
-            host: None,
-            route: None,
-            set: Vec::new(),
-        },
+        &home,
+        &smoke_upgrade(None, Vec::new()),
     )?;
     let output = String::from_utf8(output)?;
-    assert!(output.contains("\"read\""));
-    assert!(output.contains("\"review\""));
-    assert!(output.contains("\"write\""));
-    assert!(output.contains("\"id\":\"retry-route\""), "{output}");
-    assert!(output.contains("\"id\":\"steer-route\""), "{output}");
+    for node in [
+        "read",
+        "write",
+        "review-write",
+        "review-fixture",
+        "retry-probe",
+        "steer-probe",
+    ] {
+        assert!(
+            output.contains(&format!("\"id\":\"{node}\"")),
+            "{node}: {output}"
+        );
+    }
     let calls = std::fs::read_to_string(calls)?;
     assert_eq!(calls.lines().count(), 1, "{calls}");
     assert!(calls.contains("run smoke --explain"), "{calls}");
@@ -877,56 +978,129 @@ fn smoke_dry_run_previews_nodes_without_launching() -> Result<(), Box<dyn std::e
 }
 
 #[test]
-fn smoke_dry_run_pins_the_fixture_base_and_drops_a_user_base()
+fn smoke_dry_run_keeps_a_user_diff_base_and_adds_fixture_base()
 -> Result<(), Box<dyn std::error::Error>> {
-    use super::*;
     use std::os::unix::fs::PermissionsExt;
 
-    let tmp = tempfile::tempdir()?;
-    let state = tmp.path().join("state");
-    std::fs::create_dir(&state)?;
-    std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700))?;
-    let launcher = tmp.path().join("provenant");
-    let calls = tmp.path().join("calls");
-    // The host owns the review range: the launch must carry the fixture's
-    // own base (its first commit), never a caller-supplied one.
+    let temp = tempfile::tempdir()?;
+    let home = temp.path().join("home");
+    std::fs::create_dir(&home)?;
+    let state = temp.path().join("state");
+    provenant_os::fixture::private_state_dir(&state)?;
+    let launcher = temp.path().join("provenant");
+    let calls = temp.path().join("calls");
     std::fs::write(
         &launcher,
         format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nargs=\"$*\"\nproject=\"\"\ndiff_base=\"\"\nwhile [ $# -gt 0 ]; do\n  case \"$1\" in\n    --project) project=\"$2\"; shift 2;;\n    --set) case \"$2\" in diff_base=*) diff_base=\"${{2#diff_base=}}\";; esac; shift 2;;\n    *) shift;;\n  esac\ndone\nexpected=$(git -C \"$project\" rev-parse HEAD^) || exit 90\n[ \"$diff_base\" = \"$expected\" ] || exit 91\ncase \"$args\" in\n  *'run smoke --explain'*) printf '%s\\n' '{{\"nodes\":[{{\"id\":\"read\"}},{{\"id\":\"review\"}},{{\"id\":\"write\"}}]}}';;\n  *) exit 77;;\nesac\n",
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\ncase \"$*\" in *'run smoke --explain'*) printf '%s\\n' '{{\"nodes\":[]}}';; *) exit 77;; esac\n",
             calls.display()
         ),
     )?;
     std::fs::set_permissions(&launcher, std::fs::Permissions::from_mode(0o755))?;
-    let runner = UpgradeRunner {
-        executor: provenant_os::exec::SystemExecutor::new(1)?,
-        environment: std::env::vars_os().collect(),
-        cwd: tmp.path().to_owned(),
-    };
-    let output = preview_smoke(
+    let runner = smoke_runner(&home)?;
+    let user_base = "2222222222222222222222222222222222222222";
+    super::preview_smoke(
         &runner,
         &launcher,
         &state,
-        &cli::Upgrade {
-            yes: false,
-            from_source: None,
-            hosts: "all".into(),
-            verify: true,
-            verify_only: false,
-            dry_run: true,
-            host: None,
-            route: None,
-            set: vec!["diff_base=2222222222222222222222222222222222222222".into()],
-        },
+        &home,
+        &smoke_upgrade(None, vec![format!("diff_base={user_base}")]),
     )?;
-    assert!(String::from_utf8(output)?.contains("\"review\""));
-    let calls = std::fs::read_to_string(calls)?;
-    let run = calls.lines().next().ok_or("run call")?;
-    assert!(run.contains("run smoke --explain"), "{calls}");
-    assert_eq!(run.matches("--set diff_base=").count(), 1, "{calls}");
+    let run = std::fs::read_to_string(calls)?
+        .lines()
+        .next()
+        .ok_or("run argv")?
+        .to_owned();
+    assert_eq!(run.matches("--set diff_base=").count(), 1, "{run}");
     assert!(
-        !run.contains("2222222222222222222222222222222222222222"),
-        "{calls}"
+        run.contains(&format!("--set diff_base={user_base}")),
+        "{run}"
+    );
+    assert!(run.contains("--set fixture_base="), "{run}");
+    Ok(())
+}
+
+#[test]
+// Spec: docs/specs/cli.md#run-explain-reports-peer-placement — a dry run
+// must preview the writer placement the real verify launches, not a preview
+// that falls back to the caller checkout because no base was named.
+fn smoke_preview_and_verify_share_writer_branch_and_base() -> Result<(), Box<dyn std::error::Error>>
+{
+    let tmp = tempfile::tempdir()?;
+    let program = tmp.path().join("provenant");
+    let fixture = tmp.path().join("fixture");
+    let state = tmp.path().join("state");
+    let graph = "smoke-verify-test";
+    let args = cli::Upgrade {
+        yes: false,
+        from_source: None,
+        hosts: "all".into(),
+        verify: true,
+        verify_only: false,
+        dry_run: true,
+        host: Some("peer-a".into()),
+        route: Some("junior".into()),
+        set: vec!["write=false".into()],
+    };
+    let settings = provenant_cli::smoke::Settings::default();
+    let commits = crate::smoke::FixtureCommits {
+        base: provenant_core::GitOid::parse(&"1".repeat(40))?,
+        head: provenant_core::GitOid::parse(&"2".repeat(40))?,
+    };
+    let set = crate::smoke::with_fixture_defaults(settings.merged_set(&args.set), commits);
+    let render = |explain: bool| {
+        crate::smoke::smoke_run_argv(
+            &program, &fixture, &state, &args, &settings, commits, graph, &set, explain,
+        )
+        .into_iter()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect::<Vec<_>>()
+    };
+    let preview = render(true);
+    let verify = render(false);
+    // Only the preview/launch mode flag and its name differ. The writer
+    // branch, its base and every routing control are one argv builder.
+    let without_mode = |argv: Vec<String>| {
+        let mut controls = Vec::new();
+        let mut skip_next = false;
+        for arg in argv {
+            if skip_next {
+                skip_next = false;
+                continue;
+            }
+            match arg.as_str() {
+                "--explain" => {}
+                "--name" => skip_next = true,
+                _ => controls.push(arg),
+            }
+        }
+        controls
+    };
+    assert_eq!(without_mode(preview.clone()), without_mode(verify.clone()));
+    assert!(preview.contains(&"--explain".to_owned()), "{preview:?}");
+    assert!(verify.contains(&"--name".to_owned()), "{verify:?}");
+    let branch = format!("{}{graph}", settings.branch_prefix);
+    let head = commits.head.to_string();
+    for expected in [
+        "--branch",
+        branch.as_str(),
+        "--base",
+        head.as_str(),
+        "--host",
+        "peer-a",
+    ] {
+        assert!(
+            preview.iter().any(|arg| arg == expected),
+            "{expected}: {preview:?}"
+        );
+    }
+    assert!(
+        preview.contains(&format!("diff_base={head}")),
+        "{preview:?}"
+    );
+    assert!(
+        preview.contains(&format!("fixture_base={}", commits.base)),
+        "{preview:?}"
     );
     Ok(())
 }
@@ -973,7 +1147,7 @@ fn orphan_detection_keeps_default_environment_and_registered_targets()
             skills_dir: AbsolutePath::new(&dir.join("skills"))?,
             config_file: AbsolutePath::new(&dir.join("settings.json"))?,
             hook_file: None,
-            instruction: None,
+            instruction_file: None,
             hooks_relinquished: false,
         })
     };
@@ -1261,6 +1435,98 @@ fn refusal_reports_the_innermost_error_from_a_verify_envelope() {
 }
 
 #[test]
+fn verify_failure_names_the_smoke_graph_root_cause_and_next_command() {
+    // A blocked smoke's innermost envelope is its dependant's
+    // `upstream_blocked`; the checkpoint also carries the node that actually
+    // failed. The verify summary must name that node, its code and detail, the
+    // graph, and the command to read it, never just the blocked dependant.
+    let graph = "smoke-verify-4102-1";
+    let dependant = serde_json::json!({
+        "id": "task--review",
+        "state": "blocked",
+        "advance_code": "upstream_blocked",
+        "advance_note": "blocked by task--read (Blocked)",
+        "attempts": []
+    });
+    let cause = serde_json::json!({
+        "id": "task--read",
+        "state": "blocked",
+        "advance_code": "launch_refused",
+        "advance_owner_code": "confinement_refused",
+        "advance_note": "[confinement_refused] confinement rule peer_project_unprojectable on /fixture/scratch/project/.git",
+        "attempts": [{}]
+    });
+    let child = envelope(
+        "run",
+        provenant_records::Outcome::Error,
+        serde_json::json!({
+            "checkpoint": {"graph_id": graph, "nodes": [dependant, cause]}
+        }),
+        Some(provenant_records::CommandError::new(
+            "upstream_blocked",
+            "blocked by task--read (Blocked)",
+            None,
+            "unblock the reported node",
+        )),
+    );
+    let report = format!("Command failed (Exit(1)): {child}\n");
+    let summary = super::report::smoke_failure_summary(&report)
+        .expect("a blocked smoke checkpoint names its root cause");
+    for expected in [
+        graph,
+        "failed at task--read",
+        "confinement_refused",
+        "peer_project_unprojectable",
+        "next: `provenant status smoke-verify-4102-1`",
+    ] {
+        assert!(
+            summary.contains(expected),
+            "{expected} missing from {summary}"
+        );
+    }
+    assert!(!summary.contains("blocked by"), "{summary}");
+    assert!(!summary.contains("upstream_blocked"), "{summary}");
+
+    let hosts = vec![fixture_smoke_host(false, &report)];
+    let message = super::failed_hosts_message(&hosts);
+    for expected in [
+        graph,
+        "task--read",
+        "confinement_refused",
+        "peer_project_unprojectable",
+        "provenant status smoke-verify-4102-1",
+    ] {
+        assert!(
+            message.contains(expected),
+            "{expected} missing from {message}"
+        );
+    }
+    assert!(!message.contains("blocked by"), "{message}");
+
+    // The parent only sees the child's refusal envelope, which carries this
+    // summary as its message; the next command must reach the host line too.
+    let child_refusal = envelope(
+        "upgrade",
+        provenant_records::Outcome::Error,
+        serde_json::json!({"verify": "installed"}),
+        Some(provenant_records::CommandError::new(
+            "confinement_refused",
+            summary.clone(),
+            None,
+            "resolve the reported smoke cause",
+        )),
+    );
+    let parent = vec![fixture_smoke_host(false, &child_refusal)];
+    let parent_message = super::failed_hosts_message(&parent);
+    for expected in [graph, "task--read", "provenant status smoke-verify-4102-1"] {
+        assert!(
+            parent_message.contains(expected),
+            "{expected} missing from {parent_message}"
+        );
+    }
+}
+
+#[test]
 fn upgrade_failure_repair_points_at_json_per_host_detail() {
     // A failed envelope drops the human view, so the repair must send the
     // operator to the typed per-host detail, not to `--full`.
@@ -1376,4 +1642,48 @@ fn upgrade_full_human_keeps_capability_notices_and_smoke_envelopes() {
     );
     assert!(text.contains("\"schema_version\""), "{text}");
     assert!(!text.contains("use --full for detail"), "{text}");
+}
+
+#[test]
+// Spec: docs/specs/cli.md#upgrade-verification — a peer can only name a project
+// whose canonical common dir is relative to its home, so the smoke fixture must
+// sit under $HOME rather than $TMPDIR, owner-only.
+fn smoke_fixture_is_projectable_to_a_peer() -> Result<(), Box<dyn std::error::Error>> {
+    use provenant_core::{HostId, ProjectId};
+    use provenant_fabric_runtime::{
+        hosts::ProjectLocator,
+        identity::{Address, Identity},
+    };
+    use provenant_records::AbsolutePath;
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = tempfile::tempdir()?;
+    let home = temp.path().join("home");
+    std::fs::create_dir(&home)?;
+    let state = temp.path().join("state");
+    provenant_os::fixture::private_state_dir(&state)?;
+    let root = provenant_cli::smoke::Settings::default().root();
+    let nonce = crate::smoke::nonce()?;
+    crate::smoke::create_fixture(&state, &home, &nonce, &root)?;
+    let fixture = crate::smoke::fixture_root(&home, &root).join(&nonce);
+    assert!(fixture.starts_with(&home), "{}", fixture.display());
+    assert_eq!(
+        std::fs::metadata(&fixture)?.permissions().mode() & 0o777,
+        0o700
+    );
+    let common_dir = fixture.join(".git");
+    let host = HostId::from_bytes([1; 16]);
+    let identity = Identity {
+        project: ProjectId::from_bytes([2; 16]),
+        host,
+        inbox: Address::new(host, "chair")?,
+        client: "test".into(),
+        cwd: AbsolutePath::new(&fixture)?,
+        common_dir: AbsolutePath::new(&common_dir)?,
+        federation: None,
+    };
+    let locator = ProjectLocator::new(&identity, &home)
+        .expect("the smoke fixture must be projectable to a peer");
+    assert_eq!(locator.resolve(&home)?, common_dir);
+    Ok(())
 }

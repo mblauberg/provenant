@@ -81,6 +81,7 @@ pub fn read(state: &Path, project: &str, dispatch: &BTreeMap<String, Strength>) 
             Warning::new(
                 CONFIG_UNAVAILABLE,
                 format!("policy settings unavailable ({error}); using compiled defaults"),
+                provenant_records::warning::detected_source(CONFIG_UNAVAILABLE),
             )
             .subject("policy settings")
             .repair("correct the host policy configuration")

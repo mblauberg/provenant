@@ -8,12 +8,10 @@ The required check, suite tiers and green-evidence rules are in the
 
 ## Build tiers
 
-There is one build model with three tiers. Lanes run formatting only and never
-compile, seed or admit a build. The chair merges slices into one integration
-worktree and runs one warm, host-owned integrated check per epic. CI runs
-clippy and the tests on the integration pull request. `.worktrees/.cargo/config.toml`
-is the single mechanism that disables lane cargo; there is no lane build
-strategy, port row or admission knob to configure.
+Projects declare lane checks through `verify.lane`. The chair runs a warm,
+host-owned integrated check per epic and CI runs the full checks on the
+integration pull request. Local project policy may further constrain lane
+builds, including through `.worktrees/.cargo/config.toml`.
 
 ## Rust front-door tests
 
@@ -45,7 +43,9 @@ macOS tests have no module path, so they are named in `main_tests` on the
 and is run by hand.
 
 To request every suite, add the `ci:full` label to the pull request and push a
-commit, or run `gh workflow run ci.yml --ref BRANCH -f tier=full`. When a
+commit, or run `gh workflow run ci.yml --ref BRANCH -f tier=full`. To request
+all macOS suites on a PR, add `ci:macos` and push a commit. Labelling alone
+does not start a run. Any dispatch also runs the macOS suites. When a
 `ci:red-main` issue opens, inspect its failed jobs and comparison, then fix
 forward.
 
@@ -64,6 +64,9 @@ declares the tests that must run natively on macOS, their invocations and
 required environment. `scripts/check-native-inventory` resolves it against the
 platform test list and passing results. Add required native coverage to the
 declaration with the test change.
+The inventory check runs only when the macOS archive job produced its test
+list. If that producer is skipped or fails, its result remains the failure
+signal instead of a second missing-artifact failure.
 
 ## Reproduce a CI failure locally
 
@@ -82,11 +85,27 @@ tests, and `scripts/run-mutants` mutates diffs nightly and on PRs labelled
 `mutants`.
 
 Quarantine a flaky test in `tools/front-door/.config/quarantine.toml` only while
-it has an open issue, an owner and an expiry within 30 days. CI validates entries
-against the platform `cargo nextest list` inventories, excludes them from
-blocking partitions and reports their result in an advisory step. A PR without
+it has an open issue, an owner and an expiry within 30 days. CI also reads open
+`ci:flaky` issues carrying `<!-- provenant-flaky:v1 -->` with `package`, `name`,
+`owner` and `expires`; main-health opens one when a test fails on main and the
+re-run job passes that same test. Both sources are validated against the
+platform `cargo nextest list` inventories, excluded from blocking partitions and
+reported in an advisory step, and capped at ten entries together. A PR without
 the native list validates with `--partial-inventory`; main validates strictly
-against both lists. Remove the entry in the PR that fixes the test.
+against both lists. Fix the test, close its issue or remove its TOML entry in
+the same PR that ends the quarantine.
+
+When main is red, inspect the JUnit failures before filing a follow-up: if
+every failed test is already quarantined, or passed on the re-run, main-health
+records the evidence and opens no red-main issue. An unconfirmed failure still
+opens one, including when the quarantine cap is full. macOS failures have no
+Linux re-run evidence and stay actionable until a maintainer confirms them.
+
+Fixtures wait on events or pass their deadline to
+`provenant-test-support::wait_until`/`wait_step`; do not add a `thread::sleep`,
+`park_timeout` or fixed `Duration` wait to a test. `workspace_policy` warns on
+those waits, including fixed durations passed through local variables to timeout
+primitives, and refuses them under `PROVENANT_STRICT_TEST_WAITS=1`.
 
 ## Tool downloads
 

@@ -267,6 +267,78 @@ fn install_roots(
     }
     Ok(roots.clone())
 }
+/// Build-port findings rendered by `check config`: the effective `build.target`
+/// layout with its source layer, and a warning when a warm slot's toolchain no
+/// longer matches the repository pin.
+fn build_port_findings(
+    home: &Path,
+    state: &Path,
+    project: &Path,
+) -> Result<Vec<Finding>, CheckError> {
+    let relative = |path: &str| {
+        let parsed = provenant_core::RelativePath::parse(path)
+            .map_err(provenant_records::PathWireError::from)?;
+        PathWire::from_relative(&parsed).map_err(CheckError::from)
+    };
+    let mut findings = Vec::new();
+    let config_path = relative("config.toml")?;
+    let Ok(ports) = PortTable::read_for(Some(project), state) else {
+        return Ok(findings);
+    };
+    let layout = ports.build.target_layout();
+    // The default needs no note: `config show` already reports its layer. A
+    // layered override does, so `check` names the source that changed keying.
+    if layout.source != Layer::Default {
+        let components: Vec<&str> = layout.value.iter().map(|key| key.as_str()).collect();
+        let description = if components.is_empty() {
+            "a single shared directory".to_owned()
+        } else {
+            components.join(", ")
+        };
+        findings.push(Finding {
+            rule: "build.target.source".into(),
+            path: config_path,
+            line: 1,
+            message: format!(
+                "build.target keys the warm Cargo target by {description} (source: {})",
+                provenant_config::port_source_layer(layout.source)
+            ),
+        });
+    }
+    let Some(pin) = provenant_run::build::rust::pinned_toolchain(project) else {
+        return Ok(findings);
+    };
+    let key = provenant_config::project_key_for(project)
+        .unwrap_or_else(|| provenant_config::project_key(project));
+    let root = provenant_run::build::paths::project_slots(home, &key);
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return Ok(findings);
+    };
+    for entry in entries.flatten() {
+        let path = entry.path().join("slot.json");
+        let Ok(Some(record)) = provenant_run::build::slots::SlotRecord::read(&path) else {
+            continue;
+        };
+        if let Some((pin, warm)) =
+            provenant_run::build::rust::toolchain_drift(&pin, record.warm_toolchain.as_deref())
+        {
+            let label = format!(
+                "Library/Caches/provenant-slots/{key}/{}/slot.json",
+                record.index
+            );
+            findings.push(Finding {
+                rule: "build.toolchain_drift".into(),
+                path: relative(&label)?,
+                line: 1,
+                message: format!(
+                    "warm build cache uses rustc {warm} but the repository pins {pin}; the pinned build starts cold until its own target is warm"
+                ),
+            });
+        }
+    }
+    Ok(findings)
+}
+
 pub fn run(
     check: Check,
     globals: &Globals,
@@ -367,6 +439,53 @@ impl Inspection {
         }
     }
 }
+/// Advisory: attempt scratch above the configured share of free space. A
+/// bounded, read-only census; an incomplete observation never claims safety or
+/// danger it did not measure.
+fn warn_on_attempt_scratch(roots: &provenant_core::Roots) {
+    let Ok(config) = provenant_cli::config_reads::show_for(roots, "check config") else {
+        return;
+    };
+    let share = config.gc.scratch_warning_share_value();
+    if share <= 0.0 {
+        return;
+    }
+    let scratch = roots.state.as_path().join(provenant_run::ATTEMPT_SCRATCH);
+    let mut census = provenant_os::disk::DiskReport::with_walk_budget(
+        scratch.clone(),
+        0,
+        10_000,
+        Duration::from_millis(500),
+    )
+    .with_cancellation(CancelToken::new());
+    // The whole census is summed below, so the measured entry's index is not
+    // needed; discard the `#[must_use]` observation explicitly.
+    let _ = census.measure("attempt_scratch", &scratch);
+    let bytes = census.entries.iter().fold(0_u64, |sum, entry| {
+        sum.saturating_add(entry.allocated_bytes)
+    });
+    let Ok(free) = provenant_confinement::disk::available_bytes_at_existing(roots.state.as_path())
+    else {
+        return;
+    };
+    if scratch_exceeds_share(bytes, free, share) {
+        warn(
+            Warning::new(
+                provenant_records::warning::ATTEMPT_SCRATCH_HIGH,
+                format!(
+                    "attempt scratch holds {bytes} bytes with {free} bytes free, above gc.scratch_warning_share={share}; run `provenant gc --apply` to reclaim settled scratch"
+                ),
+                provenant_records::warning::detected_source(provenant_records::warning::ATTEMPT_SCRATCH_HIGH),
+            )
+            .subject(scratch.display().to_string()),
+        );
+    }
+}
+
+fn scratch_exceeds_share(bytes: u64, free: u64, share: f64) -> bool {
+    (bytes as f64) > (free as f64) * share
+}
+
 fn inspect(check: Inspectable, globals: &Globals) -> Result<Inspection, Error> {
     let workspace = if matches!(check, Inspectable::Release { .. }) {
         roots::Workspace::Checkout
@@ -380,6 +499,7 @@ fn inspect(check: Inspectable, globals: &Globals) -> Result<Inspection, Error> {
         roots,
         ..
     } = roots::resolve(globals, workspace, roots::Product::Required)?;
+    warn_on_attempt_scratch(&roots);
     let selector = (
         env!("PROVENANT_SOURCE_DIGEST"),
         assets.as_os_str().as_encoded_bytes(),
@@ -424,6 +544,9 @@ fn inspect(check: Inspectable, globals: &Globals) -> Result<Inspection, Error> {
         Inspectable::Config(page) => {
             let mut inspection =
                 provenant_config::inspect_config(&roots, &provenant_cli::domains::SECTIONS)?;
+            let build_findings = build_port_findings(&home, roots.state.as_path(), &project)?;
+            inspection.check.count += build_findings.len();
+            inspection.check.findings.extend(build_findings);
             if let Ok(config) = provenant_cli::config_reads::show_for(&roots, "check config") {
                 for message in
                     provenant_cli::accounts::directory_findings(&config.domains.accounts, &home)
@@ -445,6 +568,9 @@ fn inspect(check: Inspectable, globals: &Globals) -> Result<Inspection, Error> {
                 warn(Warning::new(
                     provenant_records::warning::POOL_EFFORT_UNSUPPORTED,
                     message,
+                    provenant_records::warning::detected_source(
+                        provenant_records::warning::POOL_EFFORT_UNSUPPORTED,
+                    ),
                 ));
             }
             for message in
@@ -453,6 +579,9 @@ fn inspect(check: Inspectable, globals: &Globals) -> Result<Inspection, Error> {
                 warn(Warning::new(
                     provenant_records::warning::PORT_DECLARATION_IGNORED,
                     message,
+                    provenant_records::warning::detected_source(
+                        provenant_records::warning::PORT_DECLARATION_IGNORED,
+                    ),
                 ));
             }
             Ok(provenant_cli::check::config_page(
@@ -497,6 +626,7 @@ fn inspect(check: Inspectable, globals: &Globals) -> Result<Inspection, Error> {
                 provenant_cli::config_reads::read_for(&install_roots, "check install")
             {
                 targets.accounts = provenant_cli::accounts::homes(&config.domains.accounts);
+                targets.hook_timeout_secs = config.domains.hooks.timeout_secs;
                 targets.shared_settings =
                     crate::install::shared_settings(&config.domains.accounts, &targets.home)
                         .ok()
@@ -541,7 +671,7 @@ fn inspect(check: Inspectable, globals: &Globals) -> Result<Inspection, Error> {
                 warn(Warning::new(
                     provenant_records::warning::AGENT_TOOLCHAIN_PATH,
                     message,
-                ));
+                 provenant_records::warning::detected_source(provenant_records::warning::AGENT_TOOLCHAIN_PATH)));
             }
             let apps = crate::apps::dir(&targets.home);
             let login_item = crate::apps::stale_login_item(&apps);
@@ -564,6 +694,9 @@ fn inspect(check: Inspectable, globals: &Globals) -> Result<Inspection, Error> {
                 warn(Warning::new(
                     provenant_records::warning::STALE_LOGIN_ITEM_ADVISORY,
                     message,
+                    provenant_records::warning::detected_source(
+                        provenant_records::warning::STALE_LOGIN_ITEM_ADVISORY,
+                    ),
                 ));
             }
             Ok(result)
@@ -728,6 +861,9 @@ fn private_home<T>(operation: impl FnOnce(&Path) -> Result<T, Error>) -> Result<
                 provenant_records::warning::Warning::new(
                     provenant_records::warning::PRIVATE_CHECK_DIR_UNCLEAN,
                     format!("cannot clean private check directory: {error}"),
+                    provenant_records::warning::detected_source(
+                        provenant_records::warning::PRIVATE_CHECK_DIR_UNCLEAN,
+                    ),
                 )
                 .once_per_change(),
             );
@@ -762,4 +898,21 @@ fn git_page(
             cancel: &cancel,
         })
     })
+}
+
+#[cfg(test)]
+mod scratch_warning_tests {
+    #[test]
+    fn small_positive_shares_keep_their_threshold() {
+        assert!(!super::scratch_exceeds_share(
+            99,
+            1_000_000_000,
+            0.000_000_1
+        ));
+        assert!(super::scratch_exceeds_share(
+            101,
+            1_000_000_000,
+            0.000_000_1
+        ));
+    }
 }

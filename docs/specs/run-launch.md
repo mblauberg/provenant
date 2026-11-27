@@ -20,7 +20,12 @@ read-only review: it holds no Git work, so a reservation left by its guardian is
 and reconciliation settles it with a typed warning ([outcome before release](run-settlement.md#outcome-before-release)).
 Reconciliation reports released custody only after exclusion and native
 absence evidence prove it safe; an unknown or live holder retains custody, and uncertain custody
-and unreadable reservations warn while reconciliation continues. Writer-bind refusals identify
+and unreadable reservations warn while reconciliation continues. An attempt whose stored record no
+longer decodes is not held merely because the decode failed: once writer exclusion is acquired and
+the recorded holder is proved gone with no settling exit, reconciliation preserves the bytes under
+`quarantine/` and releases the lease with a typed warning naming the source; `release attempt:ID`
+offers the same safety valve. Admission refusals keep fixed text and never carry a record path.
+Writer-bind refusals identify
 the durable lease holder, branch, worktree, reservation age (from its last durable update) and
 observed liveness.
 - Why: shared work must remain possible without holding coordination locks across external work.
@@ -175,12 +180,25 @@ provisioning, and provisioning verifies the exact branch and head.
 - Why: an owned writer must land in one project-owned location wherever the launch ran, and a
   failed bind must not leave a half-made worktree.
 
+A writer node that reuses an existing worktree declares its comparison `base`. When none is
+declared, the host resolves one from the worktree branch's upstream, else from its merge base
+with the default branch; `run --explain` reports each chosen commit and its source. The base is
+pinned only to review panels sourcing that writer, so each panel compares its writer's base
+against its pushed head without turning one writer's inferred base into a graph-wide fallback.
+A node-sourced review panel with no resolved base and no authored review base refuses the graph
+before launch, naming the writer and the remedy; a plain writer without a base remains advisory
+and falls back to the caller checkout.
+- Why: without a pinned base every lens reviews an empty range and reports equal commits, which
+  hides the missing Git evidence instead of naming it once before any lane starts.
+
 `run --explain` runs the same pre-attempt admission checks as a launch, in read-only form:
 graph exclusions, the submission snapshot, the refusal of host-authored writer-preflight
 fields, protected delivery targets and every declared writer branch, read from an existing
 checkout or from the node's `new_worktree` declaration. It allocates no graph execution,
 attempt record or writer checkout, and its `source_admission` rows report a proposed worktree
-without registering it. The dirty-worktree preflight and its WIP commit stay launch-only:
+without registering it. A writer placed on a peer is proposed on that peer: its row names the
+peer and the worktree it will provision from the branch, and no caller path is admitted for it.
+The dirty-worktree preflight and its WIP commit stay launch-only:
 they inspect and may write each existing writer checkout, so explain neither runs nor previews
 them. An explanation that passes therefore passes the same admission gates, and the launch can
 still refuse at its dirty-writer preflight before proceeding to writer provisioning and
@@ -194,7 +212,9 @@ primary checkout is not the lane's working copy. It is advice, never a fence, an
 absolute path elsewhere in the lane's context does not override it. Launch records the primary
 checkout's branch and ref tips (`primary-checkout.json`) so settlement can detect
 [stray work](run-settlement.md#stray-lane-work). The lane receives `PROVENANT_ROUTE`,
-`PROVENANT_MODEL`, `PROVENANT_EFFORT` and `PROVENANT_ACCOUNT`.
+`PROVENANT_MODEL`, `PROVENANT_EFFORT` and `PROVENANT_ACCOUNT`. On a lane, `provenant declare` is the
+companion to `provenant notes`: both travel over the attempt relay socket, and only a declared
+handoff — never prose — settles the lane.
 - Why: a provider's system prompt may name the primary checkout as the workspace root of a linked
   worktree, and a brief saying only "your worktree" loses to that absolute path.
 
@@ -205,9 +225,27 @@ Standing lane rules come from `lanes.brief_preamble`: a file path set at the hos
 (`--preamble-file`). The layers concatenate in that order, each labelled with its source. A
 file whose first line is a `<!-- provenant-roles: ... -->` header applies only to the roles it
 names: writer, review or read-only. A missing or unreadable file warns with its layer, and the
-launch proceeds without it. A writer's preamble also lists the project's declared no-build
-static checks from the port table under `Static checks:`, to run before pushing. Readers do
-not get that list.
+launch proceeds without it.
+Declared no-build checks from the port table appear under `Static checks:` in writer
+preambles, to run before pushing. Readers do not get the list.
+- A writer with valid `verify.lane` entries receives those tiers, commands, scopes and source as
+  its authoritative verification guidance; the legacy format-only scope does not also apply. The
+  launch receipt records the same effective entries and source. With no valid entries, the
+  resolved `lanes.verification` scope or formatter and hooks default remains in force.
+Project no-build checks are declared as `verify.static_checks` entries in `.provenant/ports.json` (or the host port
+table): each has an `argv`, a repository-relative `cwd` and a `timeout_seconds` cap. An absent
+or empty list adds no text and invents no tier for other stacks; an invalid entry warns and is
+dropped rather than refusing the launch. The list is labelled with the layer and exact file and
+key that declared it. Host and bound host-project declarations name their resolved ports file;
+project declarations use the stable `.provenant/ports.json` path. That same list is recorded as
+`static_checks` on the launch receipt beside `ci_scope` and `pr_policy`; each surviving check
+entry carries that layer and file/key source. Config merging replaces arrays wholesale, so entries
+in the effective list share one source. A failure is reported in the handoff and does not refuse
+the push; CI still gates the merge.
+Readers get neither the static checks list nor its receipt. Every brief states the result protocol verbatim:
+"Declare your result with `provenant declare --stdin` (schema v2 JSON; see STATUS_GUIDANCE).
+Field errors come back at once; fix and call again. The last accepted declaration settles the
+lane; prose and fenced blocks are not read. To stop early, declare `stopped_early` or `blocked`."
 - Why: standing rules belong in one owned file per layer, not repeated in every brief, and a
   writer should run the cheap checks the project declares before CI does.
 
@@ -217,21 +255,34 @@ control (access mode, worktree, branch, base or write scope) and the first one g
 the refusal; the bundled `smoke` template is the exception for worktree and branch/base, which
 bind to its write node only. Remote placement takes no caller path: a caller `worktree` is refused,
 but `--branch` with an optional `--base` is carried as peer-owned worktree intent so the peer
-creates the writer in its own clone. A bundled smoke launch with no branch provisions that intent
-from a sourced scratch branch (overridable with `--branch`/`--base` or `--set write_attempt`), so
-`upgrade --verify --host PEER` exercises the remote writer without a caller-supplied branch. The
-sender's graph does not bind or provision a local worktree for that writer; its checkpoint retains
-the peer provisioning intent for replay. A graph reader without an explicit worktree or attempt
-directory uses its selected project as its source; `upgrade --verify` selects a temporary
-committed scratch project for its smoke graph and binds a fixed review range so no lens fails on
-an empty range. For a manual bundled smoke launch without a `diff_base`, the checkout's first
-parent supplies the range; if unavailable, review is skipped with a reason and the other eligible
-nodes continue. A node may name a small project-relative fixture;
-the host stages its bytes with the task, so a peer places the same file in its own candidate
-scratch and the brief names its path instead of leaking a caller path.
-- Why: a verification graph must run on a real install and exercise a writer, and a skipped node
-  must not refuse the run it does not take part in. A fixture must reach every host that runs a
-  reader, not just the host that owns the checkout.
+creates the writer in its own clone. There is no default remote provisioning: a remote write
+node needs an explicit `--branch` (and optional `--base`) to own that worktree; without one the
+write node is skipped with a repair warning. The sender's graph does not bind or provision a
+local worktree for that writer; its checkpoint retains the peer provisioning intent for replay.
+
+`run smoke` and `upgrade --verify` share one hermetic lifecycle. It creates a deterministic
+fixture repository under `domains.smoke.fixture_root` (default `.local/state/provenant-smoke`,
+home-relative, owner-only) in the home of every target host; a peer can only project a project
+whose common directory is relative to its own home, so a fixture in `$TMPDIR` would refuse before
+submission. A fresh six-byte hex nonce names the fixture;
+fixed author, committer and 2000-01-01 timestamps make the same nonce yield the same OIDs on any
+host. A `.git/provenant-smoke.json` marker records the nonce, creation time and `FIXTURE_RECIPE`;
+the sweep removes only expired marked fixtures and warns `SMOKE_FIXTURE_FOREIGN` for an unmarked
+directory. The writer commits in the fixture and the review covers that commit. The verdict
+counts only when the nonce appears in both the read and review result summaries; a row that loses
+its nonce fails with the row named, so a false pass cannot masquerade as a result. `--project` on
+`run smoke` is ignored with `SMOKE_PROJECT_IGNORED`, because a caller project would reintroduce
+the checkout leak. `diff_base` defaults to the fixture head and any caller value resolves inside
+the fixture; an unresolvable value is refused with `INVALID (field diff_base)`. A peer below
+`SMOKE_FIXTURE_PROTOCOL` cannot verify the fixture and yields `SmokeVerdict::Unverified`, never a
+pass; `domains.smoke.unverified` chooses warn (exit 0) or fail. The result reports five phases
+(fixture, launch, wait, status, cleanup) and the effective values and sources of the
+`domains.smoke` keys (`fixture_root`, `sweep_after_hours`, `branch_prefix`, `unverified` and
+`set.{parameter}`). Afterwards the lifecycle forgets the fixture's binding and removes it on
+success, failure and refused launch.
+- Why: a verification graph must run on a real install and exercise a writer against evidence
+  only it produced, and a skipped node must not refuse the run it does not take part in. A caller
+  checkout, a caller project or an old peer must never turn a failed smoke into a pass.
 
 Every refusal of a launch input names the field that caused it, or the decoded path of a document
 or patch field; an unnamed `invalid input` is a defect. A refused bind keeps its typed cause to
@@ -267,6 +318,120 @@ attempt, and exclude Git and provider control paths. Host-native launches keep c
 provenance but cannot resume a provider session or select model-specific controls.
 - Why: provider selection must not silently narrow a lane's working surface, and only the user
   may widen a read-only lane's write authority.
+
+### Launch capability decisions
+
+Before any side effect a launch checks each requested field against the adapter's declared
+`AdapterFact`s and reports a gap for every absent field in `LaunchField` order. Model, effort
+and image input degrade: a model gap makes the candidate ineligible so routing prefers a
+fallback; an effort gap on an exact pin drops the control with an `effort_warning` naming the
+declaration's reason and source, while a pool prefers a fallback; image attachments on an
+adapter without image input stay readable paths and produce a launch warning that lists them.
+Write, network, resume and skill-location gaps refuse the launch: they are confinement or
+continuity boundaries with no safe downgrade. A refusal names the adapter, the field, the
+reason and the source.
+- Why: a degraded input must stay visible in the result, and a boundary refusal must never
+  be silently narrowed.
+
+### Capability overrides and gap policy
+
+`[[adapter_capabilities]]` entries in the host and project overlays narrow an adapter's facts
+with `disable = [...]` and a `reason`; a later layer replaces the whole entry by adapter, and
+an unknown adapter or capability name warns and is skipped. Widening is not expressible.
+`on_gap.model`, `on_gap.effort` and `on_gap.image_input` set a degradable gap to `warn`, `off`
+or `refuse`; the `policy.LAUNCH_MODEL_UNSUPPORTED`, `policy.LAUNCH_EFFORT_UNSUPPORTED` and
+`policy.LAUNCH_IMAGE_INPUT_UNSUPPORTED` rows set the same action for every adapter. One
+resolver decides each gap. Precedence, lowest first: the compiled default (`warn`); the policy
+row, layered host, project and dispatch by the policy table; the adapter's `on_gap` key, host
+then project. The adapter entry is the narrower setting, so it wins for that adapter at any
+layer, and the policy candidate it replaced is reported as shadowed. A gap names the layer and
+setting that chose its action; a default names both settings that can change it, for example
+`warn by default; set policy.LAUNCH_EFFORT_UNSUPPORTED or [[adapter_capabilities]]
+on_gap.effort`. `provenant adapter capabilities` reports each adapter's effective rules, and
+`run --explain` reports, per node and pinned adapter, the gaps that launch would meet with
+those sources. Write, network, resume and
+skill-location gaps always refuse because they are authority and continuity boundaries, so an
+`on_gap` key for them warns and is skipped. Admission and graph validation read the row facts;
+routing and preparation apply the overlay and gap policy before the provider starts.
+`provenant adapter capabilities` reports the effective facts and the layer that narrowed them.
+- Why: an owner may narrow a harness without editing the registry, and an override cannot
+  silently become an authority grant.
+
+### Adapter capability matrix
+
+`provenant adapter capabilities [--json]` projects the registry, the compatibility assessment
+and measured latency in the result envelope v2. The checked table below is the static part: it
+reads no host state, so the document never depends on a machine. A `no` value carries a
+footnote with its reason and source.
+
+<!-- adapter-capabilities:begin -->
+Declared adapter capabilities. A `no` value carries a footnote with its reason and source.
+
+| Adapter | Model | Effort | Image input | Resume | Write | Network | Default network | Lane | Chair | Terminal event | Answering model | Usage attribution | Live input | Session reference | Hooks | Answer delivery | Precompact context | Instructions |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| claude | yes | yes | yes | yes | yes | provider, local, open | open | continuation_only | mail_only | weak | stream | attempt | no[^1] | reported | yes | yes | yes | yes |
+| codex | yes | yes | yes | yes | yes | provider, local, open | open | continuation_only | mail_only | weak | rollout | session | no[^3] | reported | yes | yes | no[^2] | yes |
+| cursor | yes | yes | no[^7] | yes | yes | provider, local, open | open | continuation_only | mail_only | weak | stream | attempt | no[^8] | reported | yes | no[^4] | no[^5] | no[^6] |
+| agy | yes | yes | no[^11] | yes | yes | provider, local, open | open | continuation_only | mail_only | weak | stream | attempt | no[^12] | reported | yes | no[^9] | no[^10] | yes |
+| opencode | yes | yes | no[^14] | yes | yes | provider, local, open | open | continuation_only | mail_only | weak | session_database | attempt | no[^15] | reported | yes | no[^13] | yes | yes |
+| command | no[^18] | no[^19] | no[^20] | no[^21] | no[^22] | provider, local, open | open | unsupported | unsupported | no[^16] | unreported | attempt | no[^23] | no[^17] | - | - | - | - |
+| host-native | no[^25] | no[^26] | no[^27] | no[^28] | yes | provider, local, open | open | unsupported | unsupported | weak | stream | attempt | no[^29] | no[^24] | - | - | - | - |
+| fixture-provider | yes | no[^31] | no[^32] | no[^33] | no[^34] | provider, local, open | open | unsupported | unsupported | weak | stream | attempt | no[^35] | no[^30] | - | - | - | - |
+
+[^1]: live input: no live mid-run input is implemented for this adapter; source=crates/records/src/adapters.rs
+[^2]: precompact context: Codex PreCompact accepts only a systemMessage UI notice, not model context; source=https://developers.openai.com/codex/hooks
+[^3]: live input: no live mid-run input is implemented for this adapter; source=crates/records/src/adapters.rs
+[^4]: answer delivery: Cursor preToolUse does not accept the additionalContext response used by Provenant answer delivery; source=https://cursor.com/docs/hooks#pretooluse
+[^5]: precompact context: Cursor preCompact accepts only user_message output shown to the user, not model context; source=https://cursor.com/docs/hooks#precompact
+[^6]: instructions: Cursor global instructions are settings-managed; AGENTS.md is project-root scoped; source=https://docs.cursor.com/context/rules-for-ai
+[^7]: image input: cursor does not provide image input control; source=crates/records/src/adapters.rs
+[^8]: live input: no live mid-run input is implemented for this adapter; source=crates/records/src/adapters.rs
+[^9]: answer delivery: Antigravity PreToolUse returns a tool decision and argument overwrite, not injected context; source=https://antigravity.google/docs/hooks#input-and-output-contract
+[^10]: precompact context: Antigravity exposes no PreCompact event; source=https://antigravity.google/docs/hooks#supported-events
+[^11]: image input: agy does not provide image input control; source=crates/records/src/adapters.rs
+[^12]: live input: no live mid-run input is implemented for this adapter; source=crates/records/src/adapters.rs
+[^13]: answer delivery: OpenCode tool.execute.before hooks cannot inject additional context into the active session; source=https://opencode.ai/docs/build/plugins/server#tool-execution
+[^14]: image input: opencode does not provide image input control; source=crates/records/src/adapters.rs
+[^15]: live input: no live mid-run input is implemented for this adapter; source=crates/records/src/adapters.rs
+[^16]: absent: process exit is the contract for raw output; source=crates/records/src/adapters.rs
+[^17]: absent: raw output carries no session id; source=crates/records/src/adapters.rs
+[^18]: model: command does not provide model control; source=crates/records/src/adapters.rs
+[^19]: effort: command does not provide effort control; source=crates/records/src/adapters.rs
+[^20]: image input: command does not provide image input control; source=crates/records/src/adapters.rs
+[^21]: resume: command does not provide resume control; source=crates/records/src/adapters.rs
+[^22]: write: command does not provide write control; source=crates/records/src/adapters.rs
+[^23]: live input: no live mid-run input is implemented for this adapter; source=crates/records/src/adapters.rs
+[^24]: absent: the delegated adapter reports no provider session id; source=crates/records/src/adapters.rs
+[^25]: model: host-native does not provide model control; source=crates/records/src/adapters.rs
+[^26]: effort: host-native does not provide effort control; source=crates/records/src/adapters.rs
+[^27]: image input: host-native does not provide image input control; source=crates/records/src/adapters.rs
+[^28]: resume: host-native does not provide resume control; source=crates/records/src/adapters.rs
+[^29]: live input: no live mid-run input is implemented for this adapter; source=crates/records/src/adapters.rs
+[^30]: absent: the delegated adapter reports no provider session id; source=crates/records/src/adapters.rs
+[^31]: effort: fixture-provider does not provide effort control; source=crates/records/src/adapters.rs
+[^32]: image input: fixture-provider does not provide image input control; source=crates/records/src/adapters.rs
+[^33]: resume: fixture-provider does not provide resume control; source=crates/records/src/adapters.rs
+[^34]: write: fixture-provider does not provide write control; source=crates/records/src/adapters.rs
+[^35]: live input: no live mid-run input is implemented for this adapter; source=crates/records/src/adapters.rs
+<!-- adapter-capabilities:end -->
+
+### Harness version compatibility
+
+A bundled, empty table at `crates/routing/assets/harness-compatibility.toml` is overlaid by
+`[[harness_compatibility]]` entries in the host and project `config.toml` through
+`provenant_config::overlays::read_layers`; a later layer replaces the whole entry by adapter.
+An entry declares a `provenant_range`, an optional `recommended_range` and `ranges` of
+comma-separated comparators (`>=`, `>`, `<`, `<=`, `=`) over `MAJOR[.MINOR[.PATCH]]`; the first
+matching range wins and names `supported`, `unsupported` or `broken`. No entry or no matching
+range is `unlisted` and a version that cannot be read is `version_unread`. An entry whose
+`provenant_range` excludes this build's version is ignored, and an invalid entry is skipped
+with an overlay warning naming its layer. `HARNESS_VERSION_UNSUPPORTED` and
+`HARNESS_VERSION_BROKEN` warn by default and may be set to `off` or `refuse` through their
+`policy.*` knobs. The version probe is one bounded `--version` call per binary per process,
+cached by path, mtime and length, and controlled by `providers.<id>.version_probe` and
+`providers.<id>.version_probe_timeout_seconds`; there is no remote fetch.
+- Why: harness CLIs change weekly, and a stale version must be actionable without becoming
+  an accidental launch boundary.
 
 ### Lane access
 
@@ -375,18 +540,18 @@ proceeds, and records `effective=false` and the reason in the sandbox receipt.
 
 ## Inputs and resources
 
-The tree a read-only lane reads is the sourced `lanes.read_source` setting, resolved by one
-resolver, `read_only_source_ref`. `auto` (the registry default, also the empty value) pins only a
-checkout behind its fetched upstream, as last fetched; a level or ahead checkout keeps its local
-tree. `checkout` keeps the local checkout; `default_branch` pins the fetched default branch
-(remote HEAD, then the forge API), never this checkout's configured tracking upstream; any other
-value is an explicit Git ref; `lanes.read_source_fetch_first` fetches from the resolved remote
-before the ref is read. `--source local` maps onto `checkout` and `--source upstream` onto
-`default_branch` at the launch layer, so the flag wins over the host or project knob. The registry
-default and the resolver agree: `config schema` reports `auto` when no knob is set.
-`bind_default_read_only_source` pins the graph's read-only nodes to the resolved commit. A writer
-launch instead resolves one base by role before sealing its identity: explicit `--base`; else the
-`--branch` default; else the HEAD of a named `--worktree` or a composite bound with
+The tree a read-only lane reads is selected by `lanes.read_source`, resolved by
+`resolve_read_source`. `auto` pins the fetched upstream when the checkout is behind,
+and otherwise pins checkout HEAD. `live` reads the live tree locally; on a peer it
+pins HEAD and warns `READ_SOURCE_PINNED_FOR_PEER`. `default_branch` pins the fetched
+default branch; any other value is a Git ref. `--source` accepts the same values
+and overrides configuration. `lanes.read_source_fetch_first` fetches before resolution.
+`bind_read_source` is the one binder: it pins each agent leaf, never a gate or composite, to
+the writer base when one resolved and otherwise to the pinned read source. A
+repository file still naming `checkout` warns `READ_SOURCE_VALUE_RENAMED` and resolves as `auto`;
+it never acts as the live choice. A writer launch instead resolves one base by role before
+sealing its identity: explicit `--base`; else the `--branch` default; else the HEAD of a named
+`--worktree` or a composite bound with
 `--set worktree=PATH`; else none, with an advisory warning that its identity falls back to the
 caller checkout. The writer's own nodes, its launch identity and the stale-checkout warning skip
 the read-only default; its read-only members (a plan node, or a composite's review and gate nodes)
@@ -395,7 +560,12 @@ authored document keep resolving their own subject. Writer-ness is the resolved 
 launch is a writer when a node that will run writes a worktree — not one launch input. The warning
 names the ref, the commit and the layer that chose it; `read_source` on the launch result and the
 explain status names the same commit. Absent or unusable Git evidence stays advisory and never
-refuses the launch.
+refuses the launch. The `lanes.writer_base` knob chooses that default: `default_branch` resolves
+the remote the read-source resolver finds (never a hard-coded `origin`), `checkout` pins the
+caller HEAD at admission, and any other value is a Git ref; provisioning creates the branch from
+the admitted commit. Explicit `--base` always wins; an
+unresolvable value warns and falls back to the caller checkout, naming the key and its source.
+The run result reports `writer_base` with its commit and source.
 - Why: file:line evidence from a stale working tree reports findings upstream has fixed, and a
   plan should read the base it will implement rather than the caller's checkout.
 

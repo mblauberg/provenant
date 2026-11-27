@@ -187,8 +187,12 @@ pub(super) fn run(
             use provenant_records::warning::{WORKTREE_SETUP_INCOMPLETE, Warning, warn};
             // Spec: docs/specs/cli.md#warnings-are-typed-values
             warn(
-                Warning::new(WORKTREE_SETUP_INCOMPLETE, warning.clone())
-                    .subject(path.display().to_string()),
+                Warning::new(
+                    WORKTREE_SETUP_INCOMPLETE,
+                    warning.clone(),
+                    provenant_records::warning::detected_source(WORKTREE_SETUP_INCOMPLETE),
+                )
+                .subject(path.display().to_string()),
             );
             let mut warnings: Vec<_> = durability_warning.into_iter().collect();
             warnings.push(warning);

@@ -7,13 +7,14 @@ mod interface;
 #[cfg(test)]
 mod lane_read_tests;
 mod refusal_detail;
-mod review_subject;
+mod source_policy;
+mod subject;
 pub(crate) mod unified;
 pub(crate) use unified::{
     GraphCommand, check_targets, command_fail, final_status_rows, graph_listing, read_lane_graph,
-    read_status_rows, status_line, superseded_notice, superseding_handle, unified_graph_command,
-    unified_graph_output, unified_graph_result, unified_graph_steer, unified_graph_trace,
-    unsettled_graphs,
+    read_status_rows_with_recovery, status_line, superseded_notice, superseding_handle,
+    unified_graph_command, unified_graph_output, unified_graph_result, unified_graph_steer,
+    unified_graph_trace, unsettled_graphs,
 };
 pub(crate) mod gc_cleanup;
 pub(crate) mod git_facts;
@@ -22,10 +23,16 @@ mod graph_document;
 pub(crate) mod owner;
 mod peer;
 mod peer_source_binding;
+mod queue_adoption;
+mod queue_controls;
+mod queue_delivery;
+mod queue_dispatch;
+mod queue_registry;
+mod queue_scheduler;
+mod queue_snapshot;
 pub(crate) mod run_owner;
 pub(crate) mod settlement;
 mod steer;
-mod writer_base;
 
 pub(crate) use git_facts::*;
 pub(crate) use owner::*;
@@ -46,9 +53,9 @@ use graph_status::{graph_snapshot, graph_status_elapsed};
 pub use peer::{hosts, peer};
 pub(crate) use settlement::advance_live_graph;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "fixture"))]
 include!("fabric/facade_tests.rs");
-#[cfg(test)]
+#[cfg(any(test, feature = "fixture"))]
 include!("fabric/graph_tests.rs");
 
 use provenant_cli::fabric::Context;
@@ -239,7 +246,13 @@ impl Factory {
             "review_empty_range: base and subject resolve to the same commit; select a subject with changes".into(),
         ))
         };
-        let base = base.ok_or_else(empty)?;
+        // An absent base is not an empty range: there was nothing to compare.
+        // Keep `review_empty_range` for two commits that really are equal.
+        let base = base.ok_or_else(|| {
+            FacadeError::invalid(InvalidInputDetail::Field(
+                "review_base_unresolved: no base was resolved for the review subject; declare a base on the writer or supply review_base".into(),
+            ))
+        })?;
         if base == subject {
             return Err(empty());
         }
@@ -333,6 +346,18 @@ impl BoundFacade<'_> {
         cancel: &CancelToken,
     ) -> Result<provenant_fabric_runtime::inbox::InboxResult, ServiceError> {
         use provenant_fabric_runtime::inbox::{InboxInput, InboxReply};
+
+        if let Some(result) = queue_controls::handle_inbox_control(
+            self.factory,
+            input.clone(),
+            host.clone(),
+            budget,
+            cancel,
+        )
+        .map_err(ServiceError::from)?
+        {
+            return Ok(result);
+        }
 
         let ctx = &self.factory.context;
         let Some(host) =
@@ -435,6 +460,7 @@ impl F3Facade for BoundFacade<'_> {
         let steer = |attempt: provenant_core::AttemptId,
                      operation: &provenant_core::OperationId,
                      text: &str,
+                     now: bool,
                      call: &provenant_fabric_store::Request<'_>| {
             provenant_cli::inbox::deliver_steer(
                 &edge,
@@ -442,6 +468,7 @@ impl F3Facade for BoundFacade<'_> {
                 attempt,
                 operation,
                 text,
+                now,
                 call,
             )
         };

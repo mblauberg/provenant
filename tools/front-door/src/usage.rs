@@ -98,6 +98,7 @@ pub fn ingest_native(
     provider: Option<&str>,
     since: Option<jiff::Timestamp>,
     deadline: Option<provenant_core::MonoTime>,
+    incremental: bool,
 ) -> Result<provenant_telemetry::ingest::Report, String> {
     use provenant_telemetry::ingest;
     let config = provenant_cli::config_reads::read_for(roots, "telemetry")
@@ -135,7 +136,7 @@ pub fn ingest_native(
             provider,
             since,
             deadline,
-            incremental: deadline.is_some(),
+            incremental,
         },
     )
     .map_err(|error| error.to_string())
@@ -180,33 +181,39 @@ fn merge_chair_identity(
     }
 }
 
-/// Wall budget for the SessionStart ingest, inside the hook's five-second host
-/// timeout with room for the chair's own work.
-const HOOK_INGEST_BUDGET: std::time::Duration = std::time::Duration::from_secs(3);
+/// Arguments for the detached ingest worker. Separated from spawning so the
+/// hook path can be pinned without starting a process in a test harness.
+pub(crate) fn ingest_worker_argv(
+    executable: &std::path::Path,
+    state: &std::path::Path,
+) -> Vec<std::ffi::OsString> {
+    use std::ffi::OsString;
+    vec![
+        executable.as_os_str().to_owned(),
+        OsString::from("--state-dir"),
+        state.as_os_str().to_owned(),
+        OsString::from("telemetry"),
+        OsString::from("ingest"),
+        OsString::from("--incremental"),
+    ]
+}
 
-/// Best-effort ingest at chair session start and turn end.
-/// The hook has a five-second host timeout, so only files modified in the last day are read; the
-/// read stops at a three-second wall deadline, and the rows read so far are
-/// still written. Every failure is ignored: a slow transcript must never stop
-/// the chair.
-#[allow(clippy::disallowed_methods)]
-pub fn ingest_after_chair_hook(globals: &Globals) {
+/// Queue usage ingest without doing it on the hook path. The worker resumes
+/// durable per-transcript cursors and has no `since` window, so a large
+/// transcript set cannot hold the chair hook. The hook returns as soon as the
+/// child is queued; every failure is advisory.
+pub fn ingest_after_chair_hook(globals: &Globals) -> bool {
     let Ok(resolved) = roots::resolve(globals, Workspace::Directory, Product::Optional) else {
-        return;
+        return false;
     };
-    use provenant_core::Clock;
-    let clock = provenant_os::clock::SystemClock::new();
-    let deadline = clock
-        .mono_now()
-        .checked_add(provenant_core::DurationMicros::from_micros(
-            HOOK_INGEST_BUDGET.as_micros() as u64,
-        ))
-        .ok();
-    let since = clock
-        .wall_now()
-        .ok()
-        .and_then(|now| jiff::Timestamp::from_second(now.as_timestamp().as_second() - 86_400).ok());
-    let _ = ingest_native(&resolved.roots, &resolved.home, None, since, deadline);
+    let Ok(executable) = std::env::current_exe() else {
+        return false;
+    };
+    provenant_os::exec::spawn_detached(
+        &ingest_worker_argv(&executable, resolved.roots.state.as_path()),
+        &resolved.home,
+    )
+    .is_ok()
 }
 
 pub fn ingest(cmd: &provenant_cli::Ingest, globals: &Globals) -> u8 {
@@ -226,6 +233,7 @@ pub fn ingest(cmd: &provenant_cli::Ingest, globals: &Globals) -> u8 {
         cmd.provider.as_deref(),
         cmd.since,
         None,
+        cmd.incremental,
     ) {
         Ok(report) => {
             let mut text = format!(
@@ -368,6 +376,32 @@ mod tests {
         fn resolve_existing_ancestor(&self, path: &Path) -> std::io::Result<PathBuf> {
             Ok(path.to_owned())
         }
+    }
+
+    #[test]
+    fn chair_hook_ingest_is_queued_as_an_incremental_worker() {
+        let argv = ingest_worker_argv(
+            std::path::Path::new("/bin/provenant"),
+            std::path::Path::new("/private/state"),
+        );
+        let words: Vec<_> = argv
+            .iter()
+            .map(|word| word.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            words,
+            [
+                "/bin/provenant",
+                "--state-dir",
+                "/private/state",
+                "telemetry",
+                "ingest",
+                "--incremental"
+            ]
+        );
+        // No --since: the worker resumes durable cursors rather than rescanning
+        // a 24-hour window on the hook path.
+        assert!(!words.iter().any(|word| word == "--since"));
     }
 
     #[test]

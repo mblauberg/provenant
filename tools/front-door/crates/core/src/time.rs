@@ -34,6 +34,8 @@ impl UtcMicros {
     /// nanoseconds beyond it that this type cannot construct. Built with a
     /// const constructor, so an invalid bound fails at compile time.
     pub const MAX: Self = Self(jiff::Timestamp::constant(253_402_207_200, 0));
+    /// The Unix epoch, for a reading whose clock is unavailable.
+    pub const UNIX_EPOCH: Self = Self(jiff::Timestamp::UNIX_EPOCH);
 
     pub fn from_micros(micros: i64) -> Result<Self, TimeError> {
         // RFC3339 has a four-digit nonnegative year. Jiff also supports earlier

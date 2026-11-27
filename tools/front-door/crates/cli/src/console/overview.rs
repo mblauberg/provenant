@@ -2,7 +2,7 @@
 use super::{Error, Project};
 use provenant_core::{ActorId, CancelToken, Clock, ProjectId, Roots};
 use provenant_os::clock::SystemClock;
-use provenant_run::{ExecutionContext, OverviewState, RunStore};
+use provenant_run::{ExecutionContext, RunStore};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
@@ -106,7 +106,13 @@ pub(super) fn read(roots: &Roots, projects: &[Project]) -> Result<Value, Error> 
             remaining_bytes -= page.bytes_read;
             for item in page.items {
                 if let Some(label) = labels.get(&item.project_id) {
-                    needs_you.push(json!({"id":item.id,"project_id":item.project_id,"project_label":label,"title":item.title,"chair_session_id":item.chair_session_id}));
+                    needs_you.push(super::projection::overview_needs_you(
+                        &json!(item.id),
+                        &item.title,
+                        &json!(item.chair_session_id),
+                        &json!(item.project_id),
+                        &json!(label),
+                    ));
                 }
             }
             if page.truncated {
@@ -152,28 +158,23 @@ pub(super) fn read(roots: &Roots, projects: &[Project]) -> Result<Value, Error> 
                         true,
                         census.as_ref().ok_or(()),
                     );
-                    let active = match row.presence {
-                        Some(provenant_records::wire::LanePresence::Live) => true,
-                        Some(
-                            provenant_records::wire::LanePresence::Unattended
-                            | provenant_records::wire::LanePresence::Unknown
-                            | provenant_records::wire::LanePresence::Settling,
-                        ) => false,
-                        None => is_live(item.state),
-                    };
-                    let attention = matches!(
-                        row.presence,
-                        Some(
-                            provenant_records::wire::LanePresence::Unattended
-                                | provenant_records::wire::LanePresence::Unknown
-                                | provenant_records::wire::LanePresence::Settling
-                        )
-                    );
+                    let (active, attention) =
+                        super::projection::overview_activity(row.presence, &item.record.state);
                     running += usize::from(active);
                     attention_count += usize::from(attention);
                     if active || attention {
                         let key = &item.record.key;
-                        lanes.push(json!({"project_id":item.project_id,"project_label":label,"key":key,"attempt_id":row.attempt_id,"task_label":item.title,"state":row.state,"reason":row.reason,"presence":row.presence,"queued_at":item.record.queued_at,"cause":row.cause,"retry_of":row.retry_of,"superseded_by":row.superseded_by,"attention":attention}));
+                        let attempt = serde_json::to_value(row).map_err(|_| Error::Encode)?;
+                        lanes.push(super::projection::overview_lane(
+                            &json!(item.project_id),
+                            label,
+                            &serde_json::to_value(key).map_err(|_| Error::Encode)?,
+                            &item.title,
+                            &attempt,
+                            &serde_json::to_value(item.record.queued_at)
+                                .map_err(|_| Error::Encode)?,
+                            attention,
+                        ));
                     }
                 }
                 if batch.truncated {
@@ -190,44 +191,21 @@ pub(super) fn read(roots: &Roots, projects: &[Project]) -> Result<Value, Error> 
         Ok(None) => "empty",
         Err(_) => "unavailable",
     };
-    Ok(
-        json!({"schema_version":2,"needs_you":needs_you,"lanes":lanes,
-        "counts":{"needs_you":(fabric != "unavailable" && fabric != "incompatible").then_some(needs_you.len()),
-                  "running":(run != "unavailable" && run != "incompatible").then_some(running),
-                  "attention":(run != "unavailable" && run != "incompatible").then_some(attention_count)},
-        // Overview reads only this host's stores; it never traverses nested
-        // runs, so their coverage is declared unavailable, not measured.
-        "coverage":{"scope":"local","inbox":fabric,"runs":run,"nested_runs":"unavailable"}}),
-    )
-}
-
-fn is_live(state: OverviewState) -> bool {
-    !matches!(state, OverviewState::Terminal(_))
+    // Overview reads only this host's stores; it never traverses nested runs,
+    // so their coverage is declared unavailable, not measured.
+    Ok(super::projection::overview(
+        &needs_you,
+        &lanes,
+        running,
+        attention_count,
+        fabric,
+        run,
+    ))
 }
 
 #[cfg(test)]
 mod comparison_tests {
     use super::*;
-
-    #[test]
-    fn overview_only_contains_unsettled_attempts() {
-        for state in [
-            OverviewState::Queued,
-            OverviewState::Starting,
-            OverviewState::Running,
-            OverviewState::Settling,
-        ] {
-            assert!(is_live(state));
-        }
-        for outcome in [
-            provenant_run::Outcome::Succeeded,
-            provenant_run::Outcome::Failed,
-            provenant_run::Outcome::TimedOut,
-            provenant_run::Outcome::Cancelled,
-        ] {
-            assert!(!is_live(OverviewState::Terminal(outcome)));
-        }
-    }
 
     use provenant_fabric_runtime::inbox::{OverviewBatch, OverviewItem};
 

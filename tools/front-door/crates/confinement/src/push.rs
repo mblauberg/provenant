@@ -147,7 +147,7 @@ impl PushContext<'_> {
                                     Warning::new(
                                         DEFAULT_BRANCH_REWRITTEN,
                                         format!("pre-push: rewriting the default branch {branch}; {setting}"),
-                                    )
+                                     provenant_records::warning::detected_source(DEFAULT_BRANCH_REWRITTEN))
                                     .subject(branch.to_string())
                                     .once_per_change(),
                                 );
@@ -192,6 +192,9 @@ impl PushContext<'_> {
                                     CONFLICT_MARKERS_PUSHED,
                                     format!(
                                         "pre-push: conflict markers in pushed commits; {setting}"
+                                    ),
+                                    provenant_records::warning::detected_source(
+                                        CONFLICT_MARKERS_PUSHED,
                                     ),
                                 )
                                 .subject(branch.to_string())

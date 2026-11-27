@@ -46,7 +46,63 @@ def check(config, workflow, packages):
     for job in always | ungated:
         if 'needs.scope.outputs.suites' in str(jobs.get(job, {}).get('if', '')):
             errors.append(f'{job} must not bind a suite')
-    return errors + unwatched_packages(config, jobs, packages)
+    return errors + unwatched_packages(config, jobs, packages) + gate_edges(config, jobs) + artifact_edges(jobs)
+
+
+def artifact_edges(jobs):
+    """Artifact inventories run only when their native test archive exists."""
+    consumer, producer = 'rust-macos-inventory', 'rust-macos-archive'
+    if consumer not in jobs:
+        return []
+    errors = []
+    if producer not in job_needs(jobs[consumer]):
+        errors.append(f'{consumer} does not wait for {producer}')
+    if f"needs.{producer}.result == 'success'" not in str(jobs[consumer].get('if', '')):
+        errors.append(f'{consumer} does not require {producer} success before downloading its artifact')
+    return errors
+
+
+def job_needs(job):
+    value = job.get('needs', [])
+    if isinstance(value, str):
+        value = [value]
+    return [n for n in value if isinstance(n, str)] if isinstance(value, list) else []
+
+
+def gate_edges(config, jobs):
+    """A failed cheap gate must leave every gated suite's job unstarted.
+
+    Follow the workflow's needs graph transitively: a job that inherits the
+    gate through an intermediate job counts, but a gated job cannot escape it
+    with one indirect hop. A job that needs the gate directly must name the
+    gate's result in its condition, or a covered gate suite would skip a gated
+    suite that was independently selected to run.
+    """
+    edges = {name: job_needs(job) for name, job in jobs.items()}
+    errors = []
+    for gate in config.get('gate', []):
+        gate_job = gate['job']
+        for name in gate['suites']:
+            suite = next((s for s in config['suite'] if s['name'] == name), None)
+            if suite is None:
+                errors.append(f'gate names unknown suite {name}')
+                continue
+            for job in suite['jobs']:
+                if job == gate_job:
+                    errors.append(f'gate job {gate_job} is itself gated')
+                    continue
+                seen, stack = set(), list(edges.get(job, []))
+                while stack:
+                    dep = stack.pop()
+                    if dep in seen:
+                        continue
+                    seen.add(dep)
+                    stack.extend(edges.get(dep, []))
+                if gate_job not in seen:
+                    errors.append(f'{job} does not wait for gate {gate_job}')
+                if gate_job in edges.get(job, []) and f'needs.{gate_job}.result' not in str(jobs.get(job, {}).get('if', '')):
+                    errors.append(f'{job} does not handle skipped gate {gate_job}')
+    return errors
 
 
 def unwatched_packages(config, jobs, packages):
@@ -87,13 +143,55 @@ def workspace_packages(root):
     return packages
 
 
+# Walk balanced cfg expressions so nested all/any/not and multiline cfg work.
+CFG_START = re.compile(r'\bcfg\s*\(')
+MACOS = re.compile(r'target_os\s*=\s*["\']macos["\']')
+NOT_LINUX = re.compile(r'not\s*\(\s*target_os\s*=\s*["\']linux["\']\s*\)')
+UNIX = re.compile(r'\bunix\b')
+
+
+def cfg_expressions(content):
+    for match in CFG_START.finditer(content):
+        depth = 1
+        for index in range(match.end(), len(content)):
+            if content[index] == '(':
+                depth += 1
+            elif content[index] == ')':
+                depth -= 1
+                if depth == 0:
+                    yield content[match.end():index]
+                    break
+
+
+def macos_cfg_paths(root):
+    for directory, dirs, files in os.walk(root):
+        dirs[:] = [d for d in dirs if d not in ('.git', 'target')]
+        for name in sorted(files):
+            if not name.endswith('.rs'):
+                continue
+            path = Path(directory) / name
+            content = path.read_text()
+            expressions = list(cfg_expressions(content))
+            if (any(MACOS.search(cfg) or NOT_LINUX.search(cfg) for cfg in expressions)
+                    or (any(UNIX.search(cfg) for cfg in expressions)
+                        and re.search(r'\b(?:macos|darwin)\b', content, re.IGNORECASE))):
+                yield path.relative_to(root).as_posix()
+
+
+def uncovered_macos(config, root):
+    suite = next(s for s in config['suite'] if s['name'] == 'macos_lint')
+    return [f'{path}: macOS-specific cfg is not covered by macos_lint.pr_paths'
+            for path in macos_cfg_paths(root)
+            if not selector.any_match(suite.get('pr_paths', []), path)]
+
+
 def main():
     try:
         import yaml
         config = selector.manifest()
         workflow_path = Path(os.environ.get('CI_WORKFLOW', selector.ROOT / '.github/workflows/ci.yml'))
         workflow = yaml.safe_load(workflow_path.read_text())
-        errors = check(config, workflow, workspace_packages(selector.ROOT))
+        errors = check(config, workflow, workspace_packages(selector.ROOT)) + uncovered_macos(config, selector.ROOT)
         if errors:
             print('\n'.join(errors), file=sys.stderr); return 1
         print('CI workflow matches suite manifest.'); return 0

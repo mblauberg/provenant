@@ -123,6 +123,78 @@ class ReferenceTests(unittest.TestCase):
                     GEN['with_declared_enums'](section(**{'projects.{project}.choice': {
                         'type': 'string', 'effect': 'Choose.', **restated}}), declared)
 
+    def test_steer_delivery_registry_takes_values_and_default_from_its_owner(self):
+        # The fabric asset and FIELD_METADATA declare delivery's values and
+        # default. Restating either in the knob registry makes the strict
+        # reference generator reject the whole config source.
+        data = json.loads((SCRIPTS.parent / GEN['KNOBS']).read_text())
+        setting = data['domain_steer_settings']['settings']['delivery']
+        for restated in ('allowed', 'values', 'default'):
+            self.assertNotIn(restated, setting)
+        declared = [
+            {'path': 'domains.fabric.steer.delivery',
+             'values': ['queued', 'now'], 'default': 'queued'},
+            {'path': 'domains.fabric.steer.fallback',
+             'values': ['fresh_with_handoff', 'refuse'], 'default': 'fresh_with_handoff'},
+        ]
+        GEN['with_declared_enums'](data, declared)
+        filled = data['domain_steer_settings']['settings']['delivery']
+        self.assertEqual(filled['values'], ['queued', 'now'])
+        self.assertEqual(filled['default'], 'queued')
+        text = GEN['config_reference'](
+            {'knobs': {}, 'domain_steer_settings': data['domain_steer_settings']},
+            all_fields=True)
+        self.assertIn('| `delivery` | queued |', text)
+        self.assertIn('(queued, now).', text)
+
+    def test_wait_and_smoke_registries_take_enums_from_their_owners(self):
+        # Once the wait policy and smoke verdict became declared enumerations,
+        # restating their values or runtime defaults in the knob registry made
+        # strict reference generation reject the whole config source.
+        data = json.loads((SCRIPTS.parent / GEN['KNOBS']).read_text())
+        wait = data['domain_wait_settings']['settings']
+        smoke = data['domain_smoke_settings']['settings']
+        runtime_defaults = {
+            'pr_head_policy', 'pr_head_source', 'pr_head_unpinned',
+            'projects.{project}.pr_head_policy', 'projects.{project}.pr_head_source',
+            'projects.{project}.pr_head_unpinned',
+        }
+        for name in runtime_defaults:
+            with self.subTest(wait=name):
+                for restated in ('allowed', 'values'):
+                    self.assertNotIn(restated, wait[name])
+        for name in ('pr_head_policy', 'pr_head_source', 'pr_head_unpinned'):
+            with self.subTest(wait_default=name):
+                self.assertNotIn('default', wait[name])
+        for restated in ('allowed', 'values', 'default'):
+            self.assertNotIn(restated, smoke['unverified'])
+
+        declared = [
+            {'path': 'domains.wait.pr_head_policy',
+             'values': ['pinned', 'follow_latest'], 'default': 'pinned'},
+            {'path': 'domains.wait.pr_head_source',
+             'values': ['auto', 'forge', 'local'], 'default': 'auto'},
+            {'path': 'domains.wait.pr_head_unpinned',
+             'values': ['first_sample', 'refuse'], 'default': 'first_sample'},
+            {'path': 'domains.smoke.unverified',
+             'values': ['warn', 'fail'], 'default': 'warn'},
+        ]
+        GEN['with_declared_enums'](data, declared)
+        filled = wait['pr_head_policy']
+        self.assertEqual(filled['values'], ['pinned', 'follow_latest'])
+        self.assertEqual(filled['default'], 'pinned')
+        self.assertEqual(smoke['unverified']['default'], 'warn')
+        text = GEN['config_reference'](
+            {'knobs': {},
+             'domain_wait_settings': data['domain_wait_settings'],
+             'domain_smoke_settings': data['domain_smoke_settings']},
+            all_fields=True)
+        self.assertIn('(pinned, follow_latest).', text)
+        # Smoke is an advanced section: its filled enum is rendered in the
+        # registry remainder rather than the compact settings table.
+        self.assertIn('"values"', text)
+        self.assertIn('\n          "warn",\n          "fail"\n', text)
+
     def test_reference_distinguishes_review_defaults_from_bundled_shapes(self):
         data = json.loads((SCRIPTS.parent / GEN['KNOBS']).read_text())
         settings = data['domain_routing_settings']['settings']

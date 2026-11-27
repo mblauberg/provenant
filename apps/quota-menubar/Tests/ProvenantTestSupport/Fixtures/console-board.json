@@ -36,33 +36,40 @@
           "attempt": {
             "account": null,
             "applied_route": null,
+            "attempt_directory": {
+              "kind": "path",
+              "relative": {
+                "encoding": "utf8",
+                "path": "fixture/attempts/65656565656565656565656565656565"
+              },
+              "root": "/"
+            },
             "attempt_id": "65656565656565656565656565656565",
             "attempt_number": 1,
             "cache_read_share": null,
-            "cause": null,
             "continuation": null,
             "delivery": null,
             "delivery_id": null,
             "exit_code": null,
             "finished_at": null,
+            "first_output_at": null,
             "git_grants_digest": null,
             "graph": "board-fixture",
             "head": null,
-            "lane_class": null,
+            "lane_class": "read_only",
             "last_event_at": "2026-11-02T01:57:31.075623Z",
             "last_event_source": "queued",
             "last_output_at": null,
             "node": "task",
             "observed_route": null,
             "overdue": null,
-            "partial_signals": [],
             "presence": null,
             "priority": null,
             "project_id": "01010101010101010101010101010101",
             "protected_paths": [],
             "queued_at": "2026-11-02T01:57:31.075623Z",
             "read_only_writable": [],
-            "reason": null,
+            "reason": "launch preparation",
             "recorded_state": null,
             "requested_route": {
               "effort": "high",
@@ -74,6 +81,8 @@
             "retry_of": null,
             "runtime_deadline": null,
             "settlement": null,
+            "settlement_class": null,
+            "signals": [],
             "skipped_routes": [],
             "stale": null,
             "started_at": null,
@@ -93,8 +102,17 @@
                 "reasoning": null
               }
             },
-            "waiting_for": null,
+            "waiting_for": "launch preparation",
             "write_grants": []
+          },
+          "operation": {
+            "actor_id": "02020202020202020202020202020202",
+            "kind": "dispatch",
+            "operation_id": "board-101",
+            "project_id": "01010101010101010101010101010101",
+            "request_digest": "sha256:0707070707070707070707070707070707070707070707070707070707070707",
+            "schema_version": 1,
+            "state": "accepted"
           }
         },
         "observation_coverage": "complete",
@@ -109,15 +127,18 @@
           ]
         },
         "wait": {
+          "attempt_id": "65656565656565656565656565656565",
           "lane_class": "read_only",
-          "waiting_for": "launch: not yet handed to a guardian"
+          "waiting_for": {
+            "kind": "launch_preparation"
+          }
         }
       }
     ],
     "next_cursor": "2.101.101.sha256:88fdd1c45d28a6ed462639aaadc725d8f7821fd400d0c5b0481ba269745061c7",
     "observed_at": "2026-11-02T01:58:27.161938Z",
     "schema_version": 3,
-    "snapshot": "sha256:6e7c1ae3da4729de4646923c1406eba51d8e29ce86aef35109254e74a4594a9b",
+    "snapshot": "sha256:69dffe883b1c10ac1aee3c8fbcb31bf51981f712326f476ba5428efb9b96267e",
     "truncated": true
   },
   "error": null,

@@ -25,87 +25,10 @@ use thiserror::Error;
 /// The project root, as seen by the owner resolving the context.
 pub type Project = Path;
 
-/// A Git remote name that is known to be present and usable as a ref namespace.
-///
-/// The forge boundary creates this once; every consumer below it receives the
-/// typed value, so an absent remote cannot be flattened into `Some("")` and
-/// reach Git as a push destination or a `refs/remotes/` namespace. The grammar
-/// follows the ref-component rules of `git check-ref-format` for
-/// `refs/remotes/<name>/x`, and also refuses a leading '-', which Git accepts
-/// in a ref component but which would read as an option when passed as a remote
-/// argument.
-#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct RemoteName(String);
-
-/// The supplied remote name cannot name a `refs/remotes/` namespace.
-#[derive(Debug, Error, PartialEq, Eq)]
-#[error("a Git remote name must be a valid, non-blank ref namespace component")]
-pub struct RemoteNameError;
-
-impl RemoteName {
-    /// Build a remote name, refusing blank, padded, option-like or otherwise
-    /// invalid values that Git could not use as a `refs/remotes/<name>/x` ref.
-    pub fn new(name: impl AsRef<str>) -> Result<Self, RemoteNameError> {
-        let name = name.as_ref();
-        let valid = !name.is_empty()
-            && name.trim() == name
-            && !name.starts_with('-')
-            && !name.ends_with('/')
-            && !name.ends_with('.')
-            && !name.contains("..")
-            && !name.contains("@{")
-            && !name.chars().any(|character| {
-                character.is_ascii_control()
-                    || character.is_whitespace()
-                    || "~^:?*[\\".contains(character)
-            })
-            && name
-                .split('/')
-                .all(|part| !part.is_empty() && !part.starts_with('.') && !part.ends_with(".lock"));
-        if !valid {
-            return Err(RemoteNameError);
-        }
-        Ok(Self(name.to_owned()))
-    }
-
-    /// The remote name as a string.
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-
-    /// Consume the name into its string.
-    pub fn into_string(self) -> String {
-        self.0
-    }
-}
-
-impl AsRef<str> for RemoteName {
-    fn as_ref(&self) -> &str {
-        self.as_str()
-    }
-}
-
-impl std::fmt::Display for RemoteName {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
-impl TryFrom<&str> for RemoteName {
-    type Error = RemoteNameError;
-
-    fn try_from(name: &str) -> Result<Self, Self::Error> {
-        Self::new(name)
-    }
-}
-
-impl TryFrom<String> for RemoteName {
-    type Error = RemoteNameError;
-
-    fn try_from(name: String) -> Result<Self, Self::Error> {
-        Self::new(name)
-    }
-}
+/// The one grammar for a Git remote name. It lives in `provenant-core` beside
+/// `GitOid` so records can store a typed destination; the re-export keeps the
+/// forge boundary's existing callers unchanged.
+pub use provenant_core::{RemoteName, RemoteNameError};
 
 /// A refusal from one step of context resolution. It never invents a default:
 /// it lists what was seen and the closest spellings, so the operator can add a
@@ -440,12 +363,7 @@ fn policy_layer(policy: &Policy) -> Layer {
         .iter()
         .map(|rule| rule.source)
         .max_by_key(|source| rank(*source))
-        .map(|source| match source {
-            PolicySource::CompiledDefault => Layer::Default,
-            PolicySource::Host => Layer::Host,
-            PolicySource::Project => Layer::Project,
-            PolicySource::Dispatch => Layer::Route,
-        })
+        .map(PolicySource::layer)
         .unwrap_or(Layer::Default)
 }
 

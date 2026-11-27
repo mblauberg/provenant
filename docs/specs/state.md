@@ -89,11 +89,23 @@ status with its graph ID and typed reason, and landing review reports unreadable
 graph sources by graph ID while keeping valid settlements. The first tick read of
 a corrupt checkpoint records its file digest and reason in a quarantine marker;
 identical bytes are skipped on later ticks, changed bytes are reported again and
-`provenant stop -- NAME` retires the record. Pending-index recovery never uses
-unverified lifecycle fields to classify a corrupt record as settled.
+`provenant stop -- NAME` retires the record. A readable checkpoint whose active
+expansion pause disagrees with the graph pause is quarantined on the same byte
+key and reported once with the same retire step, so a bad pause pair cannot
+repeat every tick. Pending-index recovery never uses unverified lifecycle fields
+to classify a corrupt record as settled.
 - Why: stored text must verify on reload, and one damaged graph must not hide
   another's review evidence or flood every tick with an unresolvable retry.
 - Owner: `crates/fabric-runtime/src/graph/journal.rs`, `src/pr/landing/adapters.rs`
+
+`GraphDocument.subject` is additive: the host writes the admitted `PinnedSubject`
+at admission and overwrites any caller-supplied value, and its serialisation is
+skipped when absent so older execution digests stay byte-identical. A document
+with a subject uses graph schema v2; schema v1 cannot represent subject
+provenance. There is no `CHECKPOINT_SCHEMA_VERSION` bump. `GraphCheckpoint.subject`
+is a serde-skipped projection hydrated from the execution on reload and shown under
+`checkpoint.subject` in status; it is never stored on its own. Graphs already in
+flight at upgrade load with `subject` absent and status omits the field.
 
 ## SQLite stores
 
@@ -122,7 +134,9 @@ crossing and there is no compatibility path afterwards. Owners keep the SQL
 narrow: rewrite only the rows and fields the new types cannot read, and make
 every walk total for any valid JSON. A row whose stored bytes are not valid JSON
 is skipped by the rewrite and fails only its own decode, because one damaged row
-must not block every writable open.
+must not block every writable open. An additive optional attempt field such as
+`first_output_at` needs no base bump or migration: an older row decodes to `None`,
+which is the true value for a time nothing recorded.
 - Why: additive changes preserve stored state, while a single declared rewrite
   lets a vocabulary change reach existing rows without a permanent decoder
   shim.
@@ -226,6 +240,9 @@ beside the type it owns, is:
   separately in the sealed profile and is not a configuration layer.
 - Config overlays use `OVERLAY_PRECEDENCE`: default, host, project. Host-project
   state reports as the host layer to owners.
+- `harness_compatibility` and `adapter_capabilities` are overlay tables keyed by
+  adapter: each effective entry reports the layer and origin that supplied it, and a
+  later layer replaces the whole entry.
 - Editable schema fields use `SCHEMA_PRECEDENCE`: default, profile, host.
 - Land policies use `LAND_PRECEDENCE`: default, host, project.
 - Graph templates use `TEMPLATE_PRECEDENCE`: default, host, project, launch.
@@ -255,6 +272,33 @@ flat usage buckets (`uncached_input`,
 free-form source to the typed `stream` source, preserving every stated number.
 A malformed row is skipped so it fails only its own decode; a row already in the
 new shape is left byte-identical. No decoder accepts a retired spelling.
+
+The run store's base-14-to-15 migration (`crates/run/src/migration_14_15.sql`)
+rewrites the retired empty local destination to JSON null in an attempt's
+stored delivery receipt and its integration. It leaves named remotes and
+already-current rows alone and skips malformed JSON. The terminal update trigger
+is restored in the migration transaction.
+
+The run store's base-15-to-16 migration (`crates/run/src/migration_15_16.sql`) is the one crossing
+for the settlement renames. On a writable open it renames `$.state.terminal_cause` to
+`$.state.cause`, rewriting the value `handoff_refused` to `launch_handoff_refused`, and renames
+`$.partial_signals` to `$.signals`, `$.terminal_evidence` to `$.terminal_basis`, and
+`$.settlement_reason` to `$.settlement_class`. Each walk is total and guarded by `json_valid`; a row
+already in the new shape stays byte-identical and a malformed row fails only its own decode. Because
+`AttemptState::Terminal` and `AttemptRecord` flatten `ExtraFields`, the migration test also asserts
+that no migrated row keeps an old key as an extra field. Other stores that persist one of these keys
+declare their own crossing in the same slice, and a versioned federation envelope is refused with a
+typed version error rather than decoded by an old peer.
+- Why: the wire spellings change once at one declared crossing, and no decoder keeps a retired key
+  alive.
+
+The graph checkpoint moves from 2 to 3 through one declared step, `migrate_checkpoint_2_3`, which is
+the only v2 reader. It renames each node's `advance_error_code` to `advance_code` and `advance_error`
+to `advance_note`, rewrites the value `writer_declared_stop` to `declared_stop`, renames the
+execution-level `advance_error`, revalidates the result and publishes it atomically under the
+journal lock. A bare version bump would strand in-flight v2 graphs; after the step v2 has no reader
+but this migration, and v1 is refused.
+- Why: one migration owns the old spelling, so checkpoints are never silently reinterpreted.
 
 ### One sourced port table
 
@@ -395,8 +439,9 @@ Edits replace only owned values, keeping comments and order; malformed or
 symlinked configs are refused unchanged. Edited hooks are not overwritten. A
 missing container is created only as an object, so an index selector reaches an
 array the document already holds. An upgrade that retires an owned hook action
-hands its ownership to the declared replacement, so installing without
-`--hooks on` keeps the managed set.
+hands its ownership to that action's declared replacement alone, so installing
+without `--hooks on` keeps answer delivery; a managed leaf the user edited or
+removed is never re-added by the transfer.
 - Why: a harness config holds the user's other tools and secrets.
 - Owner: `crates/config/src/splice.rs`, `crates/config/src/hooks.rs`
 
@@ -430,6 +475,14 @@ state to migrate; the receipt it publishes records any later step's id.
 - Why: state a store does not own still changes shape, and one recorded
   crossing keeps retries safe without a permanent decoder.
 - Owner: `crates/records/src/migrate.rs`, `src/install/migrations.rs`
+
+`ReadSourceLiveSpelling` (`read-source-live`) rewrites the retired
+`lanes.read_source` value `checkout` to `live` in the host and host-project
+config files. It is idempotent, reports each changed path, and never rewrites a
+repository's own `.provenant/config.toml`; a repository file still saying
+`checkout` warns `READ_SOURCE_VALUE_RENAMED` and resolves as `auto`. No other
+batch-P rename needs a persisted step: the other names are unreleased or in
+memory only.
 
 ## Typed host metadata in format 2
 

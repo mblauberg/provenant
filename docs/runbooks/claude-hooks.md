@@ -44,10 +44,28 @@ The [human inbox](human-inbox.md#delivery-service) owns how the hook offers answ
 
 ## SessionStart output
 
+Native subagent payloads marked with `agent_id` or `agent_transcript_path`
+receive no chair checkpoint context and do not consume an account-switch
+handoff.
+
 The hook reports checkpoint and lane state. An unavailable section is not an
 empty one: inspect the source before acting. The checkpoint points to authority
 but does not create it. Record delivered PRs in the checkpoint so the digest can
-find them.
+find them. The custody list is printed once: when the derived digest is shown,
+the autosave's copy of that section is withheld. If the response reaches its
+8 KiB cap, derived state shrinks first and the chair's `## Intent` (up to 3 KiB)
+and `## Now` (up to 1 KiB) remain intact; the rest of the checkpoint excerpt is
+then trimmed with a notice. A fresh checkpoint with nothing actionable omits the
+"no save needed by freshness policy" boilerplate but keeps the save command.
+
+A native subagent carries its own task prompt. When the hook payload includes a
+non-empty `agent_id` or agent transcript path, the chair lifecycle hooks abstain:
+`chair-start` neither consumes a handoff nor records chair attribution, and the
+advisory hooks emit no checkpoint or custody text. `agent_type` alone does not
+mark a subagent because Claude Code also sets it for top-level `--agent` sessions.
+Lanes were already excluded by their lane identity. The guard applies to every
+advisory event, so a subagent's compaction and stop hooks also leave the chair's
+checkpoint alone.
 
 ## Autosave and compaction
 
@@ -61,8 +79,15 @@ find them.
 - `pre-compact` prints one instruction that Claude Code takes as guidance for
   the compaction summary: write an Intent section with each live ruling's wanted
   outcome, reason, rejected alternatives, open disagreement and uncertain
-  readings, and quote only authority grants or corrections. The hook only asks;
-  without a compliant summary, intent survives only if the chair saved it (see the
+  readings, and quote only authority grants or corrections. It also asks the
+  summary to state work done since the last checkpoint save as done and never
+  list a step the tail shows done as next, to treat the verbatim tail after the
+  summary as newer where they disagree, to list waits in flight with their
+  handles and what each blocks, to cite rulings saved in the checkpoint as 'see
+  checkpoint Intent' rather than replaying them, to drop items untouched for
+  24 h unless they are owner asks and move them to the tracker, and to keep the
+  summary under 12k characters. The hook only asks; without a compliant summary,
+  intent survives only if the chair saved it (see the
   [session skill](../../skills/session/SKILL.md)).
 
 ## Claude worktree hooks

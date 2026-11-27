@@ -2,7 +2,10 @@
 //! process state; uncertain custody stays fenced and is reported as such.
 use crate::{artifacts::read_sealed, launch::Providers, *};
 use provenant_core::{AttemptId, MessageId, OperationId, WallTime};
-use provenant_records::custody::Scope;
+use provenant_records::{
+    custody::Scope,
+    warning::{self, Warning},
+};
 use provenant_supervisor::{
     census::{ProcessObserver, SystemProcessObserver},
     custody::{self, CustodyError, Observation, RecoveryState, StopReceipt},
@@ -733,7 +736,7 @@ pub enum Reconciled {
     /// The supervisor is resuming durable settlement in the background.
     Settling {
         phase: String,
-        blocking_reason: Option<String>,
+        held_reason: Option<String>,
     },
     /// A chair explicitly released settlement while retaining its evidence.
     Abandoned { reason: String },
@@ -756,7 +759,79 @@ pub enum Reconciled {
     Escaped { pids: Vec<i64> },
     /// Custody cannot be proven either way; it stays fenced.
     Uncertain { reason: UncertainReason },
+    /// An undecodable attempt record was preserved and its writer lease
+    /// released after liveness was disproved. The source names what could not
+    /// be decoded so the host can warn with the exact record identity.
+    UnreadableReleased {
+        source: UnreadableSource,
+        locks: Vec<std::path::PathBuf>,
+    },
 }
+
+/// The identity of a stored attempt record that no longer decodes. This is
+/// evidence for a host-side typed warning, never a substitution for the bytes:
+/// the bytes stay in the run database and a copy is sealed under `quarantine/`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct UnreadableSource {
+    pub attempt: AttemptId,
+    pub path: std::path::PathBuf,
+    pub schema_version: Option<u64>,
+    pub error: String,
+}
+
+impl std::fmt::Display for UnreadableSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} attempt {}", self.path.display(), self.attempt)?;
+        if let Some(version) = self.schema_version {
+            write!(f, " (schema version {version})")?;
+        }
+        write!(f, ": {}", self.error)
+    }
+}
+
+/// A decode failure plus the original bytes, held together so recovery can
+/// preserve the record before it releases the lease it fenced.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UnreadableAttempt {
+    pub source: UnreadableSource,
+    pub(crate) raw: Vec<u8>,
+}
+
+/// The one typed warning for an undecodable attempt record. Its subject carries
+/// the source path, schema and error; admission refusals stay fixed text.
+pub fn unreadable_record_warning(source: &UnreadableSource, released: bool) -> Warning {
+    use provenant_records::warning::{
+        UNREADABLE_RECORD_HELD, UNREADABLE_RECORD_RELEASED, detected_source,
+    };
+    let code = if released {
+        UNREADABLE_RECORD_RELEASED
+    } else {
+        UNREADABLE_RECORD_HELD
+    };
+    Warning::new(
+        code,
+        format!(
+            "stored record for attempt {} could not be decoded; {}",
+            source.attempt,
+            if released {
+                "its writer lease was released after liveness was disproved and the bytes were preserved"
+            } else {
+                "its writer lease is retained because liveness could not be disproved"
+            }
+        ),
+        detected_source(code),
+    )
+    .subject(source.to_string())
+    .repair("inspect the preserved copy under quarantine/, then rerun reconcile")
+}
+
+fn attributed_orphan_warning(message: String, attempt: impl ToString) -> Warning {
+    let code = warning::ORPHAN_PROCESS_ATTRIBUTED;
+    Warning::new(code, message, warning::detected_source(code))
+        .subject(attempt.to_string())
+        .once_per_change()
+}
+
 fn reservation_issue_blocks_report(reservation: &std::path::Path, issue: &std::path::Path) -> bool {
     reservation.starts_with(issue)
         || reservation
@@ -772,12 +847,9 @@ impl std::fmt::Display for Reconciled {
             Self::Held => f.write_str("held"),
             Self::DeadlineStop => f.write_str("deadline_stop"),
             Self::StallStop { policy } => write!(f, "stall_stop ({})", policy.as_str()),
-            Self::Settling {
-                phase,
-                blocking_reason,
-            } => {
+            Self::Settling { phase, held_reason } => {
                 write!(f, "settling ({phase})")?;
-                if let Some(reason) = blocking_reason {
+                if let Some(reason) = held_reason {
                     write!(f, ": {reason}")?;
                 }
                 Ok(())
@@ -807,6 +879,15 @@ impl std::fmt::Display for Reconciled {
                     .join(", ")
             ),
             Self::Uncertain { reason } => write!(f, "uncertain: {reason}"),
+            Self::UnreadableReleased { source, locks } => write!(
+                f,
+                "unreadable_record_released {source}; writer leases {}",
+                locks
+                    .iter()
+                    .map(|lock| lock.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
         }
     }
 }
@@ -894,6 +975,9 @@ pub enum UncertainReason {
         holder: String,
         holder_live: bool,
     },
+    /// The record is unreadable and no liveness disproof was possible, so the
+    /// writer lease stays fenced and the evidence is retained.
+    UnreadableLivenessUnknown { source: UnreadableSource },
 }
 /// The source of an unavailable reboot proof.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -961,6 +1045,12 @@ impl std::fmt::Display for UncertainReason {
                 "waiting for writer lock {}, held by {holder}",
                 lock.display()
             ),
+            Self::UnreadableLivenessUnknown { source } => {
+                write!(
+                    f,
+                    "unreadable attempt record still fenced: {source}; liveness not disproved"
+                )
+            }
         }
     }
 }
@@ -1215,6 +1305,7 @@ impl RunStore {
                     Warning::new(
                         warning::PROVIDER_STALLED,
                         "retrying the recorded stall stop request",
+                        provenant_records::warning::detected_source(warning::PROVIDER_STALLED),
                     )
                     .subject(record.attempt_id.to_string())
                     .once_per_change(),
@@ -1267,10 +1358,14 @@ impl RunStore {
             )?;
         }
         warning::warn(
-            Warning::new(warning::PROVIDER_STALLED, message)
-                .subject(record.attempt_id.to_string())
-                .source(source)
-                .once_per_change(),
+            Warning::new(
+                warning::PROVIDER_STALLED,
+                message,
+                provenant_records::warning::detected_source(warning::PROVIDER_STALLED),
+            )
+            .subject(record.attempt_id.to_string())
+            .source(source)
+            .once_per_change(),
         );
         match policy {
             StallPolicy::Report => Ok(None),
@@ -1303,13 +1398,39 @@ impl RunStore {
         }
     }
 
-    /// Persist one idempotent steer for an exact running attempt. Settlement
-    /// delivers it at the next turn boundary without interrupting this attempt.
+    /// Persist one idempotent steer for an exact running attempt. The default
+    /// delivery queues the turn at the next boundary without interrupting this
+    /// attempt. `steer_now` asks for the session-preserving restart instead.
     pub fn steer(
         &self,
         id: AttemptId,
         operation_id: OperationId,
         text: &str,
+        call: &Request<'_>,
+    ) -> Result<SteerReceipt> {
+        self.steer_inner(id, operation_id, text, false, call)
+    }
+
+    /// Persist a steer and interrupt through custody once the session identity
+    /// is durable, so settlement resumes the same session with the text. The
+    /// text is durable before any stop is requested, so a custody race cannot
+    /// lose the accepted instruction.
+    pub fn steer_now(
+        &self,
+        id: AttemptId,
+        operation_id: OperationId,
+        text: &str,
+        call: &Request<'_>,
+    ) -> Result<SteerReceipt> {
+        self.steer_inner(id, operation_id, text, true, call)
+    }
+
+    fn steer_inner(
+        &self,
+        id: AttemptId,
+        operation_id: OperationId,
+        text: &str,
+        now: bool,
         call: &Request<'_>,
     ) -> Result<SteerReceipt> {
         if text.trim().is_empty() || text.len() > provenant_records::control::CONTROL_TEXT_BYTES {
@@ -1436,10 +1557,13 @@ impl RunStore {
                 }
             });
         }
-        // The accepted text is durable. A steer never interrupts the running
-        // attempt: settlement delivers the queued turn at the next turn
-        // boundary, continuing a retained session or using the configured
-        // fresh-with-handoff fallback. No stop intent is written here.
+        // The accepted text is durable before any interrupt. Only `--now`
+        // requests a `Steered` stop, and only once the session identity is
+        // durable; the default path leaves the attempt running for settlement
+        // to deliver the queued turn at its next boundary.
+        if now {
+            let _ = self.request_steer_stop_if_ready(id, call);
+        }
         Ok(if already_queued {
             SteerReceipt::AlreadyQueued {
                 message_id: intent.message_id,
@@ -1942,12 +2066,38 @@ impl RunStore {
         })
     }
 
+    /// Request a `Steered` stop only when the running attempt holds a durable,
+    /// validated session for its exact route. Interrupting without one would
+    /// cancel the attempt and strand the accepted text, so this is the gate for
+    /// the `--now` restart path; queued delivery never calls it.
+    fn request_steer_stop_if_ready(&self, id: AttemptId, call: &Request<'_>) -> Result<bool> {
+        if !self.steer_session_available(id, call)? {
+            return Ok(false);
+        }
+        let record = self.record(id, call)?;
+        let directory = self.attempt_dir(id, false)?;
+        let stopped = match custody::reattach(directory.try_clone()?, Self::scope(&record)) {
+            Ok(handle) => custody::stop(&handle, StopReason::Steered),
+            Err(CustodyError::Filesystem(error)) if error.is_not_found() => custody::request_stop(
+                directory,
+                Self::scope(&record),
+                record.verified_owner.unwrap_or(self.context.actor_id),
+                StopReason::Steered,
+            ),
+            Err(error) => Err(error),
+        };
+        match stopped {
+            Ok(StopReceipt::Requested | StopReceipt::AlreadyRequested)
+            | Err(CustodyError::StopConflict) => Ok(true),
+            Err(error) => Err(RunError::Io(std::io::Error::other(error.to_string()))),
+        }
+    }
+
     /// Whether this running attempt holds a validated, live provider session
     /// bound to its exact route (provider, model, effort, account and
-    /// host-native lane). When it does, settlement can deliver a queued steer
-    /// by continuing that session; otherwise it uses the configured
-    /// fresh-with-handoff fallback. Either way a steer is queued without
-    /// interrupting the attempt, so this is evidence, not a delivery gate.
+    /// host-native lane). For queued delivery this is evidence for how
+    /// settlement delivers the turn, not a gate on acceptance; for `--now` it
+    /// is the condition for requesting the interrupt.
     pub fn steer_session_available(&self, id: AttemptId, call: &Request<'_>) -> Result<bool> {
         let record = self.record(id, call)?;
         if !matches!(record.state, AttemptState::Running { .. }) {
@@ -2678,14 +2828,41 @@ impl RunStore {
         // the attempt recorded; a live guardian keeps the fence and falls
         // through to the normal proof path.
         match recovery.end_recorded_orphans(observer, ORPHAN_PATIENCE) {
-            Ok(report) if !report.survivors.is_empty() => {
-                return Ok(Some(Reconciled::Escaped {
-                    pids: report
-                        .survivors
+            Ok(report) if !report.survivors.is_empty() || !report.reported.is_empty() => {
+                // Proven survivors and processes found only through the
+                // durable group/session tag are both named for the chair;
+                // neither grants authority to signal the reported ones.
+                let mut pids: Vec<i64> = report
+                    .survivors
+                    .iter()
+                    .map(|identity| identity.pid)
+                    .collect();
+                pids.extend(report.reported.iter().copied());
+                pids.sort_unstable();
+                pids.dedup();
+                if !report.reported.is_empty() {
+                    // A report-only process must remain visible in status
+                    // while the attempt stays fenced, just like a stall.
+                    let names = report
+                        .reported
                         .iter()
-                        .map(|identity| identity.pid)
-                        .collect(),
-                }));
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    let message = format!(
+                        "ORPHAN_PROCESS_ATTRIBUTED: attributed process(es) {names} still live; reported only, never signalled; run `provenant reconcile` to review"
+                    );
+                    if read_sealed(&attempt, "orphan-warning.json", RECORD_LIMIT)?.is_none() {
+                        crate::artifacts::seal(
+                            &attempt,
+                            "orphan-warning.json",
+                            &crate::db::bytes(&message)?,
+                            RECORD_LIMIT,
+                        )?;
+                    }
+                    warning::warn(attributed_orphan_warning(message, record.attempt_id));
+                }
+                return Ok(Some(Reconciled::Escaped { pids }));
             }
             Ok(_) | Err(CustodyError::Fenced) => {}
             Err(error) => return Ok(Some(Reconciled::custody_unavailable(&error))),
@@ -3705,7 +3882,7 @@ impl RunStore {
             let mut destination = HostDeliveryContext::destination_for_remote(
                 prior.mode.clone(),
                 branch,
-                &prior.remote,
+                prior.remote.remote_name().cloned(),
             )?
             .ok_or(RunError::Validation("fresh fallback delivery destination"))?;
             destination.remote = prior.remote.clone();
@@ -4328,6 +4505,17 @@ impl RunStore {
     ) -> Reconciled {
         if matches!(
             &state,
+            Reconciled::UnreadableReleased { .. }
+                | Reconciled::Uncertain {
+                    reason: UncertainReason::UnreadableLivenessUnknown { .. }
+                }
+        ) {
+            // The record cannot be decoded, so progress cannot derive a scope
+            // from it. The typed source already carries the evidence.
+            return state;
+        }
+        if matches!(
+            &state,
             Reconciled::Uncertain {
                 reason: UncertainReason::HostStalled
             }
@@ -4350,15 +4538,18 @@ impl RunStore {
                     *holder_live,
                     call.clock,
                 ),
-                Reconciled::Uncertain { reason } => {
-                    crate::settlement::blocked(&directory, scope, &reason.to_string(), call.clock)
-                }
+                Reconciled::Uncertain { reason } => crate::settlement::record_recovery_failure(
+                    &directory,
+                    scope,
+                    &reason.to_string(),
+                    call.clock,
+                ),
                 Reconciled::Settling {
-                    blocking_reason: Some(_),
+                    held_reason: Some(_),
                     ..
                 }
                 | Reconciled::Abandoned { .. } => Ok(()),
-                _ => crate::settlement::clear_blocked(&directory, scope),
+                _ => crate::settlement::clear_held(&directory, scope),
             }
         })();
         if let Err(error) = progress {
@@ -4496,10 +4687,10 @@ impl RunStore {
                         },
                         finished_at: now,
                         failure: None,
-                        terminal_cause: if cancelled {
+                        cause: if cancelled {
                             None
                         } else {
-                            Some(TerminalCause::HandoffRefused)
+                            Some(CauseKind::LaunchHandoffRefused)
                         },
                         terminal_note: None,
                     },
@@ -4570,10 +4761,10 @@ impl RunStore {
                 },
                 finished_at: now,
                 failure: None,
-                terminal_cause: if cancelled {
+                cause: if cancelled {
                     None
                 } else {
-                    Some(TerminalCause::HandoffRefused)
+                    Some(CauseKind::LaunchHandoffRefused)
                 },
                 terminal_note: None,
             },
@@ -4794,13 +4985,50 @@ impl RunStore {
             // Release does not finish the work. A follow-up may still need scratch.
             return Ok(None);
         }
+        let in_use = self.scratch_in_use(id)?;
+        let released = self.custody_released(record, call)?;
+        if !released && !in_use {
+            // Settlement releases scratch for a settled attempt whose custody
+            // proof never arrived once it has been idle past `gc.scratch_grace`.
+            // GC applies the same rule, so neither path alone strands it.
+            let grace = provenant_config::GcSettings::read(self.context.state_root.as_path())
+                .ok()
+                .and_then(|settings| settings.scratch_grace_seconds().ok())
+                .unwrap_or(86_400);
+            let policy = ScratchPolicy {
+                grace_seconds: grace,
+                ..ScratchPolicy::new(0)
+            };
+            let mut sizes = provenant_os::disk::DiskReport::with_walk_budget(
+                self.context.state_root.as_path().into(),
+                0,
+                10_000,
+                std::time::Duration::from_millis(500),
+            );
+            let mut grace_report = ProviderStateGc::default();
+            self.collect_grace_scratch(
+                &id.to_string(),
+                call.clock
+                    .wall_now()
+                    .map_err(|_| RunError::Validation("wall clock"))?,
+                false,
+                &policy,
+                call,
+                &RetentionScan::default(),
+                &mut sizes,
+                &mut grace_report,
+            )?;
+            if !grace_report.attempt_tmp.is_empty() {
+                return Ok(Some(Reconciled::TemporaryRemoved));
+            }
+        }
+        if !released || in_use {
+            return Ok(None);
+        }
         let _publication = attempt.try_lock_existing(
             std::ffi::OsStr::new("publication.lock"),
             provenant_os::fs::LockMode::Exclusive,
         )?;
-        if !self.custody_released(record, call)? || self.scratch_in_use(id)? {
-            return Ok(None);
-        }
         let remove = || -> Result<()> {
             match scratch.metadata_at(std::ffi::OsStr::new("tmp"), false) {
                 Err(error) if error.is_not_found() => return Ok(()),
@@ -4852,6 +5080,148 @@ impl RunStore {
         }))
     }
 
+    /// Safety valve for `release attempt:ID`. A record that still decodes stays
+    /// under normal custody; only an undecodable record whose owner is proved
+    /// gone has its writer lease released here. Returns `None` when this path
+    /// has nothing to do, so the caller keeps the ordinary release outcome.
+    pub fn release_unreadable_writer_lease(
+        &self,
+        id: AttemptId,
+        call: &Request<'_>,
+    ) -> Result<Option<Reconciled>> {
+        let unreadable = match self.recovery_record(id, call)? {
+            crate::reader::AttemptRecordRead::Decoded(_) => return Ok(None),
+            crate::reader::AttemptRecordRead::Unreadable(unreadable) => unreadable,
+        };
+        Ok(Some(self.reconcile_unreadable(
+            &unreadable,
+            &SystemProcessObserver,
+            call,
+        )))
+    }
+
+    /// Reclaim a writer lease fenced by an undecodable attempt record. The
+    /// release is gated on a supervisor quiescence proof held under writer
+    /// exclusion, an absent reservation, and no unresolved exit cleanup. A
+    /// completed exit can prove same-boot quiescence; an exit still settling
+    /// cannot. The bytes are preserved under `quarantine/` before the
+    /// reservation is cleared; the database row keeps its original bytes.
+    fn reconcile_unreadable(
+        &self,
+        unreadable: &UnreadableAttempt,
+        observer: &dyn ProcessObserver,
+        call: &Request<'_>,
+    ) -> Reconciled {
+        let retained = || {
+            Reconciled::uncertain(UncertainReason::UnreadableLivenessUnknown {
+                source: unreadable.source.clone(),
+            })
+        };
+        let attempt = match self.attempt_dir(unreadable.source.attempt, false) {
+            Ok(attempt) => attempt,
+            Err(_) => return retained(),
+        };
+        let fence = match self.writer_fences() {
+            Ok(fences) => fences
+                .into_iter()
+                .find(|fence| fence.scope.attempt == unreadable.source.attempt),
+            Err(_) => return retained(),
+        };
+        let Some(fence) = fence else {
+            // Already released: the source is still reported without a lock.
+            return Reconciled::UnreadableReleased {
+                source: unreadable.source.clone(),
+                locks: Vec::new(),
+            };
+        };
+        let directory = match fence
+            .custody_directory()
+            .map(provenant_os::fs::Directory::open_anchor)
+            .transpose()
+        {
+            Ok(Some(directory)) => directory,
+            _ => return retained(),
+        };
+        let recovery = match custody::acquire_recovery(
+            directory,
+            fence.scope,
+            provenant_core::WaitBudget::nonblocking(call.clock.mono_now()),
+            call.cancel,
+            call.clock,
+        ) {
+            Ok(recovery) => recovery,
+            Err(_) => return retained(),
+        };
+        if recovery.scope() != fence.scope
+            || !custody::attempt_quiescent(&attempt, fence.scope, observer)
+            || recovery.observe_with(observer) != RecoveryState::Absent
+        {
+            return retained();
+        }
+        if let Err(error) = self.preserve_unreadable(unreadable, &attempt) {
+            return Reconciled::uncertain(UncertainReason::ReconcileFailed {
+                error: error.to_string(),
+            });
+        }
+        if let Err(error) = recovery.release_lost() {
+            return Reconciled::uncertain(UncertainReason::ReconcileFailed {
+                error: error.to_string(),
+            });
+        }
+        let lock = fence
+            .reservation
+            .parent()
+            .and_then(std::path::Path::parent)
+            .map(|slot| slot.join("writer.lock"))
+            .unwrap_or_else(|| fence.reservation.clone());
+        Reconciled::UnreadableReleased {
+            source: unreadable.source.clone(),
+            locks: vec![lock],
+        }
+    }
+
+    /// Keep the undecodable bytes and their typed source together, never
+    /// replacing or deleting the stored record. `quarantine/` already holds
+    /// retained attempt evidence, so the copy survives settlement and GC.
+    fn preserve_unreadable(
+        &self,
+        unreadable: &UnreadableAttempt,
+        attempt: &provenant_os::fs::Directory,
+    ) -> Result<()> {
+        let quarantine =
+            crate::artifacts::subdir(attempt, std::ffi::OsStr::new("quarantine"), true)?;
+        let record_name = "unreadable-attempt-record.json";
+        if crate::artifacts::read_sealed(&quarantine, record_name, TERMINAL_RECORD_LIMIT)
+            .ok()
+            .flatten()
+            .is_none()
+        {
+            crate::artifacts::seal(
+                &quarantine,
+                record_name,
+                &unreadable.raw,
+                TERMINAL_RECORD_LIMIT,
+            )?;
+        }
+        let source_name = "unreadable-attempt-source.json";
+        if crate::artifacts::read_sealed(&quarantine, source_name, RECORD_LIMIT)
+            .ok()
+            .flatten()
+            .is_none()
+        {
+            let manifest = crate::db::bytes(&serde_json::json!({
+                "schema_version": 1,
+                "kind": "unreadable_attempt_record",
+                "attempt": unreadable.source.attempt,
+                "path": unreadable.source.path,
+                "record_schema_version": unreadable.source.schema_version,
+                "error": unreadable.source.error,
+            }))?;
+            crate::artifacts::seal(&quarantine, source_name, &manifest, RECORD_LIMIT)?;
+        }
+        Ok(())
+    }
+
     fn reconcile_attempt(
         &self,
         id: AttemptId,
@@ -4859,7 +5229,12 @@ impl RunStore {
         call: &Request<'_>,
         observer: &dyn ProcessObserver,
     ) -> Result<Option<Reconciled>> {
-        let record = self.record(id, call)?;
+        let record = match self.recovery_record(id, call)? {
+            crate::reader::AttemptRecordRead::Decoded(record) => *record,
+            crate::reader::AttemptRecordRead::Unreadable(unreadable) => {
+                return Ok(Some(self.reconcile_unreadable(&unreadable, observer, call)));
+            }
+        };
         let directory = self.attempt_dir(id, false)?;
         if let Some(state) = crate::settlement::abandoned(&directory, Self::scope(&record))? {
             return Ok(Some(state));

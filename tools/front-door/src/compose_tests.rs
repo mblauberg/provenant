@@ -1,5 +1,5 @@
 //! Production CLI dispatch against a fake Codex executable, never live credentials.
-use super::worktree_tests::support::{Result, TestRig};
+use super::worktree_tests::support::{Result, TestRig, production_binary};
 use super::worktree_tests::{git, ok, repository, writer_backend_available, writer_context};
 use std::{
     fs,
@@ -151,9 +151,8 @@ fn dispatch(rig: &TestRig, mode: &str) -> Result<PathBuf> {
     }
     // The production binary keeps both acquisition and its same-binary
     // guardian on the native boot observer. Only Codex is the test executable.
-    let executable = option_env!("CARGO_BIN_EXE_provenant")
-        .ok_or("production binary path is only available to integration targets")?;
-    let output = rig.execute_os(Path::new(executable), &args, None)?;
+    let executable = production_binary()?;
+    let output = rig.execute_os(executable, &args, None)?;
     let mut stderr = String::from_utf8_lossy(&output.stderr.bytes).into_owned();
     // The launch names a graph; waiting settles it and status names its attempt.
     let mut wait = prefix.clone();
@@ -162,7 +161,7 @@ fn dispatch(rig: &TestRig, mode: &str) -> Result<PathBuf> {
             .into_iter()
             .map(Into::into),
     );
-    let waited = rig.execute_os(Path::new(executable), &wait, None)?;
+    let waited = rig.execute_os(executable, &wait, None)?;
     stderr.push_str(&String::from_utf8_lossy(&waited.stderr.bytes));
     let mut status = prefix;
     status.extend(
@@ -170,7 +169,7 @@ fn dispatch(rig: &TestRig, mode: &str) -> Result<PathBuf> {
             .into_iter()
             .map(Into::into),
     );
-    let status = rig.execute_os(Path::new(executable), &status, None)?;
+    let status = rig.execute_os(executable, &status, None)?;
     let stdout = String::from_utf8_lossy(&status.stdout.bytes).into_owned();
     assert!(
         !stderr.contains("ignored invalid configuration"),
@@ -240,9 +239,11 @@ pub(crate) fn read_only_dispatch_applies_bound_git_and_project_writes() -> Resul
     for configured in [false, true] {
         let rig = fixture()?;
         // This proves confinement's denied writes and selected exceptions.
+        // Bound project writes apply to a reader of the live checkout, so the
+        // lane reads live rather than the pinned snapshot `auto` selects.
         fs::write(
             rig.state.join("config.toml"),
-            "schema_version = 1\n[knobs]\n\"lanes.sandbox\" = \"on\"\n\"lanes.access\" = \"isolated\"\n[gc]\nfree_floor='1B'\n",
+            "schema_version = 1\n[knobs]\n\"lanes.sandbox\" = \"on\"\n\"lanes.access\" = \"isolated\"\n\"lanes.read_source\" = \"live\"\n[gc]\nfree_floor='1B'\n",
         )?;
         let cleanup = provenant_supervisor::fixture::ProcessCleanupGuard::new(&rig.state);
         let (_, context) = writer_context(&rig)?;

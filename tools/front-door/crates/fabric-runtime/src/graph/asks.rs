@@ -507,7 +507,8 @@ fn next_wake(checkpoint: &GraphCheckpoint) -> Option<WallTime> {
                 .filter(|node| node.state == NodeState::Running)
                 .filter_map(|node| {
                     let ci = node.ci.as_ref().and_then(|ci| ci.wake_at);
-                    ci.or_else(|| node.land.as_ref().and_then(|land| land.wake_at))
+                    ci.or_else(|| node.conflict.as_ref().and_then(|conflict| conflict.wake_at))
+                        .or_else(|| node.land.as_ref().and_then(|land| land.wake_at))
                 }),
         )
         // A node waiting on its own bounded launch retry also owes the tick a
@@ -528,6 +529,31 @@ fn next_wake(checkpoint: &GraphCheckpoint) -> Option<WallTime> {
                     node.fallback_evidence_retry
                         .as_ref()
                         .map(|retry| retry.wake_at)
+                }),
+        )
+        .chain(
+            checkpoint
+                .nodes
+                .iter()
+                .filter(|node| node.state == NodeState::Running)
+                .filter_map(|node| {
+                    node.delivery_publication
+                        .as_ref()
+                        .filter(|progress| progress.ci_admission.is_none())
+                        .and_then(|progress| progress.ci_admission_wait.as_ref())
+                        .map(|wait| wait.wake_at)
+                }),
+        )
+        .chain(
+            checkpoint
+                .nodes
+                .iter()
+                .filter(|node| node.state == NodeState::Running)
+                .filter_map(|node| {
+                    node.delivery_adoption()
+                        .filter(|progress| progress.ci_admission.is_none())
+                        .and_then(|progress| progress.ci_admission_wait)
+                        .map(|wait| wait.wake_at)
                 }),
         )
         .min()
@@ -838,7 +864,7 @@ pub(super) fn decide<R: AttemptOwner, J: GraphJournal>(
             .collect();
         answer.rejected = Some(bounded(
             &format!("answer must choose one of {}", ids.join(", ")),
-            MAX_ADVANCE_ERROR_BYTES,
+            MAX_ADVANCE_NOTE_BYTES,
         ));
     }
     if let (None, Some(chosen)) = (&answer.rejected, chosen) {
@@ -925,6 +951,9 @@ fn decision_outputs(ask_id: &str, outcome: DecideOutcome) -> NodeOutputs {
         compact_disposition_findings: None,
         full_disposition_findings: None,
         verdict_error: None,
+        hygiene: None,
+        publication: None,
+        handoff: None,
         schema_version: 2,
         decide_outcome: Some(outcome.clone()),
         result: Some(ResultOutput {
@@ -1069,7 +1098,7 @@ pub(super) fn pause<R: AttemptOwner, J: GraphJournal>(
             checkpoint.asks.remove(position);
         }
         Err((_, note)) => {
-            let note = bounded(&note, MAX_ADVANCE_ERROR_BYTES);
+            let note = bounded(&note, MAX_ADVANCE_NOTE_BYTES);
             let request = pause_ask(
                 &checkpoint.graph_id,
                 checkpoint.pause_asks + 1,
@@ -1246,7 +1275,7 @@ pub(super) fn validate_progress(
     let valid = progress.attempts.is_empty()
         && progress.gate.is_none()
         && progress.ci.is_none()
-        && (progress.advance_error.is_none() || progress.state == NodeState::Failed)
+        && (progress.advance_note.is_none() || progress.state == NodeState::Failed)
         && match progress.state {
             NodeState::Pending | NodeState::Blocked => progress.outputs.is_none(),
             NodeState::Skipped => progress.outputs.is_none() || unanswered_progress(progress, node),

@@ -1,6 +1,8 @@
 //! Pure argument parsing, help and bounded result rendering. No owner execution.
 #![forbid(unsafe_code)]
+
 pub mod accounts;
+pub mod adapter_capabilities;
 pub mod brief;
 pub mod check;
 pub mod ci;
@@ -8,6 +10,7 @@ pub mod cloud;
 pub mod config_reads;
 pub mod config_shape;
 pub mod console;
+pub mod declaration;
 pub mod domains;
 pub mod external_contract;
 pub mod fabric;
@@ -17,6 +20,7 @@ pub mod quota;
 pub(crate) mod quota_history;
 pub mod route;
 pub mod run;
+pub mod smoke;
 pub mod target;
 pub mod tracker;
 pub mod wait;
@@ -1432,6 +1436,11 @@ mod tests {
             "accepted brief, prior handoff and queued steering text",
             "refuse rejects unsupported routes up front",
             "leaves unavailable sessions without a successor",
+            "--now",
+            "interrupt through custody once the session identity is durable",
+            "resume that same session with the text",
+            "domains.fabric.steer.delivery",
+            "--explain",
         ] {
             assert!(
                 help.contains(contract),
@@ -1544,17 +1553,27 @@ mod tests {
 
     #[test]
     fn run_accepts_an_explicit_local_read_only_source() {
-        let invocation = valid(&["run", "task", "Review the tree", "--source", "local"]);
+        let invocation = valid(&["run", "task", "Review the tree", "--source", "live"]);
         let Command::Run(request) = invocation.command else {
             panic!("expected run");
         };
-        assert_eq!(request.source.as_deref(), Some("local"));
-        let invocation = valid(&["run", "task", "Review the tree", "--source", "upstream"]);
+        assert_eq!(request.source.as_deref(), Some("live"));
+        let invocation = valid(&[
+            "run",
+            "task",
+            "Review the tree",
+            "--source",
+            "default_branch",
+        ]);
         let Command::Run(request) = invocation.command else {
             panic!("expected run");
         };
-        assert_eq!(request.source.as_deref(), Some("upstream"));
-        invalid(&["run", "task", "Review the tree", "--source", "elsewhere"]);
+        assert_eq!(request.source.as_deref(), Some("default_branch"));
+        for source in ["auto", "refs/heads/x"] {
+            valid(&["run", "task", "Review the tree", "--source", source]);
+        }
+        let retired = "local";
+        invalid(&["run", "task", "Review the tree", "--source", retired]);
     }
 
     #[test]
@@ -3294,6 +3313,26 @@ mod tests {
         assert_eq!(wait.head.as_deref(), Some(sha.as_str()));
         invalid(&["wait", "--pr", "2721", "--head", "abc"]);
         invalid(&["wait", "--pr", "2721", "--head", "zz"]);
+        let Command::Wait(wait) =
+            valid(&["wait", "--pr", "2721", "--pr-head-policy", "follow_latest"]).command
+        else {
+            panic!("wait command")
+        };
+        assert_eq!(
+            wait.pr_head_policy,
+            Some(provenant_records::subject::SubjectPolicy::FollowLatest)
+        );
+        invalid(&["wait", "--pr-head-policy", "follow_latest"]);
+        invalid(&["wait", "--pr", "2721", "--pr-head-policy", "unknown"]);
+        invalid(&[
+            "wait",
+            "--pr",
+            "2721",
+            "--head",
+            &sha,
+            "--pr-head-policy",
+            "pinned",
+        ]);
         invalid(&["wait", "--all", "--any"]);
         invalid(&["wait", "--any", "--fail-fast"]);
         for timeout in ["1", "4h", "14400"] {
@@ -3419,6 +3458,8 @@ mod tests {
             "s-1",
         ]);
         valid(&["steer", attempt, "--brief-file", "-"]);
+        valid(&["steer", attempt, "--now", "--brief", "Please continue"]);
+        valid(&["steer", attempt, "--explain"]);
         invalid(&["steer", attempt]);
         invalid(&["steer", attempt, "--brief", "a", "--brief-file", "b"]);
         invalid(&[

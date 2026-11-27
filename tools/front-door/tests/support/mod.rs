@@ -7,11 +7,32 @@ use std::{
     ffi::{OsStr, OsString},
     fs,
     path::{Path, PathBuf},
-    sync::Mutex,
+    sync::{Mutex, OnceLock},
     time::Duration,
 };
 
 pub type Result<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
+
+// Cargo supplies CARGO_BIN_EXE_provenant only to integration targets. The
+// fixture-linked library cannot see it, so its driver supplies the same path
+// at startup. The explicit value wins; the target-local env stays the default
+// for targets that do get it.
+static PRODUCTION_BINARY: OnceLock<PathBuf> = OnceLock::new();
+
+pub fn set_production_binary(path: Option<PathBuf>) {
+    if let Some(path) = path {
+        let _ = PRODUCTION_BINARY.set(path);
+    }
+}
+
+pub fn production_binary() -> Result<&'static Path> {
+    if let Some(path) = PRODUCTION_BINARY.get() {
+        return Ok(path.as_path());
+    }
+    option_env!("CARGO_BIN_EXE_provenant")
+        .map(Path::new)
+        .ok_or_else(|| "production binary path is only available to integration targets".into())
+}
 
 // Current graph format, mirrored here because the validator/journal do not
 // expose their version declarations to integration fixtures.
@@ -50,9 +71,8 @@ pub fn call_with_stdin(
         "--json",
     ];
     words.extend_from_slice(args);
-    let binary = option_env!("CARGO_BIN_EXE_provenant")
-        .ok_or("production binary path is only available to integration targets")?;
-    let output = rig.execute(Path::new(binary), &words, stdin)?;
+    let binary = production_binary()?;
+    let output = rig.execute(binary, &words, stdin)?;
     assert_eq!(
         code(&output),
         expected,
@@ -334,6 +354,9 @@ pub struct TestRig {
     pub root: PathBuf,
     pub home: PathBuf,
     pub project: PathBuf,
+    /// Installed release assets (`PROVENANT_ROOT`), kept apart from the
+    /// project so read-only lanes never see assets inside their source.
+    pub assets: PathBuf,
     pub state: PathBuf,
     pub env: Vec<(OsString, OsString)>,
     executor: SystemExecutor,
@@ -388,10 +411,12 @@ impl TestRig {
         provenant_os::fixture::private_state_dir(&root)?;
         let home = root.join("home");
         let project = root.join("project");
+        let assets = root.join("assets");
         let state = root.join("state");
         for path in [
             &home,
             &project,
+            &assets,
             &root.join("config"),
             &root.join("cache"),
             &root.join("claude"),
@@ -417,7 +442,7 @@ impl TestRig {
             ("CODEX_HOME", root.join("codex")),
             ("PROVENANT_GIT", git.clone()),
             ("PROVENANT_STATE_DIR", state.clone()),
-            ("PROVENANT_ROOT", project.clone()),
+            ("PROVENANT_ROOT", assets.clone()),
             ("TMPDIR", root.clone()),
         ]
         .into_iter()
@@ -444,6 +469,7 @@ impl TestRig {
             root,
             home,
             project,
+            assets,
             state,
             env,
             executor: SystemExecutor::new(8)?,
@@ -471,6 +497,23 @@ impl TestRig {
         }
         Ok(rig)
     }
+    /// The `PROVENANT_LANE_PROJECT` entry a lane launched in this rig's
+    /// project receives. Binds the project on the host first, as a launch does.
+    pub fn lane_project(&self) -> Result<(OsString, OsString)> {
+        let mut inputs = provenant_core::RootInputs::new(self.home.clone(), self.assets.clone());
+        inputs.state_dir = Some(self.state.clone());
+        let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+        let common = fs::canonicalize(self.project.join(".git"))?;
+        let binding = provenant_config::bind_project(
+            &roots,
+            provenant_config::ProjectLocation::new(common)?,
+        )?;
+        Ok((
+            provenant_core::consumer_env::LANE_PROJECT.into(),
+            binding.project_id().to_string().into(),
+        ))
+    }
+
     /// Exercise commands whose contract requires an absent state root.
     pub fn without_state(self) -> Result<Self> {
         fs::remove_file(self.state.join("config.toml"))?;
@@ -492,11 +535,10 @@ impl TestRig {
             self.state.clone().into_os_string(),
         ];
         arguments.extend(args.iter().map(OsString::from));
-        // Clippy also compiles the included command edge as a binary unit
-        // target, where Cargo supplies no integration-test executable path.
-        let binary = option_env!("CARGO_BIN_EXE_provenant")
-            .ok_or("production binary path is only available to integration targets")?;
-        self.execute_os(Path::new(binary), &arguments, None)
+        // The library-linked harness gets this path from its driver; Cargo
+        // supplies it directly to ordinary integration-test targets.
+        let binary = production_binary()?;
+        self.execute_os(binary, &arguments, None)
     }
 
     pub fn execute(

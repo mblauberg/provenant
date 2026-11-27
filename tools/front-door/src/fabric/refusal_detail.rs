@@ -13,7 +13,7 @@ impl Factory {
             return;
         };
         for node in nodes {
-            if node["advance_error_code"] != "preparation_refused" {
+            if node["advance_code"] != "preparation_refused" {
                 continue;
             }
             let Some(reference) = node["attempts"]
@@ -26,12 +26,12 @@ impl Factory {
             let Some(detail) = self.recorded_refusal(reference) else {
                 continue;
             };
-            let base = node["advance_error"].as_str().unwrap_or_default();
+            let base = node["advance_note"].as_str().unwrap_or_default();
             if base.contains(&detail) {
                 continue;
             }
             let text = format!("{base} Refused: {detail}");
-            node["advance_error"] = Value::String(text.chars().take(MAX_DETAIL_CHARS).collect());
+            node["advance_note"] = Value::String(text.chars().take(MAX_DETAIL_CHARS).collect());
         }
     }
 

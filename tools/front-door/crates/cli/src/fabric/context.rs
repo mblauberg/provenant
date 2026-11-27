@@ -47,6 +47,8 @@ pub(super) fn canonical(path: &Path) -> Result<PathBuf, EdgeError> {
     Ok(provenant_os::fs::canonicalize(path)?)
 }
 
+mod lane_project;
+
 fn has_git_common_layout(path: &Path) -> bool {
     path.file_name() == Some(OsStr::new(".git"))
         || (path.join("HEAD").is_file() && path.join("objects").is_dir())
@@ -412,6 +414,9 @@ impl Context {
     }
 
     pub fn open(roots: Roots, home: &Path, cwd: &Path) -> Result<Self, EdgeError> {
+        if in_lane() {
+            return Self::open_in_lane(roots, home, cwd, lane_project::LaneHost::Bind);
+        }
         // Validate configuration before allocating identities or opening SQLite.
         let resolved = crate::config_reads::read_for(&roots, "fabric context")?;
         let graph_prompt_limit_source = prompt_limit_source(&resolved.origins);
@@ -419,19 +424,8 @@ impl Context {
         let local_observation = crate::wait::observation_settings(&resolved);
         let config = resolved.domains.fabric;
         private_dir(roots.state.as_path(), roots.state.as_path())?;
-        let utility_root = if in_lane() {
-            lane_temporary()?
-        } else {
-            roots.state.as_path().join("tmp")
-        };
-        let utility_home = utility_root.join("git-home");
-        let utility_anchor = if in_lane() {
-            utility_root.as_path()
-        } else {
-            roots.state.as_path()
-        };
-        private_dir(utility_anchor, &utility_home)?;
-        let lane = in_lane();
+        let utility_home = roots.state.as_path().join("tmp").join("git-home");
+        private_dir(roots.state.as_path(), &utility_home)?;
         let git = provenant_os::git::git_executable().ok_or(EdgeError::GitUnavailable)?;
         let runtime =
             provenant_confinement::UtilityRuntime::new(&git, &utility_home, roots.state.as_path())?
@@ -443,12 +437,7 @@ impl Context {
         let discovered = runtime.project_location(&executor, cwd, budget, &CancelToken::new())?;
         let is_git = discovered.repository.is_some();
         let common_dir = discovered.location.common_dir().to_path_buf();
-        let binding = if lane {
-            provenant_config::lookup_project(&roots, &discovered.location)?
-                .ok_or(EdgeError::Invalid)?
-        } else {
-            provenant_config::bind_project(&roots, discovered.location.clone())?
-        };
+        let binding = provenant_config::bind_project(&roots, discovered.location.clone())?;
         let (project_root, project_config_root) = if is_git {
             let repository = discovered.repository.as_ref().ok_or(EdgeError::Invalid)?;
             registered_project_roots_for_repository(
@@ -495,7 +484,7 @@ impl Context {
             project_root,
             graph_prompt_limit_source,
             graph_decide_timeout_source,
-            in_lane: lane,
+            in_lane: false,
             executor,
             home: home.to_path_buf(),
             cwd: cwd.to_path_buf(),
@@ -503,6 +492,9 @@ impl Context {
     }
     /// Resolve existing identity and configuration without creating state.
     pub fn open_read_only(roots: Roots, home: &Path, cwd: &Path) -> Result<Self, EdgeError> {
+        if in_lane() {
+            return Self::open_in_lane(roots, home, cwd, lane_project::LaneHost::Lookup);
+        }
         let resolved = crate::config_reads::read_for(&roots, "fabric context")?;
         let graph_prompt_limit_source = prompt_limit_source(&resolved.origins);
         let graph_decide_timeout_source = decide_timeout_source(&resolved.origins);
@@ -842,7 +834,7 @@ impl Context {
             self.identity.host,
             &self.config,
             std::env::var_os(provenant_core::consumer_env::AGENT_LABEL).as_deref(),
-            harness_client(client).map(|harness| harness.spec().name),
+            harness_client(client).map(|harness| harness.spec().identity.name),
         )
     }
     pub fn text(&self, text: &str) -> Result<(), EdgeError> {
@@ -1131,7 +1123,7 @@ fn harness_client(
         let detected: Vec<_> = provenant_records::ADAPTER_SPECS
             .iter()
             .filter(|spec| {
-                spec.client_env_markers.is_some_and(|markers| {
+                spec.launch.client_env_markers.is_some_and(|markers| {
                     markers
                         .equals_one
                         .is_some_and(|name| std::env::var(name).is_ok_and(|value| value == "1"))
@@ -1146,7 +1138,7 @@ fn harness_client(
     })
 }
 fn active_harness_client() -> Option<&'static str> {
-    harness_client(None).map(|harness| harness.spec().name)
+    harness_client(None).map(|harness| harness.spec().identity.name)
 }
 
 /// A peer call failure: the stable error plus, for transport failures, the

@@ -1,22 +1,22 @@
 doc = "Exercise the main lane paths with small, disposable work."
 nodes = [
-  { id = "read", use = "task", tier = "junior", fixture = "fixture.txt", prompt = "Read the supplied fixture and report its single stated fact." },
-  { id = "review", use = "review", tier = "junior", review_base = "${diff_base}", when = { smoke-review = true }, over = ["correctness", "tests"], min_ok = 2, after = ["read"], prompt = "Review this trivial fixture: the only expected fact is that smoke checks work." },
-  { id = "write", use = "implement", tier = "junior", after = ["review"], worktree = "${worktree}", attempt = "${write_attempt}", when = { smoke-write = true }, prompt = "In the supplied scratch worktree, create exactly one file named smoke.txt containing 'smoke ok', then commit it." },
-  { id = "retry-route", use = "task", tier = "junior", after = ["review"], when = { smoke-retry = true }, fixture = "fixture.txt", prompt = "Report the supplied fixture's single stated fact. This node checks that the smoke run has a free-capable route for the retry path; it does not itself retry a failed node." },
-  { id = "steer-route", use = "task", tier = "junior", after = ["review"], when = { smoke-steer = true }, fixture = "fixture.txt", prompt = "Report the supplied fixture's single stated fact. This node checks that the smoke run has a free-capable route for the steer path; it does not itself steer a running lane." },
+  { id = "read", use = "task", tier = "junior", prompt = "Read fixture.txt and reply with its nonce line exactly." },
+  { id = "write", use = "implement", tier = "junior", after = ["read"], worktree = "${worktree}", attempt = "${write_attempt}", when = { write = true }, prompt = "Append the nonce line from fixture.txt to smoke.txt and commit." },
+  { id = "review-write", use = "review", tier = "junior", review_base = "${diff_base}", source = { type = "node", node = "write" }, when = { write = true }, over = ["correctness", "tests"], min_ok = 2, after = ["write"], prompt = "Review the writer's commit and quote the nonce line it added." },
+  { id = "review-fixture", use = "review", tier = "junior", review_base = "${fixture_base}", when = { write = false }, over = ["correctness", "tests"], min_ok = 2, after = ["read"], prompt = "Review this fixture change and quote its nonce line." },
+  { id = "retry-probe", use = "task", tier = "junior", after = ["read"], when = { retry_probe = true }, prompt = "Report the supplied fixture's single stated fact. This node checks that the smoke run has a free-capable route for the retry path; it does not itself retry a failed node." },
+  { id = "steer-probe", use = "task", tier = "junior", after = ["read"], when = { steer_probe = true }, prompt = "Report the supplied fixture's single stated fact. This node checks that the smoke run has a free-capable route for the steer path; it does not itself steer a running lane." },
 ]
 exports = [
-  { node = "review", outputs = ["result"], when = { smoke-write = false, smoke-review = true } },
-  { node = "read", outputs = ["result"], when = { smoke-write = false, smoke-review = false } },
-  { node = "write", outputs = ["result"], when = { smoke-write = true } },
+  { node = "review-write", outputs = ["result"], when = { write = true } },
+  { node = "review-fixture", outputs = ["result"], when = { write = false } },
 ]
 
 [parameters]
 worktree = { type = "string", default = "", doc = "Scratch worktree for the writer node (--worktree, or --branch to create one). A remote launch never carries a caller path; it provisions its own worktree from a branch." }
 write_attempt = { type = "table", default = {}, doc = "Attempt settings for the writer node, such as a new worktree; bound from --branch and --base, or from the remote launch's sourced scratch branch." }
-smoke-write = { type = "boolean", default = false, doc = "Whether to run the write node; enabled by a local worktree or a peer-owned branch. A remote launch provisions a scratch branch from a sourced default so the writer runs unless it is explicitly disabled." }
-diff_base = { type = "string", default = "", doc = "Commit the review nodes compare against; a launch supplies the fixture's base. Empty uses the checkout's first parent; if unavailable, review is skipped with a warning." }
-smoke-review = { type = "boolean", default = true, doc = "Whether to run review; the launch disables it when no diff_base or checkout first parent is available." }
-smoke-retry = { type = "boolean", default = true, doc = "Whether to run the retry-route probe, which checks a free-capable route for the retry path without retrying a node; disable with --set smoke-retry=false." }
-smoke-steer = { type = "boolean", default = true, doc = "Whether to run the steer-route probe, which checks a free-capable route for the steer path without steering a lane; disable with --set smoke-steer=false." }
+write = { type = "boolean", default = false, doc = "Whether to run the write node; enabled by a local worktree or a peer-owned branch. A peer writer needs an explicit branch." }
+diff_base = { type = "string", default = "", doc = "Commit the review compares against; the lifecycle supplies the fixture head. A caller value resolves inside the fixture." }
+fixture_base = { type = "string", default = "", doc = "Commit the fixture change started from; the lifecycle supplies the fixture's base." }
+retry_probe = { type = "boolean", default = true, doc = "Whether to run the retry probe, which checks a free-capable route for the retry path without retrying a node; disable with --set retry_probe=false." }
+steer_probe = { type = "boolean", default = true, doc = "Whether to run the steer probe, which checks a free-capable route for the steer path without steering a lane; disable with --set steer_probe=false." }

@@ -75,14 +75,33 @@ impl Layer {
 
 /// A layer plus the exact place, for example
 /// `~/.config/provenant/config.toml#lanes.writer_dirty`,
-/// `.provenant/ports.json#verify.remote` or `--max-turns`.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+/// `.provenant/ports.json#verify.remote` or `--max-turns`. The default is the
+/// compiled default with no named place.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Source {
     /// The layer that set the value.
     pub layer: Layer,
     /// The exact file, key or flag, when the layer has one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub origin: Option<String>,
+}
+
+impl Source {
+    /// A source at `layer` naming its exact place.
+    pub fn at(layer: Layer, origin: impl Into<String>) -> Self {
+        Self {
+            layer,
+            origin: Some(origin.into()),
+        }
+    }
+
+    /// `LAYER (ORIGIN)`, the prose form diagnostics print.
+    pub fn describe(&self) -> String {
+        match &self.origin {
+            Some(origin) => format!("{} ({origin})", self.layer.description()),
+            None => self.layer.description().to_owned(),
+        }
+    }
 }
 
 /// A value with its source. Serialises as
@@ -139,6 +158,7 @@ pub fn warn_ignored<T>(ignored: &[Sourced<T>], setting: &str) {
                     "{setting} value from {} ignored: this family does not declare that layer",
                     candidate.source.layer.description()
                 ),
+                crate::warning::detected_source(SETTING_LAYER_IGNORED),
             )
             .source(candidate.source.clone())
             .repair(format!("set {setting} from a layer this family declares")),
@@ -294,10 +314,7 @@ mod tests {
             crate::warning::capture(|| crate::warn_ignored(&merge.ignored, "example"));
         assert_eq!(warnings.len(), 1);
         assert_eq!(warnings[0].code.as_ref(), "SETTING_LAYER_IGNORED");
-        assert_eq!(
-            warnings[0].source.as_ref().map(|source| source.layer),
-            Some(Layer::Profile)
-        );
+        assert_eq!(warnings[0].source.layer, Layer::Profile);
         assert!(warnings[0].repair.is_some());
     }
 

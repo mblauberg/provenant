@@ -125,14 +125,20 @@ fn prepare_refusal_is_terminal_without_custody() -> TestResult {
     assert!(prompt.contains(&path.join("process-exit.json").display().to_string()));
     assert!(prompt.contains("only durable outputs"));
     assert!(prompt.contains("Files in $TMPDIR are discarded when the attempt ends."));
+    // The brief now directs the lane to the declaration journal instead of a
+    // progress handoff file; prose and fenced blocks are never parsed.
     assert!(prompt.contains(
-        "Provider history is kept. The harness writes the attempt's own records, including the sealed handoff.json in the attempt directory, and the lane never writes them; your progress handoff JSON under provider-state is yours to update throughout the task and is kept."
+        "Provider history is kept. The harness writes the attempt's own records, including the sealed handoff.json in the attempt directory, and the lane never writes them. Declare your result with `provenant declare --stdin`"
     ));
+    assert!(prompt.contains(
+        "The last accepted declaration settles the lane; prose and fenced blocks are not read."
+    ));
+    assert!(prompt.contains("To stop early, declare `stopped_early` or `blocked`."));
     assert!(prompt.ends_with("exact prompt"));
     let fact = store.attempt(run.attempt_id, &call)?;
     assert_eq!(
         fact.terminal_state,
-        provenant_records::AttemptOutcome::Rejected
+        provenant_records::run::Outcome::Rejected
     );
     assert!(fact.started_at.is_none());
     assert!(
@@ -184,10 +190,7 @@ fn stored_cloud_request_is_refused_and_never_launched_locally() -> TestResult {
     let AttemptState::Terminal { .. } = &state else {
         return Err("attempt is not terminal".into());
     };
-    assert_eq!(
-        state.terminal_cause(),
-        Some(TerminalCause::CloudPlacementRemoved)
-    );
+    assert_eq!(state.cause(), Some(CauseKind::CloudPlacementRemoved));
     assert!(
         store
             .start(run.attempt_id, &fake, &|_, _| unreachable!(), &call)?
@@ -258,6 +261,21 @@ fn publication_holder_accepts_exit_zero_or_completed_host_budget() -> TestResult
             )?;
         }
         seal_exit(&store, &observed)?;
+        // The completed host budget and a zero exit both need the lane's done
+        // declaration; a fenced block in stdout is only captured output now.
+        crate::dispatch_tests::declare_handoff(
+            &store,
+            id,
+            "publication-done",
+            serde_json::json!({
+                "schema_version": 2,
+                "status": "done",
+                "note": "finished",
+                "remaining": [],
+                "decisions": [],
+                "verify": [],
+            }),
+        )?;
         let record = store.finish(id, &dir, &observed, &fake, &call)?;
         if code == 0 {
             assert_eq!(
@@ -279,8 +297,8 @@ fn publication_holder_accepts_exit_zero_or_completed_host_budget() -> TestResult
         if budget {
             let reopened = store.record(id, &call)?;
             assert_eq!(
-                reopened.settlement_reason,
-                Some(provenant_records::run::SettlementReason::CompletedBeforeBudget)
+                reopened.settlement_class,
+                Some(provenant_records::run::SettlementClass::CompletedBeforeBudget)
             );
             let stop: provenant_records::Stop = match &reopened.state {
                 AttemptState::Terminal { stop, .. } => stop.clone().ok_or("stop")?,
@@ -294,8 +312,8 @@ fn publication_holder_accepts_exit_zero_or_completed_host_budget() -> TestResult
             let fact = store.attempt(id, &call)?;
             assert_eq!(fact.cause_source, provenant_records::run::CauseSource::Host);
             assert_eq!(
-                fact.settlement_reason,
-                Some(provenant_records::run::SettlementReason::CompletedBeforeBudget)
+                fact.settlement_class,
+                Some(provenant_records::run::SettlementClass::CompletedBeforeBudget)
             );
         }
         assert_eq!(store.finish(id, &dir, &observed, &fake, &call)?, record);
@@ -349,7 +367,7 @@ fn never_spawned_exit_is_a_refusal_with_its_reason() -> TestResult {
     let fact = store.attempt(id, &call)?;
     assert_eq!(
         fact.terminal_state,
-        provenant_records::AttemptOutcome::Rejected
+        provenant_records::run::Outcome::Rejected
     );
     assert_eq!(fact.reason.as_deref(), Some("admission refused"));
     let record = store.record(id, &call)?;
@@ -408,24 +426,21 @@ fn release_preserves_private_temporary_directories_for_follow_up() -> TestResult
     observed.scope.attempt = terminal;
     observed.termination = Some(Termination::Exit(1));
     seal_exit(&store, &observed)?;
+    let mut fact = super::tests::publication_fact(Outcome::Failed, None);
+    fact.reason = Some("fixture failure".into());
     let publication = TerminalPublication {
-        handoff: Ok(None),
-        terminal_cause: None,
-        terminal_note: None,
-        outcome: Outcome::Failed,
+        fact,
+        evidence: None,
         finished_at: WallTime::from_micros(160)?,
         started_at: Some(WallTime::from_micros(120)?),
         provider_ms: Some(1),
-        reason: Some("fixture failure".into()),
         result: "",
-        complete: true,
         redacted: false,
         resolved_route: Some(route()),
         applied_route: Some(route()),
         observed_route: Some(route()),
         usage: UsageRecord::default(),
         session: None,
-        partial_signals: Vec::new(),
     };
     store.publish_terminal(terminal, 1, &publication, &observed, &call)?;
     assert!(terminal_tmp.exists());

@@ -15,8 +15,10 @@ PATH` adds the launch layer. The layers concatenate in that order, each labelled
 with its source, and a first-line `<!-- provenant-roles: ... -->` header scopes a
 layer to writer, review or read-only. A missing file warns and the launch
 proceeds. A project's `verify.static_checks` port entries are named in the
-writer preamble as no-build checks to run before pushing; a failure is reported
-in the handoff and never refuses the push.
+writer preamble as no-build checks to run before pushing; the same list is
+recorded on the launch receipt with a source on each entry, and with no
+declaration neither appears. A
+failure is reported in the declaration and never refuses the push.
 
 ## Confinement
 

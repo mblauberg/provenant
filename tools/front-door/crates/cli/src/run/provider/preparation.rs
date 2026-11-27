@@ -6,7 +6,7 @@ pub(super) fn preparation_executable(
     path: &run::FilteredLanePath,
     name: &str,
 ) -> Result<PathBuf, String> {
-    let name = AdapterSpec::get(name).map_or(name, |spec| spec.binary);
+    let name = AdapterSpec::get(name).map_or(name, |spec| spec.identity.binary);
     path.resolve(name)
 }
 
@@ -17,28 +17,31 @@ fn include_local_login(
     selected_adapter: Option<&str>,
     retained_identity: Option<RetainedIdentity<'_>>,
 ) -> bool {
-    if !spec.local_login
-        || selected_adapter.is_some_and(|adapter| adapter != spec.name)
+    if !spec.login.local
+        || selected_adapter.is_some_and(|adapter| adapter != spec.identity.name)
         || retained_identity
-            .is_some_and(|identity| identity.account_key != Some(spec.local_account.1))
+            .is_some_and(|identity| identity.account_key != Some(spec.accounts.local_entry.1))
     {
         return false;
     }
-    let has_entry = entries.iter().any(|entry| entry.adapter == spec.name);
+    let has_entry = entries
+        .iter()
+        .any(|entry| entry.adapter == spec.identity.name);
     if !has_entry {
         return true;
     }
 
     // A registered-account adapter's local identity participates in the same
     // per-account observation and quota scheduling as its other accounts.
-    if !spec.is_unregistered_local(spec.local_account.1) {
+    if !spec.is_unregistered_local(spec.accounts.local_entry.1) {
         return false;
     }
     selected.is_none_or(|selector| {
-        selector == spec.local_account.1
-            || (selector == spec.local_account.0
+        selector == spec.accounts.local_entry.1
+            || (selector == spec.accounts.local_entry.0
                 && !entries.iter().any(|entry| {
-                    entry.adapter == spec.name && (entry.label == selector || entry.key == selector)
+                    entry.adapter == spec.identity.name
+                        && (entry.label == selector || entry.key == selector)
                 }))
     })
 }
@@ -76,7 +79,7 @@ fn select_account<'a>(
             } else {
                 PrepareError::Refusal {
                     message: format!("{refusal}; run `provenant accounts list`"),
-                    cause: provenant_records::run::TerminalCause::UnregisteredAccount,
+                    cause: provenant_records::run::CauseKind::UnregisteredAccount,
                     note: None,
                     fallback_outcome: None,
                 }
@@ -87,7 +90,7 @@ fn select_account<'a>(
         .find(|entry| entry.adapter == resolved.item.adapter && entry.key == resolved.item.key)
         .ok_or_else(|| PrepareError::Refusal {
             message: "the selected account is not registered for the requested route; run `provenant accounts list`".into(),
-            cause: provenant_records::run::TerminalCause::UnregisteredAccount,
+            cause: provenant_records::run::CauseKind::UnregisteredAccount,
             note: None,
             fallback_outcome: None,
         })
@@ -113,7 +116,7 @@ fn select_retained_account<'a>(
     let resolved = provenant_providers::accounts::resolve(&settings, key, ReferenceForms::RETAINED)
         .map_err(|_| PrepareError::Refusal {
             message: "the prior attempt's account is not registered for its applied provider; cannot continue it".into(),
-            cause: provenant_records::run::TerminalCause::UnregisteredAccount,
+            cause: provenant_records::run::CauseKind::UnregisteredAccount,
             note: None,
             fallback_outcome: None,
         })?;
@@ -123,7 +126,7 @@ fn select_retained_account<'a>(
         .map(Some)
         .ok_or_else(|| PrepareError::Refusal {
             message: "the prior attempt's account is not registered for its applied provider; cannot continue it".into(),
-            cause: provenant_records::run::TerminalCause::UnregisteredAccount,
+            cause: provenant_records::run::CauseKind::UnregisteredAccount,
             note: None,
             fallback_outcome: None,
         })
@@ -239,21 +242,20 @@ fn resolve_pacing_source(
     fact
 }
 
-pub(super) fn image_input_warning(adapter: &str, attachments: &[PathBuf]) -> Option<String> {
-    (!attachments.is_empty()
-        && !AdapterSpec::get(adapter).is_some_and(|spec| spec.launch.image_input))
-    .then(|| {
-        format!(
-            "warning: adapter {adapter} does not support image_input; attachments remain readable"
-        )
-    })
-}
-
 fn opencode_access_message(access: &provenant_records::LaneAccessReceipt) -> String {
     format!(
         "OpenCode profile={} (lanes.access; source: {})",
         access.access.as_str(),
         access.source.as_str()
+    )
+}
+
+/// Effective `[[adapter_capabilities]]` entries for one launch; without
+/// routing roots there are no owner entries.
+fn launch_capability_overlay(registry: &Registry<'_>) -> provenant_records::CapabilityOverlay {
+    registry.roots.map_or_else(
+        provenant_records::CapabilityOverlay::default,
+        crate::config_reads::capability_overlay,
     )
 }
 
@@ -299,7 +301,14 @@ fn has_alternative_account(
     route: &ResolvedRoute,
     availability: &[provenant_providers::AvailabilityRecord],
     refused: &std::collections::BTreeSet<(String, String)>,
+    policy: &provenant_routing::OfferEvidencePolicy<'_>,
+    catalogue: &provenant_routing::Catalogue,
 ) -> bool {
+    let Ok(model) =
+        provenant_routing::ModelId::parse(&format!("{}/{}", route.adapter, route.model))
+    else {
+        return false;
+    };
     availability.iter().any(|record| {
         record.adapter == route.adapter
             && record.account_key.as_deref() != route.account_key.as_deref()
@@ -307,7 +316,15 @@ fn has_alternative_account(
                 .account_key
                 .as_deref()
                 .is_some_and(|key| !refused.contains(&(record.adapter.clone(), key.to_owned())))
-            && provenant_providers::model_matches_offered(&route.model, &record.observed_models)
+            && record.account_key.as_deref().is_some_and(|key| {
+                provenant_routing::recorded_offer_models(
+                    policy.inputs(Some(record), &route.adapter, key),
+                    &model,
+                    catalogue,
+                    provenant_routing::OfferSupersedence::Allow,
+                )
+                .is_some_and(|evidence| evidence.serves)
+            })
     })
 }
 
@@ -556,6 +573,9 @@ fn publish_preparation_login_failure(
         warn(Warning::new(
             provenant_records::warning::LOGIN_RECORD_UNRETAINED,
             format!("could not publish preparation login failure: {error}"),
+            provenant_records::warning::detected_source(
+                provenant_records::warning::LOGIN_RECORD_UNRETAINED,
+            ),
         ));
     }
 }
@@ -982,7 +1002,7 @@ pub(super) enum PrepareError {
     #[error("{message}")]
     Refusal {
         message: String,
-        cause: provenant_records::run::TerminalCause,
+        cause: provenant_records::run::CauseKind,
         /// Fixed-form text naming a configured value, never captured output.
         note: Option<String>,
         fallback_outcome: Option<provenant_records::run::PreparationFailure>,
@@ -990,7 +1010,7 @@ pub(super) enum PrepareError {
     #[error(transparent)]
     Prompt(#[from] LaunchPromptError),
     #[error(transparent)]
-    Unsupported(#[from] provenant_records::UnsupportedLaunch),
+    Unsupported(#[from] provenant_records::LaunchGap),
     #[error(transparent)]
     Permission(#[from] provenant_confinement::permissions::PermissionError),
     #[error(transparent)]
@@ -1149,18 +1169,18 @@ impl PrepareError {
                 boundary_class: provenant_records::diagnostic::BoundaryClass::None,
                 policy_code: None,
                 resource: None,
-                terminal_cause: cause,
+                cause,
                 terminal_note: note,
                 message,
                 host_message: None,
                 skipped_routes: Vec::new(),
                 fallback_outcome: fallback_outcome.or(match cause {
-                    provenant_records::run::TerminalCause::AccountLoginRequired => {
+                    provenant_records::run::CauseKind::AccountLoginRequired => {
                         Some(provenant_records::run::PreparationFailure::AuthRequired)
                     }
-                    provenant_records::run::TerminalCause::UnregisteredAccount
-                    | provenant_records::run::TerminalCause::CommandUnavailable
-                    | provenant_records::run::TerminalCause::HostNativeUnconfigured => {
+                    provenant_records::run::CauseKind::UnregisteredAccount
+                    | provenant_records::run::CauseKind::CommandUnavailable
+                    | provenant_records::run::CauseKind::HostNativeUnconfigured => {
                         Some(provenant_records::run::PreparationFailure::AdapterUnavailable)
                     }
                     _ => None,
@@ -1173,9 +1193,9 @@ impl PrepareError {
                     super::source_tree::SourceCause::ProjectBindingDirectory(_)
                 );
                 let cause = if binding_refusal {
-                    provenant_records::run::TerminalCause::ProjectBindingDirectoryUnsafe
+                    provenant_records::run::CauseKind::ProjectBindingDirectoryUnsafe
                 } else {
-                    provenant_records::run::TerminalCause::SourceViewRefused
+                    provenant_records::run::CauseKind::SourceViewRefused
                 };
                 let mut refusal = run::PrepareRefusal::boxed(cause, detail.clone());
                 refusal.terminal_note = Some(detail);
@@ -1243,7 +1263,7 @@ impl PrepareError {
                     boundary_class,
                     policy_code,
                     resource: candidate_resource,
-                    terminal_cause: provenant_records::run::TerminalCause::RouteResolutionRefused,
+                    cause: provenant_records::run::CauseKind::RouteResolutionRefused,
                     terminal_note: None,
                     message,
                     host_message,
@@ -1251,14 +1271,13 @@ impl PrepareError {
                     fallback_outcome,
                 });
                 if refusal.auth_required() {
-                    refusal.terminal_cause =
-                        provenant_records::run::TerminalCause::AccountLoginRequired;
+                    refusal.cause = provenant_records::run::CauseKind::AccountLoginRequired;
                 }
                 refusal
             }
             Self::SourceRoots(error) => {
                 let mut refusal = run::PrepareRefusal::boxed(
-                    provenant_records::run::TerminalCause::AccessPolicyRefused,
+                    provenant_records::run::CauseKind::AccessPolicyRefused,
                     error.to_string(),
                 );
                 refusal.boundary_class = provenant_records::diagnostic::BoundaryClass::Authority;
@@ -1268,7 +1287,7 @@ impl PrepareError {
             }
             Self::SourceCwd(error) => {
                 let mut refusal = run::PrepareRefusal::boxed(
-                    provenant_records::run::TerminalCause::AccessPolicyRefused,
+                    provenant_records::run::CauseKind::AccessPolicyRefused,
                     error.to_string(),
                 );
                 refusal.boundary_class = error.boundary_class();
@@ -1283,13 +1302,13 @@ impl PrepareError {
             }
             Self::Permission(error) => PlanCheckError::Permission(error).into_refusal(),
             Self::Unsupported(error) => run::PrepareRefusal::boxed(
-                provenant_records::run::TerminalCause::HandoffRefused,
+                provenant_records::run::CauseKind::LaunchHandoffRefused,
                 error.to_string(),
             ),
             Self::ContinuationRequest(error) => {
                 let guard = error.guard();
                 let mut refusal = run::PrepareRefusal::boxed(
-                    provenant_records::run::TerminalCause::AccessPolicyRefused,
+                    provenant_records::run::CauseKind::AccessPolicyRefused,
                     guard.to_string(),
                 );
                 refusal.boundary_class = provenant_records::diagnostic::BoundaryClass::Authority;
@@ -1301,7 +1320,7 @@ impl PrepareError {
             }
             Self::SourceHead(error) => {
                 let mut refusal = run::PrepareRefusal::boxed(
-                    provenant_records::run::TerminalCause::AccessPolicyRefused,
+                    provenant_records::run::CauseKind::AccessPolicyRefused,
                     error.to_string(),
                 );
                 refusal.boundary_class = provenant_records::diagnostic::BoundaryClass::Authority;
@@ -1317,12 +1336,12 @@ impl PrepareError {
                 let boundary_class = error.boundary_class();
                 let cause = match error {
                     run::RunError::WriterSourceMismatch { expected, actual } => {
-                        provenant_records::run::TerminalCause::WriterPinMismatch {
+                        provenant_records::run::CauseKind::WriterPinMismatch {
                             pinned: expected,
                             head: actual,
                         }
                     }
-                    _ => provenant_records::run::TerminalCause::HandoffRefused,
+                    _ => provenant_records::run::CauseKind::LaunchHandoffRefused,
                 };
                 let mut refusal = run::PrepareRefusal::boxed(cause, error.to_string());
                 refusal.boundary_class = boundary_class;
@@ -1333,7 +1352,7 @@ impl PrepareError {
                 let policy_code = provider_policy_code(&error);
                 let boundary_class = error.boundary_class();
                 let mut refusal = run::PrepareRefusal::boxed(
-                    provenant_records::run::TerminalCause::HandoffRefused,
+                    provenant_records::run::CauseKind::LaunchHandoffRefused,
                     error.to_string(),
                 );
                 refusal.boundary_class = boundary_class;
@@ -1349,7 +1368,7 @@ impl PrepareError {
             }
             Self::Prompt(error) => {
                 let mut refusal = run::PrepareRefusal::boxed(
-                    provenant_records::run::TerminalCause::StoredPromptUnreadable,
+                    provenant_records::run::CauseKind::StoredPromptUnreadable,
                     error.to_string(),
                 );
                 let policy_code = match &error {
@@ -1359,8 +1378,7 @@ impl PrepareError {
                 if let Some(policy_code) = policy_code {
                     refusal.boundary_class = provenant_records::diagnostic::BoundaryClass::None;
                     refusal.policy_code = Some(policy_code);
-                    refusal.terminal_cause =
-                        provenant_records::run::TerminalCause::AccessPolicyRefused;
+                    refusal.cause = provenant_records::run::CauseKind::AccessPolicyRefused;
                 } else {
                     refusal.boundary_class = match &error {
                         LaunchPromptError::TooLarge => {
@@ -1376,7 +1394,7 @@ impl PrepareError {
             }
             error @ Self::HostIndexOverlap => {
                 let mut refusal = run::PrepareRefusal::boxed(
-                    provenant_records::run::TerminalCause::AccessPolicyRefused,
+                    provenant_records::run::CauseKind::AccessPolicyRefused,
                     error.to_string(),
                 );
                 refusal.boundary_class = provenant_records::diagnostic::BoundaryClass::Integrity;
@@ -1390,7 +1408,7 @@ impl PrepareError {
                 uncommitted,
             } => {
                 let mut refusal = run::PrepareRefusal::boxed(
-                    provenant_records::run::TerminalCause::WriterPinMismatch { pinned, head },
+                    provenant_records::run::CauseKind::WriterPinMismatch { pinned, head },
                     format!(
                         "writer worktree head {head} differs from pinned commit {pinned}{}",
                         dirty_predecessor_suffix(&uncommitted)
@@ -1405,7 +1423,7 @@ impl PrepareError {
             | Self::SourceViewReadOnly(_)
             | Self::WriterContinuation(_)) => {
                 let mut refusal = run::PrepareRefusal::boxed(
-                    provenant_records::run::TerminalCause::AccessPolicyRefused,
+                    provenant_records::run::CauseKind::AccessPolicyRefused,
                     error.to_string(),
                 );
                 refusal.boundary_class = provenant_records::diagnostic::BoundaryClass::Authority;
@@ -1430,7 +1448,7 @@ impl PrepareError {
                 refusal
             }
             other => run::PrepareRefusal::boxed(
-                provenant_records::run::TerminalCause::HandoffRefused,
+                provenant_records::run::CauseKind::LaunchHandoffRefused,
                 other.to_string(),
             ),
         }
@@ -1449,7 +1467,7 @@ fn dirty_predecessor_suffix(paths: &[String]) -> String {
 #[test]
 // Spec: docs/specs/run.md#writer-pin-and-re-pin
 fn a_pin_mismatch_refusal_uses_its_own_text_not_the_handoff_cause() {
-    use provenant_records::run::TerminalCause;
+    use provenant_records::run::CauseKind;
     let pinned = provenant_core::GitOid::parse(&"a".repeat(40)).expect("pinned");
     let head = provenant_core::GitOid::parse(&"b".repeat(40)).expect("head");
     for error in [
@@ -1464,14 +1482,11 @@ fn a_pin_mismatch_refusal_uses_its_own_text_not_the_handoff_cause() {
         },
     ] {
         let refusal = error.into_refusal();
-        assert_eq!(
-            refusal.terminal_cause,
-            TerminalCause::WriterPinMismatch { pinned, head }
-        );
-        let text = refusal.terminal_cause.diagnostic(true);
+        assert_eq!(refusal.cause, CauseKind::WriterPinMismatch { pinned, head });
+        let text = refusal.cause.diagnostic(true);
         assert!(text.contains(&pinned.to_string()), "{text}");
         assert!(text.contains(&head.to_string()), "{text}");
-        assert!(!text.contains(TerminalCause::HandoffRefused.detail()));
+        assert!(!text.contains(CauseKind::LaunchHandoffRefused.detail()));
     }
 }
 
@@ -1594,9 +1609,14 @@ fn preparation_preserves_typed_boundaries_without_classifying_other_errors() {
         PrepareError::SourceCwd(SourceCwdError::Operational("cwd unavailable".into()))
             .into_refusal();
     assert_eq!(unavailable.boundary_class, BoundaryClass::None);
-    let unsupported = PrepareError::Unsupported(provenant_records::UnsupportedLaunch {
+    let unsupported = PrepareError::Unsupported(provenant_records::LaunchGap {
         adapter: "fixture",
         field: provenant_records::LaunchField::Write,
+        action: provenant_records::LaunchAction::Refuse,
+        reason: "fixture limitation",
+        source: provenant_records::ADAPTER_ROW_SOURCE,
+        warn: true,
+        action_source: provenant_records::Source::default(),
     })
     .into_refusal();
     assert_eq!(unsupported.boundary_class, BoundaryClass::None);
@@ -1607,8 +1627,8 @@ fn preparation_preserves_typed_boundaries_without_classifying_other_errors() {
     assert_eq!(home.boundary_class, BoundaryClass::None);
     assert!(home.policy_code.is_none());
     assert_eq!(
-        home.terminal_cause,
-        provenant_records::run::TerminalCause::HandoffRefused
+        home.cause,
+        provenant_records::run::CauseKind::LaunchHandoffRefused
     );
     let extensions =
         PlanCheckError::Plan(provenant_confinement::PlanError::UnconfinedExtensions).into_refusal();
@@ -1685,7 +1705,7 @@ fn preparation_preserves_typed_boundaries_without_classifying_other_errors() {
 /// Retain a closed resolver classification, never its freely formatted error.
 fn route_resolution_refusal(error: crate::route::DispatchError) -> PrepareError {
     use crate::route::{DispatchError, EdgeError};
-    use provenant_records::run::TerminalCause;
+    use provenant_records::run::CauseKind;
     let fallback_outcome = match &error {
         DispatchError::Edge(edge) => match edge.as_ref() {
             EdgeError::Routing(provenant_routing::RoutingError::NoEligiblePoolMember {
@@ -1702,10 +1722,7 @@ fn route_resolution_refusal(error: crate::route::DispatchError) -> PrepareError 
             EdgeError::AccountProfile {
                 kind: crate::route::AccountProfileError::Unknown,
                 ..
-            } => (
-                TerminalCause::UnknownPacingAccount,
-                "unknown_pacing_account",
-            ),
+            } => (CauseKind::UnknownPacingAccount, "unknown_pacing_account"),
             EdgeError::Routing(error) => {
                 let cause = match error {
                     provenant_routing::RoutingError::NoEligiblePoolMember {
@@ -1714,36 +1731,36 @@ fn route_resolution_refusal(error: crate::route::DispatchError) -> PrepareError 
                     } => match reason {
                         provenant_records::RouteExclusionReason::AuthRequired
                         | provenant_records::RouteExclusionReason::LoginExpired => {
-                            TerminalCause::AccountLoginRequired
+                            CauseKind::AccountLoginRequired
                         }
                         provenant_records::RouteExclusionReason::UnknownAccount
                         | provenant_records::RouteExclusionReason::UnresolvedAccount => {
-                            TerminalCause::UnregisteredAccount
+                            CauseKind::UnregisteredAccount
                         }
-                        _ => TerminalCause::RouteResolutionRefused,
+                        _ => CauseKind::RouteResolutionRefused,
                     },
-                    _ => TerminalCause::RouteResolutionRefused,
+                    _ => CauseKind::RouteResolutionRefused,
                 };
                 (cause, error.code())
             }
             EdgeError::Unresolved { .. } => {
-                (TerminalCause::RouteResolutionRefused, "unresolved_selector")
+                (CauseKind::RouteResolutionRefused, "unresolved_selector")
             }
             _ => (
-                TerminalCause::RouteResolutionRefused,
+                CauseKind::RouteResolutionRefused,
                 "route_configuration_or_observation",
             ),
         },
-        DispatchError::Catalogue(error) => (TerminalCause::RouteResolutionRefused, error.code()),
+        DispatchError::Catalogue(error) => (CauseKind::RouteResolutionRefused, error.code()),
         DispatchError::FamilySeparation(..) => {
-            (TerminalCause::RouteResolutionRefused, "family_separation")
+            (CauseKind::RouteResolutionRefused, "family_separation")
         }
     };
     PrepareError::Refusal {
         message,
         cause,
         note: Some(format!("route resolver classification: {code}")),
-        fallback_outcome: if cause == TerminalCause::AccountLoginRequired {
+        fallback_outcome: if cause == CauseKind::AccountLoginRequired {
             Some(provenant_records::run::PreparationFailure::AuthRequired)
         } else {
             fallback_outcome
@@ -1975,9 +1992,9 @@ impl PlanCheckError {
         let skipped = self.skipped("preparation");
         let boundary = self.boundary_class();
         let cause = if boundary == provenant_records::diagnostic::BoundaryClass::None {
-            provenant_records::run::TerminalCause::HandoffRefused
+            provenant_records::run::CauseKind::LaunchHandoffRefused
         } else {
-            provenant_records::run::TerminalCause::AccessPolicyRefused
+            provenant_records::run::CauseKind::AccessPolicyRefused
         };
         let mut refusal = run::PrepareRefusal::boxed(cause, skipped.detail.clone());
         refusal.boundary_class = boundary;
@@ -1986,8 +2003,7 @@ impl PlanCheckError {
         refusal.resource = skipped.guard_resource.clone();
         refusal.skipped_routes.push(skipped);
         if let Self::ReadOnly(ReadOnlyPlanError::ProjectBindingDirectory(diagnostic)) = self {
-            refusal.terminal_cause =
-                provenant_records::run::TerminalCause::ProjectBindingDirectoryUnsafe;
+            refusal.cause = provenant_records::run::CauseKind::ProjectBindingDirectoryUnsafe;
             refusal.message = diagnostic
                 .detail
                 .unwrap_or_else(|| "project binding state directory is unsafe".into());
@@ -2143,19 +2159,26 @@ fn prepare_inner(
     fixture_token: Option<&provenant_providers::claude::OauthToken>,
     wait: Option<u64>,
 ) -> Result<run::PreparedLaunch, PrepareError> {
+    let capability_overlay = launch_capability_overlay(registry);
     if let run::RequestedRoute::Adapter { provider, name, .. } = &task.route
-        && AdapterSpec::get(provider)
-            .is_some_and(|spec| spec.named_entry == provenant_records::NamedEntry::DelegatedAgent)
+        && AdapterSpec::get(provider).is_some_and(|spec| {
+            spec.identity.named_entry == provenant_records::NamedEntry::DelegatedAgent
+        })
     {
-        AdapterSpec::get(provider)
+        let check = AdapterSpec::get(provider)
             .ok_or("unknown adapter")?
+            .with_overlay(&capability_overlay)
             .check_launch(&provenant_records::LaunchRequest {
                 resume: resume.is_some(),
                 write: run::Service::has_writes(task.writer.is_some(), &task.access.write_roots),
                 network: task.access.network,
                 skill_location: task.profile.require_skill_location,
+                gap_policy: provenant_records::GapPolicy::default(),
                 ..Default::default()
-            })?;
+            });
+        if let Some(decision) = check.refusal() {
+            return Err(PrepareError::Unsupported(decision.clone()));
+        }
         let roots = registry.roots.ok_or("routing context is unavailable")?;
         let config =
             crate::config_reads::read_for(roots, "run").map_err(|error| error.to_string())?;
@@ -2166,10 +2189,10 @@ fn prepare_inner(
                 .host_native
                 .get(name)
                 .ok_or_else(|| PrepareError::Refusal {
-                    message: provenant_records::run::TerminalCause::HostNativeUnconfigured
+                    message: provenant_records::run::CauseKind::HostNativeUnconfigured
                         .detail()
                         .into(),
-                    cause: provenant_records::run::TerminalCause::HostNativeUnconfigured,
+                    cause: provenant_records::run::CauseKind::HostNativeUnconfigured,
                     note: None,
                     fallback_outcome: None,
                 })?;
@@ -2232,7 +2255,7 @@ fn prepare_inner(
 /// A mismatch is about which account is signed in, so only a check that names
 /// the account may clear it; a plain "logged in" answer must not.
 pub(super) fn login_check_can_clear(adapter: &str, mismatch: bool) -> bool {
-    !mismatch || AdapterSpec::get(adapter).is_some_and(|spec| spec.login_check_names_account)
+    !mismatch || AdapterSpec::get(adapter).is_some_and(|spec| spec.login.check_names_account)
 }
 
 /// Spec: docs/specs/routing.md#launch-login-recovery
@@ -2259,7 +2282,7 @@ fn login_recovery_can_clear(
         return false;
     }
     AdapterSpec::get(adapter).is_none_or(|spec| {
-        spec.account_identity_probe != provenant_records::AccountIdentityProbe::CliAuthStatus
+        spec.login.identity_probe != provenant_records::AccountIdentityProbe::CliAuthStatus
     })
 }
 
@@ -2292,28 +2315,30 @@ fn stale_observation_index(
 
 /// The models a route's account reports when the requested model is not among
 /// them, with the age of that recorded offer list. Accounts that report no
-/// models place no restriction.
+/// models place no restriction. Launch preparation reads the same owner as
+/// resolve instead of its own probe-only offer rule.
 fn unoffered_model(
     availability: &[provenant_providers::AvailabilityRecord],
     route: &ResolvedRoute,
-    now: i64,
+    policy: &provenant_routing::OfferEvidencePolicy<'_>,
+    catalogue: &provenant_routing::Catalogue,
 ) -> Option<(Vec<String>, u64)> {
     let key = route.account_key.as_deref()?;
-    if !AdapterSpec::get(&route.adapter).is_some_and(|spec| spec.offered_models) {
+    if !AdapterSpec::get(&route.adapter).is_some_and(|spec| spec.identity.offered_models) {
         return None;
     }
-    let record = availability.iter().find(|record| {
-        record.adapter == route.adapter
-            && record.account_key.as_deref() == Some(key)
-            && record.expires_unix_seconds > now
-            && !record.observed_models.is_empty()
-    })?;
-    (!provenant_providers::model_matches_offered(&route.model, &record.observed_models)).then(
-        || {
-            let age_seconds = now.saturating_sub(record.observed_unix_seconds) as u64;
-            (record.observed_models.clone(), age_seconds)
-        },
-    )
+    let model =
+        provenant_routing::ModelId::parse(&format!("{}/{}", route.adapter, route.model)).ok()?;
+    let probe = availability.iter().find(|record| {
+        record.adapter == route.adapter && record.account_key.as_deref() == Some(key)
+    });
+    let evidence = provenant_routing::recorded_offer_models(
+        policy.inputs(probe, &route.adapter, key),
+        &model,
+        catalogue,
+        provenant_routing::OfferSupersedence::Allow,
+    )?;
+    (!evidence.serves).then_some((evidence.offered_models, evidence.age_seconds))
 }
 
 /// The typed lane refusal for an account whose recorded offers exclude the
@@ -2393,6 +2418,17 @@ fn same_selected_ready(route: &ResolvedRoute, next: ResolvedRoute) -> Option<Res
 }
 
 #[cfg(test)]
+fn offer_policy(now: i64) -> provenant_routing::OfferEvidencePolicy<'static> {
+    provenant_routing::OfferEvidencePolicy {
+        accounts: &[],
+        freshness: &provenant_quota::DEFAULT_FRESHNESS,
+        quota_policies: &[],
+        catalogue_revision: "revision",
+        now_seconds: now,
+    }
+}
+
+#[cfg(test)]
 mod stale_readiness_tests {
     use super::*;
     use std::cell::Cell;
@@ -2423,14 +2459,25 @@ mod stale_readiness_tests {
             observed_unix_seconds: 10,
             expires_unix_seconds: 400,
         };
+        let catalogue = provenant_routing::Catalogue::bundled().unwrap();
         assert_eq!(
-            unoffered_model(std::slice::from_ref(&record), &route, 20),
+            unoffered_model(
+                std::slice::from_ref(&record),
+                &route,
+                &offer_policy(20),
+                &catalogue
+            ),
             Some((record.observed_models.clone(), 10))
         );
         let mut flash = route.clone();
         flash.model = "gemini-9-flash".into();
         assert_eq!(
-            unoffered_model(std::slice::from_ref(&record), &flash, 20),
+            unoffered_model(
+                std::slice::from_ref(&record),
+                &flash,
+                &offer_policy(20),
+                &catalogue
+            ),
             None
         );
         let unknown = provenant_providers::AvailabilityRecord {
@@ -2438,7 +2485,10 @@ mod stale_readiness_tests {
             observed_models: vec![],
             ..record
         };
-        assert_eq!(unoffered_model(&[unknown], &route, 20), None);
+        assert_eq!(
+            unoffered_model(&[unknown], &route, &offer_policy(20), &catalogue),
+            None
+        );
     }
 
     #[test]
@@ -2834,10 +2884,7 @@ mod stale_readiness_tests {
             temp.path(),
             None,
         )?;
-        assert_eq!(
-            prior.terminal_cause,
-            Some(run::TerminalCause::LaneTokenLost)
-        );
+        assert_eq!(prior.cause, Some(run::CauseKind::LaneTokenLost));
         let stale = provenant_providers::AvailabilityRecord {
             schema_version: 1,
             adapter: "claude".into(),
@@ -2915,8 +2962,8 @@ mod stale_readiness_tests {
         .into_refusal();
         assert!(refusal.auth_required());
         assert_eq!(
-            refusal.terminal_cause,
-            provenant_records::run::TerminalCause::AccountLoginRequired
+            refusal.cause,
+            provenant_records::run::CauseKind::AccountLoginRequired
         );
         assert_eq!(
             refusal.skipped_routes[0].cause,
@@ -3191,6 +3238,7 @@ pub(super) fn prepare_candidates_inner(
     host_native: Option<&str>,
     #[cfg(test)] alter_availability: Option<&AlterAvailability<'_>>,
 ) -> Result<run::PreparedLaunch, PrepareError> {
+    let capability_overlay = launch_capability_overlay(registry);
     if let run::RequestedRoute::Adapter { provider, name, .. } = &task.route {
         return prepare_command(
             registry,
@@ -3241,6 +3289,9 @@ pub(super) fn prepare_candidates_inner(
             warn(Warning::new(
                 provenant_records::warning::CONFIG_UNAVAILABLE,
                 format!("{ARGV_LIMIT_KEY} unavailable ({error}); using compiled default"),
+                provenant_records::warning::detected_source(
+                    provenant_records::warning::CONFIG_UNAVAILABLE,
+                ),
             ));
             (
                 default_limit,
@@ -3363,6 +3414,9 @@ pub(super) fn prepare_candidates_inner(
                 warn(Warning::new(
                     provenant_records::warning::GH_PUBLISHING_UNAVAILABLE,
                     format!("GitHub publishing unavailable: {cause}"),
+                    provenant_records::warning::detected_source(
+                        provenant_records::warning::GH_PUBLISHING_UNAVAILABLE,
+                    ),
                 ));
             }
             None
@@ -3399,6 +3453,8 @@ pub(super) fn prepare_candidates_inner(
     // pacing decision this launch makes.
     let freshness = crate::quota::quota_freshness(&config.origins, &config.domains.quota);
     config.domains.routing.freshness = freshness;
+    let quota_policies =
+        provenant_providers::scheduling_policies(&config.domains.quota, provider_registry);
     // Continue the applied decision rather than redrawing the named pool
     // using the new operation seed.
     let (mut request, retained_identity) = match resume {
@@ -3478,16 +3534,24 @@ pub(super) fn prepare_candidates_inner(
     let host_writes = config.domains.run;
     let mut entries: Vec<_> = settings.entries.clone().into_values().collect();
     let mut default_failures = std::collections::BTreeMap::new();
-    for spec in ADAPTER_SPECS.iter().filter(|spec| eligible(spec.name)) {
-        let Some((environment, fallback)) = spec.default_account_directory else {
+    for spec in ADAPTER_SPECS
+        .iter()
+        .filter(|spec| eligible(spec.identity.name))
+    {
+        let Some((environment, fallback)) = spec.accounts.default_directory else {
             continue;
         };
-        if entries.iter().any(|entry| entry.adapter == spec.name) {
+        if entries
+            .iter()
+            .any(|entry| entry.adapter == spec.identity.name)
+        {
             continue;
         }
-        let host_directory = registry
-            .host
-            .and_then(|host| host.default_account_directories.get(spec.name).cloned());
+        let host_directory = registry.host.and_then(|host| {
+            host.default_account_directories
+                .get(spec.identity.name)
+                .cloned()
+        });
         let environment_directory = host_provider_var(registry, environment);
         let configured_by = match (host_directory.as_ref(), environment_directory.as_ref()) {
             (Some(directory), Some(value)) if directory.as_os_str() == value => Some(environment),
@@ -3499,7 +3563,7 @@ pub(super) fn prepare_candidates_inner(
             .or_else(|| environment_directory.map(PathBuf::from))
             .unwrap_or_else(|| home.join(fallback));
         let mut entry = provenant_providers::accounts::Registration {
-            adapter: spec.name.into(),
+            adapter: spec.identity.name.into(),
             label: "default".into(),
             key: String::new(),
             org_fingerprint: None,
@@ -3518,13 +3582,13 @@ pub(super) fn prepare_candidates_inner(
         };
         let discovered = (|| -> Result<(), AccountObservationError> {
             let executable =
-                locate(spec.name).map_err(AccountObservationError::VersionUnavailable)?;
+                locate(spec.identity.name).map_err(AccountObservationError::VersionUnavailable)?;
             entry.directory = canonical(&directory).map_err(|detail| {
                 default_directory_error(spec, &directory, detail, configured_by)
             })?;
             entry.key = provenant_providers::accounts::detect(
                 &executor,
-                spec.name,
+                spec.identity.name,
                 &executable,
                 &home,
                 &user,
@@ -3540,7 +3604,7 @@ pub(super) fn prepare_candidates_inner(
                 let configured_directory =
                     matches!(&error, AccountObservationError::ConfiguredDirectory(_));
                 default_failures.insert(
-                    spec.name.to_owned(),
+                    spec.identity.name.to_owned(),
                     (error.skip_kind(), error.to_string(), configured_directory),
                 );
             }
@@ -3549,9 +3613,9 @@ pub(super) fn prepare_candidates_inner(
     // These adapters use the CLI's existing local login and configuration.
     for spec in ADAPTER_SPECS
         .iter()
-        .filter(|spec| spec.local_login && eligible(spec.name))
+        .filter(|spec| spec.login.local && eligible(spec.identity.name))
     {
-        let adapter = spec.name;
+        let adapter = spec.identity.name;
         if include_local_login(
             spec,
             &entries,
@@ -3561,13 +3625,13 @@ pub(super) fn prepare_candidates_inner(
         ) && locate(adapter).is_ok()
             && !entries.iter().any(|entry| {
                 entry.adapter == adapter
-                    && (entry.key == spec.local_account.1 || entry.directory == home)
+                    && (entry.key == spec.accounts.local_entry.1 || entry.directory == home)
             })
         {
             entries.push(provenant_providers::accounts::Registration {
                 adapter: adapter.into(),
-                label: spec.local_account.0.into(),
-                key: spec.local_account.1.into(),
+                label: spec.accounts.local_entry.0.into(),
+                key: spec.accounts.local_entry.1.into(),
                 org_fingerprint: None,
                 directory: home.clone(),
                 plan: None,
@@ -3640,7 +3704,7 @@ pub(super) fn prepare_candidates_inner(
             Ok(mut record) => {
                 let strategy = AdapterSpec::get(&entry.adapter)
                     .map_or(provenant_records::LoginReprobe::None, |spec| {
-                        spec.login_reprobe
+                        spec.login.reprobe
                     });
                 if strategy != provenant_records::LoginReprobe::None {
                     let scope = provenant_quota::ReadinessScope {
@@ -3731,6 +3795,9 @@ pub(super) fn prepare_candidates_inner(
                                 warn(Warning::new(
                                     provenant_records::warning::LOGIN_RECORD_UNRETAINED,
                                     format!("could not publish login recovery: {error}"),
+                                    provenant_records::warning::detected_source(
+                                        provenant_records::warning::LOGIN_RECORD_UNRETAINED,
+                                    ),
                                 ));
                             }
                             let interval = record
@@ -4044,18 +4111,21 @@ pub(super) fn prepare_candidates_inner(
             reasons.push(skipped);
             continue;
         }
-        if let Some(spec) = AdapterSpec::get(&route.adapter)
-            && let Err(error) =
-                request
-                    .intent
-                    .check_launch(spec, &route.model, route.effort.as_deref())
-        {
-            reason_boundaries.insert(
-                reasons.len(),
-                provenant_records::diagnostic::BoundaryClass::Authority,
-            );
-            reasons.push(skip(&label, SkipKind::Refused, error.to_string()));
-            continue;
+        if let Some(spec) = AdapterSpec::get(&route.adapter) {
+            let spec = spec.with_overlay(&capability_overlay);
+            let gap_policy = capability_overlay.gap_policy(spec.identity.name, &launch_policy);
+            if let Some(error) = request
+                .intent
+                .check_launch(&spec, &route.model, route.effort.as_deref(), gap_policy)
+                .refusal()
+            {
+                reason_boundaries.insert(
+                    reasons.len(),
+                    provenant_records::diagnostic::BoundaryClass::Authority,
+                );
+                reasons.push(skip(&label, SkipKind::Refused, error.to_string()));
+                continue;
+            }
         }
         let effective = config.domains.routing.model_policy.effective(
             &catalogue,
@@ -4091,8 +4161,18 @@ pub(super) fn prepare_candidates_inner(
             reasons.push(offer_mismatch_skip(&route, mismatch));
             continue;
         }
+        let offer_catalogue_revision = route.catalogue_revision.clone();
+        let offer_policy = provenant_routing::OfferEvidencePolicy {
+            accounts: &diagnostic_records,
+            freshness: &freshness,
+            quota_policies: &quota_policies,
+            // Judge the availability the route was resolved against, not a
+            // later catalogue revision discovered after the decision.
+            catalogue_revision: &offer_catalogue_revision,
+            now_seconds: clock.unix_seconds(),
+        };
         if let Some((offered, age_seconds)) =
-            unoffered_model(&availability, &route, clock.unix_seconds())
+            unoffered_model(&availability, &route, &offer_policy, &catalogue)
         {
             reason_boundaries.insert(
                 reasons.len(),
@@ -4230,6 +4310,9 @@ pub(super) fn prepare_candidates_inner(
                                 .detail
                                 .as_deref()
                                 .unwrap_or("account readiness is stale")
+                        ),
+                        provenant_records::warning::detected_source(
+                            provenant_records::warning::ACCOUNT_READINESS_STALE,
                         ),
                     )
                     .repair(diagnostic.next.as_deref().unwrap_or("re-probe the account")),
@@ -4451,8 +4534,13 @@ pub(super) fn prepare_candidates_inner(
             // model-only pin with another account redraws, and automatic
             // alternatives keep their own readiness; both still prefer an
             // available route.
-            let alternative_account =
-                has_alternative_account(&route, &availability, &refused_accounts);
+            let alternative_account = has_alternative_account(
+                &route,
+                &availability,
+                &refused_accounts,
+                &offer_policy,
+                &catalogue,
+            );
             let pinned_advisory_route = pinned_advisory_candidate(
                 &task_request.choice,
                 &route,
@@ -4573,7 +4661,7 @@ pub(super) fn prepare_candidates_inner(
         let account = match entry
             .filter(|entry| {
                 AdapterSpec::get(&entry.adapter).is_none_or(|spec| {
-                    spec.registered_account && !spec.is_unregistered_local(&entry.key)
+                    spec.accounts.registered && !spec.is_unregistered_local(&entry.key)
                 })
             })
             .map(|entry| entry.registered())
@@ -4587,7 +4675,7 @@ pub(super) fn prepare_candidates_inner(
         };
         // An unregistered local login runs without a pinned account.
         if AdapterSpec::get(adapter.id()).is_some_and(|spec| {
-            spec.registered_account
+            spec.accounts.registered
                 && !route
                     .account_key
                     .as_deref()
@@ -4643,7 +4731,8 @@ pub(super) fn prepare_candidates_inner(
             continue;
         }
         let opencode_host = adapter_spec.is_some_and(|spec| {
-            spec.model_observation == provenant_records::ModelObservation::SessionDatabase
+            spec.capabilities.answering_model.value
+                == provenant_records::AnsweringModelSource::SessionDatabase
         }) && !lane_access.access.is_isolated();
         let opencode_homes = provenant_providers::opencode::host_xdg_homes(&home, &|key| {
             host_provider_var(registry, key)
@@ -4744,8 +4833,13 @@ pub(super) fn prepare_candidates_inner(
             None => text,
         };
         let text = if !task.access.attachments.is_empty()
-            && !AdapterSpec::get(adapter.id()).is_some_and(|spec| spec.launch.image_input)
-        {
+            && !AdapterSpec::get(adapter.id()).is_some_and(|spec| {
+                spec.with_overlay(&capability_overlay)
+                    .capabilities
+                    .launch
+                    .image_input
+                    .value
+            }) {
             let paths = task
                 .access
                 .attachments
@@ -4834,7 +4928,7 @@ pub(super) fn prepare_candidates_inner(
                 continue;
             }
         };
-        if adapter_spec.is_some_and(|spec| spec.codex_policy) {
+        if adapter_spec.is_some_and(|spec| spec.launch.codex_policy) {
             request.codex = if writer.is_none()
                 || config
                     .providers
@@ -4892,6 +4986,9 @@ pub(super) fn prepare_candidates_inner(
             push_launch_warning(&mut route, warning);
         }
         provider.lane_access = Some(lane_access.clone());
+        // The matched model policy's settlement keys, sealed on the applied
+        // route so the holder resolves the route layer explain reported.
+        provider.settlement = model_policy.lanes.route_layer();
         apply_resolved_model(&mut provider, &exact_model);
         if let Some(name) = host_native {
             provider.source = Some(format!("domains.fabric.host_native.{name}"));
@@ -4926,6 +5023,7 @@ pub(super) fn prepare_candidates_inner(
         };
         if let Ok(ports) = provenant_config::PortTable::read_for(project_root, state_root) {
             brief.set_static_checks_from_ports(&ports, role);
+            brief.set_lane_checks_from_ports(&ports, role);
         }
         let extras = run::PreambleExtras {
             route: Some(provider.clone()),
@@ -5047,8 +5145,8 @@ pub(super) fn prepare_candidates_inner(
             // host profile reads the provider's own login. Take that set and
             // its expected mechanism from the registry rather than restating
             // adapter names here.
-            let warning = adapter_spec.map(|spec| spec.native_auth_warning);
-            let expected = adapter_spec.and_then(|spec| spec.authentication);
+            let warning = adapter_spec.map(|spec| spec.login.native_auth_warning);
+            let expected = adapter_spec.and_then(|spec| spec.login.authentication);
             if warning.is_some_and(|warning| {
                 warning == provenant_records::NativeAuthWarning::Always
                     || (warning == provenant_records::NativeAuthWarning::WhenMismatch
@@ -5068,8 +5166,51 @@ pub(super) fn prepare_candidates_inner(
                 }
             }
         }
+        // Harness version compatibility is declared data: the bundled table is
+        // overlaid by host and project config, and the policy decides whether a
+        // status warns or blocks. No network fetch; probes are cached by file.
+        let (compatible, overlay_warnings) =
+            provenant_routing::compatibility::CompatibilityTable::effective(
+                roots.state.as_path(),
+                Some(&source),
+            );
+        for warning in overlay_warnings {
+            push_launch_warning(&mut route, warning.to_string());
+        }
+        // The probe is a per-adapter host setting: when it is off we assess an
+        // unreadable version and name the key in the reason, without running
+        // the harness binary. The bound comes from the same settings row.
+        let (version, disabled) =
+            match provenant_providers::version::configured(adapter.id(), provider_settings) {
+                Ok(timeout) => (
+                    provenant_providers::version::shared().read(
+                        &git_executor,
+                        &executable,
+                        &cwd,
+                        timeout,
+                    ),
+                    None,
+                ),
+                Err(reason) => (None, Some(reason)),
+            };
+        let mut assessment = compatible.assess(adapter.id(), version.as_deref());
+        if disabled.is_some() {
+            assessment.reason = disabled;
+        }
+        if let Some(code) = provenant_routing::compatibility::policy_code(assessment.status) {
+            let detail = assessment.detail();
+            match launch_policy.check(code, provenant_records::policy::Facts::violation(detail)) {
+                provenant_records::policy::Effect::Warn(warning) => {
+                    push_launch_warning(&mut route, warning.message);
+                }
+                effect if effect.blocks() => {
+                    return Err(effect.message().unwrap_or(code).into());
+                }
+                _ => {}
+            }
+        }
         let credential_roots = plan.permissions().credential_roots.clone();
-        let refresh_token = adapter_spec.is_some_and(|spec| spec.launch_token_refresh)
+        let refresh_token = adapter_spec.is_some_and(|spec| spec.launch.launch_token_refresh)
             && lane_access.access.is_isolated()
             && sandbox.env_value() != "off";
         let refreshed = if refresh_token && fixture_token.is_none() {
@@ -5444,6 +5585,9 @@ pub(super) fn prepare_candidates_inner(
                 Warning::new(
                     provenant_records::warning::GH_CREDENTIALS_WITHHELD,
                     "GitHub publishing credentials withheld by the access policy",
+                    provenant_records::warning::detected_source(
+                        provenant_records::warning::GH_CREDENTIALS_WITHHELD,
+                    ),
                 )
                 .subject(label.as_str()),
             );
@@ -5513,8 +5657,14 @@ pub(super) fn prepare_candidates_inner(
                 Ok(origin) => super::gh_auth::Delivery::Injected(origin),
                 Err(warning) => {
                     warn(
-                        Warning::new(provenant_records::warning::GH_LOGIN_UNAVAILABLE, warning)
-                            .subject(label.to_string()),
+                        Warning::new(
+                            provenant_records::warning::GH_LOGIN_UNAVAILABLE,
+                            warning,
+                            provenant_records::warning::detected_source(
+                                provenant_records::warning::GH_LOGIN_UNAVAILABLE,
+                            ),
+                        )
+                        .subject(label.to_string()),
                     );
                     super::gh_auth::Delivery::None("login lookup failed".into())
                 }
@@ -5568,7 +5718,7 @@ pub(super) fn prepare_candidates_inner(
             }
         }
         if git_context.is_some()
-            && let Some(argument) = adapter_spec.and_then(|spec| spec.context_directory_arg)
+            && let Some(argument) = adapter_spec.and_then(|spec| spec.launch.context_directory_arg)
         {
             // Scratch is already granted by the outer profile. Claude's file
             // tools also need it in their working directories to read context.
@@ -5596,7 +5746,7 @@ pub(super) fn prepare_candidates_inner(
         }
         let transcript_account = account
             .as_ref()
-            .filter(|_| adapter_spec.is_some_and(|spec| spec.transcript_account_root))
+            .filter(|_| adapter_spec.is_some_and(|spec| spec.retention.transcript_account_root))
             .map(|account| account.directory());
         let mut setup_roots = vec![scratch, private_state, roots.state.as_path()];
         // Only directory creation uses these additional provider state roots;
@@ -5606,7 +5756,9 @@ pub(super) fn prepare_candidates_inner(
             .iter()
             .find(|(key, _)| key == "XDG_DATA_HOME")
             .map(|(_, value)| Path::new(value));
-        match adapter_spec.map_or(provenant_records::SetupRoot::None, |spec| spec.setup_root) {
+        match adapter_spec.map_or(provenant_records::SetupRoot::None, |spec| {
+            spec.accounts.setup_root
+        }) {
             provenant_records::SetupRoot::XdgDataHome => {
                 if let Some(data) = xdg_data_home {
                     let existing = data
@@ -5631,7 +5783,7 @@ pub(super) fn prepare_candidates_inner(
             continue;
         }
         if AdapterSpec::get(&route.adapter).is_some_and(|spec| {
-            spec.login_observation == provenant_records::LoginObservation::ExecutableOnly
+            spec.login.observation == provenant_records::LoginObservation::ExecutableOnly
         }) {
             let warning = format!(
                 "{} login status is unverified; the selected launch will check authentication",
@@ -5639,8 +5791,28 @@ pub(super) fn prepare_candidates_inner(
             );
             push_launch_warning(&mut route, warning);
         }
-        if let Some(warning) = image_input_warning(&route.adapter, &task.access.attachments) {
-            push_launch_warning(&mut route, warning);
+        let image_input = !task.access.attachments.is_empty();
+        if let Some(spec) = AdapterSpec::get(&route.adapter) {
+            let spec = spec.with_overlay(&capability_overlay);
+            let gap_policy = capability_overlay.gap_policy(spec.identity.name, &launch_policy);
+            let check = spec.check_launch(&provenant_records::LaunchRequest {
+                image_input,
+                gap_policy,
+                ..Default::default()
+            });
+            // An owner-set `refuse` image gap stops the launch; otherwise a
+            // degraded image input leaves the attachments as readable paths.
+            if let Some(decision) = check.refusal() {
+                return Err(PrepareError::Unsupported(decision.clone()));
+            }
+            if let Some(decision) = check.degraded(provenant_records::LaunchField::ImageInput)
+                && decision.warn
+            {
+                push_launch_warning(
+                    &mut route,
+                    format!("warning: {decision}; attachments remain readable"),
+                );
+            }
         }
         // A read-only lane builds in its scratch by design. No writer launch
         // exports a target; warn if an adapter still points one into the lane's
@@ -5787,12 +5959,16 @@ pub(super) fn prepare_candidates_inner(
                 .collect(),
         ))?);
         if adapter_spec.is_some_and(|spec| {
-            spec.model_observation == provenant_records::ModelObservation::SessionDatabase
+            spec.capabilities.answering_model.value
+                == provenant_records::AnsweringModelSource::SessionDatabase
         }) {
             let message = opencode_access_message(&lane_access);
             warn(Warning::new(
                 provenant_records::warning::LAUNCH_ACCESS_PROFILE,
                 message.clone(),
+                provenant_records::warning::detected_source(
+                    provenant_records::warning::LAUNCH_ACCESS_PROFILE,
+                ),
             ));
             for warning in spec.warnings.iter().chain(continuation_warning.iter()) {
                 let text = warning
@@ -5801,12 +5977,15 @@ pub(super) fn prepare_candidates_inner(
                 warn(Warning::new(
                     provenant_records::warning::LAUNCH_ACCESS_PROFILE,
                     text.to_string(),
+                    provenant_records::warning::detected_source(
+                        provenant_records::warning::LAUNCH_ACCESS_PROFILE,
+                    ),
                 ));
             }
             provider.launch_warnings.push(message);
         }
-        if let Some(spec) = adapter_spec.filter(|spec| spec.codex_policy) {
-            let setting = format!("providers.{}.clean_config", spec.name);
+        if let Some(spec) = adapter_spec.filter(|spec| spec.launch.codex_policy) {
+            let setting = format!("providers.{}.clean_config", spec.identity.name);
             let source = if writer.is_none() {
                 "read-only extension authority"
             } else {
@@ -5817,7 +5996,7 @@ pub(super) fn prepare_candidates_inner(
             };
             provider.launch_warnings.push(format!(
                 "{} clean_config={} ({setting}; source: {source})",
-                spec.name,
+                spec.identity.name,
                 plan.codex_policy() == provenant_confinement::CodexPolicy::Clean,
             ));
         }
@@ -5848,7 +6027,7 @@ pub(super) fn prepare_candidates_inner(
         let reader_gh = publishing
             && sandbox.effective
             && github_auth_permitted(&plan, &spec.profile.spec)
-            && adapter_spec.is_some_and(|spec| spec.github_auth.is_some());
+            && adapter_spec.is_some_and(|spec| spec.launch.github_auth.is_some());
         if let Some(gh) = policy_gh.as_ref()
             && reader_gh
             && !gh_attempted
@@ -5865,8 +6044,14 @@ pub(super) fn prepare_candidates_inner(
                 Ok(origin) => super::gh_auth::Delivery::Injected(origin),
                 Err(warning) => {
                     warn(
-                        Warning::new(provenant_records::warning::GH_LOGIN_UNAVAILABLE, warning)
-                            .subject(label.to_string()),
+                        Warning::new(
+                            provenant_records::warning::GH_LOGIN_UNAVAILABLE,
+                            warning,
+                            provenant_records::warning::detected_source(
+                                provenant_records::warning::GH_LOGIN_UNAVAILABLE,
+                            ),
+                        )
+                        .subject(label.to_string()),
                     );
                     super::gh_auth::Delivery::None("login lookup failed".into())
                 }
@@ -5888,10 +6073,36 @@ pub(super) fn prepare_candidates_inner(
                 key: "lanes.ci_scope".into(),
                 extra: Default::default(),
             });
+            provider.lane_verification = extras.brief.as_ref().and_then(|brief| {
+                if brief.lane_checks.is_empty() {
+                    return None;
+                }
+                Some(provenant_records::run::LaneVerificationReceipt {
+                    checks: brief
+                        .lane_checks
+                        .iter()
+                        .map(
+                            |check| provenant_records::run::LaneVerificationCheckReceipt {
+                                tier: check.tier.clone(),
+                                argv: check.argv.clone(),
+                                scope: check.scope.clone(),
+                            },
+                        )
+                        .collect(),
+                    source: brief.lane_checks_source.clone()?,
+                    extra: Default::default(),
+                })
+            });
+            // The same sourced list the writer's preamble names goes on the
+            // launch receipt. An absent or empty tier records nothing.
+            provider.static_checks = extras
+                .brief
+                .as_ref()
+                .and_then(|brief| brief.static_checks_receipt());
         }
         gh_selection.finalise_environment(&mut spec.env);
         if adapter_spec.is_some_and(|spec| {
-            spec.github_auth == Some(provenant_records::GithubAuth::ShellEnvironment)
+            spec.launch.github_auth == Some(provenant_records::GithubAuth::ShellEnvironment)
         }) && (!sandbox.effective || spec.env.iter().any(|(key, _)| key == "GH_TOKEN"))
         {
             super::gh_auth::codex_shell_environment(&spec.env, &mut spec.argv);
@@ -5926,7 +6137,7 @@ pub(super) fn prepare_candidates_inner(
             (true, None) => {
                 return Err(PrepareError::Refusal {
                     message: "provider prepared a resumed invocation without its retained session binding".into(),
-                    cause: provenant_records::run::TerminalCause::HandoffRefused,
+                    cause: provenant_records::run::CauseKind::LaunchHandoffRefused,
                     note: None,
                     fallback_outcome: None,
                 });
@@ -5934,8 +6145,6 @@ pub(super) fn prepare_candidates_inner(
             (false, _) => None,
         };
         apply_sandbox_mode(task, sandbox.clone(), &mut spec.env, &mut provider);
-        let allowance_policies =
-            provenant_providers::scheduling_policies(&config.domains.quota, provider_registry);
         let mut pacing_config = config.domains.routing.clone();
         crate::route::resolve_pacing_accounts(&mut pacing_config, &config.domains.accounts)
             .map_err(|error| error.to_string())?;
@@ -5945,7 +6154,7 @@ pub(super) fn prepare_candidates_inner(
             &paths.attempt_id.to_string(),
             &pacing_config,
             &catalogue,
-            &allowance_policies,
+            &quota_policies,
             provenant_os::clock::SystemClock::new()
                 .wall_now()
                 .map_err(|e| e.to_string())?,
@@ -6311,10 +6520,7 @@ mod lane_access_tests {
         );
         assert_eq!(warnings.len(), 1);
         assert_eq!(warnings[0].code.as_ref(), "SETTING_LAYER_IGNORED");
-        assert_eq!(
-            warnings[0].source.as_ref().map(|source| source.layer),
-            Some(Layer::Profile)
-        );
+        assert_eq!(warnings[0].source.layer, Layer::Profile);
     }
 }
 
@@ -6654,11 +6860,11 @@ mod user_skills_tests {
         let prompt = Prompt::new("fixture".into());
         for adapter in provenant_records::ADAPTER_SPECS
             .iter()
-            .filter(|entry| entry.skills.is_some())
+            .filter(|entry| entry.launch.skill_location.is_some())
         {
-            let root = base.join(adapter.name);
+            let root = base.join(adapter.identity.name);
             let home = root.join("home");
-            let skills = match adapter.name {
+            let skills = match adapter.identity.name {
                 "claude" => home.join(".claude/skills"),
                 "codex" => home.join(".agents/skills"),
                 "cursor" => home.join(".cursor/skills"),
@@ -6674,7 +6880,7 @@ mod user_skills_tests {
                 path,
                 scope: PathScope::Subtree,
             };
-            let auth = match adapter.name {
+            let auth = match adapter.identity.name {
                 "codex" | "cursor" | "opencode" => Some("login".into()),
                 "agy" => Some("keychain".into()),
                 _ => None,
@@ -6707,7 +6913,7 @@ mod user_skills_tests {
                 user_skills: true,
                 access: provenant_records::LaneAccess::Isolated,
                 extra: Default::default(),
-                adapter: adapter.name.into(),
+                adapter: adapter.identity.name.into(),
                 model: "fixture".into(),
                 effort: None,
                 catalogue_revision: "fixture".into(),
@@ -6730,7 +6936,7 @@ mod user_skills_tests {
             };
             let provider = provenant_providers::REGISTRY
                 .iter()
-                .find(|entry| entry.adapter.id() == adapter.name)
+                .find(|entry| entry.adapter.id() == adapter.identity.name)
                 .ok_or("adapter")?
                 .adapter;
             for writer in [false, true] {
@@ -6804,7 +7010,7 @@ mod user_skills_tests {
                         receipt["exposed"],
                         state == "discover",
                         "{} {state}",
-                        adapter.name
+                        adapter.identity.name
                     );
                     if let Some(stage) = &spec.user_skills.root {
                         assert!(
@@ -6822,7 +7028,7 @@ mod user_skills_tests {
                                     && (read.scope != PathScope::Subtree
                                         || !skills.starts_with(&read.path))),
                             "{}: {:?}",
-                            adapter.name,
+                            adapter.identity.name,
                             spec.profile.spec.runtime_reads
                         );
                         assert!(spec.setup.iter().any(
@@ -6972,12 +7178,94 @@ mod user_skills_tests {
 mod attachment_tests {
     use super::*;
     #[test]
-    fn unsupported_image_input_warns_without_refusing() {
-        let images = vec![PathBuf::from("/outside/image.png")];
-        let warning = image_input_warning("cursor", &images).unwrap();
-        assert!(warning.contains("cursor") && warning.contains("image_input"));
-        assert!(image_input_warning("claude", &images).is_none());
-        assert!(image_input_warning("cursor", &[]).is_none());
+    fn unsupported_image_input_degrades_without_refusing() {
+        let request = provenant_records::LaunchRequest {
+            image_input: true,
+            ..Default::default()
+        };
+        let cursor = AdapterSpec::get("cursor").unwrap();
+        let checked = cursor.check_launch(&request);
+        let decision = checked
+            .degraded(provenant_records::LaunchField::ImageInput)
+            .expect("cursor declares no image input");
+        assert_eq!(decision.action, provenant_records::LaunchAction::Degrade);
+        let warning = format!("warning: {decision}; attachments remain readable");
+        assert!(warning.contains("cursor") && warning.contains("image input"));
+        assert!(warning.contains("source="));
+        let claude = AdapterSpec::get("claude").unwrap();
+        assert!(
+            claude
+                .check_launch(&request)
+                .degraded(provenant_records::LaunchField::ImageInput)
+                .is_none()
+        );
+        assert!(
+            cursor
+                .check_launch(&provenant_records::LaunchRequest::default())
+                .degraded(provenant_records::LaunchField::ImageInput)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn a_disabled_image_input_names_the_overlay_and_off_silences_it() {
+        use provenant_records::{
+            AdapterOverride, CapabilityOverlay, Layer, OVERLAY_SOURCE, OverridableCapability,
+            Source,
+        };
+        let overlay = CapabilityOverlay {
+            entries: vec![AdapterOverride {
+                adapter: "cursor".into(),
+                disable: vec![OverridableCapability::ImageInput],
+                reason: Some("no attachments in this lane".into()),
+                on_gap: vec![],
+                source: Source {
+                    layer: Layer::Project,
+                    origin: None,
+                },
+            }],
+        };
+        let effective = AdapterSpec::get("cursor").unwrap().with_overlay(&overlay);
+        let checked = effective.check_launch(&provenant_records::LaunchRequest {
+            image_input: true,
+            gap_policy: provenant_records::GapPolicy::default(),
+            ..Default::default()
+        });
+        let gap = checked
+            .degraded(provenant_records::LaunchField::ImageInput)
+            .expect("a disabled image input degrades");
+        assert_eq!(gap.source, OVERLAY_SOURCE);
+        assert!(gap.warn);
+        let warning = format!("warning: {gap}; attachments remain readable");
+        assert!(warning.contains("cursor") && warning.contains("image input"));
+        assert!(warning.contains(OVERLAY_SOURCE));
+
+        let off = CapabilityOverlay {
+            entries: vec![AdapterOverride {
+                adapter: "cursor".into(),
+                disable: vec![OverridableCapability::ImageInput],
+                reason: None,
+                on_gap: vec![(
+                    provenant_records::LaunchField::ImageInput,
+                    provenant_records::GapAction::Off,
+                )],
+                source: Source {
+                    layer: Layer::Project,
+                    origin: None,
+                },
+            }],
+        };
+        let policy = off.gap_policy("cursor", &provenant_records::policy::Policy::default());
+        let effective = AdapterSpec::get("cursor").unwrap().with_overlay(&off);
+        let checked = effective.check_launch(&provenant_records::LaunchRequest {
+            image_input: true,
+            gap_policy: policy,
+            ..Default::default()
+        });
+        let silent = checked
+            .degraded(provenant_records::LaunchField::ImageInput)
+            .expect("off still degrades rather than refusing");
+        assert!(!silent.warn);
     }
 }
 
@@ -7003,8 +7291,8 @@ mod refusal_cause_tests {
         let refusal =
             route_resolution_refusal(crate::route::DispatchError::from(error)).into_refusal();
         assert_eq!(
-            refusal.terminal_cause,
-            provenant_records::run::TerminalCause::AccountLoginRequired
+            refusal.cause,
+            provenant_records::run::CauseKind::AccountLoginRequired
         );
         assert_eq!(
             refusal.fallback_outcome,
@@ -7035,8 +7323,8 @@ mod refusal_cause_tests {
         );
         let refusal = route_resolution_refusal(error).into_refusal();
         assert_eq!(
-            refusal.terminal_cause,
-            provenant_records::run::TerminalCause::RouteResolutionRefused
+            refusal.cause,
+            provenant_records::run::CauseKind::RouteResolutionRefused
         );
         assert_eq!(
             refusal.terminal_note.as_deref(),
@@ -7124,570 +7412,8 @@ fn oversized_argv_prompt_spills_to_private_attempt_state() -> Result<(), Box<dyn
 }
 
 #[cfg(test)]
-mod candidate_walk_regressions {
-    use super::*;
-    use provenant_records::{
-        ResolvedRoute, RouteConfidentiality, RouteEligibility, RouteReadiness,
-    };
-
-    fn route(model: &str, account: &str) -> ResolvedRoute {
-        ResolvedRoute {
-            selection_context: Default::default(),
-            diagnostics: Default::default(),
-            user_skills: true,
-            access: Default::default(),
-            extra: Default::default(),
-            adapter: "cursor".into(),
-            model: model.into(),
-            effort: None,
-            catalogue_revision: "fixture".into(),
-            account_key: Some(account.into()),
-            host: "fixture".into(),
-            alternatives: Default::default(),
-            exclusions: vec![],
-            eligibility: RouteEligibility::Eligible,
-            readiness: RouteReadiness::stale(),
-            confidentiality: RouteConfidentiality {
-                extra: Default::default(),
-                evidence_ref: "fixture".into(),
-            },
-            pool_selection: None,
-        }
-    }
-
-    #[test]
-    fn pin_incompatible_candidate_does_not_hide_later_compatible_candidate()
-    -> Result<(), PrepareError> {
-        let mut queue = [route("wrong", "other"), route("right", "pinned")].into();
-        let mut rejected = vec![];
-        let mut reasons = vec![];
-        let selected = next_permitted_candidate(
-            &mut queue,
-            &mut rejected,
-            &mut reasons,
-            (Some("pinned"), Some("cursor")),
-            true,
-            provenant_routing::FallbackOutcome::Other,
-        )?
-        .expect("compatible route");
-        assert_eq!(selected.model, "right");
-        assert_eq!(reasons[0].route, "cursor/wrong");
-        assert_eq!(
-            reasons[0].cause,
-            Some(provenant_records::RouteExclusionReason::AccountPinned)
-        );
-        assert!(queue.is_empty());
-        Ok(())
-    }
-
-    #[test]
-    fn refused_accounts_leave_only_untried_accounts() {
-        let record = |key: &str| provenant_providers::AvailabilityRecord {
-            schema_version: 1,
-            adapter: "claude".into(),
-            executable: "/fixture/claude".into(),
-            version: "fixture".into(),
-            last_update: None,
-            fixture_ref: "fixture".into(),
-            catalogue_revision: "fixture".into(),
-            account_key: Some(key.into()),
-            plan: None,
-            observed_models: vec![],
-            observed_unix_seconds: 0,
-            expires_unix_seconds: 1,
-        };
-        let all = [record("spent"), record("ready")];
-        let mut refused = std::collections::BTreeSet::new();
-        refused.insert(("claude".to_owned(), "spent".to_owned()));
-        let left = without_refused_accounts(&all, &refused);
-        assert_eq!(left.len(), 1);
-        assert_eq!(left[0].account_key.as_deref(), Some("ready"));
-        refused.insert(("claude".to_owned(), "ready".to_owned()));
-        assert!(without_refused_accounts(&all, &refused).is_empty());
-    }
-
-    #[test]
-    fn admission_exclusions_become_typed_preparation_skips()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let spent = provenant_routing::ModelId::parse("cursor/spent")?;
-        let admitted = crate::route::admission::AdmittedRoutes {
-            exclusions: vec![crate::route::admission::AdmissionExclusion {
-                model: spent.clone(),
-                reason: provenant_records::RouteExclusionReason::Exhausted,
-                detail: "quota admission refused: allowance exhausted".into(),
-            }],
-            ..Default::default()
-        };
-        let mut reasons = vec![];
-        let mut rejected = vec![];
-        record_admission_exclusions(&admitted, &mut reasons, &mut rejected);
-        assert_eq!(reasons[0].route, "cursor/spent");
-        assert_eq!(
-            reasons[0].cause,
-            Some(provenant_records::RouteExclusionReason::Exhausted)
-        );
-        // A typed cause persists only its bounded safe projection, never the
-        // admission error's own text.
-        assert!(reasons[0].detail.contains("allowance is exhausted"));
-        assert!(!reasons[0].detail.contains("quota admission refused"));
-        assert!(rejected.contains(&spent));
-        Ok(())
-    }
-
-    #[test]
-    fn advisory_carve_out_keys_on_the_exact_pinned_candidate() {
-        let primary = route("legacy", "spent");
-        let alternative = route("other", "spent");
-        let choice = provenant_routing::RouteChoice::Model(
-            provenant_routing::ModelId::parse(&format!("{}/{}", primary.adapter, primary.model))
-                .expect("model"),
-        );
-        assert!(pinned_candidate(&choice, &primary));
-        assert!(!pinned_candidate(&choice, &alternative));
-        // An exact account pin is attempted; a model-only pin redraws while
-        // another account can serve the model, and is attempted when none can.
-        assert!(pinned_advisory_candidate(
-            &choice,
-            &primary,
-            Some("spent"),
-            true
-        ));
-        assert!(pinned_advisory_candidate(
-            &choice,
-            &primary,
-            Some("spent"),
-            false
-        ));
-        assert!(!pinned_advisory_candidate(&choice, &primary, None, true));
-        assert!(pinned_advisory_candidate(&choice, &primary, None, false));
-        assert!(!pinned_advisory_candidate(
-            &choice,
-            &alternative,
-            Some("spent"),
-            true
-        ));
-    }
-
-    // Spec: docs/specs/routing.md#unknown-never-means-ready
-    #[test]
-    fn advisory_redraw_defers_the_pinned_route_for_one_final_attempt() {
-        use provenant_records::RouteExclusionReason;
-        let pinned = route("legacy", "spent");
-        let choice = provenant_routing::RouteChoice::Model(
-            provenant_routing::ModelId::parse("cursor/legacy").expect("model"),
-        );
-        let deferred = deferred_pinned_attempt(
-            &choice,
-            &pinned,
-            None,
-            true,
-            &RouteExclusionReason::Exhausted,
-            Some("recorded exhaustion".into()),
-        )
-        .expect("a model-only pin with another account defers");
-        assert_eq!(deferred.route.account_key.as_deref(), Some("spent"));
-        // A non-advisory cause is never deferred: a missing login or a policy
-        // refusal is not evidence that an attempt would succeed.
-        assert!(
-            deferred_pinned_attempt(
-                &choice,
-                &pinned,
-                None,
-                true,
-                &RouteExclusionReason::AuthRequired,
-                Some("warning".into())
-            )
-            .is_none()
-        );
-        assert!(
-            deferred_pinned_attempt(
-                &choice,
-                &pinned,
-                None,
-                true,
-                &RouteExclusionReason::ConfinementUnavailable,
-                Some("warning".into())
-            )
-            .is_none()
-        );
-        // An exact account pin, a pin with no other account, and a pin with no
-        // recorded source are attempted directly or cannot warn truthfully.
-        assert!(
-            deferred_pinned_attempt(
-                &choice,
-                &pinned,
-                Some("spent"),
-                true,
-                &RouteExclusionReason::Exhausted,
-                Some("warning".into())
-            )
-            .is_none()
-        );
-        assert!(
-            deferred_pinned_attempt(
-                &choice,
-                &pinned,
-                None,
-                false,
-                &RouteExclusionReason::Exhausted,
-                Some("warning".into())
-            )
-            .is_none()
-        );
-        assert!(
-            deferred_pinned_attempt(
-                &choice,
-                &pinned,
-                None,
-                true,
-                &RouteExclusionReason::Exhausted,
-                None
-            )
-            .is_none()
-        );
-
-        // A drained redraw re-queues exactly the refused pinned route with its
-        // warning and makes its model tryable again.
-        let mut queue = std::collections::VecDeque::new();
-        let mut rejected =
-            vec![provenant_routing::ModelId::parse("cursor/legacy").expect("recorded rejection")];
-        assert_eq!(
-            resume_deferred_pinned(&mut queue, deferred, &mut rejected),
-            "recorded exhaustion"
-        );
-        assert_eq!(queue.len(), 1);
-        assert!(rejected.is_empty());
-        assert_eq!(queue[0].account_key.as_deref(), Some("spent"));
-    }
-
-    // Spec: docs/specs/routing.md#unknown-never-means-ready
-    #[test]
-    fn redraw_records_the_admission_block_cause() {
-        use provenant_records::RouteExclusionReason;
-        let blocked =
-            |block| crate::route::EdgeError::Quota(provenant_quota::QuotaError::Blocked(block));
-        assert_eq!(
-            redraw_exclusion_reason(&blocked(provenant_quota::AccountBlock::ScopedRefusal), None),
-            RouteExclusionReason::ProviderRefused
-        );
-        assert_eq!(
-            redraw_exclusion_reason(
-                &blocked(provenant_quota::AccountBlock::FreeTierRefusal),
-                None
-            ),
-            RouteExclusionReason::FreeTierRefused
-        );
-        assert_eq!(
-            redraw_exclusion_reason(&blocked(provenant_quota::AccountBlock::Mismatch), None),
-            RouteExclusionReason::AccountMismatch
-        );
-        assert_eq!(
-            redraw_exclusion_reason(
-                &crate::route::EdgeError::Quota(provenant_quota::QuotaError::AllowanceExhausted),
-                Some(&RouteExclusionReason::ProviderRefused),
-            ),
-            RouteExclusionReason::Exhausted
-        );
-        assert_eq!(
-            redraw_exclusion_reason(
-                &crate::route::EdgeError::Admission("unclassified".into()),
-                Some(&RouteExclusionReason::ProviderRefused),
-            ),
-            RouteExclusionReason::ProviderRefused
-        );
-    }
-
-    // Spec: docs/specs/routing.md#unknown-never-means-ready
-    #[test]
-    fn advisory_expiry_must_be_in_the_future() {
-        let mut pinned = route("legacy", "spent");
-        pinned.diagnostics.allowance_warning =
-            Some(provenant_records::route_selection::AllowanceWarning {
-                extra: Default::default(),
-                warning: "allowance spent".into(),
-                source: "quota:fixture".into(),
-            });
-        let availability = [provenant_providers::AvailabilityRecord {
-            schema_version: 1,
-            adapter: pinned.adapter.clone(),
-            executable: "/fixture/cursor".into(),
-            version: "fixture".into(),
-            last_update: None,
-            fixture_ref: "fixture".into(),
-            catalogue_revision: "fixture".into(),
-            account_key: pinned.account_key.clone(),
-            plan: None,
-            observed_models: vec![],
-            observed_unix_seconds: 0,
-            expires_unix_seconds: 3700,
-        }];
-        let reason = provenant_records::RouteExclusionReason::Exhausted;
-        assert!(
-            pinned_refusal_warning(
-                &pinned,
-                &availability,
-                &[],
-                &reason,
-                3700,
-                &provenant_quota::DEFAULT_FRESHNESS,
-            )
-            .is_none(),
-            "an availability expiry at the current second is not in the future"
-        );
-        assert!(
-            pinned_refusal_warning(
-                &pinned,
-                &availability,
-                &[],
-                &reason,
-                4000,
-                &provenant_quota::DEFAULT_FRESHNESS,
-            )
-            .is_none(),
-            "an expired availability record is not evidence for an advisory launch"
-        );
-        assert!(
-            pinned_refusal_warning(
-                &pinned,
-                &availability,
-                &[],
-                &reason,
-                3699,
-                &provenant_quota::DEFAULT_FRESHNESS,
-            )
-            .is_some()
-        );
-    }
-
-    #[test]
-    fn alternative_account_must_serve_the_pinned_model() {
-        let pinned = route("legacy", "spent");
-        let record = |key: &str, models: &[&str]| provenant_providers::AvailabilityRecord {
-            schema_version: 1,
-            adapter: pinned.adapter.clone(),
-            executable: "/fixture/cursor".into(),
-            version: "fixture".into(),
-            last_update: None,
-            fixture_ref: "fixture".into(),
-            catalogue_revision: "fixture".into(),
-            account_key: Some(key.into()),
-            plan: None,
-            observed_models: models.iter().map(|model| (*model).to_owned()).collect(),
-            observed_unix_seconds: 0,
-            expires_unix_seconds: 1,
-        };
-        let refused = std::collections::BTreeSet::new();
-        assert!(!has_alternative_account(&pinned, &[], &refused));
-        assert!(!has_alternative_account(
-            &pinned,
-            &[record("spent", &["legacy"])],
-            &refused
-        ));
-        assert!(has_alternative_account(
-            &pinned,
-            &[record("other", &["legacy"])],
-            &refused
-        ));
-        assert!(!has_alternative_account(
-            &pinned,
-            &[record("other", &["unrelated"])],
-            &refused
-        ));
-        let mut refused = std::collections::BTreeSet::new();
-        refused.insert(("cursor".to_owned(), "other".to_owned()));
-        assert!(!has_alternative_account(
-            &pinned,
-            &[record("other", &["legacy"])],
-            &refused
-        ));
-    }
-
-    #[test]
-    fn pinned_refusal_warning_names_the_record_source_and_expiry() {
-        let mut pinned = route("cursor/legacy", "spent");
-        pinned.diagnostics.allowance_warning =
-            Some(provenant_records::route_selection::AllowanceWarning {
-                extra: Default::default(),
-                warning: "allowance spent".into(),
-                source: "quota:fixture".into(),
-            });
-        // Without a quota record the expiry comes from the matching
-        // availability record, never from a fabricated default.
-        let availability = [provenant_providers::AvailabilityRecord {
-            schema_version: 1,
-            adapter: pinned.adapter.clone(),
-            executable: "/fixture/cursor".into(),
-            version: "fixture".into(),
-            last_update: None,
-            fixture_ref: "fixture".into(),
-            catalogue_revision: "fixture".into(),
-            account_key: pinned.account_key.clone(),
-            plan: None,
-            observed_models: vec![],
-            observed_unix_seconds: 0,
-            expires_unix_seconds: 3700,
-        }];
-        let (warning, expiry) = pinned_refusal_warning(
-            &pinned,
-            &availability,
-            &[],
-            &provenant_records::RouteExclusionReason::Exhausted,
-            0,
-            &provenant_quota::DEFAULT_FRESHNESS,
-        )
-        .expect("availability evidence");
-        assert!(warning.contains("cursor/legacy"), "{warning}");
-        assert!(warning.contains("quota:fixture"), "{warning}");
-        assert!(warning.contains("expiry unix seconds: 3700"), "{warning}");
-        assert_eq!(expiry, 3700);
-        assert!(
-            pinned_refusal_warning(
-                &pinned,
-                &[],
-                &[],
-                &provenant_records::RouteExclusionReason::Exhausted,
-                0,
-                &provenant_quota::DEFAULT_FRESHNESS,
-            )
-            .is_none(),
-            "no record means no source or expiry to claim"
-        );
-    }
-
-    #[test]
-    fn pinned_refusal_warning_reads_the_exhaustion_record() {
-        let pinned = route("legacy", "spent");
-        let scope = provenant_quota::AccountScope {
-            extra: Default::default(),
-            adapter: pinned.adapter.clone(),
-            account_key: "spent".into(),
-            label: "pro".into(),
-        };
-        let expected_source = format!("quota.provider.{}", pinned.adapter);
-        let mut record = provenant_quota::AccountRecord::empty(scope.clone());
-        record.revision = 1;
-        record.snapshot = Some(provenant_quota::QuotaSnapshot {
-            extra: Default::default(),
-            schema_version: 1,
-            account: scope,
-            revision: 1,
-            status: provenant_quota::QuotaStatus::Exhausted,
-            observed_unix_seconds: 1000,
-            source_ref: expected_source.clone(),
-            authority_ref: None,
-            windows: vec![provenant_quota::QuotaWindow {
-                extra: Default::default(),
-                pool: "five_hour".into(),
-                window_seconds: Some(18_000),
-                used_basis_points: 10_000,
-                resets_unix_seconds: Some(10_000),
-            }],
-            details: None,
-        });
-        let (warning, expiry) = pinned_refusal_warning(
-            &pinned,
-            &[],
-            std::slice::from_ref(&record),
-            &provenant_records::RouteExclusionReason::Exhausted,
-            0,
-            &provenant_quota::DEFAULT_FRESHNESS,
-        )
-        .expect("record evidence");
-        assert!(warning.contains(&expected_source), "{warning}");
-        assert!(!warning.contains("quota allowance on"), "{warning}");
-        assert!(warning.contains("expiry unix seconds: 10000"), "{warning}");
-        assert_eq!(expiry, 10_000);
-    }
-
-    #[test]
-    fn pinned_refusal_warning_reads_the_provider_refusal_record() {
-        let pinned = route("legacy", "spent");
-        let scope = provenant_quota::AccountScope {
-            extra: Default::default(),
-            adapter: pinned.adapter.clone(),
-            account_key: "spent".into(),
-            label: "pro".into(),
-        };
-        let mut record = provenant_quota::AccountRecord::empty(scope.clone());
-        record.revision = 1;
-        record.refusals.push(provenant_quota::Refusal {
-            extra: Default::default(),
-            account: scope,
-            model: pinned.model.clone(),
-            pool: None,
-            observed_unix_seconds: 2_000,
-            resets_unix_seconds: Some(9_000),
-        });
-        let reason = provenant_records::RouteExclusionReason::ProviderRefused;
-        let (warning, expiry) = pinned_refusal_warning(
-            &pinned,
-            &[],
-            std::slice::from_ref(&record),
-            &reason,
-            3_000,
-            &provenant_quota::DEFAULT_FRESHNESS,
-        )
-        .expect("refusal evidence");
-        assert!(warning.contains("cursor/legacy"), "{warning}");
-        assert!(
-            warning.contains("source: provider refusal observed unix seconds 2000"),
-            "{warning}"
-        );
-        assert!(warning.contains("expiry unix seconds: 9000"), "{warning}");
-        assert_eq!(expiry, 9_000);
-        assert!(
-            pinned_refusal_warning(
-                &pinned,
-                &[],
-                std::slice::from_ref(&record),
-                &reason,
-                9_000,
-                &provenant_quota::DEFAULT_FRESHNESS
-            )
-            .is_none(),
-            "an expired refusal is not evidence for an advisory launch"
-        );
-    }
-
-    #[test]
-    fn persisted_provider_refusal_feeds_the_advisory_warning()
-    -> Result<(), Box<dyn std::error::Error>> {
-        use std::os::unix::fs::PermissionsExt;
-        let temp = tempfile::tempdir()?;
-        std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700))?;
-        crate::quota::persist_provider_refusal(
-            temp.path(),
-            &provenant_records::run::RouteRecord {
-                provider: Some("cursor".into()),
-                model: Some("cursor/legacy".into()),
-                account_key: Some("spent".into()),
-                account_label: Some("pro".into()),
-                ..Default::default()
-            },
-            None,
-            5_000,
-            Some(9_000),
-        )?;
-        let records = crate::quota::read_cache_at(temp.path())?;
-        let pinned = route("legacy", "spent");
-        let (warning, expiry) = pinned_refusal_warning(
-            &pinned,
-            &[],
-            &records,
-            &provenant_records::RouteExclusionReason::ProviderRefused,
-            5_001,
-            &provenant_quota::DEFAULT_FRESHNESS,
-        )
-        .expect("persisted refusal evidence");
-        assert!(
-            warning.contains("source: provider refusal observed unix seconds 5000"),
-            "{warning}"
-        );
-        assert!(warning.contains("expiry unix seconds: 9000"), "{warning}");
-        assert_eq!(expiry, 9_000);
-        Ok(())
-    }
-}
+#[path = "tests_candidate_walk.rs"]
+mod candidate_walk_regressions;
 
 #[cfg(test)]
 mod route_launch_boundary_regressions {
@@ -7736,21 +7462,21 @@ mod route_launch_boundary_regressions {
         assert!(include_local_login(
             spec,
             std::slice::from_ref(&registered),
-            Some(spec.local_account.1),
+            Some(spec.accounts.local_entry.1),
             Some("agy"),
             None
         ));
         assert!(include_local_login(
             spec,
             std::slice::from_ref(&registered),
-            Some(spec.local_account.0),
+            Some(spec.accounts.local_entry.0),
             Some("agy"),
             None
         ));
         assert!(!include_local_login(
             spec,
             std::slice::from_ref(&registered),
-            Some(spec.local_account.1),
+            Some(spec.accounts.local_entry.1),
             Some("cursor"),
             None
         ));
@@ -7758,20 +7484,23 @@ mod route_launch_boundary_regressions {
         assert!(include_local_login(
             cursor,
             &[],
-            Some(cursor.local_account.1),
+            Some(cursor.accounts.local_entry.1),
             Some("cursor"),
             None
         ));
         assert!(!include_local_login(
             cursor,
             &[],
-            Some(cursor.local_account.1),
+            Some(cursor.accounts.local_entry.1),
             Some("agy"),
             None
         ));
-        let resumed_local =
-            effective_account_selector(Some("agy-registered"), Some(spec.local_account.1), true);
-        assert_eq!(resumed_local, Some(spec.local_account.1));
+        let resumed_local = effective_account_selector(
+            Some("agy-registered"),
+            Some(spec.accounts.local_entry.1),
+            true,
+        );
+        assert_eq!(resumed_local, Some(spec.accounts.local_entry.1));
         assert!(include_local_login(
             spec,
             std::slice::from_ref(&registered),
@@ -7779,7 +7508,7 @@ mod route_launch_boundary_regressions {
             Some("agy"),
             Some(RetainedIdentity {
                 provider: "agy",
-                account_key: Some(spec.local_account.1),
+                account_key: Some(spec.accounts.local_entry.1),
             })
         ));
         assert!(!include_local_login(
@@ -7793,7 +7522,11 @@ mod route_launch_boundary_regressions {
             })
         ));
         assert_eq!(
-            effective_account_selector(Some("agy-registered"), Some(spec.local_account.1), false),
+            effective_account_selector(
+                Some("agy-registered"),
+                Some(spec.accounts.local_entry.1),
+                false
+            ),
             Some("agy-registered")
         );
         assert_eq!(
@@ -7864,18 +7597,22 @@ mod route_launch_boundary_regressions {
         );
 
         let mut candidates = vec![registered.clone()];
-        candidates.push(agy_entry(spec.local_account.0, spec.local_account.1, &home));
+        candidates.push(agy_entry(
+            spec.accounts.local_entry.0,
+            spec.accounts.local_entry.1,
+            &home,
+        ));
         assert_eq!(
-            select_account(&candidates, spec.local_account.1, Some("agy"))
+            select_account(&candidates, spec.accounts.local_entry.1, Some("agy"))
                 .map_err(|error| error.to_string())?
                 .key,
-            spec.local_account.1
+            spec.accounts.local_entry.1
         );
         assert_eq!(
-            select_account(&candidates, spec.local_account.0, Some("agy"))
+            select_account(&candidates, spec.accounts.local_entry.0, Some("agy"))
                 .map_err(|error| error.to_string())?
                 .key,
-            spec.local_account.1
+            spec.accounts.local_entry.1
         );
         assert_eq!(
             select_account(&candidates, "agy-registered", Some("agy"))
@@ -7886,11 +7623,19 @@ mod route_launch_boundary_regressions {
 
         let labelled_collision = agy_entry("local", "agy-other", &home.join(".agy-other"));
         let mut colliding_candidates = vec![labelled_collision];
-        colliding_candidates.push(agy_entry(spec.local_account.0, spec.local_account.1, &home));
+        colliding_candidates.push(agy_entry(
+            spec.accounts.local_entry.0,
+            spec.accounts.local_entry.1,
+            &home,
+        ));
         // Spec: docs/specs/routing.md#account-references
         // A key and a label collision is ambiguous, never silently key-first.
         assert!(matches!(
-            select_account(&colliding_candidates, spec.local_account.1, Some("agy")),
+            select_account(
+                &colliding_candidates,
+                spec.accounts.local_entry.1,
+                Some("agy")
+            ),
             Err(PrepareError::Other(_))
         ));
         Ok(())
@@ -7938,7 +7683,7 @@ mod route_launch_boundary_regressions {
         assert!(matches!(
             mismatch,
             Err(PrepareError::Refusal {
-                cause: provenant_records::run::TerminalCause::UnregisteredAccount,
+                cause: provenant_records::run::CauseKind::UnregisteredAccount,
                 ..
             })
         ));
@@ -7956,7 +7701,7 @@ mod route_launch_boundary_regressions {
         assert!(matches!(
             mismatch,
             Err(PrepareError::Refusal {
-                cause: provenant_records::run::TerminalCause::UnregisteredAccount,
+                cause: provenant_records::run::CauseKind::UnregisteredAccount,
                 ..
             })
         ));
@@ -8033,7 +7778,7 @@ fn binding_refusal_preserves_local_repair_and_closed_route_guard() {
         Some(provenant_records::diagnostic::ConfinementGuard::ProjectBindingDirectoryUnsafe)
     );
     assert_eq!(
-        refusal.terminal_cause,
-        provenant_records::run::TerminalCause::ProjectBindingDirectoryUnsafe
+        refusal.cause,
+        provenant_records::run::CauseKind::ProjectBindingDirectoryUnsafe
     );
 }

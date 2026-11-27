@@ -86,7 +86,7 @@ pub(crate) fn advance_graphs_after_settlement(
     // A lane's settlement must not stop unrelated graphs from advancing.
     // Settlement records its own retention reason on the attempt.
     let settlement_error = settle_owned_worktree(settled, &roots, workers, None).err();
-    let settlement_reason = settlement_error.as_ref().map(|error| error.to_string());
+    let settlement_class = settlement_error.as_ref().map(|error| error.to_string());
     let mut first_error = settlement_error;
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
@@ -164,7 +164,7 @@ pub(crate) fn advance_graphs_after_settlement(
                         &before_steer,
                         &operation,
                     ) {
-                        let _ = FileJournal::set_advance_error(
+                        let _ = FileJournal::set_advance_note(
                             &roots.state,
                             settled.project_id,
                             &graph,
@@ -199,6 +199,9 @@ pub(crate) fn advance_graphs_after_settlement(
                             "steer restart staggered by {} ms (source: {source})",
                             waited / 1_000
                         ),
+                        provenant_records::warning::detected_source(
+                            provenant_records::warning::STEER_RESTART_STAGGERED,
+                        ),
                     ));
                 }
             }
@@ -223,14 +226,14 @@ pub(crate) fn advance_graphs_after_settlement(
         // If the attempt store itself refused the retention receipt, retain
         // the error on the graph containing this lane, without affecting
         // the status or advancement of any other graph.
-        let settlement_reason = settlement_reason.as_deref();
+        let settlement_class = settlement_class.as_deref();
         // The guardian's output is discarded, so `graph status` shows a failure.
         let advance_reason = result.as_ref().err().map(|error| error.to_string());
-        let recorded = FileJournal::set_advance_error(
+        let recorded = FileJournal::set_advance_note(
             &roots.state,
             settled.project_id,
             &id,
-            advance_reason.as_deref().or(settlement_reason),
+            advance_reason.as_deref().or(settlement_class),
         );
         if let Err(error) = result {
             first_error.get_or_insert(error);
@@ -350,11 +353,17 @@ fn advance_attempt_graph(
         backoff: ThreadPause,
         executor: SystemExecutor::new(4)?,
         home: settled.roots.home.clone(),
-        cwd: execution.directory,
+        cwd: execution.directory.clone(),
         assets: settled.roots.checkout.clone(),
         host_launch: Some(host),
         workers,
     };
+    let (admitted, _warnings, _waiting) =
+        super::queue_scheduler::admit_graph_tick(&factory, id, &execution, &checkpoint)
+            .map_err(std::io::Error::other)?;
+    if !admitted {
+        return Ok(());
+    }
     let mut owner = BoundGraphOwner {
         writer_launch_budget: None,
         admission_timeout: None,
@@ -523,6 +532,9 @@ pub(crate) fn settle_owned_worktree(
                 provenant_records::warning::GC_SCHEDULE_FAILED,
                 format!(
                     "completion GC did not start: {error}; the next gc sweep collects the worktree"
+                ),
+                provenant_records::warning::detected_source(
+                    provenant_records::warning::GC_SCHEDULE_FAILED,
                 ),
             )
             .repair("the next gc sweep collects the worktree"),

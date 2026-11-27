@@ -3,12 +3,16 @@
 
 mod adapters;
 pub use adapters::{
-    ADAPTER_SPECS, AccountIdentityProbe, AccountModelPlan, AccountQuota, AdapterSpec,
-    COMMAND_OUTPUT_TAIL_BYTES, CapabilitySupport, ClientEnvMarkers, GithubAuth, HarnessInstall,
-    HookAction, HookEvent, HookProtocol, HookTimeoutUnit, INSTRUCTION_ASSET, LaunchCapabilities,
-    LaunchField, LaunchRequest, LoginObservation, LoginReprobe, ModelListingFormat,
-    ModelObservation, NamedEntry, NativeAuthWarning, QuotaProbeKind, SetupRoot, SkillLocation,
-    StreamContract, UnsupportedLaunch, UpdateCommand, normalise_model_id,
+    ADAPTER_ROW_REASON, ADAPTER_ROW_SOURCE, ADAPTER_SPECS, AccountIdentityProbe, AccountModelPlan,
+    AccountQuota, AdapterAccounts, AdapterFact, AdapterIdentity, AdapterLaunch, AdapterLogin,
+    AdapterOverride, AdapterQuota, AdapterSpec, AnsweringModelSource, COMMAND_OUTPUT_TAIL_BYTES,
+    Capabilities, CapabilityOverlay, Caveat, ClientEnvMarkers, GapAction, GapPolicy, GapRule,
+    GithubAuth, HarnessInstall, HookAction, HookEvent, HookProtocol, HookTimeoutUnit,
+    INSTRUCTION_ASSET, LaunchAction, LaunchCapabilities, LaunchCheck, LaunchField, LaunchGap,
+    LaunchRequest, LoginObservation, LoginReprobe, ModelListingFormat, NamedEntry,
+    NativeAuthWarning, NativeCapabilities, OVERLAY_REASON, OVERLAY_SOURCE, OverridableCapability,
+    QuotaProbeKind, RetainedArtifact, Retention, SessionReference, SetupRoot, SkillLocation,
+    StreamFraming, TerminalEventStrength, UpdateCommand, UsageAttribution, normalise_model_id,
 };
 
 /// The instruction content bound into this product build and projected into
@@ -24,6 +28,7 @@ mod attempt_file;
 mod canonical;
 pub mod control;
 pub mod custody;
+pub mod declaration;
 pub mod diagnostic;
 mod extra_de;
 mod finding;
@@ -38,6 +43,7 @@ pub mod policy;
 pub mod port_receipt;
 pub mod ports;
 pub mod provenance;
+pub mod settlement;
 mod source;
 pub mod telemetry_context;
 mod trace;
@@ -47,8 +53,7 @@ pub mod warning;
 
 pub use artifact_ref::ArtifactRef;
 pub use attempt_fact::{
-    AttemptFact, AttemptOutcome, OutputRef, ReviewerFact, ReviewerProvenance, RouteFact,
-    TranscriptRef, Usage,
+    AttemptFact, OutputRef, ReviewerFact, ReviewerProvenance, RouteFact, TranscriptRef, Usage,
 };
 pub use attempt_file::{AttemptFile, AttemptFileClass};
 pub use canonical::{
@@ -105,6 +110,7 @@ pub use resolved_route::{
 pub mod lane_contract;
 pub mod result_capture;
 pub mod run;
+pub mod subject;
 
 // Format-2 records (#3078). Callers adopt them in later slices.
 pub mod finding_decision;

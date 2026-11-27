@@ -94,10 +94,21 @@ fn wip_refuses_held_or_uncertain_writer_custody() {
         (tree.live_writer, tree.writer_unknown) = handoff_writer_state(&advisory);
         assert!(!unsafe_wip(&tree), "{advisory:?} is advisory");
     }
-    let mut output = Vec::new();
-    write_writer_advisory(&mut output, "/repo/lane: census incomplete").expect("advisory written");
-    let output = String::from_utf8(output).expect("UTF-8 advisory");
-    assert!(output.contains("/repo/lane: census incomplete"));
+    // A writer advisory is a typed warning, not a printed line: it carries the
+    // WRITER_ADVISORY code and is shown once per change, while the JSON envelope
+    // keeps every instance. Spec: docs/specs/cli.md#warnings-are-typed-values
+    let ((), warnings) = provenant_records::warning::capture(|| {
+        emit_writer_advisory("/repo/lane: census incomplete");
+    });
+    assert_eq!(warnings.len(), 1, "one advisory is one typed warning");
+    let warning = &warnings[0];
+    assert_eq!(warning.code.as_ref(), "WRITER_ADVISORY");
+    assert_eq!(warning.dedup, provenant_records::warning::Dedup::PerChange);
+    assert!(
+        warning.message.contains("/repo/lane: census incomplete"),
+        "{}",
+        warning.message
+    );
     tree.writer_unknown = true;
     tree.writer_evidence = Some("/repo: process census incomplete".into());
     let refusal = wip_unsafe_description(&tree);
@@ -590,5 +601,127 @@ fn wip_push_and_recreation_follow_the_upstream_context() -> Result<(), Box<dyn s
     let pushed = provenant_os::fixture::run_git(&bare, &["rev-parse", "refs/heads/lane"])?;
     assert_eq!(pushed.trim_ascii(), head.trim_ascii());
     assert!(!forge.is_protected("lane"));
+    Ok(())
+}
+
+/// The handoff inspection and recreation call sites use the declared remote.
+/// Spec: docs/specs/run-git.md#one-resolved-forge-context-per-command
+#[test]
+fn inspect_and_recreate_follow_the_configured_upstream_remote()
+-> Result<(), Box<dyn std::error::Error>> {
+    use std::collections::BTreeMap;
+
+    struct Free;
+    impl WorkerObserver for Free {
+        fn observe_roots(&self, roots: &[PathBuf]) -> BTreeMap<PathBuf, Occupancy> {
+            roots
+                .iter()
+                .cloned()
+                .map(|path| (path, Occupancy::Available))
+                .collect()
+        }
+    }
+
+    let temp = tempfile::tempdir()?;
+    let home = temp.path().join("home");
+    let state = temp.path().join("state");
+    let project = temp.path().join("project");
+    let bare = temp.path().join("upstream.git");
+    std::fs::create_dir_all(&home)?;
+    std::fs::create_dir_all(&state)?;
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700))?;
+    std::fs::create_dir_all(&project)?;
+    provenant_os::fixture::run_git(
+        temp.path(),
+        &["init", "--bare", bare.to_str().ok_or("remote path")?],
+    )?;
+    provenant_os::fixture::run_git(&project, &["init", "-q", "-b", "trunk"])?;
+    std::fs::write(project.join("tracked.txt"), "base\n")?;
+    provenant_os::fixture::run_git(&project, &["add", "tracked.txt"])?;
+    provenant_os::fixture::run_git(&project, &["commit", "-qm", "base"])?;
+    provenant_os::fixture::run_git(
+        &project,
+        &[
+            "remote",
+            "add",
+            "upstream",
+            bare.to_str().ok_or("remote path")?,
+        ],
+    )?;
+    for args in [
+        vec!["checkout", "-qb", "lane"],
+        vec!["commit", "--allow-empty", "-qm", "lane"],
+        vec!["push", "-q", "upstream", "HEAD:refs/heads/lane"],
+        vec!["checkout", "-q", "trunk"],
+        vec!["checkout", "-qb", "recreated"],
+        vec!["commit", "--allow-empty", "-qm", "recreated"],
+        vec!["push", "-q", "upstream", "HEAD:refs/heads/recreated"],
+        vec!["checkout", "-q", "trunk"],
+        vec!["branch", "-D", "recreated"],
+        vec!["fetch", "-q", "upstream"],
+        // Inspection enumerates checkouts, not all local branches.
+        vec!["checkout", "-q", "lane"],
+    ] {
+        provenant_os::fixture::run_git(&project, &args)?;
+    }
+    std::fs::create_dir_all(project.join(".provenant"))?;
+    std::fs::write(
+        project.join(".provenant/ports.json"),
+        r#"{"git":{"remote":"upstream"}}"#,
+    )?;
+
+    let mut inputs = provenant_core::RootInputs::new(home.clone(), project.clone());
+    inputs.state_dir = Some(state);
+    let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+    let context = Context::open(roots.clone(), &home, &project)?;
+    let source = Source {
+        roots: roots.clone(),
+        home: home.clone(),
+        assets: temp.path().join("assets"),
+        cwd: project.clone(),
+        context,
+    };
+    let declared_remote =
+        resolve_remote(roots.state.as_path(), &project, &source.context.port_table)
+            .map_err(|refusal| refusal.message)?;
+    assert_eq!(declared_remote.as_ref(), Some(&remote("upstream")));
+    let inspected = inspect(
+        &source,
+        &Free,
+        &worktrees::RepoFacts::default(),
+        declared_remote.as_ref(),
+    )
+    .map_err(|refusal| refusal.message)?;
+    let lane = inspected
+        .iter()
+        .find(|tree| tree.branch.as_deref() == Some("lane"))
+        .expect("lane is listed by handoff inspection");
+    assert!(lane.pushed, "inspection must resolve upstream/lane");
+    assert!(lane.upstream.is_some());
+
+    let clock = SystemClock::new();
+    let target = Target {
+        context: &source.context,
+        home: &home,
+        cwd: &project,
+        workers: &Free,
+        source: HostId::from_bytes([1; 16]),
+        clock: &clock,
+        budget: WaitBudget::cli(clock.mono_now(), 30)?,
+    };
+    let made = recreate(&target, &["recreated".into()], declared_remote);
+    assert_eq!(made.len(), 1);
+    assert!(
+        made[0].error.is_none(),
+        "recreation from upstream must succeed"
+    );
+    assert!(made[0].created);
+    assert!(
+        made[0]
+            .path
+            .as_deref()
+            .is_some_and(|path| Path::new(path).exists())
+    );
     Ok(())
 }

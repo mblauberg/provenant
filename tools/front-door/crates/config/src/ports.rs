@@ -311,12 +311,31 @@ pub struct VerifyPort {
     pub runners: BTreeMap<String, Vec<String>>,
     #[serde(default)]
     pub affected: VerifyAffectedPort,
+    /// Commands and their scope for a writer lane, declared by the project.
+    #[serde(default)]
+    pub lane: Vec<VerifyLaneCheck>,
     /// Cheap repository checks a writer runs before pushing. They need no
-    /// build, so a lane may run them even though it otherwise only formats.
+    /// build and supplement the declared lane verification commands.
     /// Invalid entries are dropped with a typed warning at the writer preamble,
     /// not refused here: they are advice to the writer, not a launch gate.
     #[serde(default)]
     pub static_checks: Vec<VerifyStaticCheck>,
+}
+
+/// One lane verification command, with its tier and applicability.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VerifyLaneCheck {
+    pub tier: String,
+    pub argv: Vec<String>,
+    pub scope: String,
+}
+
+impl VerifyLaneCheck {
+    pub fn is_valid(&self) -> bool {
+        !self.tier.trim().is_empty()
+            && !self.scope.trim().is_empty()
+            && self.argv.first().is_some_and(|program| !program.is_empty())
+    }
 }
 
 /// One no-build check declared under `verify.static_checks` of a port layer.
@@ -721,6 +740,9 @@ fn default_build_overflow() -> String {
 fn default_build_clean() -> String {
     "untracked".to_owned()
 }
+fn default_build_target() -> String {
+    "toolchain,worktree".to_owned()
+}
 fn default_build_snapshot_retention() -> String {
     "7d".to_owned()
 }
@@ -775,6 +797,10 @@ pub struct BuildPort {
     pub overflow: String,
     #[serde(default = "default_build_clean")]
     pub clean: String,
+    /// Comma-separated identities for the slot's warm Cargo target.
+    /// Defaults to `toolchain,worktree`; `shared` keeps the legacy shared target.
+    #[serde(default = "default_build_target")]
+    pub target: String,
     #[serde(default)]
     pub stacks: Vec<String>,
     #[serde(default = "default_build_snapshot_retention")]
@@ -886,6 +912,25 @@ pub enum BuildOffload {
     Auto,
     Off,
 }
+/// One identity component in the slot target directory key.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BuildTargetKey {
+    /// The resolved `rustc -vV` toolchain, never the ambiguous channel name.
+    Toolchain,
+    /// The source checkout identity, so workspace members are never reused
+    /// across worktrees.
+    Worktree,
+}
+impl BuildTargetKey {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Toolchain => "toolchain",
+            Self::Worktree => "worktree",
+        }
+    }
+}
+pub const DEFAULT_BUILD_TARGET_KEYS: [BuildTargetKey; 2] =
+    [BuildTargetKey::Toolchain, BuildTargetKey::Worktree];
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum BuildPriority {
     Interactive,
@@ -984,6 +1029,53 @@ impl BuildPort {
         )
     }
 
+    /// Resolve `build.target` into ordered, deduplicated target identities.
+    /// `shared` (or an empty value) keeps the legacy shared target.
+    /// Unknown components warn and fall back to the builtin key list.
+    pub fn target_layout(&self) -> ResolvedBuildValue<Vec<BuildTargetKey>> {
+        let raw = self.target.trim();
+        let (keys, invalid) = if raw.is_empty() || raw == "shared" {
+            (Vec::new(), None)
+        } else {
+            let mut keys: Vec<BuildTargetKey> = Vec::new();
+            let mut invalid = None;
+            for part in raw.split(',') {
+                let part = part.trim();
+                let key = match part {
+                    "toolchain" => Some(BuildTargetKey::Toolchain),
+                    "worktree" => Some(BuildTargetKey::Worktree),
+                    "" => {
+                        invalid = Some("an empty component".to_owned());
+                        None
+                    }
+                    other => {
+                        invalid = Some(format!("unknown component {other:?}"));
+                        None
+                    }
+                };
+                if let Some(key) = key
+                    && !keys.contains(&key)
+                {
+                    keys.push(key);
+                }
+            }
+            (keys, invalid)
+        };
+        match invalid {
+            None => ResolvedBuildValue {
+                value: keys,
+                source: self.source_for_leaf("target"),
+                warnings: Vec::new(),
+            },
+            Some(detail) => self.invalid(
+                "target",
+                &self.target,
+                DEFAULT_BUILD_TARGET_KEYS.to_vec(),
+                &format!("{detail}; use toolchain, worktree or shared"),
+            ),
+        }
+    }
+
     /// Resolve `build.offload`, warning and falling back to `auto`.
     pub fn offload_policy(&self) -> ResolvedBuildValue<BuildOffload> {
         self.string_value(
@@ -1079,6 +1171,7 @@ impl BuildPort {
             "offload",
             "overflow",
             "clean",
+            "target",
             "stacks",
             "snapshot_retention",
             "priority.check",
@@ -1565,6 +1658,7 @@ fn warn_malformed_port_file(path: &Path, error: &io::Error) {
         Warning::new(
             CONFIG_MALFORMED,
             format!("{file}: malformed port declaration ignored: {error}"),
+            provenant_records::warning::detected_source(CONFIG_MALFORMED),
         )
         .subject(file)
         .repair(format!(
@@ -1809,7 +1903,7 @@ fn apply_layer(
                         "{file}: schema_version: expected {}, found {version}; using the current schema",
                         PORTS_SCHEMA_VERSION
                     ),
-                )
+                 provenant_records::warning::detected_source(CONFIG_MALFORMED))
                 .subject(file.clone())
                 .repair(format!(
                     "set \"schema_version\": {PORTS_SCHEMA_VERSION} in {file}"

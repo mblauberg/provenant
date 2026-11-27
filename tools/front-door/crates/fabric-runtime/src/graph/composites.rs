@@ -106,10 +106,14 @@ pub(super) fn resolve_writer_targets(document: &mut GraphDocument) {
                 })
                 .collect()
         };
-        let aliases = |links: BTreeMap<String, String>, inherited: &BTreeMap<String, String>| {
+        let aliases = |links: BTreeMap<String, String>,
+                       inherited: &BTreeMap<String, String>,
+                       writer: bool| {
             let mut aliases = inherited.clone();
             for node in nodes.iter() {
-                aliases.remove(&node.id);
+                if !writer || node.continues.is_none() {
+                    aliases.remove(&node.id);
+                }
             }
             for id in links.keys() {
                 let mut target = id;
@@ -124,8 +128,40 @@ pub(super) fn resolve_writer_targets(document: &mut GraphDocument) {
             }
             aliases
         };
-        let writer_aliases = aliases(links(false), inherited);
-        let result_aliases = aliases(links(true), inherited_results);
+        // An authored writer id is the local name inside its enclosing
+        // composite or loop scope. Resolve it to the same expanded leaf as
+        // the composite id that exports that writer: a `with.writer` naming
+        // `fix` and a writer expanded as `task--fix` are the same authority.
+        // A local name shared by two writers stays unresolved so the whole
+        // plan can report the candidate ids instead of guessing one.
+        let mut local_writers: BTreeMap<&str, Option<&str>> = BTreeMap::new();
+        for node in nodes
+            .iter()
+            .filter(|node| node.continues.is_none() && writers.contains(&node.id))
+        {
+            let id = &node.id;
+            if let Some((_, local)) = id.rsplit_once("--") {
+                match local_writers.entry(local) {
+                    std::collections::btree_map::Entry::Vacant(entry) => {
+                        entry.insert(Some(id.as_str()));
+                    }
+                    std::collections::btree_map::Entry::Occupied(mut entry) => {
+                        if entry.get().is_some_and(|target| target != id.as_str()) {
+                            entry.insert(None);
+                        }
+                    }
+                }
+            }
+        }
+        let mut writer_aliases = aliases(links(false), inherited, true);
+        for (local, target) in local_writers {
+            if let Some(target) = target
+                && !writer_aliases.contains_key(local)
+            {
+                writer_aliases.insert(local.to_owned(), target.to_owned());
+            }
+        }
+        let result_aliases = aliases(links(true), inherited_results, false);
         let bind = |id: &mut String, aliases: &BTreeMap<String, String>| {
             if let Some(target) = aliases.get(id) {
                 *id = target.clone();
@@ -136,9 +172,13 @@ pub(super) fn resolve_writer_targets(document: &mut GraphDocument) {
                 Some(SourceBinding::Head { node }) => bind(node, &writer_aliases),
                 Some(SourceBinding::Node { node: target }) => {
                     if let Some(writer) = result_aliases.get(target) {
+                        // The exported writer is usable only after its boundary settles,
+                        // including for nested consumers with their own local edges.
+                        if !node.depends_on.contains(target) {
+                            node.after_settled.retain(|parent| parent != target);
+                            node.depends_on.push(target.clone());
+                        }
                         *target = writer.clone();
-                        // Keep the composite dependency as its settlement gate,
-                        // and retain the direct edge required by a Node source.
                         if !node.depends_on.contains(writer) {
                             node.depends_on.push(writer.clone());
                         }
@@ -152,10 +192,16 @@ pub(super) fn resolve_writer_targets(document: &mut GraphDocument) {
             if let Some(land) = &mut node.land {
                 bind(&mut land.node, &writer_aliases);
             }
-            if let Some(GateCondition::Ci {
-                target: CiTarget::Node { node, .. },
-                ..
-            }) = &mut node.condition
+            if let Some(
+                GateCondition::Ci {
+                    target: CiTarget::Node { node, .. },
+                    ..
+                }
+                | GateCondition::Conflict {
+                    target: CiTarget::Node { node, .. },
+                    ..
+                },
+            ) = &mut node.condition
             {
                 bind(node, &writer_aliases);
             }
@@ -260,10 +306,26 @@ fn children(
             ));
         }
         for parent in &mut node.depends_on {
-            *parent = reference(prefix, parent, &locals, incoming).ok_or("dependency")?;
+            *parent = reference(prefix, parent, &locals, incoming)
+                .or_else(|| {
+                    if prefix.is_empty() {
+                        visible_names.get(parent.as_str()).cloned()
+                    } else {
+                        None
+                    }
+                })
+                .ok_or("dependency")?;
         }
         for parent in &mut node.after_settled {
-            *parent = reference(prefix, parent, &locals, incoming).ok_or("dependency")?;
+            *parent = reference(prefix, parent, &locals, incoming)
+                .or_else(|| {
+                    if prefix.is_empty() {
+                        visible_names.get(parent.as_str()).cloned()
+                    } else {
+                        None
+                    }
+                })
+                .ok_or("dependency")?;
         }
         for input in &mut node.inputs {
             if !input.node.starts_with("previous.") {
@@ -286,6 +348,7 @@ fn children(
             && !source.starts_with("previous.")
         {
             *source = reference(prefix, source, &locals, incoming)
+                .or_else(|| visible_names.get(source).cloned())
                 .unwrap_or_else(|| scoped(prefix, source));
         }
         if let Some(SourceBinding::Head { node: writer }) = &mut node.source {
@@ -294,10 +357,16 @@ fn children(
                 .cloned()
                 .unwrap_or_else(|| writer.clone());
         }
-        if let Some(GateCondition::Ci {
-            target: CiTarget::Node { node: target, .. },
-            ..
-        }) = &mut node.condition
+        if let Some(
+            GateCondition::Ci {
+                target: CiTarget::Node { node: target, .. },
+                ..
+            }
+            | GateCondition::Conflict {
+                target: CiTarget::Node { node: target, .. },
+                ..
+            },
+        ) = &mut node.condition
             && !target.starts_with("previous.")
         {
             *target = visible_names
@@ -305,15 +374,46 @@ fn children(
                 .cloned()
                 .unwrap_or_else(|| target.clone());
         }
-        // A continued or landed writer may sit inside or outside the composite.
-        for writer in node
-            .continues
-            .iter_mut()
-            .chain(node.land.as_mut().map(|spec| &mut spec.node))
+        if let Some(loop_spec) = &mut node.loop_body {
+            for initial in loop_spec.previous_bindings.values_mut() {
+                let target = initial.clone();
+                *initial = reference(prefix, &target, &locals, incoming)
+                    .or_else(|| visible_names.get(&target).cloned())
+                    .ok_or("loop previous binding")?;
+            }
+            if let Some(initial) = &mut loop_spec.initial_publication {
+                let target = initial.clone();
+                *initial = reference(prefix, &target, &locals, incoming)
+                    .or_else(|| visible_names.get(&target).cloned())
+                    .ok_or("loop initial publication")?;
+            }
+        }
+        if let Some(edge) = node
+            .loop_body
+            .as_mut()
+            .and_then(|spec| spec.outcome_edge.as_mut())
         {
-            // Outer writers resolve through every enclosing scope, so a loop
-            // body or nested composite can continue or land a writer that is
-            // not one of its direct dependencies.
+            let target = edge.node.clone();
+            edge.node = reference(prefix, &target, &locals, incoming)
+                .or_else(|| visible_names.get(&target).cloned())
+                .unwrap_or_else(|| scoped(prefix, &target));
+        }
+        // A continuation cannot refer to itself. Preserve the authored name
+        // when no outer binding is visible so writer alias resolution can bind it.
+        if let Some(writer) = &mut node.continues {
+            *writer = if *writer == original.id {
+                inherited_names
+                    .get(writer.as_str())
+                    .cloned()
+                    .unwrap_or_else(|| writer.clone())
+            } else {
+                reference(prefix, writer, &locals, incoming)
+                    .or_else(|| visible_names.get(writer.as_str()).cloned())
+                    .unwrap_or_else(|| scoped(prefix, writer))
+            };
+        }
+        if let Some(land) = &mut node.land {
+            let writer = &mut land.node;
             *writer = reference(prefix, writer, &locals, incoming)
                 .or_else(|| visible_names.get(writer.as_str()).cloned())
                 .unwrap_or_else(|| scoped(prefix, writer));
@@ -396,12 +496,13 @@ fn children(
                 }
                 if child.loop_body.is_some()
                     || child.kind == Some(NodeKind::Loop)
-                    || child.on_fail.is_some()
                     || child.delivery.as_ref().is_some_and(|mode| {
                         !matches!(mode, provenant_records::run::DeliveryMode::Integrate(_))
                     })
                 {
-                    return Err("loop body cannot nest loops or route on_fail, and may only deliver by integrate:".into());
+                    return Err(
+                        "loop body cannot nest loops and may only deliver by integrate:".into(),
+                    );
                 }
             }
             spec.body = children(
@@ -552,6 +653,9 @@ fn outputs(
         result: None,
         verdict: None,
         verdict_error: None,
+        hygiene: None,
+        publication: None,
+        handoff: None,
         findings: Vec::new(),
         findings_available: None,
         branch: None,
@@ -691,6 +795,7 @@ fn outputs(
                 .push(bounded(&format!("unavailable {entry}"), WARNING_BYTES));
         }
     }
+    let mut split = false;
     if spec.reduce_verdict {
         use provenant_records::workflow::ReviewVerdict;
         let rank = |verdict| match verdict {
@@ -699,7 +804,7 @@ fn outputs(
             ReviewVerdict::Inconclusive => 2,
             ReviewVerdict::RequestChanges => 3,
         };
-        let verdict = exporting_members(spec, positions)
+        let verdicts: Vec<_> = exporting_members(spec, positions)
             .into_iter()
             .map(|index| &checkpoint.nodes[index])
             .filter(|member| member.state == NodeState::Succeeded)
@@ -718,7 +823,15 @@ fn outputs(
                     })
                     .unwrap_or(ReviewVerdict::Inconclusive)
             })
-            .max_by_key(|verdict| rank(*verdict));
+            .collect();
+        // A split on one head is not a fresh review round: the single
+        // adjudication node resolves it. Flag the split so a reduced verdict
+        // is never silently treated as an agreed changes-request.
+        // Spec: docs/specs/fabric.md#fix-round-invariants-and-split-verdict-adjudication
+        split = verdicts
+            .first()
+            .is_some_and(|first| verdicts.iter().any(|verdict| verdict != first));
+        let verdict = verdicts.into_iter().max_by_key(|verdict| rank(*verdict));
         selected.verdict = verdict.map(|verdict| format!("VERDICT: {}", verdict.as_token()));
         selected.verdict_error = None;
     }
@@ -803,6 +916,14 @@ fn outputs(
             Some(own) => format!("{own}\n{inherited}"),
             None => inherited,
         });
+    }
+    if split {
+        selected.warnings.truncate(MAX_WARNINGS.saturating_sub(1));
+        truncation_warning_indices.retain(|index| *index < selected.warnings.len());
+        selected.warnings.push(bounded(
+            "review_split_verdict: conflicting verdicts on one head go to the adjudicator, not a new round",
+            WARNING_BYTES,
+        ));
     }
     selected.result = match results.as_slice() {
         [] => None,
@@ -1005,9 +1126,9 @@ fn unavailable(
                 .as_deref()
                 .map(|lens| format!(" (lens {lens})"))
                 .unwrap_or_default();
-            let reason = progress.advance_error.as_deref().unwrap_or_else(|| {
+            let reason = progress.advance_note.as_deref().unwrap_or_else(|| {
                 match progress.attempts.last().and_then(|a| a.outcome.as_ref()) {
-                    Some(AttemptOutcome::AdapterUnavailable) => "adapter unavailable",
+                    Some(GraphAttemptOutcome::AdapterUnavailable) => "adapter unavailable",
                     _ => "member failed",
                 }
             });
@@ -1065,7 +1186,7 @@ fn review_lens_statuses(
             let available = progress.state == NodeState::Succeeded;
             let reason = (!available).then(|| {
                 let detail = progress
-                    .advance_error
+                    .advance_note
                     .as_deref()
                     .unwrap_or(match progress.state {
                         NodeState::Failed => "review did not succeed",
@@ -1253,28 +1374,27 @@ fn reconcile_progress(
     }
     let (exported, truncation_cause) =
         exported.map_or((None, None), |(output, cause)| (Some(output), cause));
-    let (advance_error_code, advance_error) =
-        if let Some(reason) = shortfall.filter(|_| hard_shortfall) {
-            (
-                Some("coverage_below_minimum".into()),
-                Some(bounded(&reason, MAX_ADVANCE_ERROR_BYTES)),
-            )
-        } else if let Some(reason) = export_error {
-            (Some("composite_findings_exceed_cap".into()), Some(reason))
-        } else {
-            (None, None)
-        };
+    let (advance_code, advance_note) = if let Some(reason) = shortfall.filter(|_| hard_shortfall) {
+        (
+            Some("coverage_below_minimum".into()),
+            Some(bounded(&reason, MAX_ADVANCE_NOTE_BYTES)),
+        )
+    } else if let Some(reason) = export_error {
+        (Some("composite_findings_exceed_cap".into()), Some(reason))
+    } else {
+        (None, None)
+    };
     let progress = &mut checkpoint.nodes[index];
     let changed = progress.state != state
         || progress.outputs != exported
         || progress.truncation_cause != truncation_cause
-        || progress.advance_error_code != advance_error_code
-        || progress.advance_error != advance_error;
+        || progress.advance_code != advance_code
+        || progress.advance_note != advance_note;
     progress.state = state;
     progress.outputs = exported;
     progress.truncation_cause = truncation_cause;
-    progress.advance_error_code = advance_error_code;
-    progress.advance_error = advance_error;
+    progress.advance_code = advance_code;
+    progress.advance_note = advance_note;
     changed
 }
 
@@ -1334,14 +1454,23 @@ fn state(
                 NodeState::Pending
             };
         }
-        if !node
-            .composite
-            .as_ref()
-            .is_some_and(|spec| spec.reduce_verdict)
-            && members
-                .iter()
-                .any(|state| matches!(state, NodeState::Blocked | NodeState::Skipped))
-        {
+        let skipped_non_export = node.composite.as_ref().is_some_and(|spec| {
+            !spec.reduce_verdict
+                && node
+                    .composite_members
+                    .iter()
+                    .zip(&members)
+                    .any(|(member, state)| {
+                        matches!(state, NodeState::Blocked | NodeState::Skipped)
+                            && (*state == NodeState::Blocked
+                                || spec.min_successful.is_none()
+                                || !spec
+                                    .exports
+                                    .iter()
+                                    .any(|export| export.node.as_str() == member.as_str()))
+                    })
+        });
+        if skipped_non_export {
             return NodeState::Blocked;
         }
         // A review group can still produce a useful degraded receipt when no
@@ -1384,7 +1513,7 @@ pub(super) fn validate_progress(
         .composite
         .as_ref()
         .and_then(|spec| coverage_shortfall(positions[&node.id], spec, plan, checkpoint, positions))
-        .map(|reason| bounded(&reason, MAX_ADVANCE_ERROR_BYTES));
+        .map(|reason| bounded(&reason, MAX_ADVANCE_NOTE_BYTES));
     let hard_shortfall = shortfall.is_some()
         && node
             .composite
@@ -1393,8 +1522,8 @@ pub(super) fn validate_progress(
     let failed_for_coverage = progress.state == NodeState::Failed
         && state == NodeState::Succeeded
         && hard_shortfall
-        && progress.advance_error_code.as_deref() == Some("coverage_below_minimum")
-        && progress.advance_error == shortfall;
+        && progress.advance_code.as_deref() == Some("coverage_below_minimum")
+        && progress.advance_note == shortfall;
     let mut export = node
         .composite
         .as_ref()
@@ -1421,15 +1550,15 @@ pub(super) fn validate_progress(
     let failed_for_export = progress.state == NodeState::Failed
         && state == NodeState::Succeeded
         && !hard_shortfall
-        && progress.advance_error_code.as_deref() == Some("composite_findings_exceed_cap")
-        && matches!(&export, Some(Err(reason)) if progress.advance_error.as_ref() == Some(reason));
+        && progress.advance_code.as_deref() == Some("composite_findings_exceed_cap")
+        && matches!(&export, Some(Err(reason)) if progress.advance_note.as_ref() == Some(reason));
     let valid = progress.attempts.is_empty()
         && (progress.state == NodeState::Succeeded
             || failed_for_coverage
             || progress.truncation_cause.is_none())
         && progress.gate.is_none()
         && progress.ci.is_none()
-        && (progress.advance_error.is_none() || failed_for_coverage || failed_for_export)
+        && (progress.advance_note.is_none() || failed_for_coverage || failed_for_export)
         && progress.source_commit.is_none()
         && match progress.state {
             NodeState::Failed => {

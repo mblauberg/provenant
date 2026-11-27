@@ -478,7 +478,9 @@ impl ValidateInput for SubmitInput {
                         MAX_ARTIFACT_PATH_BYTES,
                     )?;
                     if let Some(deliver) = &task.deliver {
-                        bounded_text(&deliver.remote, &format!("{path}.deliver.remote"), 64)?;
+                        // The destination is typed on decode with the one
+                        // `RemoteName` grammar; there is no second alphabet or
+                        // length limit to apply here.
                         bounded_text(&deliver.branch, &format!("{path}.deliver.branch"), 1024)?;
                     }
                     route(&task.route, &format!("{path}.route"))?;

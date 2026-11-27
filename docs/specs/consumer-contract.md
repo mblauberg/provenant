@@ -42,12 +42,37 @@ port table or settings, never a name compiled into a reader.
   must not force a layout on the repository or collide with what it has.
 - Owner: `crates/config/src/repository_files.rs`, `crates/config/src/ports.rs`
 
+### The Git context is declared, not compiled in
+
+Every forge operation uses one resolved context: the remote, the default branch
+and the protected-branch set. They come from the `git.remote`,
+`git.default_branch` and `git.protected` port leaves, else from the checkout's
+branch upstream or sole remote, its remote HEAD, and the forge API. A declared
+default branch wins ahead of HEAD; with no HEAD to read, a declared protected
+set is authoritative. Handoff push and branch recreation, cloud fetch and
+`ls-remote`, GC upstream probing, PR base resolution and delivery all receive
+the resolved value rather than reading a local fallback. `provenant config ports`
+prints the effective remote, default branch and protected set with the layer and
+key that supplied each; a conventional `origin`/`main`/`master` may remain as a
+shown default but never decides behaviour for a repository that declares other
+names. There are no new refusals and no multi-remote workflows.
+
+- Why: a repository whose remote is not `origin` and whose default branch is not
+  `main` or `master` must get correct behaviour from every consumer.
+- Spec: `docs/specs/run-git.md#one-resolved-forge-context-per-command`
+- Owner: `crates/config/src/forge.rs`, `crates/config/src/ports.rs`
+
 ## Commands
 
 Command names may change freely, and an unknown command or flag fails with
 exit 2; there are no aliases. JSON envelopes other than `process-tree` are
 evolving, and so is human output, including printed next-step command lines:
-scripts read `--json`.
+scripts read `--json`. `provenant adapter capabilities --json` projects the
+declared capability matrix, harness compatibility and measured latency in the
+result envelope's `data`; every capability declaration carries a reason and a
+source. The effective overlay, per-field gap actions and sourced settings are
+projected with it. Repeatable `--adapter ID` narrows the rows (an unknown id
+warns and is skipped) and `--no-probe` leaves compatibility `version_unread`.
 
 - Why: a script that drives Provenant needs a fixed grammar and one parseable form.
 - Owner: `crates/cli/src/grammar.rs`
@@ -87,6 +112,7 @@ port commands, and `caller` ones are read only from the caller.
 | `PROVENANT_LANE_HEAD` | lane | evolving | The branch the writer lane delivers to. | lanes whose task names a head branch |
 | `PROVENANT_LANE_BASE` | lane | evolving | The branch the lane's head is based on. | lanes whose task names both a head and a base |
 | `PROVENANT_PRIMARY_CHECKOUT` | lane | evolving | The project's primary checkout: the directory holding the common Git directory. | lanes launched in a project |
+| `PROVENANT_LANE_PROJECT` | lane | evolving | The project the lane was launched in, as its host binding id. Provenant commands in the lane resolve their project from this binding, not from the working directory. | lanes launched in a project |
 | `PROVENANT_WORKTREE_GITDIR` | lane | evolving | The linked worktree's private Git directory. | writer lanes, and read-only lanes whose worktree has a private Git directory |
 | `PROVENANT_SESSION_ID` | caller | evolving | Names the chair session the chair log records. When unset, settlement finds the session the chair saved. | set by the caller |
 | `PROVENANT_PORT_PHASE` | port_command | evolving | The admission phase the command runs for. | admission port commands |
@@ -117,6 +143,11 @@ port commands, and `caller` ones are read only from the caller.
 
 - Why: a repository's scripts detect and adapt to a lane only through these names.
 - Owner: `crates/core/src/consumer_env.rs`
+- `PROVENANT_LANE_PROJECT` is set by `crates/cli/src/run/provider/project_paths.rs`
+  (`apply_to`), which model lane preparation (`preparation.rs`) and command
+  lane preparation (`command.rs`) both call. In a lane, Fabric contexts
+  (`crates/cli/src/fabric/lane_project.rs`) read only this binding: a missing
+  or unreadable binding refuses and names the variable and the binding path.
 
 ## State root
 
@@ -169,6 +200,23 @@ Every command exits with the code of its envelope `status`. This tier is stable.
 
 - Why: a script branches on the exit code before it parses any output.
 - Owner: `crates/records/src/command_result.rs`
+
+## JSON output
+
+Every JSON command result is a version-2 `CommandResult`. Besides
+`schema_version`, `command`, `status`, `data` and `error`, it always carries a
+typed `warnings` array, empty when nothing warned. A consumer reads warnings
+from that array instead of stderr. The field's name and presence belong to the
+evolving envelope; the warning codes themselves follow the stable-code rules in
+[the CLI spec](cli.md#warnings-are-typed-values). The `process-tree` envelope is
+the one stable JSON output (see below).
+
+| Object | Field | Stability |
+|---|---|---|
+| envelope | `warnings` | evolving |
+
+- Why: a consumer must know which envelope fields it may parse and at which tier.
+- Owner: `crates/records/src/command_result.rs`, `crates/cli/src/external_contract.rs`
 
 ## Process tree
 

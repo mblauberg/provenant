@@ -5,6 +5,7 @@ use super::{
     BuildContext, BuildError, Captured, Exception, ExecPlace, Job, JobOutcome, JobResult,
     RunContext, SlotChanges,
 };
+mod target;
 use provenant_core::{Clock, MonoTime};
 use provenant_os::fs::{Directory, FsError, LockGuard, LockMode};
 use provenant_os::git_config::{ConfigContext, ConfigMutation, StoreSetting};
@@ -12,7 +13,6 @@ use provenant_supervisor::census::{
     MAX_CENSUS_ENTRIES, ProcessIdentity, ProcessObservation, ProcessObserver, SystemProcessObserver,
 };
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::{
     ffi::{OsStr, OsString},
@@ -23,7 +23,8 @@ use std::{
 };
 static TEMP_ID: AtomicU64 = AtomicU64::new(0);
 
-/// Persisted slot record, schema 1.
+/// Persisted slot record, schema 1. New fields are additive and defaulted so
+/// records written by earlier releases stay readable.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SlotRecord {
     pub schema: u32,
@@ -34,6 +35,17 @@ pub struct SlotRecord {
     pub prepare_digest: Option<String>,
     pub health: SlotHealth,
     pub last_canary_unix_ms: Option<u64>,
+    /// `rustc -vV` release of the toolchain that last warmed this slot's
+    /// target. Compared with the repository pin when reporting drift.
+    #[serde(default)]
+    pub warm_toolchain: Option<String>,
+    /// Full `rustc -vV` identity key of the last warm target.
+    #[serde(default)]
+    pub warm_toolchain_key: Option<String>,
+    /// The target directory key used by the last job, including the source
+    /// identity. Reported so the cache provenance is visible from checks.
+    #[serde(default)]
+    pub target_key: Option<String>,
 }
 
 /// Last completed job associated with a slot.
@@ -68,6 +80,7 @@ pub struct SlotPaths {
     pub root: PathBuf,
     pub repo: PathBuf,
     pub target: PathBuf,
+    pub workspace_wrapper: Option<PathBuf>,
     pub tmp: PathBuf,
     pub record: PathBuf,
     pub job: PathBuf,
@@ -81,12 +94,22 @@ impl SlotPaths {
         Self {
             repo: root.join("repo"),
             target: root.join("target"),
+            workspace_wrapper: None,
             tmp: root.join("tmp"),
             record: root.join("slot.json"),
             job: root.join("job.json"),
             lock: root.join("slot.lock"),
             root,
         }
+    }
+
+    /// Cargo target directory under the slot, narrowed by the derived key
+    /// components. Components are internally produced digests and sanitised
+    /// compiler fields, so joining them cannot escape the slot. An empty key
+    /// keeps the legacy single shared target.
+    pub fn keyed_target(&self, key: &[String]) -> PathBuf {
+        key.iter()
+            .fold(self.target.clone(), |path, part| path.join(part))
     }
 }
 
@@ -230,7 +253,7 @@ pub fn stage(job: &Job, context: &RunContext, index: u64) -> Result<PreparedSlot
         false,
     )
     .map_err(map_error)?;
-    let paths = SlotPaths::new(&context.home, &job.project_key, index);
+    let mut paths = SlotPaths::new(&context.home, &job.project_key, index);
     fs::create_dir_all(&paths.root).map_err(|_| Exception::PoolUnavailable)?;
     fs::create_dir_all(&paths.tmp).map_err(|_| Exception::PoolUnavailable)?;
     let slot_lock = slot_lock(&paths.lock).map_err(|_| Exception::PoolUnavailable)?;
@@ -379,25 +402,20 @@ pub fn stage(job: &Job, context: &RunContext, index: u64) -> Result<PreparedSlot
         }
     }
     drop(store_lock);
+    let target = target::resolve_target(job, context, &paths);
+    warnings.extend(target.warnings);
+    paths.target = paths.keyed_target(&target.key);
+    paths.workspace_wrapper = target.workspace_wrapper;
+    record.warm_toolchain = target.toolchain.as_ref().map(|info| info.release.clone());
+    record.warm_toolchain_key = target.toolchain.as_ref().map(|info| info.key());
+    record.target_key = (!target.key.is_empty()).then(|| target.key.join("/"));
     let prepare = context.strategy.port.prepare.clone();
-    let digest = digest_prepare(&prepare);
+    let digest = super::prepare::digest(&prepare);
     if record.prepare_digest.as_deref() != Some(&digest) {
         let build_context = build_context(job, context);
         let env = super::rust::job_env(&job.env, &build_context, &paths);
-        for argv in &prepare {
-            if argv.is_empty() {
-                continue;
-            }
-            let status = Command::new(&argv[0])
-                .args(&argv[1..])
-                .current_dir(&paths.repo)
-                .env_clear()
-                .envs(env.iter().cloned())
-                .output();
-            if !status.is_ok_and(|output| output.status.success()) {
-                return Err(Exception::PoolUnavailable.into());
-            }
-        }
+        super::prepare::execute(&prepare, &paths.repo, &env)
+            .map_err(|_| Exception::PoolUnavailable)?;
         record.prepare_digest = Some(digest);
     }
     fs::create_dir_all(&paths.target).map_err(|_| Exception::PoolUnavailable)?;
@@ -439,7 +457,11 @@ pub fn stage(job: &Job, context: &RunContext, index: u64) -> Result<PreparedSlot
     use provenant_records::warning::{BUILD_PORT_UNAVAILABLE, Warning, warn};
     for warning in &warnings {
         // Spec: docs/specs/cli.md#warnings-are-typed-values
-        warn(Warning::new(BUILD_PORT_UNAVAILABLE, warning.clone()));
+        warn(Warning::new(
+            BUILD_PORT_UNAVAILABLE,
+            warning.clone(),
+            provenant_records::warning::detected_source(BUILD_PORT_UNAVAILABLE),
+        ));
     }
     Ok(PreparedSlot {
         site: super::ExecSite {
@@ -555,6 +577,7 @@ pub fn execute_staged(
         warn(Warning::new(
             BUILD_SLOT_CUSTODY_UNPUBLISHED,
             format!("cannot publish slot custody before spawn: {error}"),
+            provenant_records::warning::detected_source(BUILD_SLOT_CUSTODY_UNPUBLISHED),
         ));
         Exception::PoolUnavailable
     })?;
@@ -734,7 +757,11 @@ pub fn execute(job: &Job, context: &RunContext, index: u64) -> Result<SlotExecut
             );
             use provenant_records::warning::{BUILD_SLOT_UNAVAILABLE, Warning, warn};
             // Spec: docs/specs/cli.md#warnings-are-typed-values
-            warn(Warning::new(BUILD_SLOT_UNAVAILABLE, warning.clone()));
+            warn(Warning::new(
+                BUILD_SLOT_UNAVAILABLE,
+                warning.clone(),
+                provenant_records::warning::detected_source(BUILD_SLOT_UNAVAILABLE),
+            ));
             outcome.warnings.push(warning);
             let result =
                 super::local::execute(&mut local_job, context, outcome, ExecPlace::Local, None, 0);
@@ -1074,13 +1101,6 @@ fn slot_lock(path: &Path) -> std::io::Result<provenant_os::fs::LockGuard> {
         .try_lock(name, provenant_os::fs::LockMode::Exclusive)
         .map_err(std::io::Error::other)
 }
-fn digest_prepare(prepare: &[Vec<String>]) -> String {
-    let bytes = serde_json::to_vec(prepare).unwrap_or_default();
-    Sha256::digest(bytes)
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
-}
 fn build_context(job: &Job, context: &RunContext) -> BuildContext {
     let get = |name: &str| {
         job.env
@@ -1109,6 +1129,7 @@ fn build_context(job: &Job, context: &RunContext) -> BuildContext {
         verify_base: job.verify_base.clone(),
     }
 }
+
 fn lane_port_plan(state: &Path) -> std::io::Result<Option<provenant_os::lane_ports::Plan>> {
     let settings = provenant_config::LaneBuildSettings::read(state)?;
     let blocks = settings.lane_port_blocks();
@@ -1583,6 +1604,21 @@ mod tests {
         };
         record.write(&path).unwrap();
         assert_eq!(SlotRecord::read(&path).unwrap(), Some(record));
+    }
+
+    #[test]
+    fn target_directory_key_distinguishes_toolchains() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = SlotPaths::new(&tmp.path().join("home"), "project", 0);
+        let shared = paths.keyed_target(&[]);
+        let first = paths.keyed_target(&["tc-1".into()]);
+        let other_worktree = paths.keyed_target(&["tc-1".into()]);
+        let other_toolchain = paths.keyed_target(&["tc-2".into()]);
+        assert_eq!(shared, paths.target);
+        assert!(first.starts_with(&paths.target));
+        assert_eq!(first, other_worktree);
+        assert_ne!(first, other_toolchain);
+        assert!(!first.to_string_lossy().contains(".."));
     }
 
     #[test]

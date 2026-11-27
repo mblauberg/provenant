@@ -11,5 +11,5 @@ Read the draft cold. Find, in order of severity:
 
 For each finding give the location, why it matters and a concrete fix. Do not
 rewrite the draft. Write `VERDICT: PASS` when the draft can be approved as
-written or after the listed small fixes, otherwise `VERDICT: FAIL`; the closing
-handoff block, if your run uses one, comes after the verdict line and last.
+written or after the listed small fixes, otherwise `VERDICT: FAIL`, and end with
+that verdict line.

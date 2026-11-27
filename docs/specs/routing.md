@@ -74,22 +74,32 @@ catalogue once, at launch selection: the provider is launched with the exact
 model and the launch receipt carries it, while the attempt's requested route
 keeps the alias. An unknown or ambiguous alias warns.
 
-For adapters that report per-account offered models, one rule decides offer
-evidence for selection, resolve and launch preparation: a fresh keychain-stamped
-usage probe comes first, a fresh quota snapshot counts only when the probe has
-not run, and stale or expired availability is never offer evidence — it keeps
-its `StaleAvailability` re-probe path instead of refusing the account. A
-catalogued `superseded_by` edge withholds an older shipped pool member on an
-account that offers a superseding model, and an unpinned selection never picks
-an account whose known offer list lacks the model. `route resolve` reports the
-exclusion with the recorded offers. With no observed offer list, shipped members
-stay and supersedence is not applied; owner-configured pools stay pinned
-regardless. An explicit `--account` pin is judged by the same recorded offers:
-it is refused at resolve and at launch preparation with the same reason, which
-names the account and model, the recorded offers and their age, and names an
-offering account or `provenant quota tick` as the repair. The resolve selection
-line names the pinned account even when the account is refused, so another
-account of the same provider is never shown in its place.
+For adapters that report per-account offered models, one owner decides offer
+evidence for selection, resolve, `route resolve` preview and launch preparation:
+`recorded_offer_models` returns the recorded list, the source it came from and
+that list's own age, with the supersedence policy passed in by the caller. A
+fresh keychain-stamped usage probe comes first, a fresh quota snapshot counts
+only when the probe has not run, and stale or expired availability is never
+offer evidence — it keeps its `StaleAvailability` re-probe path instead of
+refusing the account. A catalogued `superseded_by` edge withholds an older
+shipped pool member on an account that offers a superseding model, and an
+unpinned selection never picks an account whose known offer list lacks the
+model. Supersedence only orders candidates: a model the account lists literally
+is never refused because its successor is also listed. `route resolve` reports
+the exclusion from this same owner with the recorded offers and their age, so
+an expired snapshot cannot produce the exclusion; an unpinned account without
+the model leaves the readiness table, while a pinned account keeps its row. With
+no observed offer list, shipped members stay and supersedence is not applied;
+owner-configured pools stay pinned regardless. An explicit `--account` pin is
+judged by the same recorded offers: it is refused at resolve and at launch
+preparation with the same reason, which names the account and model, the
+recorded offers and their age, and names an offering account or
+`provenant quota tick` as the repair. The resolve selection line names the
+pinned account even when the account is refused, so another account of the same
+provider is never shown in its place.
+Selection and preparation pass the unmodified probe and snapshot through this
+owner; copying snapshot offers onto the probe would incorrectly assign the
+probe's observation age to the snapshot.
 
 `quota tick` refreshes listings for installed adapters with a registered
 account and an enabled quota probe, concurrently within the tick's remaining
@@ -123,7 +133,11 @@ from the forge, while the diff narrows to `review_base...head`, matching the
 three-dot range the host writes into its review context. `subject` stays
 exclusive with `--pr`, since both would name the head and `--pr` takes it
 from the forge. Diff evidence and selection use base...head, including branches that
-merged main. Because the forge can report the previous head seconds after a
+merged main. The admitted subject's base is merge-base(head, base), not the
+base tip, so every consumer of the pinned pair, the lane's own two-dot diff
+included, sees only the head's changes even when the head is behind its base.
+When the merge base cannot be computed the base tip is kept and the launch warns,
+naming the missing merge base. Because the forge can report the previous head seconds after a
 push, `--pr N --head SHA` pins the expected head: the host rereads the forge
 within a bounded wait and, if the mismatch persists, refuses naming `--head`,
 saying the supplied head is not the PR's head and showing both SHAs.
@@ -206,7 +220,10 @@ credential or filesystem grants.
 Unavailable adapter, model and effort capabilities may select an eligible
 fallback, and invalid invocation syntax remains an operation error. Neither
 establishes an authority boundary; account, route, continuation, explicit
-read-only and pinned-source bindings still do.
+read-only and pinned-source bindings still do. A missing effort control on an exact route is
+dropped with an `effort_warning` naming the adapter's declaration; pools prefer a fallback.
+Write, network, resume and skill-location gaps refuse. `on_gap` or
+`policy.LAUNCH_*_UNSUPPORTED` may set a model, effort or image gap to off or refuse.
 
 Authorised task text reaches provider stdin or argv unchanged, including
 secret-shaped prose and whitespace, and cloud handoff instructions append to the
@@ -221,11 +238,16 @@ warns and forwards the exact invocation; host publication authority is separate.
 
 Capacity (`model_unavailable`) and account allowance (`quota_limited`) are
 separate outcomes. A capacity cooldown is an advisory selection preference that
-explicit models ignore; only a quota-limited outcome cools an account. An
-unclassified provider error settles as `Unclassified`, including after text and
-exit 0, keeps the provider message and is never recorded as usage-limited; a
-clean exit without an error still settles as `Succeeded`. Retries spend the
-single lineage allowance in [retry owner](retry-owner.md).
+explicit models ignore; only a quota-limited outcome cools an account. When the
+provider reports capacity for a launched candidate, the typed outcome stays
+distinct from an adapter failure: the depletion ladder hands the work to the
+next eligible candidate in the same tier and records the cause. An exact model
+pin has no pool selection, so its family names the stand-in tier from
+`depletion.tiers`. An unclassified provider error settles as `Unclassified`,
+including after text and exit 0, keeps the provider message and is never
+recorded as usage-limited; a clean exit without an error still settles as
+`Succeeded`. Retries spend the single lineage allowance in
+[retry owner](retry-owner.md).
 
 - Why: capacity and quota need different remedies without multiplying retries.
 

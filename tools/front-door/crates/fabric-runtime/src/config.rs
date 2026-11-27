@@ -29,6 +29,9 @@ pub struct FabricConfig {
     pub implement: ImplementConfig,
     #[serde(default)]
     pub batch: BatchConfig,
+    /// Defaults for durable delivery queues.
+    #[serde(default)]
+    pub queue: QueueConfig,
     /// The planner front-end: whether `provenant run --preset` runs a planner.
     #[serde(default)]
     pub plan: PlanConfig,
@@ -57,6 +60,57 @@ impl Default for BatchConfig {
     }
 }
 
+/// Defaults for the durable delivery queue. Zero CI slots disables its
+/// advisory admission cap; queue item concurrency must remain positive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct QueueConfig {
+    pub max_parallel: usize,
+    pub ci_slots: usize,
+    pub prep_retries: usize,
+}
+
+impl Default for QueueConfig {
+    fn default() -> Self {
+        Self {
+            max_parallel: 4,
+            ci_slots: 1,
+            prep_retries: 2,
+        }
+    }
+}
+
+/// How an accepted steer reaches a running attempt. Queued delivery keeps the
+/// attempt running and applies the text at its next turn boundary; `now`
+/// interrupts through custody once the session identity is durable, then
+/// resumes that same session with the text.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SteerDelivery {
+    /// Keep the attempt running; deliver at the next turn boundary.
+    #[default]
+    Queued,
+    /// Interrupt through custody and resume the same session with the text.
+    Now,
+}
+
+impl SteerDelivery {
+    pub fn parse(text: &str) -> Option<Self> {
+        match text {
+            "queued" => Some(Self::Queued),
+            "now" => Some(Self::Now),
+            _ => None,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Queued => "queued",
+            Self::Now => "now",
+        }
+    }
+}
+
 /// Fallback after an accepted steer cannot resume its provider session.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -71,6 +125,8 @@ pub enum SteerFallback {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct SteerConfig {
+    /// Default delivery mode. `provenant steer --now` overrides it for one call.
+    pub delivery: SteerDelivery,
     pub fallback: SteerFallback,
     /// Minimum spacing between steer restart launches, in milliseconds. Steered
     /// lanes that settle close together queue behind this gate instead of
@@ -81,6 +137,7 @@ pub struct SteerConfig {
 impl Default for SteerConfig {
     fn default() -> Self {
         Self {
+            delivery: SteerDelivery::Queued,
             fallback: SteerFallback::FreshWithHandoff,
             restart_spacing_ms: 2_000,
         }
@@ -209,6 +266,22 @@ pub struct GraphConfig {
     pub allowed_read_roots: Vec<String>,
     /// What a graph `land` node does at each risk tier.
     pub land: GraphLand,
+    /// Host default next step for each stop cause, resolved once at graph
+    /// admission and sealed in the checkpoint. A node's own `on_stop` wins.
+    #[serde(skip_serializing_if = "provenant_records::OnStop::is_empty")]
+    pub on_stop: provenant_records::OnStop,
+    /// Per-project graph defaults, keyed by Fabric project ID.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub projects: BTreeMap<String, GraphProject>,
+}
+
+/// One project's graph defaults. Each entry overrides the host entry of the
+/// same name.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct GraphProject {
+    #[serde(skip_serializing_if = "provenant_records::OnStop::is_empty")]
+    pub on_stop: provenant_records::OnStop,
 }
 
 pub const DEFAULT_DECIDE_TIMEOUT_SECONDS: u64 = 300;
@@ -227,6 +300,8 @@ impl Default for GraphConfig {
             ci_poll_overrides: Default::default(),
             allowed_read_roots: Default::default(),
             land: Default::default(),
+            on_stop: Default::default(),
+            projects: Default::default(),
         }
     }
 }
@@ -809,6 +884,9 @@ impl DomainConfig for FabricConfig {
         {
             reject("ssh_executable".into());
         }
+        if self.queue.max_parallel == 0 {
+            reject("queue.max_parallel".into());
+        }
         for key in self.home_hosts.keys() {
             if key.len() != 64
                 || !key
@@ -850,6 +928,11 @@ impl DomainConfig for FabricConfig {
         for project in self.graph.land.projects.keys() {
             if !crate::graph::valid_identifier(project) {
                 reject(format!("graph.land.projects.{project}"));
+            }
+        }
+        for project in self.graph.projects.keys() {
+            if !crate::graph::valid_identifier(project) {
+                reject(format!("graph.projects.{project}"));
             }
         }
         let plan = &self.plan;
@@ -966,6 +1049,10 @@ pub const FIELD_METADATA: &[FieldMetadata] = &[
     FieldMetadata::int("graph.launch_wait_seconds", 1, 14_400),
     FieldMetadata::int("graph.writer_provision_seconds", 1, 14_400),
     FieldMetadata::int("batch.max_parallel", 1, 64),
+    FieldMetadata::enumeration("steer.delivery", &["queued", "now"]),
+    FieldMetadata::int("queue.max_parallel", 1, 64),
+    FieldMetadata::int("queue.ci_slots", 0, 64),
+    FieldMetadata::int("queue.prep_retries", 0, 64),
     FieldMetadata::enumeration("steer.fallback", &["fresh_with_handoff", "refuse"]),
     FieldMetadata::int("steer.restart_spacing_ms", 0, 600_000),
     FieldMetadata::enumeration(
@@ -1273,6 +1360,7 @@ mod tests {
             plan: Default::default(),
             implement: Default::default(),
             batch: Default::default(),
+            queue: Default::default(),
             steer: Default::default(),
             limits: Limits {
                 body_bytes: 65536,
@@ -1287,6 +1375,93 @@ mod tests {
                 store_busy_timeout_ms: 30_000,
             },
         }
+    }
+
+    #[test]
+    fn queue_defaults_and_host_values_are_loaded_with_their_origins() {
+        #[derive(Serialize, Deserialize)]
+        struct Domains {
+            fabric: FabricConfig,
+        }
+        struct Resolver;
+        impl provenant_core::PathResolver for Resolver {
+            fn resolve_existing_ancestor(
+                &self,
+                path: &std::path::Path,
+            ) -> std::io::Result<PathBuf> {
+                Ok(path.to_owned())
+            }
+        }
+
+        let mut inputs =
+            provenant_core::RootInputs::new("/fixture/home".into(), "/fixture/checkout".into());
+        inputs.state_dir = Some("/fixture/state".into());
+        let roots = inputs.resolve(&Resolver).unwrap();
+        let sections = provenant_config::DomainSections::<Domains>::new(&[SECTION]);
+        let configured = provenant_config::load_with_domains(
+            &roots,
+            Some(
+                &b"schema_version = 1\n[domains.fabric.queue]\nmax_parallel = 7\nci_slots = 0\nprep_retries = 3\n"[..],
+            ),
+            &sections,
+        )
+        .unwrap();
+        assert_eq!(configured.domains.fabric.queue.max_parallel, 7);
+        assert_eq!(configured.domains.fabric.queue.ci_slots, 0);
+        assert_eq!(configured.domains.fabric.queue.prep_retries, 3);
+        for key in [
+            "domains.fabric.queue.max_parallel",
+            "domains.fabric.queue.ci_slots",
+            "domains.fabric.queue.prep_retries",
+        ] {
+            assert!(matches!(
+                configured.origins.get(key),
+                Some(provenant_config::Origin::User { .. })
+            ));
+        }
+
+        let defaults =
+            provenant_config::load_with_domains(&roots, None::<&[u8]>, &sections).unwrap();
+        assert_eq!(defaults.domains.fabric.queue, QueueConfig::default());
+        for key in [
+            "domains.fabric.queue.max_parallel",
+            "domains.fabric.queue.ci_slots",
+            "domains.fabric.queue.prep_retries",
+        ] {
+            assert!(matches!(
+                defaults.origins.get(key),
+                Some(provenant_config::Origin::Compiled { .. })
+            ));
+        }
+
+        let mut invalid = config();
+        invalid.queue.max_parallel = 0;
+        assert!(
+            invalid
+                .validate()
+                .iter()
+                .any(|error| error.field == "queue.max_parallel")
+        );
+        invalid.queue.max_parallel = 64;
+        invalid.queue.ci_slots = 0;
+        invalid.queue.prep_retries = 0;
+        assert!(invalid.validate().is_empty());
+    }
+
+    // Spec: docs/specs/fabric.md#session-ready-steering
+    #[test]
+    fn steer_delivery_defaults_to_queued_and_can_be_overridden() {
+        let config = config();
+        assert_eq!(config.steer.delivery, SteerDelivery::Queued);
+        let mut encoded = serde_json::to_value(config).unwrap();
+        encoded["steer"]["delivery"] = "now".into();
+        let decoded: FabricConfig = serde_json::from_value(encoded).unwrap();
+        assert_eq!(decoded.steer.delivery, SteerDelivery::Now);
+        assert_eq!(SteerDelivery::parse("queued"), Some(SteerDelivery::Queued));
+        assert_eq!(SteerDelivery::parse("now"), Some(SteerDelivery::Now));
+        assert_eq!(SteerDelivery::parse("unknown"), None);
+        assert_eq!(SteerDelivery::Queued.name(), "queued");
+        assert_eq!(SteerDelivery::Now.name(), "now");
     }
 
     // Spec: docs/specs/fabric.md#session-ready-steering

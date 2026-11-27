@@ -64,8 +64,37 @@ unreleased attempts are never touched, and collection preserves durable results,
 handoffs, logs and process records. After a merge, cleanup targets only
 the merged branch's worktree and attempt scratch.
 
+Three size caps bound the classes that grow without a retention age.
+`lanes.cargo_cache_max` budgets the lane Cargo cache, `retention.payload_cap_bytes`
+budgets bulk payload across attempt directories, and `gc.attempt_scratch_max`
+(an overridable default whose value and source appear in GC output) caps one
+attempt's scratch. `0` disables the scratch cap. An attempt whose scratch is
+measured over that cap becomes collectible once settled, without waiting out
+`gc.idle`; a bounded observation that cannot measure the whole tree keeps the
+scratch rather than assuming it is over cap. Live, continuing and unsettled
+attempts are never collected by a cap.
+- Why: a single large settled attempt must not hold the volume hostage until
+  its idle age passes, while uncertain measurement must never authorise removal.
+
+A settled attempt whose run record cannot be read or cannot prove custody is
+not kept forever. `gc.scratch_grace` (default `1d`, overridable, with its source
+reported by `provenant gc`) bounds how long such scratch is retained. The grace
+runs from the newest observed write in the scratch tree and its private-Git
+marker, so a live writer restarts it; when the grace has passed, collection
+still needs free publication and writer locks and no continuation. Settlement
+uses the same grace release, so an attempt that never produced a custody proof
+is reclaimed at settlement or by the next sweep. A preview that cannot observe
+the whole tree keeps it and reports the reason.
+- Why: a crashed attempt with a missing receipt or an unreadable record would
+  otherwise keep gigabytes of scratch on a full host indefinitely.
+
 Lanes do not build. Cargo targets here belong to the chair's warm check, CI or
-a person's worktree; the host never allocates one per lane. Discard archives
+a person's worktree; the host never allocates one per lane. A warm slot target
+is keyed by `build.target` (default `toolchain,worktree`): `toolchain` uses the
+compiler selected by Cargo, including a `+toolchain` argument, and `worktree`
+sets Cargo's workspace-only rustc wrapper to a checkout-specific executable
+path. Workspace-member artifacts stay isolated while dependency artifacts
+remain in the shared toolchain target. Discard archives
 exclude ignored build output (`target/` and
 any `CACHEDIR.TAG` directory) and expire after `gc.discard_archive_retention`.
 In shared targets, unlocked `debug/incremental/*` sessions older than `gc.idle`
@@ -142,7 +171,18 @@ trigger and scope keeps its own bounded restart record, so unfinished scopes
 resume independently without growing the lease record, and an ambiguous cursor
 restarts its scope from the beginning rather than skipping work. Attempt
 scratch collection precedes the broader provider-state and payload-cap scans so
-they cannot consume its first pass budget. The advisory dweller census runs
+they cannot consume its first pass budget. Within each resume page, scratch
+candidates are ranked largest first by a bounded best-effort census; the
+sequence cursor still advances past the whole page, so a stop resumes without
+repeating work. A preview observes the overridable `gc.preview_budget` (default
+`1s`, with its source reported), distinct from `gc.sweep_budget` which bounds
+applied collection. When either budget stops a pass, exit 3 names the budget,
+its value and source and how to raise it. The report carries reclaimed bytes
+for every retention class it measured, naming unmeasured classes rather than
+reporting them as zero. `check` warns with `ATTEMPT_SCRATCH_HIGH` when measured
+attempt scratch exceeds the configured `gc.scratch_warning_share` of free space;
+zero disables the warning and positive shares retain their configured precision.
+The advisory dweller census runs
 after the collection classes: one bounded observation is cached for the whole
 pass and reused for every settled attempt
 and terminal worktree instead of re-walking the process table per candidate.
@@ -185,7 +225,8 @@ The lease record does not carry a holder name, so neither does the failure.
 
 Every gc report lists the candidates it deliberately kept: path, class,
 observed bytes (or an explicit unknown), and the reason — live holder,
-uncertain custody, retained evidence, unmerged work, held Cargo lock, recent
+uncertain custody, an undecodable attempt record awaiting liveness disproof,
+retained evidence, unmerged work, held Cargo lock, recent
 write and similar. Bytes already measured for attempt scratch and Cargo
 targets are carried into those rows; where only a class total was measured,
 the row reports that total. A measurement that cannot report bytes says so

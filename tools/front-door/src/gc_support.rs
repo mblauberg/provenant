@@ -104,6 +104,9 @@ pub(crate) fn collect_below_floor(
             provenant_records::warning::Warning::new(
                 provenant_records::warning::GC_SCHEDULE_FAILED,
                 format!("free-floor sweep did not complete: {error}"),
+                provenant_records::warning::detected_source(
+                    provenant_records::warning::GC_SCHEDULE_FAILED,
+                ),
             )
             .once_per_change(),
         );

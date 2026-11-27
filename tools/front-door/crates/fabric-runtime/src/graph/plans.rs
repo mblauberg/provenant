@@ -158,6 +158,10 @@ pub struct Expansion {
     #[serde(flatten)]
     pub extra: provenant_records::ExtraFields,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery_review_disposition: Option<DeliveryReviewDisposition>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery_review_node: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retired: Option<Box<RetiredExpansion>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry_generation: Option<u64>,
@@ -436,18 +440,35 @@ pub(super) fn handoff(
     let Some(handoff) = handoff.filter(provenant_records::handoff::Handoff::unfinished) else {
         return Ok(None);
     };
-    if serde_json::to_vec(&handoff).map_or(usize::MAX, |bytes| bytes.len()) > STORED_HANDOFF_BYTES {
+    validate_stored_handoff(&handoff)?;
+    Ok(Some(handoff))
+}
+
+/// A completed report stays available to downstream delivery and park records.
+pub(super) fn reported_handoff(
+    capture: &crate::result_capture::CapturedResult,
+) -> Result<Option<provenant_records::handoff::Handoff>, String> {
+    let handoff = capture.handoff.clone().map_err(|error| error.to_string())?;
+    let Some(handoff) = handoff else {
+        return Ok(None);
+    };
+    validate_stored_handoff(&handoff)?;
+    Ok(Some(handoff))
+}
+
+fn validate_stored_handoff(handoff: &provenant_records::handoff::Handoff) -> Result<(), String> {
+    if serde_json::to_vec(handoff).map_or(usize::MAX, |bytes| bytes.len()) > STORED_HANDOFF_BYTES {
         return Err(format!(
             "handoff block has too many escaped characters to store in {STORED_HANDOFF_BYTES} bytes"
         ));
     }
-    Ok(Some(handoff))
+    Ok(())
 }
 
 pub(super) fn agent(node: &PlannedNode) -> bool {
     matches!(
         node.kind,
-        None | Some(NodeKind::Task | NodeKind::Synthesise)
+        None | Some(NodeKind::Task | NodeKind::Synthesise | NodeKind::Adjudicate)
     )
 }
 
@@ -821,6 +842,7 @@ fn restore_patch_rounds(document: &mut GraphDocument, expansion: &Expansion) {
                 round,
                 node_id: local.to_owned(),
                 until: local == spec.until,
+                retry_on: spec.retry_on.iter().any(|retry| retry == local),
                 previous_gate: (round > 1)
                     .then(|| format!("{}--r{}--{}", boundary.id, round - 1, spec.until)),
             });
@@ -1073,7 +1095,14 @@ fn prepare_nested(
     // Write scope is optional review metadata; all agents carry acceptance prose.
     if !matches!(
         child.kind,
-        Some(NodeKind::Gate | NodeKind::Decide | NodeKind::Composite | NodeKind::Loop)
+        Some(
+            NodeKind::Gate
+                | NodeKind::Decide
+                | NodeKind::Composite
+                | NodeKind::Loop
+                | NodeKind::Hygiene
+                | NodeKind::Publish
+        )
     ) {
         if child.prompt.trim().is_empty()
             || child.acceptance_checks.is_empty()
@@ -1086,7 +1115,7 @@ fn prepare_nested(
             child
                 .prompt
                 .push_str(&format!(
-                    "Advisory write-scope paths: {}. The whole worktree remains writable; list out-of-scope edits in the handoff.\n",
+                    "Advisory write-scope paths: {}. The whole worktree remains writable; list out-of-scope edits in your declaration.\n",
                     child.write_scope.join(", ")
                 ));
         }
@@ -1435,8 +1464,10 @@ pub(super) fn flatten_fragment(
         local_nodes.push(stub);
     }
     let mut local = GraphDocument {
+        queue_ci_wait: None,
+        queue: None,
         review: None,
-        review_subject_missing: false,
+        subject: None,
         exclude: Vec::new(),
         network: None,
         capability: Vec::new(),
@@ -1559,6 +1590,22 @@ pub(super) fn flatten_fragment(
                     export.node = id(&export.node);
                 }
             }
+            if let Some(edge) = child
+                .loop_body
+                .as_mut()
+                .and_then(|spec| spec.outcome_edge.as_mut())
+            {
+                let target = edge.node.clone();
+                edge.node = id(&target);
+            }
+            if let Some(loop_spec) = &mut child.loop_body {
+                for initial in loop_spec.previous_bindings.values_mut() {
+                    *initial = id(initial);
+                }
+                if let Some(initial) = &mut loop_spec.initial_publication {
+                    *initial = id(initial);
+                }
+            }
             for input in &mut child.inputs {
                 input.node = id(&input.node);
             }
@@ -1568,10 +1615,16 @@ pub(super) fn flatten_fragment(
             {
                 *source = id(source);
             }
-            if let Some(GateCondition::Ci {
-                target: CiTarget::Node { node: target, .. },
-                ..
-            }) = &mut child.condition
+            if let Some(
+                GateCondition::Ci {
+                    target: CiTarget::Node { node: target, .. },
+                    ..
+                }
+                | GateCondition::Conflict {
+                    target: CiTarget::Node { node: target, .. },
+                    ..
+                },
+            ) = &mut child.condition
             {
                 *target = id(target);
             }
@@ -1789,14 +1842,17 @@ pub(super) fn settle(
                         "node {} fallback expansion paused: {safe_fallback_error}",
                         node.id
                     ),
-                    MAX_ADVANCE_ERROR_BYTES,
+                    MAX_ADVANCE_NOTE_BYTES,
                 );
                 set_expansion_pause(checkpoint, index, reason, true, None, fallback_limit);
                 return None;
             }
         };
         checkpoint.nodes[index].state = NodeState::Succeeded;
-        clear_expansion_pause(checkpoint, index, false);
+        // The fallback settled the expansion, so refresh the graph pause: a
+        // stale `InvalidPlanExpansion` pause would otherwise outlive its owner
+        // and fail validation on every later tick (#4106).
+        clear_expansion_pause(checkpoint, index, true);
         let outputs = checkpoint.nodes[index]
             .outputs
             .get_or_insert_with(|| super::outputs::make_outputs(None, None, None, None, None));
@@ -2037,7 +2093,7 @@ pub(super) fn settle(
                         set_expansion_pause(
                             checkpoint,
                             index,
-                            bounded(&display_reason, MAX_ADVANCE_ERROR_BYTES),
+                            bounded(&display_reason, MAX_ADVANCE_NOTE_BYTES),
                             false,
                             Some(fragment_error),
                             fallback_limit,
@@ -2048,7 +2104,7 @@ pub(super) fn settle(
             }
             let reason = bounded(
                 &format!("node {} expansion paused: {safe_reason}: {reason}", node.id),
-                MAX_ADVANCE_ERROR_BYTES,
+                MAX_ADVANCE_NOTE_BYTES,
             );
             let structural_limit = match safe_reason {
                 PlanFailureFact::Structural(limit) => Some(limit),
@@ -2120,6 +2176,8 @@ pub(super) fn fallback_expansion(
         .map_err(|error| format!("fallback stage does not expand: {error}"))?;
     Ok(Expansion {
         extra: Default::default(),
+        delivery_review_disposition: None,
+        delivery_review_node: None,
         retired: None,
         retry_generation: None,
         final_result: false,
@@ -2134,7 +2192,13 @@ pub(super) fn fallback_expansion(
                 if child.composite.is_none()
                     && !matches!(
                         child.kind,
-                        Some(NodeKind::Gate | NodeKind::Decide | NodeKind::Land)
+                        Some(
+                            NodeKind::Gate
+                                | NodeKind::Decide
+                                | NodeKind::Land
+                                | NodeKind::Hygiene
+                                | NodeKind::Publish
+                        )
                     )
                 {
                     child.require_skill_location |= require_skill_location;
@@ -2158,7 +2222,7 @@ fn fallback_reason(progress: &NodeProgress) -> String {
         );
     // A result excerpt is captured output, not an approved diagnostic fact.
     let detail = progress
-        .advance_error
+        .advance_note
         .as_deref()
         .filter(|detail| !detail.trim().is_empty());
     let reason = detail.map_or_else(

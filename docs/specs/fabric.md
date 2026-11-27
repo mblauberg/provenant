@@ -130,9 +130,17 @@ run on the owning host; an unavailable owner is reported, never mirrored.
 Relay input is a strict tagged enum with no coercion, validated before side
 effects, and the relay carries coordination only. A queued relay caller must still
 be present with budget left before any effect, so a timed-out call cannot commit.
-The CLI and the relay render one typed category per error. Settlement reactions
-(graph advance, chair notice, chair log) run once in effect, and notices never
-instruct.
+The CLI and the relay render one typed category per error. A lane-side graph
+call is sent only after the kernel-supplied relay peer is proved to be the
+caller's live guardian ancestor. The proof follows the kernel-reported parent
+chain with exact current identities and rechecks each child identity and parent
+PID while walking; process start timestamps do not determine ancestry. A scoped
+or host-wide census is neither required nor consulted, so an inconclusive or
+unavailable census cannot present a healthy relay as replaced. On macOS, when
+libproc cannot inspect an ancestor across a sandbox boundary, the observer uses
+checked kernel sysctl process metadata and revalidates the identity and parent
+link; inaccessible or inconsistent metadata still refuses the call. Settlement reactions (graph advance, chair notice,
+chair log) run once in effect, and notices never instruct.
 - Why: a lenient parser turns a typo into another request, and a lost lane must
   never commit after its deadline.
 - Owner: `crates/fabric-runtime/src/relay/`,
@@ -176,6 +184,17 @@ starts the next attempt on the same recorded worktree.
 - Why: a graph that starts must be able to finish within its bounds.
 - Owner: `crates/fabric-runtime/src/graph.rs`
 
+Graph status reports the exact settled cause on each attempt as `attempts[].cause`, copied from the
+run fact when the attempt is recorded and absent when no cause was settled; `next_step` still keys on
+the sealed stop cause. Default next steps may be set at the host and project layers under
+`domains.fabric.graph.on_stop.<stop_cause>` and `projects.{project}.on_stop.<stop_cause>`, resolved
+once at graph admission because graphs are pinned. A template's or node's own `on_stop` stays above
+those defaults, and setting a pinned cause warns `ON_STOP_PINNED_IGNORED` with its source.
+`declared_stop` and `stopped_no_work` are display codes keyed by the projected outcome: no-work
+needs a known, unchanged head, and without an override its default follows `stopped_early`.
+- Why: status and follow-up need one typed cause without re-reading the run store, and a pinned
+  graph must not change meaning when host policy changes later.
+
 ### One model spelling per route
 
 A route carries one spelling of its model: the full catalogue id
@@ -199,6 +218,18 @@ Nothing downstream splits, prefixes or re-derives the stored id: preparation,
 successor deduplication and prior-model exclusions parse it directly. This is
 what lets a batch route match `run implement --model` and a declared route
 equal to a ladder hand-off appear once among successors.
+`run --explain` reports a `node_routes` row for each launchable node with the
+effective adapter, model and effort and the source of each (`node field`,
+`policy`, `pool` or `default`). An exact node field or a configured named route
+resolves to one spelling; a pool is shown as candidate entries without
+drawing a pick, because the weighted selection, account and credential decision
+remain launch-only. The row's `selection` names that boundary, so pool routing
+can be checked before launch. Each pool candidate includes its model, adapter,
+effective effort and the source of each value; a node-level effort applies to
+every candidate. Structural and host-managed nodes (gates, loops, composites, decisions, land,
+hygiene and publish) have no route row. A model route reports its declared
+adapter even when its model cannot be canonicalised. Model-less adapter routes report their provider in `adapter`
+and preserve the configured entry separately as `route_name`.
 - Why: a model id may itself contain `/`, so re-parsing a stored id silently
   changes which model runs.
 - Owner: `crates/routing/src/catalog.rs`,
@@ -219,7 +250,13 @@ admission. The CLI catalogue exposes those declarations.
 `after_settled` orders a node after its predecessors settle in any state without
 propagating their failure; they stay visible in the graph outcome. Inputs may
 select outputs from either kind of direct dependency; unavailable optional
-outputs stay absent and required outputs still gate admission.
+outputs stay absent and required outputs still gate admission. When loop
+expansion binds a source or gate target that was inherited as an ordering-only
+edge, the source's success requirement replaces that ordering edge; a retry of
+failed hygiene retains its settled-only source edge. Dependencies inherited
+from an enclosing composite are checked against the full expanded graph and
+remain attached to each round under their original graph identities, rather than
+being renamed into the loop namespace.
 
 ### Implementation planning
 
@@ -259,6 +296,16 @@ candidate leaves the checkpoint and execution binding unchanged. The pure
 `admit_candidate` gate owns admission; entry points keep no separate resume
 validators.
 
+A graph's subject (base, head, origin, policy) is resolved once at admission and
+stored on the execution; read-only nodes bind to its head; status shows it under
+`checkpoint.subject`. Nothing inside an admitted graph re-resolves a ref, so a
+later push or commit on the source cannot change what its lanes read. The
+subject records `repository`, `base_ref` and `policy_source` as credential-free
+provenance, `followed_from` for any `follow_latest` re-pins, and the reserved
+`Continuation` origin for a predecessor graph name (#3972; no producer yet).
+`head_check` is a status slot for a later result-read comparison, not a stored
+fact in this batch.
+
 A structural limit at first admission refuses without publishing. A running graph
 that later exceeds one (during expansion or after a host limit is lowered) saves
 a `StructuralLimit` pause and resumes once the limit is raised; a cancelled or
@@ -297,7 +344,8 @@ own `when` condition holds; a composite skipped by its own condition keeps that
 state whatever its members. An explicit `GraphPatch` skip of a composite stays
 authoritative until a later replacement or retry supersedes it, and a patch that
 replaces or skips a member recomputes the affected active composite boundaries in
-the same checkpoint.
+the same checkpoint. A node whose resolved `when` is false remains visible as
+skipped and needs no launch route; active agent nodes still require one.
 - Why: recovery must validate a checkpoint against the topology it records.
 - Owner: `crates/fabric-runtime/src/graph/composites.rs`,
   `crates/fabric-runtime/src/graph/patch.rs`
@@ -321,11 +369,14 @@ steer covers session identity (provider, model, effort, account, host-native
 lane), not route-selection history, so a same-identity continuation always
 resumes.
 
-Delivery is a queued turn at the next boundary, not live injection and never an
-interrupt. The owner refuses a route that advertises unsupported continuation
-when `domains.fabric.steer.fallback = "refuse"`, with a typed unsupported
-receipt before saving the steer. Otherwise its text is durable at once and the
-live attempt keeps running. The host's shared
+Delivery is a queued turn at the next boundary by default: no live injection
+and no interrupt. `domains.fabric.steer.delivery = "queued" | "now"` sets the
+host default (`queued`), and `provenant steer --now` overrides it for one call.
+`provenant steer --explain` reports the effective delivery mode and the layer
+that set it without steering. The owner refuses a route that advertises
+unsupported continuation when `domains.fabric.steer.fallback = "refuse"`, with
+a typed unsupported receipt before saving the steer. Otherwise its text is
+durable at once and the live attempt keeps running. The host's shared
 adapter stream decoder records the first validated session identity against the
 admitted route and spawned process; after settlement the graph resumes the
 same provider, model, account and session with the saved text as the next user
@@ -349,6 +400,16 @@ same worktree (`provenant run implement --worktree ... --brief-file FILE`). A
 finished task is terminal for this rule: success never admits a follow-up
 attempt, even when the steering was queued while the writer was live; the note
 stays accepted and resolves as not-continued.
+
+`--now` keeps the session-preserving restart. Once the text is durable, it
+requests a `Steered` stop through custody only when the running attempt holds a
+validated, live session bound to its exact route; settlement then resumes that
+same session with the saved text. The typed `STEER_INTERRUPTS_ATTEMPT` warning
+announces the interrupt and names the delivery and fallback sources before it
+happens. Without a retained session the attempt is left running and the call is
+refused with `steer_session_unavailable`, because an interrupt could not resume
+the same session. No other path writes a `Steered` stop for a steer: the queued
+default never interrupts, with or without a session.
 
 A writer's continuation reuses the retained worktree, including edits left
 uncommitted when a turn finishes naturally. Admission waits for
@@ -458,6 +519,28 @@ configuration overlaps follow
 - Why: scouts share read access while review and repair keep one immutable
   subject.
 
+### Read source and writer base
+
+`lanes.read_source` selects the read-only tree and is resolved once at admission.
+`auto` (the default) pins the fetched upstream when the checkout is behind it and
+otherwise pins checkout HEAD; `live` reads the live tree locally and is pinned to
+HEAD on a peer with `READ_SOURCE_PINNED_FOR_PEER`; `default_branch` pins the
+fetched default branch; any other value is a Git ref. `--source` accepts the same
+vocabulary and overrides configuration. The admitted subject's `policy_source`
+is a typed provenance source (`{layer, origin}`) naming the layer and the exact
+file, key or flag that chose the pin. A repository file that still says `checkout`
+warns `READ_SOURCE_VALUE_RENAMED` and resolves as `auto`; it never acts as `live`.
+
+A writer's base is selected separately by `lanes.writer_base`: `default_branch`
+resolves the remote the read-source resolver finds (never a hard-coded
+`origin`), `checkout` pins the caller HEAD at admission and any Git ref pins that
+ref. Explicit `--base` always wins. The admitted commit is the one provisioning
+creates the writer branch from (a peer placement resolves its own). The run
+result reports `writer_base` with its commit and source, and a fallback warning
+names the key that chose it. Graph
+subject policy itself is always pinned; `follow_latest` applies only to a wait
+and to the local `live` read choice.
+
 A relay admission stores one schema-versioned typed receipt with its request
 digest in the patch record; replay returns it with `replayed=true` whatever the
 current worktree-layout configuration, and a missing or malformed receipt is
@@ -466,7 +549,10 @@ invalid.
 ### Writer continuation
 
 A writer that `continues` an upstream `pr` or `push` writer reuses its worktree
-and branch, so repairs update the same pull request. The host pushes without
+and branch, so repairs update the same pull request. An authored writer id binds
+to its unique expanded root writer, including inside repair loops whose local
+continuation has the same name; continuing writers do not become new roots.
+The host pushes without
 force and refuses a mismatched branch.
 - Why: a repair must land on the reviewed PR and never rewrite a moved branch.
 
@@ -475,16 +561,54 @@ force and refuses a mismatched branch.
 Gates decide without a model or attempt and save the decision before dependants
 run. CI gates query the exact pinned SHA, and unavailable checks or policy fail
 explicitly. The `domains.wait.pr_*` settings (conditional requests, intervals)
-change forge-observer request cadence only, never a gate verdict.
+change forge-observer request cadence only, never a gate verdict. A wait's own
+subject policy is separate: `domains.wait.pr_head_policy` (`pinned` by default,
+or `follow_latest`), `domains.wait.pr_head_source` and
+`domains.wait.pr_head_unpinned` decide how a PR head is pinned and what happens
+when it moves; none of them changes a gate verdict.
 - Why: deterministic decisions need durable evidence without a launch.
+
+The [delivery queue target](delivery-queue.md) extends these graph capabilities
+with bounded conditional cycles, escalation and durable item scheduling.
 
 ### Bounded loops
 
 Admission counts every possible round. A body writer integrates by fast-forward
 only and never merges. Exhaustion pauses the graph without delivery, and an
-extension never adds rounds twice.
+extension never adds rounds twice. Admission treats the edge into a later round
+as a retry on the previous outcome, rather than carrying that round's success
+requirements into its failure path.
 - Why: repeated review and repair needs bounded admission and a human decision at
   the bound.
+
+### Fix-round invariants and split-verdict adjudication
+
+A blocking finding names the invariant it breaks in its top-level `class`. A
+finding without one is warned first at settlement; a blocking finding without
+one is refused. A fix round returns invariants, not patched sites: for each
+invariant its `repair_item` carries the sweep query it ran, every site it changed
+and the test that pins the invariant. Round two reviews only the repair delta
+against those named invariants, never a fresh full panel; a lens may raise a new
+invariant, which then follows the same contract. Two distinct findings with the
+same invariant are one shared flaw and route to the principal design continuation.
+Distinct member verdicts on one head, including approval and inconclusive, are a
+split and go to one adjudication node that returns a single
+verdict; the read-only adjudicator runs as an agent on the configured `senior`
+route on the panel members' pinned head when one is recorded. Each gate consumes only the adjudicator
+associated with its own panel and head; later panels receive their own adjudicator.
+Once admitted, an adjudicator must succeed with a verdict before its panel can
+pass; the original panel verdict cannot substitute for a failed or missing result.
+A split in a nested lens group remains visible when a panel synthesises its output;
+the adjudicator receives the outer panel's synthesised findings.
+A panel whose members have different pinned heads cannot be adjudicated as one
+split. It returns `VERDICT: PASS` only when
+no blocking finding survives; otherwise it returns `VERDICT: FAIL` or
+`VERDICT: INCONCLUSIVE`. An upheld finding therefore reaches the gate as a
+successful `FAIL` verdict and can route to repair. The split itself never starts
+another round, though an upheld changes-request legitimately needs repair.
+- Why: writers patch named sites and repeat a flaw elsewhere unless the invariant
+  is named and swept; lens verdicts drift when a panel re-runs without a shared
+  rubric, and no node resolved a split verdict.
 
 ### Node asks and decide nodes
 
@@ -542,7 +666,10 @@ checkpoint missing launch evidence or its actor is refused.
 
 ### Checkpoint envelope
 
-Admission bounds the worst-case checkpoint before saving the plan. Graph text,
+Admission bounds the worst-case checkpoint before saving the plan. The fixed
+checkpoint envelope is 32 MiB, including the full handoff projections,
+pending-steer reserve and worst-case configured `on_stop` defaults for graphs at
+the default node limit. Graph text,
 identity fields and object keys keep their exact bytes in local state and
 execution context, through captured fragments, retries, template substitutions
 and expansions; heuristic content inspection warns with the field and rule
@@ -562,8 +689,11 @@ index uses the validated published value and recovery loads and validates the
 committed checkpoint independently. `graph::checkpoint_digest` and
 `graph::graph_plan_digest` own the identities; hand-built fixtures use
 `FileJournal::prepare_fixture_checkpoint`, and production saves never repair a
-supplied plan digest. Corrupt-checkpoint reporting and quarantine are in
-[state](state.md#graph-checkpoints-cover-persisted-text). Landing skips unusable
+supplied plan digest. An active expansion pause and the graph pause must agree:
+a structural or stop pause yields any active expansion pause, a settled fallback
+refreshes the pause it consumed, and a disagreeing pair is quarantined once by
+the tick rather than saved again. Corrupt-checkpoint reporting and quarantine
+are in [state](state.md#graph-checkpoints-cover-persisted-text). Landing skips unusable
 review sources, keeps their graph identities in report warnings, and refuses only
 when no independent approval remains.
 - Why: an accepted graph must be able to save its checkpoint, and no reader may
@@ -592,11 +722,27 @@ and custody is released; settlement advances only the matching graph.
 ## Peer hosts
 
 Each host owns its records and liveness; an unreachable peer is unknown, not
-dead. An uncertain remote mutation is resolved by the owner's receipt, never
-resent. Remote attempts bind the origin identity, transferred Git objects are
+dead. A reachable peer relays its own census-observed writer presence with the
+attempt record, so the launching host reports the same running, unattended or
+settling row the owner sees; the age of relayed output events never proves
+liveness. When such a row needs recovery, its `next:` hint names the peer's own
+graph target and the host that owns it, where `reconcile` can resolve it. An
+uncertain remote mutation is resolved by the owner's receipt, never resent. Remote attempts bind the origin identity, transferred Git objects are
 verified before use, and a protocol mismatch is refused before decoding;
-cross-host text follows the configured disclosure policy. A peer locator
+reachable peer status relays the owner's authenticated presence and recovery
+hints name the owning host. Cross-host text follows the configured disclosure policy. A peer locator
 identifies a registered Git common directory, Git's verified worktree inventory
 selects the checkout that owns project configuration, and a bare common directory
 stays its own host-only layout root.
 - Why: a remote guess or resent mutation could free a live lane or apply twice.
+
+### Hermetic smoke
+
+Peer feature actions declare their own wire protocol so an old peer is detected
+before its action is decoded. `SMOKE_FIXTURE_PROTOCOL = 16` adds `smoke_fixture`:
+`Create { nonce, recipe, root }` builds the deterministic fixture under the
+configured home-relative `root` and returns its base and head commits;
+`Remove { nonce }` forgets the binding and deletes it. The peer echoes its own
+`recipe`, and a mismatch fails rather than passing two different fixtures off as
+one. A peer below protocol 16 cannot run hermetic smoke and its result is
+`unverified`, never a pass. The base `PROTOCOL` stays 14.

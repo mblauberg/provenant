@@ -1,6 +1,9 @@
 use super::*;
 use provenant_fabric_runtime::runs::SubmissionReceipt;
-use std::{collections::HashSet, path::Path};
+use std::{
+    collections::HashSet,
+    path::{Path, PathBuf},
+};
 
 fn console_tree_command(
     max_depth: u64,
@@ -635,6 +638,59 @@ pub fn peer(
         }
         let request = decode_request(&bytes)?;
         let common = request.project.resolve(&home)?;
+        // A Create request names a fixture that does not exist on this host
+        // yet. Build and bind it before project-root preparation needs it;
+        // Remove still sees it until its own arm deletes it. The root is
+        // validated on both sides: an absolute or `..` root is a real removal
+        // boundary and is refused here rather than ever reaching `remove_dir`.
+        let mut smoke_remove_root: Option<PathBuf> = None;
+        let smoke_created = match &request.action {
+            PeerAction::SmokeFixture {
+                op: SmokeFixtureOp::Create { nonce, root, .. },
+                ..
+            } => {
+                let root =
+                    provenant_cli::smoke::validate_root(root).map_err(|_| PeerError::Project)?;
+                let expected = crate::smoke::fixture_root(&home, &root)
+                    .join(nonce)
+                    .join(".git");
+                if common != expected {
+                    return Err(PeerError::Project.into());
+                }
+                Some(crate::smoke::create_fixture(
+                    host.roots.state.as_path(),
+                    &home,
+                    nonce,
+                    &root,
+                )?)
+            }
+            PeerAction::SmokeFixture {
+                op: SmokeFixtureOp::Remove { nonce },
+                ..
+            } => {
+                // Remove carries no root: derive it from the home-relative
+                // locator path, which ProjectLocator::resolve already proved
+                // has only normal components, then apply the same validator.
+                let fixture_dir = common
+                    .parent()
+                    .and_then(Path::parent)
+                    .ok_or(PeerError::Project)?;
+                let relative = fixture_dir
+                    .strip_prefix(&home)
+                    .map_err(|_| PeerError::Project)?;
+                let root = provenant_cli::smoke::validate_root(&relative.to_string_lossy())
+                    .map_err(|_| PeerError::Project)?;
+                let expected = crate::smoke::fixture_root(&home, &root)
+                    .join(nonce)
+                    .join(".git");
+                if common != expected {
+                    return Err(PeerError::Project.into());
+                }
+                smoke_remove_root = Some(root);
+                None
+            }
+            _ => None,
+        };
         if provenant_os::fs::canonicalize(&common)? != common {
             return Err(PeerError::Project.into());
         }
@@ -688,6 +744,50 @@ pub fn peer(
             chair: None,
         };
         let result = match &request.action {
+            PeerAction::SmokeFixture { op, .. } => {
+                let state = peer_factory.context.roots.state.as_path();
+                let refused = || PeerResult::Error {
+                    data: provenant_fabric_runtime::hosts::PeerResultError {
+                        extra: Default::default(),
+                        error: FacadeError::invalid(InvalidInputDetail::Field(
+                            "smoke_fixture".into(),
+                        )),
+                    },
+                    extra: Default::default(),
+                };
+                match op {
+                    SmokeFixtureOp::Create { .. } => match smoke_created {
+                        Some(commits) => PeerResult::SmokeFixture {
+                            data: SmokeFixtureReceipt {
+                                extra: Default::default(),
+                                base: Some(commits.base),
+                                head: Some(commits.head),
+                                recipe: Some(crate::smoke::FIXTURE_RECIPE),
+                                reason: None,
+                            },
+                            extra: Default::default(),
+                        },
+                        None => refused(),
+                    },
+                    SmokeFixtureOp::Remove { nonce } => match smoke_remove_root.as_deref() {
+                        Some(root) => match crate::smoke::remove_fixture(state, &home, nonce, root)
+                        {
+                            Ok(()) => PeerResult::SmokeFixture {
+                                data: SmokeFixtureReceipt {
+                                    extra: Default::default(),
+                                    base: None,
+                                    head: None,
+                                    recipe: None,
+                                    reason: Some("removed".into()),
+                                },
+                                extra: Default::default(),
+                            },
+                            Err(_) => refused(),
+                        },
+                        None => refused(),
+                    },
+                }
+            }
             PeerAction::Inbox { input, .. } => {
                 use provenant_fabric_runtime::inbox::{InboxInput, InboxReply};
                 let graph_steer = matches!(
@@ -1110,8 +1210,8 @@ pub fn peer(
                 }
             }
             PeerAction::SessionHandoff { input, .. } => PeerResult::SessionHandoff {
-                data: crate::handoff::receive(
-                    &crate::handoff::Target {
+                data: crate::session_handoff::receive(
+                    &crate::session_handoff::Target {
                         context,
                         home: &home,
                         cwd: &cwd,
@@ -1511,7 +1611,8 @@ pub(crate) fn peer_submit_graph(
         None
     };
     let mut document: GraphDocument = serde_json::from_value(serde_json::json!({
-        "schema_version":1,"graph_id":graph,"template_library":{},"exclude":exclude,
+        "schema_version":if task.subject.is_some() { 2 } else { 1 },
+        "graph_id":graph,"template_library":{},"exclude":exclude,
         "nodes":[{"id":node,"access":mode,"prompt":task.prompt,"title":task.title,
           "worktree":worktree,"route":route,"attempt":attempt,"context":origin,
           "require_skill_location":task.require_skill_location,
@@ -1524,29 +1625,40 @@ pub(crate) fn peer_submit_graph(
     // Carry the sender-staged fixture bytes, not a sender path, so the peer
     // places exactly the same fixture in its own candidate scratch.
     document.nodes[0].fixture_bytes = task.fixture.clone();
-    // A reader compares against the sender's pinned base. A peer-owned writer
-    // starts from its own freshly provisioned worktree and has no review base.
+    // A reader compares against the initiator's pinned base. A peer-owned
+    // writer starts from its freshly provisioned worktree and has no range.
     document.review_base = if peer_writer { None } else { task.base.clone() };
+    // The initiator's admitted subject travels with the task so this host's
+    // graph tasks carry the same provenance beside their pinned head.
+    document.subject = task.subject.clone();
     document.peer_origin_work_key = Some(origin_work_key.clone());
-    // A reader is pinned to the sender's source commit. A peer-owned writer
-    // provisions its own worktree from the branch and base instead, so a
-    // source binding would conflict with that provisioning intent.
+    // A reader reads the initiator's admitted subject: the peer receives
+    // task.head and never substitutes its own checkout HEAD, so both hosts
+    // read the same commit (spec invariant 3). A clone that lacks the commit
+    // refuses at materialisation instead of reading a different tree. A
+    // peer-owned writer provisions its worktree from the branch and base
+    // instead, so a source binding would conflict with that intent.
     document.nodes[0].source = if peer_writer {
         None
     } else {
-        task.head.as_ref().map(
-            |head| provenant_fabric_runtime::graph::SourceBinding::Commit {
-                commit: head.clone(),
-            },
-        )
+        task.head
+            .clone()
+            .map(|head| provenant_fabric_runtime::graph::SourceBinding::Commit { commit: head })
     };
     let review_base = if peer_writer {
         None
     } else {
-        task.base
-            .as_deref()
-            .map(|base| factory.resolve_base(&factory.cwd, base, &facts, cancel))
-            .transpose()?
+        let resolved = task.base.as_deref().and_then(|base| {
+            factory
+                .resolve_base(&factory.cwd, base, &facts, cancel)
+                .ok()
+        });
+        if resolved.is_none() && task.base.is_some() {
+            super::interface::warn_operator(
+                "peer reader could not resolve the initiator's review base in its own checkout; review ranges fall back to the source commit",
+            );
+        }
+        resolved
     };
     document.network = network.map(|network| match network {
         provenant_cli::Switch::On => provenant_fabric_runtime::graph::GraphNetwork::On,
