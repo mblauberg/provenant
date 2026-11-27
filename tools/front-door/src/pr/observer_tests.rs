@@ -502,7 +502,15 @@ printf '%s\n' '{"status":200,"headers":{},"body":"{\"full_name\":\"owner/repo\"}
         let mut observer = shared.observer(dir.path());
         let request = Request::within(Duration::from_secs(60));
         let (line, checks) =
-            super::super::status::poll_line(&mut observer, 7, None, &request, Duration::ZERO, &[])
+            super::super::status::observe_line(
+                &mut observer,
+                dir.path(),
+                dir.path(),
+                7,
+                &request,
+                Duration::ZERO,
+                None,
+            )
                 .unwrap();
         assert!(checks.is_empty(), "fake forge reports no checks");
         assert!(line.cause_suffix().contains(line.cause.as_deref().unwrap()));
@@ -559,7 +567,15 @@ printf '%s\n' '{"status":200,"headers":{},"body":"{\"full_name\":\"owner/repo\"}
             let dir = state();
             let mut observer = shared.observer(dir.path());
             let request = Request::within(Duration::from_secs(60));
-            super::super::status::poll_line(&mut observer, 7, None, &request, Duration::ZERO, &[])
+            super::super::status::observe_line(
+                &mut observer,
+                dir.path(),
+                dir.path(),
+                7,
+                &request,
+                Duration::ZERO,
+                None,
+            )
                 .unwrap()
                 .0
         };
@@ -601,17 +617,33 @@ printf '%s\n' '{"status":200,"headers":{},"body":"{\"full_name\":\"owner/repo\"}
         let mut observer = shared.observer(dir.path());
         let request = Request::within(Duration::from_secs(60));
         let first =
-            super::super::status::poll_line(&mut observer, 7, None, &request, Duration::ZERO, &[])
+            super::super::status::observe_line(
+                &mut observer,
+                dir.path(),
+                dir.path(),
+                7,
+                &request,
+                Duration::ZERO,
+                None,
+            )
                 .unwrap();
         let full = shared.with(|world| world.full_reads);
         let calls = shared.requests();
         let again =
-            super::super::status::poll_line(&mut observer, 7, None, &request, Duration::ZERO, &[])
+            super::super::status::observe_line(
+                &mut observer,
+                dir.path(),
+                dir.path(),
+                7,
+                &request,
+                Duration::ZERO,
+                None,
+            )
                 .unwrap();
         assert_eq!(first, again);
         assert_eq!(
-            calls, 5,
-            "PR metadata, branch policy, ruleset, check runs, legacy statuses"
+            calls, 7,
+            "PR metadata, the head observation's metadata read, branch policy, ruleset, check runs, legacy statuses, final head check"
         );
         assert_eq!(shared.requests(), 2 * calls);
         assert_eq!(first.0.verdict(), Some(true));

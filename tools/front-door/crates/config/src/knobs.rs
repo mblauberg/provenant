@@ -524,10 +524,10 @@ pub(crate) fn resolve(
         });
         match checked {
             Ok(value) => {
-                by_name
-                    .entry(name.into())
-                    .or_default()
-                    .push(sourced(value, Layer::Host));
+                by_name.entry(name.into()).or_default().push(Sourced {
+                    value,
+                    source: Source::at(Layer::Host, format!("config.toml#knobs.{name}")),
+                });
             }
             Err(rule) => {
                 if let Some(safe) = safe_value(name) {

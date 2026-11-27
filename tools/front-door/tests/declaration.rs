@@ -4,13 +4,10 @@ use provenant_core::{
     ActorId, AttemptId, CancelToken, Clock as _, Digest, OperationId, ProjectId, RootInputs,
 };
 use provenant_os::clock::SystemClock;
-use provenant_records::{
-    CanonicalRequest,
-    declaration::{
-        DeclarationError, DeclarationInput, DeclarationLimit, DeclarationLine, DeclarationReceipt,
-    },
+use provenant_records::declaration::{
+    DeclarationError, DeclarationInput, DeclarationLimit, DeclarationLine, DeclarationReceipt,
 };
-use provenant_run::{ExecutionContext, PreparedRun, Request, RunStore};
+use provenant_run::{CanonicalRequest, ExecutionContext, PreparedRun, Request, RunStore};
 use serde_json::{Value, json};
 use support::{Result, TestRig, code};
 
@@ -344,7 +341,7 @@ fn near_full_policy_off_still_reports_the_bound() -> Result {
     assert!(settings.near_full(0));
     let effect = settings.near_full_policy.check(
         "DECLARATION_JOURNAL_NEAR_FULL",
-        provenant_records::policy::Facts::violation("three bytes left".into()),
+        provenant_records::policy::Facts::violation("three bytes left"),
     );
     assert_eq!(effect, provenant_records::policy::Effect::Proceed);
     Ok(())

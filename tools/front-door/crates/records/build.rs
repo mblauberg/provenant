@@ -20,15 +20,20 @@ fn optional(row: &Table, key: &str) -> Result<String, Box<dyn Error>> {
     }
 }
 
+// `cargo:` directives are a build script's protocol with Cargo, not command output.
+#[allow(
+    clippy::disallowed_methods,
+    reason = "cargo: directives in a build script are the build protocol itself"
+)]
+fn emit_instruction(instruction: &str) -> std::io::Result<()> {
+    writeln!(std::io::stdout().lock(), "cargo:{instruction}")
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
     let manifest =
         PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").ok_or("missing manifest directory")?);
     let asset = manifest.join("../run/assets/policy.toml");
-    writeln!(
-        std::io::stdout().lock(),
-        "cargo:rerun-if-changed={}",
-        asset.display()
-    )?;
+    emit_instruction(&format!("rerun-if-changed={}", asset.display()))?;
     let document = fs::read_to_string(asset)?.parse::<DocumentMut>()?;
     let rows = document["rule"]
         .as_array_of_tables()

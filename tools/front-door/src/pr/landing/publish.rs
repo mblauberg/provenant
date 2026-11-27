@@ -370,8 +370,8 @@ pub fn rest_ordered(
 mod tests {
     use super::*;
     use crate::pr::landing::{
-        fakes::{FakeForge, FakeRepo},
-        ports::{Approval, RequiredCiCheck},
+        fakes::{FakeForge, FakeRepo, RequiredCiCheck},
+        ports::Approval,
         test_support::LandingFixture,
     };
 

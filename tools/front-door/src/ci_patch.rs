@@ -165,6 +165,14 @@ pub(crate) struct PatchError {
     pub next: Vec<NextStep>,
 }
 
+impl std::fmt::Display for PatchError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: {}", self.code, self.message)
+    }
+}
+
+impl std::error::Error for PatchError {}
+
 impl PatchError {
     fn new(
         code: impl Into<String>,

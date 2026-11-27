@@ -1297,12 +1297,16 @@ struct PreparedInstall {
     live_record_warning: Option<String>,
 }
 
-fn after_publication<T, U, E>(
-    publish: impl FnOnce() -> Result<T, E>,
-    migrate: impl FnOnce() -> Result<U, E>,
+/// Publish, then migrate only once publication succeeded. Both steps record
+/// into the one `state` the caller reports from, so a stop made by migration
+/// is still visible after a failure.
+fn after_publication<S, T, U, E>(
+    state: &mut S,
+    publish: impl FnOnce(&mut S) -> Result<T, E>,
+    migrate: impl FnOnce(&mut S) -> Result<U, E>,
 ) -> Result<(T, U), E> {
-    let published = publish()?;
-    let migrated = migrate()?;
+    let published = publish(state)?;
+    let migrated = migrate(state)?;
     Ok((published, migrated))
 }
 
@@ -1311,10 +1315,11 @@ mod publication_migration_tests {
     #[test]
     fn publication_failure_does_not_start_store_migration() {
         let mut migration_started = false;
-        let result = super::after_publication::<(), (), &str>(
-            || Err("publication failed"),
-            || {
-                migration_started = true;
+        let result = super::after_publication::<bool, (), (), &str>(
+            &mut migration_started,
+            |_| Err("publication failed"),
+            |started| {
+                *started = true;
                 Ok(())
             },
         );
@@ -1560,7 +1565,8 @@ fn apply_install(
     let mut migrated = Vec::new();
     let result: Result<_, Refused> = (|| {
         let (mut combined, applied) = after_publication(
-            || {
+            &mut reporter,
+            |reporter| {
                 let mut combined = InstallOutcome {
                     actions: Vec::new(),
                     findings: preview.findings,
@@ -1575,7 +1581,7 @@ fn apply_install(
                         &settings,
                         batch,
                         &context,
-                        &mut reporter,
+                        &mut *reporter,
                         &smoke,
                         env!("PROVENANT_TARGET_TRIPLE"),
                     )
@@ -1602,7 +1608,7 @@ fn apply_install(
                 }
                 Ok(combined)
             },
-            || {
+            |reporter| {
                 let cutover_pending = migrations::cutover_pending(state_root).map_err(|error| {
                     Refused::Fail(Outcome::Error, "UPGRADE_MIGRATION_FAILED", error)
                 })?;
@@ -2392,8 +2398,7 @@ fn verify_installed_smoke_argv(
 #[cfg(test)]
 mod verify_child_argv_tests {
     use super::verify_installed_smoke_argv;
-    use crate::cli::{CommonArgs, Upgrade};
-    use std::ffi::OsString;
+    use provenant_cli::{CommonArgs, Upgrade};
     use std::path::{Path, PathBuf};
 
     #[test]
@@ -2418,7 +2423,7 @@ mod verify_child_argv_tests {
             &args,
             180,
         );
-        let captured: Vec<_> = argv.iter().map(OsString::to_string_lossy).collect();
+        let captured: Vec<_> = argv.iter().map(|arg| arg.to_string_lossy()).collect();
         assert!(
             captured
                 .windows(2)
@@ -2789,11 +2794,8 @@ fn selected_upgrade_hosts(args: &cli::Upgrade) -> Option<std::collections::BTree
     }
 }
 
-fn remaining_timeout_seconds(deadline: std::time::Instant, maximum: u64) -> u64 {
-    deadline
-        .saturating_duration_since(std::time::Instant::now())
-        .as_secs()
-        .min(maximum)
+fn remaining_timeout_seconds(deadline: provenant_core::Deadline, maximum: u64) -> u64 {
+    crate::smoke::remaining_seconds(&SystemClock::new(), deadline).min(maximum)
 }
 
 pub(super) fn run_upgrade(
@@ -2801,8 +2803,10 @@ pub(super) fn run_upgrade(
     globals: &cli::Globals,
     timeout: Option<std::time::Duration>,
 ) -> u8 {
-    let deadline =
-        std::time::Instant::now() + timeout.unwrap_or(std::time::Duration::from_secs(1_200));
+    let deadline = crate::smoke::deadline_after(
+        &SystemClock::new(),
+        timeout.unwrap_or(std::time::Duration::from_secs(1_200)),
+    );
     let (environment, targets) = match selected_targets(globals, &[]) {
         Ok(value) => value,
         Err(error) => return edge_error("upgrade", error, globals),

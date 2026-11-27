@@ -4,8 +4,8 @@ use super::{
     model::*,
     ports::{
         AlarmSink, Approval, Forge, GateRunner, MergeTree, Mergeability, PullRequestInfo,
-        PullRequestState, Repo, RequiredCiCheck, ReviewRecord, ReviewRecordSource, Reviews,
-        StackMember, StackMembership,
+        PullRequestState, Repo, ReviewRecord, ReviewRecordSource, Reviews, StackMember,
+        StackMembership,
     },
 };
 use crate::pr::{
@@ -883,40 +883,6 @@ impl Forge for GhForge {
             reading
         };
         Ok(reading)
-    }
-    fn required_ci_policy(
-        &mut self,
-        base_branch: &str,
-    ) -> Result<Option<Vec<RequiredCiCheck>>, LandingError> {
-        let repository = self.repository_name()?;
-        let read_error = std::cell::RefCell::new(None);
-        let policy = crate::pr::status::required_policy_for(
-            &format!("repos/{repository}"),
-            base_branch,
-            &|args| match self.reader().read(args) {
-                Ok(output) => Some(output),
-                Err(error) => {
-                    *read_error.borrow_mut() = Some(failed(error));
-                    None
-                }
-            },
-        );
-        let Some(policy) = policy else {
-            return match read_error.into_inner() {
-                Some(error) => Err(error),
-                None => Ok(None),
-            };
-        };
-        Ok(Some(
-            policy
-                .checks
-                .into_iter()
-                .map(|required| RequiredCiCheck {
-                    name: required.name,
-                    app_id: required.app,
-                })
-                .collect(),
-        ))
     }
     #[allow(clippy::disallowed_methods)]
     fn checks_with_timeout(

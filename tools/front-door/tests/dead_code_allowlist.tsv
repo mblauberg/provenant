@@ -17,9 +17,6 @@ crates/supervisor/src/guardian.rs	#[cfg_attr(not(target_os = "macos"), allow(dea
 crates/supervisor/src/process_os.rs	#[allow(dead_code)]	unsupported backend exercised on macOS tests
 src/admit.rs	#[allow(dead_code)]	guard variants hold locks for their lifetime
 src/chair_log_retention.rs	#[allow(unused_imports, dead_code)]	The worktree driver includes the library without a test harness.
-src/ci_patch.rs	#[allow( dead_code, reason = "every status is a wire value; only drift is produced locally" )]	removed by W1
-src/ci_patch.rs	#[allow(dead_code, reason = "the manifest is a fixed wire schema")]	removed by W1
-src/ci_patch.rs	#[allow(dead_code, reason = "the manifest is a fixed wire schema")]	removed by W1
 src/commands/init.rs	#[allow(unused_imports, dead_code)]	The worktree driver includes the library without a test harness.
 src/fabric/graph_execution.rs	#[allow( dead_code, unused_imports, reason = "the custom worktree driver includes this module without libtest" )]	the custom worktree driver includes this module without libtest
 src/fabric/graph_human.rs	#[allow( dead_code, reason = "the custom worktree driver omits libtest functions" )]	the custom worktree driver omits libtest functions
@@ -36,8 +33,6 @@ src/gc_sweep.rs	#[allow(unused_imports, dead_code)]	The worktree driver includes
 src/hooks.rs	#[allow(dead_code)]	Unused when the worktree driver drops the #[test] items.
 src/hooks.rs	#[allow(dead_code)]	The worktree driver strips the #[test] items.
 src/hooks.rs	#[allow(dead_code)]	Also built by the worktree driver without unit tests.
-src/install/migrations.rs	#[allow(dead_code)]	removed by W3
-src/install/migrations.rs	#[allow(dead_code)]	removed by W3
 src/install.rs	#[allow(dead_code, unused_imports)]	test module included by custom worktree driver
 src/lane_cleanup.rs	#[allow(dead_code)]	Also compiled by the harness=false worktree driver.
 src/lane_cleanup.rs	#[allow(dead_code, clippy::too_many_arguments)]	Also compiled by the harness=false worktree driver.

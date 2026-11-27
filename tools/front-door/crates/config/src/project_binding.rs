@@ -146,18 +146,18 @@ fn project_presence_with_probe(
         registered_ns: registration.modified_ns,
     };
 
-    if let Some(retry) = read_project_retry_record(&directory)? {
-        if retry.matches(incarnation) {
-            let retry_at = retry.retry_at()?;
-            if now < retry_at {
-                return Ok((
-                    ProjectPresence::Unreachable {
-                        error: retry.error,
-                        retry_at,
-                    },
-                    incarnation,
-                ));
-            }
+    if let Some(retry) = read_project_retry_record(&directory)?
+        && retry.matches(incarnation)
+    {
+        let retry_at = retry.retry_at()?;
+        if now < retry_at {
+            return Ok((
+                ProjectPresence::Unreachable {
+                    error: retry.error,
+                    retry_at,
+                },
+                incarnation,
+            ));
         }
     }
 
@@ -192,9 +192,9 @@ fn read_project_retry_record(
         return Ok(None);
     };
     let record: ProjectRetryRecord = provenant_records::decode(
-        &bytes,
+        bytes.as_slice(),
         provenant_records::Limits {
-            max_bytes: PROJECT_RETRY_RECORD_LIMIT as usize,
+            max_bytes: PROJECT_RETRY_RECORD_LIMIT,
             ..provenant_records::Limits::CONFIG
         },
     )

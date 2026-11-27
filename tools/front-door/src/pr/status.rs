@@ -21,7 +21,7 @@ pub(crate) const NO_CHECKS_NEXT: &str =
     "check the workflow triggers or push an empty commit to start CI";
 
 #[derive(Deserialize)]
-struct View {
+pub(super) struct View {
     state: String,
     #[serde(rename = "headRefOid")]
     head: String,
@@ -31,8 +31,6 @@ struct View {
     review: Option<String>,
     #[serde(rename = "isDraft", default)]
     draft: bool,
-    /// The pull request URL names the base repository, whose CI it runs.
-    url: String,
 }
 #[derive(Deserialize)]
 struct RestWaitPull {
@@ -46,7 +44,6 @@ struct RestWaitPull {
     mergeable_state: Option<String>,
     #[serde(default)]
     draft: bool,
-    html_url: String,
 }
 #[derive(Deserialize)]
 struct RestWaitHead {
@@ -991,21 +988,21 @@ pub(crate) fn wait_head(
     })
 }
 
-/// Revalidate PR metadata, its CI and its Actions runs through the shared
-/// observer during a wait loop. The metadata read, every check page, the checks
-/// read and the Actions runs read share `request`'s one deadline and
-/// cancellation. Unavailable Actions runs warn once per wait.
-pub(crate) fn wait_line_observed(
+/// Revalidate PR metadata and CI through an open observer: the metadata read,
+/// every check page and the checks read share `request`'s one deadline and
+/// cancellation. Returns the rendered line with the checks it was bound to, so
+/// a poller can project them without a second read.
+pub(crate) fn observe_line<F: provenant_config::Forge, C: super::observer::Clock>(
+    observer: &mut super::observer::Observer<F, C>,
     project: &Path,
     state: &Path,
-    repository: &str,
     number: u64,
     request: &provenant_config::ports::Request,
     max_age: std::time::Duration,
     pinned_head: Option<provenant_core::GitOid>,
-) -> Result<Line> {
-    use super::observer::Observer;
-    let mut observer = Observer::open(state, project, repository, request)?;
+) -> Result<(Line, Vec<super::observer::Check>)> {
+    let repository = observer.repository().to_owned();
+    let repository = repository.as_str();
     let graphql_entry = std::cell::RefCell::new(None);
     let graphql_head = || match batch::single_for_repository_with_request(
         state, project, repository, number, request,
@@ -1018,45 +1015,47 @@ pub(crate) fn wait_line_observed(
     };
     let mut reading = pinned_head
         .map(|head| observer.observe_head(number, head, request, max_age, &graphql_head));
-    let (view, base_ref) = match observer.resource(&format!("pulls/{number}"), max_age, request) {
-        Ok(value) => {
-            let pull: RestWaitPull = serde_json::from_value(value)?;
-            let base_ref = pull.base.as_ref().map(|base| base.branch.clone());
-            (
-                View {
-                    state: if pull.merged_at.is_some() {
-                        "MERGED".into()
-                    } else {
-                        pull.state.to_ascii_uppercase()
+    let (view, base_ref, first_pull) =
+        match observer.resource(&format!("pulls/{number}"), max_age, request) {
+            Ok(value) => {
+                let first_pull = Some(value.clone());
+                let pull: RestWaitPull = serde_json::from_value(value)?;
+                let base_ref = pull.base.as_ref().map(|base| base.branch.clone());
+                (
+                    View {
+                        state: if pull.merged_at.is_some() {
+                            "MERGED".into()
+                        } else {
+                            pull.state.to_ascii_uppercase()
+                        },
+                        head: pull.head.sha,
+                        merge: pull
+                            .mergeable_state
+                            .map_or_else(|| "UNKNOWN".into(), |state| state.to_ascii_uppercase()),
+                        review: Some("unknown".into()),
+                        draft: pull.draft,
                     },
-                    head: pull.head.sha,
-                    merge: pull
-                        .mergeable_state
-                        .map_or_else(|| "UNKNOWN".into(), |state| state.to_ascii_uppercase()),
-                    review: Some("unknown".into()),
-                    draft: pull.draft,
-                    url: pull.html_url,
-                },
-                base_ref,
-            )
-        }
-        Err(error) => {
-            let entry = graphql_entry
-                .borrow_mut()
-                .take()
-                .or_else(|| {
-                    match batch::single_for_repository_with_request(
-                        state, project, repository, number, request,
-                    ) {
-                        batch::Batch::Entries(entries) => entries.into_iter().next(),
-                        _ => None,
-                    }
-                })
-                .ok_or(error)?;
-            let base_ref = Some(entry.base_ref_name.clone());
-            (view_from_batch_entry(entry), base_ref)
-        }
-    };
+                    base_ref,
+                    first_pull,
+                )
+            }
+            Err(error) => {
+                let entry = graphql_entry
+                    .borrow_mut()
+                    .take()
+                    .or_else(|| {
+                        match batch::single_for_repository_with_request(
+                            state, project, repository, number, request,
+                        ) {
+                            batch::Batch::Entries(entries) => entries.into_iter().next(),
+                            _ => None,
+                        }
+                    })
+                    .ok_or(error)?;
+                let base_ref = Some(entry.base_ref_name.clone());
+                (view_from_batch_entry(entry), base_ref, None)
+            }
+        };
     let expected = match pinned_head {
         Some(expected) => expected,
         None => provenant_core::GitOid::parse(&view.head)?,
@@ -1070,13 +1069,53 @@ pub(crate) fn wait_line_observed(
     let no_checks_for_current_head = reading.pr_head == Some(reading.expected_head)
         && reading.retry_at.is_none()
         && reading.observed.is_empty();
-    let merge_state = reading.mergeable;
+    let mut merge_state = reading.mergeable;
+    if no_checks_for_current_head
+        && merge_state == super::observer::MergeState::Unknown
+        && let Some(first) = first_pull
+    {
+        // Only a diagnosis that mergeability can change rereads it: a head
+        // with checks needs no cause. A still-UNKNOWN answer stays UNKNOWN.
+        if let Ok((reread, _)) = observer.pull_merge_state(number, first, request) {
+            merge_state = reread;
+        }
+    }
+    let checks = reading.observed.clone();
     let mut line = line_from_head_reading(number, view, reading, &gate_contexts(project, state));
+    // A pinned wait watches its own head: while GitHub reports another, the
+    // reading names the pinned head it is waiting for, not the one it saw.
+    if let (Some(pinned), Some(awaiting)) = (pinned_head, line.awaiting.as_mut()) {
+        *awaiting = pinned.to_string();
+    }
     if no_checks_for_current_head {
         let cause = merge_state.no_checks_cause(base_ref.as_deref());
         line.cause = Some(cause.code.to_owned());
         line.next = Some(cause.next);
     }
+    Ok((line, checks))
+}
+
+/// Revalidate PR metadata, its CI and its Actions runs through the shared
+/// observer during a wait loop. Unavailable Actions runs warn once per wait.
+pub(crate) fn wait_line_observed(
+    project: &Path,
+    state: &Path,
+    repository: &str,
+    number: u64,
+    request: &provenant_config::ports::Request,
+    max_age: std::time::Duration,
+    pinned_head: Option<provenant_core::GitOid>,
+) -> Result<Line> {
+    let mut observer = super::observer::Observer::open(state, project, repository, request)?;
+    let (mut line, _) = observe_line(
+        &mut observer,
+        project,
+        state,
+        number,
+        request,
+        max_age,
+        pinned_head,
+    )?;
     if line.awaiting.is_none() {
         match observer.active_workflows(&line.head, max_age, request) {
             Ok(Some(active)) => line.active_workflows = Some(active),
@@ -1112,7 +1151,6 @@ fn view_from_batch_entry(entry: batch::Entry) -> View {
         merge: entry.merge,
         review: entry.review,
         draft: entry.draft,
-        url: entry.url,
     }
 }
 
@@ -1276,12 +1314,18 @@ pub(super) fn line_from_head_reading(
     reading: super::observer::HeadReading,
     review_gate_contexts: &[String],
 ) -> Line {
-    view.merge = match reading.mergeable {
-        super::observer::MergeState::Mergeable => "CLEAN",
-        super::observer::MergeState::Conflicting => "DIRTY",
-        super::observer::MergeState::Unknown => "UNKNOWN",
+    // The observation settles only conflict or no conflict; the caller's
+    // metadata can say more ("BLOCKED", "BEHIND"). A conflict always shows. No
+    // conflict replaces a contrary or unreported state and keeps a richer one.
+    match reading.mergeable {
+        super::observer::MergeState::Conflicting => view.merge = "DIRTY".into(),
+        super::observer::MergeState::Mergeable
+            if matches!(view.merge.as_str(), "" | "DIRTY" | "UNKNOWN") =>
+        {
+            view.merge = "CLEAN".into();
+        }
+        super::observer::MergeState::Mergeable | super::observer::MergeState::Unknown => {}
     }
-    .into();
     let Some(head) = reading.pr_head else {
         return status_line_with(
             number,
@@ -1321,7 +1365,9 @@ pub(super) fn line_from_head_reading(
     );
     if !reading.complete && line.state == "OPEN" {
         line.completion = Some(CiCompletion::Pending);
-        line.required_unreadable = true;
+        // A known policy reports its own pending names; only a reading that
+        // could not establish the policy is "unavailable".
+        line.required_unreadable = reading.required_policy.is_empty();
     }
     line
 }
@@ -1342,7 +1388,6 @@ pub(super) fn line_for(
             merge: "CLEAN".into(),
             review: None,
             draft: false,
-            url: format!("https://github.com/owner/repo/pull/{number}"),
         },
         checks,
         review_gate_contexts,
@@ -1360,7 +1405,6 @@ pub(super) fn class_of(head: &str, checks: &[super::observer::Check]) -> &'stati
         merge: "CLEAN".into(),
         review: Some("APPROVED".into()),
         draft: false,
-        url: "https://github.com/owner/repo/pull/1".into(),
     };
     status_line(1, view, Some(checks), &[]).class()
 }

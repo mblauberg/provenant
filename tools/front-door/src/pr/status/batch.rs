@@ -113,7 +113,7 @@ fn snapshot_for_repository_with_request(
     if numbers.is_empty() {
         return Batch::Entries(Vec::new());
     }
-    let dir = match shared_dir(state, &repository) {
+    let dir = match shared_dir(state, repository) {
         Ok(dir) => dir,
         Err(message) => return Batch::Unavailable(message),
     };
@@ -124,7 +124,7 @@ fn snapshot_for_repository_with_request(
     {
         return Batch::Entries(entries);
     }
-    match read(state, project, &repository, numbers, request) {
+    match read(state, project, repository, numbers, request) {
         Ok(entries) => {
             store_cache(&dir, &entries, now);
             Batch::Entries(entries)
@@ -533,7 +533,6 @@ pub(crate) fn line_from_entry(entry: &Entry, review_gate_contexts: &[String]) ->
             merge: entry.merge.clone(),
             review: entry.review.clone(),
             draft: entry.draft,
-            url: entry.url.clone(),
         },
         (!entry.truncated && entry.state != "UNAVAILABLE").then_some(checks.as_slice()),
         review_gate_contexts,
@@ -581,7 +580,6 @@ pub(crate) fn line_from_entry_observed(
             merge: entry.merge.clone(),
             review: entry.review.clone(),
             draft: entry.draft,
-            url: entry.url.clone(),
         },
         reading,
         review_gate_contexts,
@@ -651,12 +649,12 @@ mod tests {
             required_policy: Vec::new(),
             observed: Vec::new(),
             required: Vec::new(),
-            observed_at: jiff::Timestamp::now(),
+            observed_at: jiff::Timestamp::UNIX_EPOCH,
             complete: false,
             pending_reason: Some("pull head moved".into()),
             retry_at: None,
         };
-        let line = super::line_from_head_reading(
+        let line = super::super::line_from_head_reading(
             batch_entry.number,
             View {
                 state: batch_entry.state.clone(),
@@ -664,7 +662,6 @@ mod tests {
                 merge: batch_entry.merge.clone(),
                 review: batch_entry.review.clone(),
                 draft: batch_entry.draft,
-                url: batch_entry.url.clone(),
             },
             reading,
             &[],

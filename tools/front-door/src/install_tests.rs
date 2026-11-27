@@ -766,14 +766,14 @@ fn smoke_fails_without_the_nonce() -> Result<(), Box<dyn std::error::Error>> {
     provenant_os::fixture::private_state_dir(&state)?;
     let (program, _) = smoke_program(temp.path(), "no nonce here")?;
     let runner = smoke_runner(&home)?;
-    let outcome = crate::smoke::run_lifecycle(
+    let outcome = crate::smoke::run_lifecycle_with_timeout(
         &provenant_os::clock::SystemClock::new(),
         &runner,
         &program,
         &state,
         &home,
         &smoke_upgrade(None, Vec::new()),
-        60,
+        std::time::Duration::from_secs(60),
     )?;
     let crate::smoke::SmokeVerdict::Failed { row, reason } = &outcome.verdict else {
         panic!("the nonce is absent, so the smoke must fail");
@@ -972,6 +972,7 @@ fn smoke_dry_run_previews_nodes_without_launching() -> Result<(), Box<dyn std::e
         &state,
         &home,
         &smoke_upgrade(None, Vec::new()),
+        60,
     )?;
     let output = String::from_utf8(output)?;
     for node in [

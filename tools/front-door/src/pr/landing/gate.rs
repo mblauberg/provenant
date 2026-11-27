@@ -493,7 +493,7 @@ fn ci_outstanding(
     }
     let reading = forge.observe_head(pr, required_names, timeout)?;
     if let Some(error) = reading.quota_error() {
-        return Err(LandingError::RateLimited(error.to_string()));
+        return Err(LandingError::RateLimited(error.into_payload().message));
     }
     if policy.mode == PrCiMode::Affected
         && reading.observed.is_empty()
@@ -513,7 +513,7 @@ pub(super) fn require_delivery_queue_ci(
 ) -> Result<(), LandingError> {
     let reading = forge.observe_head(pr, &[], Duration::from_secs(60))?;
     if let Some(error) = reading.quota_error() {
-        return Err(LandingError::RateLimited(error.to_string()));
+        return Err(LandingError::RateLimited(error.into_payload().message));
     }
     if reading
         .pr_head
@@ -793,14 +793,16 @@ mod tests {
     fn pending_forge() -> FakeForge {
         let mut forge = FakeForge::default();
         forge.pull_requests.insert(1, open_info(1, HEAD));
-        forge
-            .check_runs
-            .insert(HEAD.into(), vec![evidence(GateResult::Pending, None)]);
+        // The pending run belongs to the pull request's own head, the commit
+        // the shared observer binds checks to.
+        let mut pending = evidence(GateResult::Pending, None);
+        pending.commit = HEAD.into();
+        forge.check_runs.insert(HEAD.into(), vec![pending]);
         forge
     }
     #[test]
     fn required_review_gate_does_not_hold_landing_ci_pending() {
-        use crate::pr::landing::ports::RequiredCiCheck;
+        use crate::pr::landing::fakes::RequiredCiCheck;
 
         let mut forge = FakeForge::default();
         forge.pull_requests.insert(1, open_info(1, HEAD));
@@ -827,7 +829,7 @@ mod tests {
 
     #[test]
     fn queue_ci_requires_the_pinned_app_and_a_passing_required_check() {
-        use crate::pr::landing::ports::RequiredCiCheck;
+        use crate::pr::landing::fakes::RequiredCiCheck;
 
         for (app, result, expected_green) in [
             (Some(15368), GateResult::Passed, true),

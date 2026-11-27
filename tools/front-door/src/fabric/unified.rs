@@ -4108,7 +4108,7 @@ pub(crate) fn unified_graph_output(
                 return Err(provenant_cli::run::Fail::new(
                     result.status,
                     provenant_run::ErrorKind::Fabric,
-                    error.message,
+                    error.into_payload().message,
                 ));
             }
             Ok((result.data, String::new()))

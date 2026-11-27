@@ -663,7 +663,7 @@ mod tests {
             }],
             observed: vec![check.clone()],
             required: vec![check],
-            observed_at: jiff::Timestamp::now(),
+            observed_at: jiff::Timestamp::UNIX_EPOCH,
             complete: false,
             pending_reason: Some("pull head changed".into()),
             retry_at: None,

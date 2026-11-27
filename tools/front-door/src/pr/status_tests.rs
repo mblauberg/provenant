@@ -93,7 +93,6 @@ fn completion_report_retains_every_failed_check_and_link() {
         merge: "".into(),
         review: None,
         draft: false,
-        url: String::new(),
     };
     let checks = [
         check("one", "fail", "https://ci/one"),
@@ -131,7 +130,6 @@ fn pending_check_names_survive_the_status_line_and_render() {
         merge: "clean".into(),
         review: Some("approved".into()),
         draft: false,
-        url: String::new(),
     };
     let checks = [
         check("build", "pass"),
@@ -314,7 +312,6 @@ fn a_head_with_only_a_pending_selector_waits_for_the_aggregate_check() {
         merge: "clean".into(),
         review: None,
         draft: false,
-        url: "https://github.com/owner/repo/pull/7".into(),
     };
     let required = || {
         super::Requirement::Known(vec![super::Required {
@@ -376,7 +373,6 @@ fn a_declared_review_gate_is_not_a_required_ci_check() {
         merge: "clean".into(),
         review: None,
         draft: false,
-        url: "https://github.com/owner/repo/pull/7".into(),
     };
     let gates = ["verdict".to_owned()];
     let line = super::status_line_with(

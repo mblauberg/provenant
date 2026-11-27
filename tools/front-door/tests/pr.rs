@@ -41,6 +41,14 @@ fn rig() -> Result<TestRig> {
     Ok(rig)
 }
 
+/// Declare `check` as the base branch's required status check. A wait settles
+/// only against a non-empty required set, so a rig that expects one to settle
+/// names the check its pull requests report.
+fn require_check(rig: &TestRig, check: &str) -> Result {
+    fs::write(rig.project.join("required-checks"), format!("{check}\n"))?;
+    Ok(())
+}
+
 fn write_graphql_response(rig: &TestRig, response: serde_json::Value) -> Result {
     fs::write(
         rig.project.join("graphql-response.json"),
@@ -207,7 +215,9 @@ fn resolve_conflicted_sync(rig: &TestRig, worktree: &Path) -> Result<String> {
 }
 
 fn merge(rig: &TestRig) -> Result<provenant_os::exec::ExecOutcome> {
-    rig.command(&["land", "1668", "--head", HEAD, "--json"])
+    // CI the observer cannot read or settle stays pending to the wait bound,
+    // so a rig that expects a refusal bounds that wait.
+    rig.command(&["land", "1668", "--head", HEAD, "--wait=2s", "--json"])
 }
 fn no_merge(rig: &TestRig) -> Result {
     assert!(!rig.project.join("merge-args").exists());
@@ -220,6 +230,7 @@ fn no_merge(rig: &TestRig) -> Result {
 /// still reads CI through the observer and never merges.
 fn wait_pr_reports_the_observed_head_and_passes() -> Result {
     let rig = self::rig()?;
+    require_check(&rig, "ci-status")?;
     let output = rig.command(&["wait", "--pr", "1668", "--timeout", "30s", "--json"])?;
     assert_eq!(code(&output), 0, "{:?}", output);
     let value: serde_json::Value = String::from_utf8(output.stdout.bytes)?
@@ -247,6 +258,7 @@ fn wait_pr_reports_the_observed_head_and_passes() -> Result {
 // Spec: docs/specs/cli.md#ci-observations
 fn wait_pr_holds_a_green_head_until_actions_runs_exist_or_the_grace_ends() -> Result {
     let rig = self::rig()?;
+    require_check(&rig, "ci-status")?;
     fs::write(rig.project.join("no-actions-runs"), "")?;
     let held = rig.command(&["wait", "--pr", "1668", "--timeout", "3s", "--json"])?;
     let held_text = String::from_utf8(held.stdout.bytes.clone())?;
@@ -290,6 +302,7 @@ fn wait_pr_holds_a_green_head_until_actions_runs_exist_or_the_grace_ends() -> Re
 /// new head on the next process, where the passing verdict arrives.
 fn wait_pr_head_ignores_the_stale_head_then_settles_on_the_new_one() -> Result {
     let rig = self::rig()?;
+    require_check(&rig, "ci-status")?;
     fs::write(
         rig.project.join("checks.json"),
         r#"[{"name":"ci-status","bucket":"fail"}]"#,
@@ -336,10 +349,12 @@ fn wait_pr_head_ignores_the_stale_head_then_settles_on_the_new_one() -> Result {
         stale_text.contains(&format!("head={OTHER}")),
         "{stale_text}"
     );
+    // The observer holds a moved head pending without consulting checks for
+    // either commit: the stale head's checks cannot decide the pinned one.
     assert!(
-        fs::read_to_string(rig.project.join("gh-calls"))?
+        !fs::read_to_string(rig.project.join("gh-calls"))?
             .contains(&format!("commits/{HEAD}/check-runs")),
-        "the stale head's checks were not read"
+        "the stale head's checks were read"
     );
 
     // GitHub now reports the pinned head; its passing checks settle the wait.
@@ -389,6 +404,7 @@ fn land_refuses_unpassed_missing_and_malformed_checks() -> Result {
             _ => format!(r#"[{{"name":"ci-status","bucket":"{bucket}"}}]"#),
         };
         fs::write(rig.project.join("checks.json"), checks)?;
+        require_check(&rig, "ci-status")?;
         assert_ne!(code(&merge(&rig)?), 0, "{bucket}");
         no_merge(&rig)?;
     }
@@ -944,6 +960,14 @@ fn pr_status_prints_one_compact_line_per_pull_request() -> Result {
             }
         }}}),
     )?;
+    // Only a required check can fail a pull request's CI.
+    require_check(&rig, "ci-status\nfail")?;
+    // The observer reads each head's checks itself: serve the second pull
+    // request the checks its rollup reports.
+    fs::write(
+        rig.project.join("checks-1669.json"),
+        r#"[{"name":"ci-status","bucket":"pass"},{"name":"skip","bucket":"skipping"},{"name":"pending","bucket":"pending"},{"name":"fail","bucket":"fail"}]"#,
+    )?;
     let output = rig.command(&["pr", "status", "1668", "1669"])?;
     assert_eq!(code(&output), 0, "{output:?}");
     let text = String::from_utf8(output.stdout.bytes)?;
@@ -1277,6 +1301,11 @@ fn fake_gh(args: &[String]) -> Result<u8> {
             let body = serde_json::json!({"state":if merged {"closed"} else {"open"}, "head":{"sha":next,"ref":"feature","repo":{"full_name":"owner/repo"}}, "base":{"sha":base,"ref":"main","repo":{"full_name":"owner/repo"}}, "mergeable":mergeable,"mergeable_state":"clean","merged_at":if merged {Some("2020-01-01T00:00:00Z")} else {None},"merge_commit_sha":null,"title":"fixture","user":{"login":"fixture-author"},"draft":draft,"html_url":"https://github.com/owner/repo/pull/1668"});
             io::stdout().write_all(&serde_json::to_vec(&body)?)?;
         }
+        // A second pull request, for batch status: it sits on the other head.
+        "api repos/{owner}/{repo}/pulls/1669" => {
+            let body = serde_json::json!({"state":"open","head":{"sha":OTHER,"ref":"second","repo":{"full_name":"owner/repo"}},"base":{"sha":HEAD,"ref":"main","repo":{"full_name":"owner/repo"}},"mergeable":null,"mergeable_state":"blocked","merged_at":null,"merge_commit_sha":null,"title":"fixture","user":{"login":"fixture-author"},"draft":true,"html_url":"https://github.com/owner/repo/pull/1669"});
+            io::stdout().write_all(&serde_json::to_vec(&body)?)?;
+        }
         value if value.contains("repos/{owner}/{repo}/rules/branches/main") => {
             // No ruleset: an empty page of rules (array of pages when slurped).
             let body = if value.contains("--slurp") {
@@ -1286,7 +1315,10 @@ fn fake_gh(args: &[String]) -> Result<u8> {
             };
             io::stdout().write_all(body.as_bytes())?;
         }
-        value if value.contains("repos/{owner}/{repo}/branches/main") => {
+        value
+            if value.contains("repos/{owner}/{repo}/branches/main")
+                && !value.contains("/protection") =>
+        {
             let checks = fs::read_to_string("required-checks").unwrap_or_default();
             let contexts: Vec<&str> = checks.lines().filter(|line| !line.is_empty()).collect();
             let body = serde_json::json!({
@@ -1371,11 +1403,24 @@ fn fake_gh(args: &[String]) -> Result<u8> {
             }
         }
         "api repos/{owner}/{repo}/branches/main/protection" => {
+            // The CI observer reads the required set from classic protection.
+            let checks = fs::read_to_string("required-checks").unwrap_or_default();
+            let contexts: Vec<&str> = checks.lines().filter(|line| !line.is_empty()).collect();
+            if !contexts.is_empty() {
+                let body = serde_json::json!({
+                    "required_status_checks": {"contexts": contexts, "checks": []},
+                });
+                io::stdout().write_all(b"HTTP/2.0 200 OK\r\n\r\n")?;
+                io::stdout().write_all(&serde_json::to_vec(&body)?)?;
+                return Ok(0);
+            }
+            io::stdout().write_all(b"HTTP/2.0 404 Not Found\r\n\r\n")?;
             if Path::new("protection-404").exists() {
                 io::stdout().write_all(br#"{"message":"Not Found","status":"404"}"#)?;
             } else {
                 io::stdout().write_all(br#"{"message":"Branch not protected","status":"404"}"#)?;
             }
+            writeln!(io::stderr(), "gh: Not Found (HTTP 404)")?;
             return Ok(1);
         }
         "api --paginate --slurp repos/{owner}/{repo}/rules/branches/main?per_page=100" => {

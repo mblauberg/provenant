@@ -65,7 +65,7 @@ fn notes_cli_persists_delta_cursors_and_replays_without_rewriting() -> Result {
         1
     );
     assert_eq!(first_page["data"]["truncated"], true);
-    assert_eq!(first_page["data"]["read_cap"]["source"], "launch");
+    assert_eq!(first_page["data"]["read_cap"]["layer"], "launch");
     // Replay has no effect on the saved delta cursor.
     let replay = read(&["--replay"])?;
     assert_eq!(

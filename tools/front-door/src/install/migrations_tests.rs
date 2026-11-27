@@ -3,7 +3,7 @@
 mod tests {
     use super::{
         AttemptScratchMove, ConfigKnobRewrite, PortConfigSourceSpellings, PortSourceSpellings,
-        ProjectGrantKeys, held_store_locks, quiesce_seconds, read_receipt, run,
+        ProjectGrantKeys, held_store_locks, quiesce_seconds, read_receipt, run, run_steps,
     };
     use provenant_os::fs::{Directory, LockMode};
     use provenant_records::migrate::{Migration, MigrationError, MigrationReport};

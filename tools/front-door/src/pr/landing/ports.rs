@@ -23,11 +23,6 @@ pub enum Mergeability {
     Unknown,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct RequiredCiCheck {
-    pub name: String,
-    pub app_id: Option<u64>,
-}
-#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StackMembership {
     pub number: u64,
     pub size: u64,
@@ -130,14 +125,6 @@ pub trait Forge {
         required_names: &[String],
         timeout: std::time::Duration,
     ) -> Result<crate::pr::observer::HeadReading, LandingError>;
-    /// Read required checks for the PR's base branch. `None` means the policy
-    /// could not be established; an empty vector is a known empty policy.
-    fn required_ci_policy(
-        &mut self,
-        _base_branch: &str,
-    ) -> Result<Option<Vec<RequiredCiCheck>>, LandingError> {
-        Ok(None)
-    }
     /// Adapter-selected cadence for the next observation, if it owns one.
     /// Callers use their declared policy cadence when the adapter has none.
     /// Where the checks of `commit` can be watched, when the forge has one.

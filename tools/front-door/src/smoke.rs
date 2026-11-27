@@ -14,7 +14,9 @@ use provenant_cli::{
         Settings, UNVERIFIED_KEY, Unverified,
     },
 };
-use provenant_core::{CancelToken, Clock, GitOid, HostId, WaitBudget, WallTime};
+use provenant_core::{
+    CancelToken, Clock, Deadline, DurationMicros, GitOid, HostId, MonoTime, WaitBudget, WallTime,
+};
 use provenant_fabric_runtime::{
     coordination::facade::FacadeError,
     hosts::{PeerAction, PeerResult, SmokeFixtureOp, SmokeFixtureReceipt},
@@ -788,6 +790,20 @@ pub(crate) fn run_lifecycle(
     run_lifecycle_with_timeout(clock, runner, program, state, home, args, timeout)
 }
 
+/// A monotonic deadline `timeout` after the clock's now, saturating at the far
+/// end of the coordinate rather than failing on an absurd timeout.
+pub(crate) fn deadline_after(clock: &dyn Clock, timeout: std::time::Duration) -> Deadline {
+    let budget =
+        DurationMicros::from_micros(u64::try_from(timeout.as_micros()).unwrap_or(u64::MAX));
+    Deadline::after(clock.mono_now(), budget)
+        .unwrap_or(Deadline::at(MonoTime::from_micros(u64::MAX)))
+}
+
+/// Whole seconds left before `deadline` on the clock's monotonic coordinate.
+pub(crate) fn remaining_seconds(clock: &dyn Clock, deadline: Deadline) -> u64 {
+    deadline.remaining(clock.mono_now()).as_micros() / 1_000_000
+}
+
 pub(crate) fn run_lifecycle_with_timeout(
     clock: &dyn Clock,
     runner: &crate::install::ChildRunner,
@@ -925,12 +941,8 @@ pub(crate) fn run_lifecycle_with_timeout(
     let program = program.as_os_str().to_owned();
     let write_enabled = !set.iter().any(|item| item == "write=false");
     let mut output = String::new();
-    let deadline = std::time::Instant::now() + timeout;
-    let remaining = || {
-        deadline
-            .saturating_duration_since(std::time::Instant::now())
-            .as_secs()
-    };
+    let deadline = deadline_after(clock, timeout);
+    let remaining = || remaining_seconds(clock, deadline);
     launch_phase.0 = clock.mono_now();
     let launched = runner.execute(&run, None, 1_048_576, remaining());
     launch_phase.1 = clock.mono_now();

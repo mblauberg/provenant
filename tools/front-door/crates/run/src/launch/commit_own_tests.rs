@@ -99,7 +99,7 @@ fn commit_own_stages_only_claimed_paths_and_cas_updates_the_branch()
     fs::write(fixture.repo.join("other.txt"), "other\n")?;
     let committed = fixture
         .commit(fixture.head, 0)
-        .map_err(|e| std::io::Error::other(e.message))?;
+        .map_err(|e| std::io::Error::other(e.message.clone()))?;
     assert_eq!(committed.ref_name, "refs/heads/main");
     assert_eq!(committed.paths, ["own.txt"]);
     let head = git(&fixture.repo, &["rev-parse", "HEAD"]);
@@ -128,7 +128,7 @@ fn commit_own_cas_retries_on_race() -> std::result::Result<(), Box<dyn std::erro
     fs::write(fixture.repo.join("own.txt"), "own\n")?;
     let committed = fixture
         .commit(fixture.head, 1)
-        .map_err(|e| std::io::Error::other(e.message))?;
+        .map_err(|e| std::io::Error::other(e.message.clone()))?;
     assert_ne!(committed.head.to_string(), current);
     let parent = git(&fixture.repo, &["rev-parse", "HEAD^"]);
     assert_eq!(parent, current);
@@ -157,7 +157,7 @@ fn commit_own_patch_retries_from_new_head_without_staging_worktree_bytes()
             },
             1,
         )
-        .map_err(|error| std::io::Error::other(error.message))?;
+        .map_err(|error| std::io::Error::other(error.message.clone()))?;
     assert_ne!(committed.head, current);
     assert_eq!(
         git(&fixture.repo, &["rev-parse", "HEAD^"]),

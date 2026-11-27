@@ -748,13 +748,19 @@ fn poll_one(
         &subscription.repository,
         request,
     )?;
-    let (status, checks) = crate::pr::status::poll_line(
+    let pinned_head = subscription
+        .head
+        .as_deref()
+        .map(provenant_core::GitOid::parse)
+        .transpose()?;
+    let (status, checks) = crate::pr::status::observe_line(
         &mut observer,
+        path,
+        roots.state.as_path(),
         subscription.number,
-        subscription.head.as_deref(),
         request,
         Duration::ZERO,
-        &crate::pr::status::gate_contexts(path, roots.state.as_path()),
+        pinned_head,
     )?;
     let detail = poll_detail(subscription, &status, &checks)?;
     project_poll(roots, project, subscription, progress, detail)

@@ -1106,9 +1106,9 @@ fn transient_project_failure_keeps_retry_deadline_until_recovery() {
         "JSON escaping remains bounded"
     );
     let saved_retry: ProjectRetryRecord = provenant_records::decode(
-        &retry_record_bytes,
+        retry_record_bytes.as_slice(),
         provenant_records::Limits {
-            max_bytes: PROJECT_RETRY_RECORD_LIMIT as usize,
+            max_bytes: PROJECT_RETRY_RECORD_LIMIT,
             ..provenant_records::Limits::CONFIG
         },
     )

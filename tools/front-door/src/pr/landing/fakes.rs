@@ -3,6 +3,13 @@ use super::{LandingError, model::*, ports::*};
 use provenant_cli::domains::MergeMethod;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
+/// One required check a fake base branch declares.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RequiredCiCheck {
+    pub name: String,
+    pub app_id: Option<u64>,
+}
+
 #[derive(Default)]
 pub struct FakeForge {
     pub target_branch: String,
@@ -47,6 +54,21 @@ pub struct FakeForge {
     pub events: Vec<String>,
     pub reverts: Vec<(u64, String, String, String)>,
 }
+impl FakeForge {
+    /// The required checks this fake declares for `base_branch`; `None` is an
+    /// unreadable policy.
+    fn required_ci_policy(
+        &self,
+        base_branch: &str,
+    ) -> Result<Option<Vec<RequiredCiCheck>>, LandingError> {
+        Ok(self
+            .required_ci_policies
+            .get(base_branch)
+            .cloned()
+            .unwrap_or(None))
+    }
+}
+
 impl Forge for FakeForge {
     fn review_gate_contexts(&self) -> &[String] {
         &self.review_gate_contexts
@@ -282,16 +304,6 @@ impl Forge for FakeForge {
             },
             retry_at: None,
         })
-    }
-    fn required_ci_policy(
-        &mut self,
-        base_branch: &str,
-    ) -> Result<Option<Vec<RequiredCiCheck>>, LandingError> {
-        Ok(self
-            .required_ci_policies
-            .get(base_branch)
-            .cloned()
-            .unwrap_or(None))
     }
     fn checks_with_timeout(
         &mut self,

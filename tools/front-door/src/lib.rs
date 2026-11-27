@@ -1564,11 +1564,7 @@ mod multi_host_run_tests {
             HostSelection::All,
             HostSelection::Many(vec!["a".into(), "b".into()]),
         ];
-        assert!(
-            multi_host
-                .iter()
-                .all(|target| super::invalid_run_target(target))
-        );
+        assert!(multi_host.iter().all(super::invalid_run_target));
         assert!(!super::invalid_run_target(&HostSelection::Named(
             "a".into()
         )));

@@ -105,7 +105,7 @@ pub(crate) fn resolve_child_launch(
                 warning: Some(warning),
             } = admission
             {
-                warn(warning);
+                warn(*warning);
             }
             ChildPlacement::ParentWorktree
         }
@@ -4536,6 +4536,7 @@ mod child_launch_tests {
         assert_eq!(error.class, ErrorClass::Configured);
         let setting = error
             .setting
+            .as_ref()
             .expect("a configured refusal names its setting");
         assert_eq!(setting.key, WORKTREE_SHARING_KEY);
         assert!(!error.next.is_empty());

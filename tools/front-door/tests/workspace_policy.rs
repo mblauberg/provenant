@@ -2187,7 +2187,8 @@ fn production_files_stay_within_their_line_ceilings() -> Result<(), Box<dyn Erro
         ("crates/run/src/completion.rs", 2750),
         // Stall detection and its opt-in policy (#3903); unreadable-record
         // writer-lease reclaim under writer exclusion (#3829).
-        ("crates/run/src/controls.rs", 5500),
+        // Agent-native wiring of reclaim and custody grace (#4121).
+        ("crates/run/src/controls.rs", 5750),
         ("crates/run/src/delivery.rs", 4750),
         ("crates/run/src/git_context.rs", 3000),
         // One host phase and one sealed settlement assembly (#4020, #4024).

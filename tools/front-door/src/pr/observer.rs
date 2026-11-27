@@ -635,6 +635,11 @@ impl Observer<ForgePort, WallClock> {
 }
 
 impl<F: Forge, C: Clock> Observer<F, C> {
+    /// The `owner/repo` this observer reads.
+    pub(crate) fn repository(&self) -> &str {
+        &self.repository
+    }
+
     #[cfg(test)]
     pub(crate) fn with(
         state: &Path,
@@ -1403,31 +1408,27 @@ impl<F: Forge, C: Clock> Observer<F, C> {
             Err(ObserveError::Unavailable(message)) if message.contains("HTTP 404") => {}
             Err(error) => return Err(error),
         }
-        match self.resource(
+        let rules = self.resource(
             &format!("rules/branches/{base}?per_page=100"),
             max_age,
             request,
-        ) {
-            Ok(rules) => {
-                if let Some(rows) = rules.get("rules").and_then(Value::as_array) {
-                    for rule in rows {
-                        if let Some(checks) = rule
-                            .pointer("/parameters/required_status_checks")
-                            .and_then(Value::as_array)
-                        {
-                            for check in checks {
-                                add(
-                                    &check["context"],
-                                    check["integration_id"]
-                                        .as_i64()
-                                        .and_then(|id| u64::try_from(id).ok()),
-                                );
-                            }
-                        }
+        )?;
+        if let Some(rows) = rules.as_array() {
+            for rule in rows {
+                if let Some(checks) = rule
+                    .pointer("/parameters/required_status_checks")
+                    .and_then(Value::as_array)
+                {
+                    for check in checks {
+                        add(
+                            &check["context"],
+                            check["integration_id"]
+                                .as_i64()
+                                .and_then(|id| u64::try_from(id).ok()),
+                        );
                     }
                 }
             }
-            Err(error) => return Err(error),
         }
         required.sort_by(|left, right| (&left.name, left.app).cmp(&(&right.name, right.app)));
         required.dedup();

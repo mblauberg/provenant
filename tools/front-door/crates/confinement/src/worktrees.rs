@@ -4,6 +4,7 @@ mod archive;
 pub use archive::{ArchiveError, ArchiveInfo, ArchiveReport, collect_archives};
 mod census;
 mod census_excusal;
+mod cleanliness;
 mod context;
 mod custody;
 mod doctor;
@@ -25,6 +26,7 @@ mod removal;
 mod setup;
 mod stranded;
 pub use census::*;
+pub use cleanliness::*;
 pub use context::{
     with_context, with_context_using_facts, with_context_using_workers,
     with_context_using_workers_and_facts,
