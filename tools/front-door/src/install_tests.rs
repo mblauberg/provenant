@@ -709,6 +709,54 @@ fn smoke_verify_gives_the_review_a_non_empty_range() -> Result<(), Box<dyn std::
 }
 
 #[test]
+// Spec: docs/specs/cli.md#upgrade-verification — a peer can only name a project
+// whose canonical common dir is relative to its home, so the smoke scratch must
+// sit under $HOME rather than $TMPDIR.
+fn smoke_scratch_root_is_projectable_to_a_peer() -> Result<(), Box<dyn std::error::Error>> {
+    use super::*;
+    use provenant_core::{HostId, ProjectId};
+    use provenant_fabric_runtime::{
+        hosts::ProjectLocator,
+        identity::{Address, Identity},
+    };
+    use provenant_records::AbsolutePath;
+
+    let tmp = tempfile::tempdir()?;
+    let home = tmp.path().join("home");
+    std::fs::create_dir(&home)?;
+    let scratch = smoke_scratch_root(&home)?;
+    assert!(
+        scratch.starts_with(&home),
+        "smoke scratch must be home-relative: {}",
+        scratch.display()
+    );
+
+    // Build a real fixture the way verify does, so the locator sees the same
+    // canonical common directory the peer call would name.
+    let runner = UpgradeRunner {
+        executor: provenant_os::exec::SystemExecutor::new(1)?,
+        environment: std::env::vars_os().collect(),
+        cwd: home.clone(),
+    };
+    let project = smoke_project(&runner, &scratch)?;
+    let common_dir = project.path().join(".git");
+    let host = HostId::from_bytes([1; 16]);
+    let identity = Identity {
+        project: ProjectId::from_bytes([2; 16]),
+        host,
+        inbox: Address::new(host, "chair")?,
+        client: "test".into(),
+        cwd: AbsolutePath::new(project.path())?,
+        common_dir: AbsolutePath::new(&common_dir)?,
+        federation: None,
+    };
+    let locator = ProjectLocator::new(&identity, &home)
+        .expect("the smoke scratch project must be projectable to a peer");
+    assert_eq!(locator.resolve(&home)?, common_dir);
+    Ok(())
+}
+
+#[test]
 fn remote_smoke_verify_carries_the_writer_branch_and_staged_fixture()
 -> Result<(), Box<dyn std::error::Error>> {
     use super::*;
@@ -855,6 +903,7 @@ fn smoke_dry_run_previews_nodes_without_launching() -> Result<(), Box<dyn std::e
         &runner,
         &launcher,
         &state,
+        tmp.path(),
         &cli::Upgrade {
             yes: false,
             from_source: None,
@@ -910,6 +959,7 @@ fn smoke_dry_run_pins_the_fixture_base_and_drops_a_user_base()
         &runner,
         &launcher,
         &state,
+        tmp.path(),
         &cli::Upgrade {
             yes: false,
             from_source: None,
@@ -930,6 +980,85 @@ fn smoke_dry_run_pins_the_fixture_base_and_drops_a_user_base()
     assert!(
         !run.contains("2222222222222222222222222222222222222222"),
         "{calls}"
+    );
+    Ok(())
+}
+
+#[test]
+// Spec: docs/specs/cli.md#run-explain-reports-peer-placement — a dry run
+// must preview the writer placement the real verify launches, not a preview
+// that falls back to the caller checkout because no base was named.
+fn smoke_preview_and_verify_share_writer_branch_and_base() -> Result<(), Box<dyn std::error::Error>>
+{
+    use super::*;
+
+    let tmp = tempfile::tempdir()?;
+    let program = tmp.path().join("provenant");
+    let project = tmp.path().join("project");
+    let state = tmp.path().join("state");
+    let graph = "smoke-verify-test";
+    let args = cli::Upgrade {
+        yes: false,
+        from_source: None,
+        hosts: "all".into(),
+        verify: true,
+        verify_only: false,
+        dry_run: true,
+        host: Some("peer-a".into()),
+        route: Some("junior".into()),
+        set: vec!["smoke-write=false".into(), "diff_base=ignored".into()],
+    };
+    let render = |explain: bool| {
+        smoke_run_argv(
+            &program,
+            &project,
+            &state,
+            &args,
+            graph,
+            "fixture-base",
+            explain,
+        )
+        .into_iter()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect::<Vec<_>>()
+    };
+    let preview = render(true);
+    let verify = render(false);
+    // Only the preview/launch mode flag and its name differ. The writer
+    // branch, its base and every routing control are one argv builder.
+    let without_mode = |argv: Vec<String>| {
+        let mut controls = Vec::new();
+        let mut skip_next = false;
+        for arg in argv {
+            if skip_next {
+                skip_next = false;
+                continue;
+            }
+            match arg.as_str() {
+                "--explain" => {}
+                "--name" => skip_next = true,
+                _ => controls.push(arg),
+            }
+        }
+        controls
+    };
+    assert_eq!(without_mode(preview.clone()), without_mode(verify.clone()));
+    assert!(preview.contains(&"--explain".to_owned()), "{preview:?}");
+    assert!(verify.contains(&"--name".to_owned()), "{verify:?}");
+    assert!(preview.contains(&"--branch".to_owned()), "{preview:?}");
+    assert!(preview.contains(&format!("smoke/{graph}")), "{preview:?}");
+    assert!(preview.contains(&"--base".to_owned()), "{preview:?}");
+    assert!(preview.contains(&"HEAD".to_owned()), "{preview:?}");
+    assert!(preview.contains(&"--host".to_owned()), "{preview:?}");
+    assert!(preview.contains(&"peer-a".to_owned()), "{preview:?}");
+    assert_eq!(
+        preview.iter().filter(|arg| *arg == "--set").count(),
+        2,
+        "{preview:?}"
+    );
+    assert!(
+        !preview.iter().any(|arg| arg.contains("diff_base=ignored")),
+        "{preview:?}"
     );
     Ok(())
 }

@@ -55,9 +55,30 @@ public struct LaneMetadata: Decodable, Equatable, Sendable {
     public let attempt: AttemptRecord
 }
 
+/// Why a lane is waiting: a tagged reason (`kind`) with the facts its label needs.
+public struct LaneWaitReason: Decodable, Equatable, Sendable {
+    public let kind: String
+    public let used: UInt64?
+    public let limit: UInt64?
+
+    /// The CLI's own description of each reason; an unknown kind shows as itself.
+    public var label: String {
+        switch kind {
+        case "host_stalled": "host_stalled: supervisor is in uninterruptible sleep"
+        case "children": "children: host and project admission yielded"
+        case "admission": "admission: waiting for host or project capacity"
+        case "launch_preparation": "launch preparation"
+        case "recovery_worker_refused":
+            "launch: last recovery worker refused: user process count "
+                + "\(used.map(String.init) ?? "?") of \(limit.map(String.init) ?? "?")"
+        default: kind
+        }
+    }
+}
+
 public struct LaneWait: Decodable, Equatable, Sendable {
     public let laneClass: String?
-    public let waitingFor: String?
+    public let waitingFor: LaneWaitReason?
 }
 
 /// One row of the run board.

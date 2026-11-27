@@ -20,6 +20,7 @@ use provenant_records::{
 };
 use serde::Serialize;
 use std::ffi::OsStr;
+use std::os::unix::fs::DirBuilderExt;
 use std::{
     io::{self, Write},
     path::{Path, PathBuf},
@@ -2253,16 +2254,36 @@ fn installed_destination(targets: &provenant_config::Targets) -> PathBuf {
     targets.bin_dir.join(provenant_config::STABLE_BINARY_NAME)
 }
 
+/// Where the smoke fixture checkout is built. A peer can only name a project
+/// whose canonical common directory is relative to its own home: `ProjectLocator`
+/// strips `$HOME` and hashes that relative path into a cross-host key, so a
+/// fixture under `$TMPDIR` can never be projected and a remote smoke refuses at
+/// the first node. Keep every smoke scratch under a home-relative state path and
+/// create it owner-only, matching the private run-store layout. Factored out so
+/// the projectability invariant can be pinned by a unit test.
+fn smoke_scratch_root(home: &Path) -> Result<PathBuf, String> {
+    let root = home
+        .join(provenant_core::DEFAULT_STATE_SUFFIX)
+        .join("smoke");
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&root)
+        .map_err(|error| format!("cannot prepare the smoke scratch root: {error}"))?;
+    Ok(root)
+}
+
 fn verify_smoke(
     targets: &provenant_config::Targets,
     args: &cli::Upgrade,
 ) -> Result<String, String> {
     let runner = runner_for_verify(targets)?;
+    let scratch = smoke_scratch_root(&targets.home)?;
     verify_smoke_with(
         &runner,
         &installed_destination(targets),
         targets.roots.state.as_path(),
-        &std::env::temp_dir(),
+        &scratch,
         args,
     )
 }
@@ -2453,53 +2474,22 @@ fn verify_smoke_with(
     // canonical common directory, and the scratch may not survive the run. An
     // unresolved binding is reported by cleanup, never hidden.
     let binding = smoke_project_binding(state_dir, project.path());
-    let program = program.as_os_str().to_owned();
+    let owned_program = program.as_os_str().to_owned();
     let graph = verify_graph_name();
-    let mut run = vec![
-        program.clone(),
-        "--project".into(),
-        project.path().as_os_str().to_owned(),
-        "--state-dir".into(),
-        state_dir.as_os_str().to_owned(),
-        "--json".into(),
-        "run".into(),
-        "smoke".into(),
-        "--name".into(),
-        graph.clone().into(),
-    ];
-    // The writer node needs a linked worktree. Locally the launch creates one
-    // on a branch of the fixture; on a peer the branch and base are carried
-    // across as peer-owned provisioning intent, so the peer creates its own
-    // worktree instead of inheriting this host's scratch path.
-    run.extend([
-        "--branch".into(),
-        format!("smoke/{graph}").into(),
-        "--base".into(),
-        "HEAD".into(),
-    ]);
-    if let Some(host) = &args.host {
-        run.extend(["--host".into(), host.into()]);
-    }
-    if let Some(route) = &args.route {
-        run.extend(["--route".into(), route.into()]);
-    }
-    for setting in &args.set {
-        if setting.starts_with("worktree=") || setting.starts_with("diff_base=") {
-            continue;
-        }
-        run.extend(["--set".into(), setting.into()]);
-    }
-    // The review nodes inspect the fixture's change; give them the base the
-    // fixture committed before it, not the writer's start point.
-    run.extend([
-        "--set".into(),
-        format!("diff_base={}", project.base()).into(),
-    ]);
+    let run = smoke_run_argv(
+        program,
+        project.path(),
+        state_dir,
+        args,
+        &graph,
+        project.base(),
+        false,
+    );
     let outcome = match runner.execute(&run, None, 1_048_576, 3600) {
         Ok(launched) => {
             let wait = runner.execute(
                 &[
-                    program.clone(),
+                    owned_program.clone(),
                     "--project".into(),
                     project.path().as_os_str().to_owned(),
                     "--state-dir".into(),
@@ -2516,7 +2506,7 @@ fn verify_smoke_with(
             );
             let status = runner.execute(
                 &[
-                    program,
+                    owned_program,
                     "--project".into(),
                     project.path().as_os_str().to_owned(),
                     "--state-dir".into(),
@@ -2584,25 +2574,45 @@ fn report_smoke_cleanup<T>(
     }
 }
 
-fn preview_smoke(
-    runner: &UpgradeRunner,
+/// The `run smoke` arguments shared by the real verify and its dry-run
+/// preview. The preview omits `--name` and asks for `--explain`, but it must
+/// otherwise place the writer exactly as the launch does: a branch and a base
+/// are the writer's start point, and without them the launch falls back to the
+/// caller checkout (#4103).
+fn smoke_run_argv(
     program: &Path,
+    project: &Path,
     state_dir: &Path,
     args: &cli::Upgrade,
-) -> Result<Vec<u8>, String> {
-    let project = smoke_project(runner, &std::env::temp_dir())?;
-    let binding = smoke_project_binding(state_dir, project.path());
+    graph: &str,
+    base: &str,
+    explain: bool,
+) -> Vec<std::ffi::OsString> {
     let mut argv = vec![
         program.as_os_str().to_owned(),
         "--project".into(),
-        project.path().as_os_str().to_owned(),
+        project.as_os_str().to_owned(),
         "--state-dir".into(),
         state_dir.as_os_str().to_owned(),
         "--json".into(),
         "run".into(),
         "smoke".into(),
-        "--explain".into(),
     ];
+    if explain {
+        argv.push("--explain".into());
+    } else {
+        argv.extend(["--name".into(), graph.into()]);
+    }
+    // The writer node needs a linked worktree. Locally the launch creates one
+    // on a branch of the fixture; on a peer the branch and base are carried
+    // across as peer-owned provisioning intent, so the peer creates its own
+    // worktree instead of inheriting this host's scratch path.
+    argv.extend([
+        "--branch".into(),
+        format!("smoke/{graph}").into(),
+        "--base".into(),
+        "HEAD".into(),
+    ]);
     if let Some(host) = &args.host {
         argv.extend(["--host".into(), host.into()]);
     }
@@ -2610,15 +2620,38 @@ fn preview_smoke(
         argv.extend(["--route".into(), route.into()]);
     }
     for setting in &args.set {
-        if setting.starts_with("diff_base=") {
+        if setting.starts_with("worktree=") || setting.starts_with("diff_base=") {
             continue;
         }
         argv.extend(["--set".into(), setting.into()]);
     }
-    argv.extend([
-        "--set".into(),
-        format!("diff_base={}", project.base()).into(),
-    ]);
+    // The review nodes inspect the fixture's change; give them the base the
+    // fixture committed before it, not the writer's start point. The host owns
+    // this binding, so a caller-supplied diff_base never reaches the launch.
+    argv.extend(["--set".into(), format!("diff_base={base}").into()]);
+    argv
+}
+
+fn preview_smoke(
+    runner: &UpgradeRunner,
+    program: &Path,
+    state_dir: &Path,
+    home: &Path,
+    args: &cli::Upgrade,
+) -> Result<Vec<u8>, String> {
+    let scratch = smoke_scratch_root(home)?;
+    let project = smoke_project(runner, &scratch)?;
+    let binding = smoke_project_binding(state_dir, project.path());
+    let graph = verify_graph_name();
+    let argv = smoke_run_argv(
+        program,
+        project.path(),
+        state_dir,
+        args,
+        &graph,
+        project.base(),
+        true,
+    );
     let outcome = runner.execute(&argv, None, 1_048_576, 60);
     report_smoke_cleanup(
         outcome,
@@ -2826,7 +2859,13 @@ pub(super) fn run_upgrade(args: cli::Upgrade, globals: &cli::Globals) -> u8 {
             }
         };
         let program = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("provenant"));
-        let output = preview_smoke(&runner, &program, targets.roots.state.as_path(), &args);
+        let output = preview_smoke(
+            &runner,
+            &program,
+            targets.roots.state.as_path(),
+            &targets.home,
+            &args,
+        );
         return match output {
             Ok(bytes) => {
                 let human = format!(

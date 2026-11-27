@@ -75,6 +75,23 @@ addressable.
 - Why: inspection must be safe outside a checkout and paths must not change in
   transit.
 
+## Upgrade verification
+
+`provenant upgrade --verify` builds its smoke fixture in an owner-only scratch
+project under a home-relative state path (`$HOME/.local/share/provenant/v2/smoke`
+by suffix), never in the system temporary directory. A peer can only name a
+project whose canonical common directory is relative to its own home:
+`ProjectLocator` strips `$HOME`, hashes that relative path into a cross-host key
+and resolves it against the receiving home. A fixture under `$TMPDIR` is outside
+that home, so a remote smoke could never be submitted and refused at its first
+node with `peer_project_unprojectable`. Every smoke scratch, including the
+`--dry-run` preview, uses the home-relative root, and the host binding is removed
+when verification ends. `--host PEER` runs the same graph on the peer and reaches
+its reader because the locator names a project the peer can resolve.
+
+- Why: a real remote verification must reach every node on the peer; a scratch
+  outside the home can never be projected and fails before submission.
+
 ## Build commands
 
 `provenant build` inspects and resets the host's build slots without reading
@@ -376,6 +393,27 @@ automatically and settlement releases it. A custody failure after a successful
 external action warns and can be retried by adoption.
 
 - Why: a chair acting on a listing must see work still running.
+
+### Run explain reports peer placement
+
+`run --explain` resolves each node's declared host with the same placement rule
+that admits a launch: `local`, `localhost` and this host's id are local, a
+configured peer is remote, and an unknown host is refused. A writer placed on a
+peer carries only a branch and a base ref, so its `source_admission` row names
+the peer (`host`), the worktree that peer will provision from that branch
+(`path`) and `pending_registration`; credential admission stays `pending_route`.
+No caller checkout path is resolved or admitted for that writer, and the
+explanation is not refused for the caller's state root. Local writers keep their
+existing admission check and row shape.
+
+`upgrade --verify --dry-run` builds the `run smoke --explain` preview from the
+same argument builder as the real verify, including the writer's branch and
+base. A preview that named no base would resolve the writer's identity from the
+caller checkout and report a refusal the launch itself does not produce.
+
+- Why: an explanation of a peer launch must describe the peer's writer, not the
+  caller's checkout, and a dry run must show the writer placement it would run.
+- Owner: `tools/front-door/src/fabric/interface.rs`, `tools/front-door/src/install.rs`
 
 ### Output references and bounded tails
 
