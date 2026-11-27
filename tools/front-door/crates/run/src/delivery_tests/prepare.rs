@@ -110,9 +110,9 @@ fn prepare_refuses_unavailable_and_unsafe_credential_helpers()
         assert_eq!(
             error.boundary_class(),
             if safety == HelperSafety::Unavailable {
-                provenant_records::diagnostic::BoundaryClass::None
+                provenant_records::policy::Boundary::None
             } else {
-                provenant_records::diagnostic::BoundaryClass::Credentials
+                provenant_records::policy::Boundary::Credentials
             }
         );
         assert!(matches!(

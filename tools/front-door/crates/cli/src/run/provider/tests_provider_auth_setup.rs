@@ -1127,7 +1127,7 @@ fn launch_prompt_spills_only_top_level_argv_and_refuses_conflicting_file()
             "ARGV_PROMPT".into(),
             provenant_records::policy::Strength::Refuse,
         )]),
-        provenant_records::policy::Source::Dispatch,
+        provenant_records::Layer::Route,
     );
     for adapter in ["cursor", "agy"] {
         let temp = tempfile::tempdir()?;
@@ -1232,7 +1232,7 @@ fn nested_argv_prompt_respects_configured_byte_limit() -> Result<(), Box<dyn std
             "ARGV_PROMPT".into(),
             provenant_records::policy::Strength::Off,
         )]),
-        provenant_records::policy::Source::Dispatch,
+        provenant_records::Layer::Route,
     );
     let off = launch_prompt(
         &text,
@@ -1250,8 +1250,8 @@ fn nested_argv_prompt_respects_configured_byte_limit() -> Result<(), Box<dyn std
         provenant_records::policy::Strength::Off
     );
     assert_eq!(
-        off_policy.rule("ARGV_PROMPT").source,
-        provenant_records::policy::Source::Dispatch
+        off_policy.rule("ARGV_PROMPT").source.layer,
+        provenant_records::Layer::Route
     );
     assert!(!attempt.join("prompt.md").exists());
 
@@ -1261,7 +1261,7 @@ fn nested_argv_prompt_respects_configured_byte_limit() -> Result<(), Box<dyn std
             "ARGV_PROMPT".into(),
             provenant_records::policy::Strength::Refuse,
         )]),
-        provenant_records::policy::Source::Dispatch,
+        provenant_records::Layer::Route,
     );
     let error = launch_prompt(
         &text,

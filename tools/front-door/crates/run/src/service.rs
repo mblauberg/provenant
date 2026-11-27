@@ -932,12 +932,12 @@ impl ErrorKind {
     }
 
     /// The hard boundary this code protects; non-boundary failures remain typed.
-    pub const fn boundary_class(self) -> provenant_records::diagnostic::BoundaryClass {
-        use provenant_records::diagnostic::BoundaryClass as B;
+    pub const fn boundary_class(self) -> provenant_records::policy::Boundary {
+        use provenant_records::policy::Boundary as B;
         match self {
             Self::CredentialRoot | Self::SharedSettingsNeverSynced => B::Credentials,
-            Self::ObjectImportLimit | Self::StateCorrupt => B::Integrity,
-            Self::RetainedWriterImport | Self::WriterLeaseHeld => B::LaneGit,
+            Self::ObjectImportLimit | Self::StateCorrupt => B::Operation,
+            Self::RetainedWriterImport | Self::WriterLeaseHeld => B::OtherWork,
             Self::WriterScope
             | Self::WriterBusy
             | Self::WriterLockBusy

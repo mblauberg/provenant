@@ -283,7 +283,7 @@
     #[test]
     // Spec: docs/specs/routing.md#accounts-and-credentials
     fn unknown_identity_flows_from_resolution_to_dispatch_admission() -> Result<(), Box<dyn Error>> {
-        use provenant_records::policy::{Policy, Source, Strength};
+        use provenant_records::policy::{Policy, Strength};
         use std::os::unix::fs::PermissionsExt;
         struct Resolver;
         impl provenant_core::PathResolver for Resolver {
@@ -313,7 +313,7 @@
         assert!(route.account_key.is_none());
         super::check_dispatch_candidate(&roots, &route, super::REGISTRY, &default)?;
         let mut strict = Policy::default();
-        strict.overlay(&[("QUOTA_IDENTITY_UNKNOWN".into(), Strength::Refuse)].into(), Source::Project);
+        strict.overlay(&[("QUOTA_IDENTITY_UNKNOWN".into(), Strength::Refuse)].into(), provenant_records::Layer::Project);
         let route = resolve(&strict, &access)?;
         assert!(matches!(route.readiness, RouteReadiness::Unavailable { reason: provenant_records::RouteExclusionReason::UnknownAccount, .. }));
         let route = resolve(&default, &[])?;

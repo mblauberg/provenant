@@ -5,13 +5,13 @@
 use provenant_records::{
     Layer, RouteExclusionReason, RouteReadiness, SandboxConstraint,
     diagnostic::{
-        BoundaryClass, ConfinementGuard, ContinuationCopyLimit, ContinuationField,
-        ContinuationIssue, ContinuationRule, LaneLimit, PacingReserveSetting, PacingSettingSource,
-        PlanFailure, PortSettingSource, PressureLevel, PressureThreshold, ResourceFact,
+        ConfinementGuard, ContinuationCopyLimit, ContinuationField, ContinuationIssue,
+        ContinuationRule, LaneLimit, PacingReserveSetting, PlanFailure, PressureLevel,
+        PressureThreshold, ResourceFact,
     },
     handoff::{BlockedOn, HandoffStatus, SpecConcernStatus, WriteScopeReport},
     limit::{BudgetAction, LimitStrength},
-    policy::{Boundary, Source, Strength},
+    policy::{Boundary, Strength},
     ports::ExitDisposition,
     route_selection::{
         Capability, ExclusionSource, PacingPolicy, PriorSource, SelectionRule, WeightSource,
@@ -146,10 +146,6 @@ fn attempt_record_enum_names_are_a_deliberate_contract() -> TestResult {
         ],
     )?;
     assert_unit_names::<Strength>("Strength", &["refuse", "warn", "off"])?;
-    assert_unit_names::<Source>(
-        "policy::Source",
-        &["compiled_default", "host", "project", "dispatch"],
-    )?;
 
     // Grants, limits and terminal state.
     assert_unit_names::<WriteSource>(
@@ -532,9 +528,15 @@ fn attempt_record_enum_names_are_a_deliberate_contract() -> TestResult {
             "account_does_not_offer",
         ],
     )?;
-    assert_unit_names::<BoundaryClass>(
-        "BoundaryClass",
-        &["none", "lane_git", "credentials", "integrity", "authority"],
+    assert_unit_names::<Boundary>(
+        "Boundary",
+        &[
+            "none",
+            "credentials",
+            "other_work",
+            "authority",
+            "operation",
+        ],
     )?;
     assert_unit_names::<PlanFailure>(
         "PlanFailure",
@@ -663,11 +665,11 @@ fn attempt_record_enum_names_are_a_deliberate_contract() -> TestResult {
             ),
             (
                 "lane_ports",
-                json!({"kind": "lane_ports", "blocks": 1, "origin": "configuration"}),
+                json!({"kind": "lane_ports", "blocks": 1, "origin": "host"}),
             ),
             (
                 "pacing_reserve",
-                json!({"kind": "pacing_reserve", "percent": 1, "setting": "account", "origin": "configuration", "account": "a", "window": "w", "setting_path": "p"}),
+                json!({"kind": "pacing_reserve", "percent": 1, "setting": "account", "origin": "host", "account": "a", "window": "w", "setting_path": "p"}),
             ),
             (
                 "memory_pressure",
@@ -704,14 +706,6 @@ fn attempt_record_enum_names_are_a_deliberate_contract() -> TestResult {
     assert_unit_names::<PacingReserveSetting>(
         "PacingReserveSetting",
         &["adapter_five_hour", "adapter_seven_day", "account", "free"],
-    )?;
-    assert_unit_names::<PacingSettingSource>(
-        "PacingSettingSource",
-        &["configuration", "shipped_default", "unresolved"],
-    )?;
-    assert_unit_names::<PortSettingSource>(
-        "PortSettingSource",
-        &["configuration", "shipped_default", "recorded_plan"],
     )?;
     assert_unit_names::<ContinuationCopyLimit>(
         "ContinuationCopyLimit",

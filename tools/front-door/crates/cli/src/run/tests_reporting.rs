@@ -237,7 +237,7 @@ fn output_retains_safe_refusal_remedies() -> Result<(), Box<dyn std::error::Erro
             _: Option<&run::AttemptRecord>,
         ) -> Result<run::PreparedLaunch, Box<run::PrepareRefusal>> {
             Err(Box::new(run::PrepareRefusal {
-                boundary_class: provenant_records::diagnostic::BoundaryClass::None,
+                boundary_class: provenant_records::policy::Boundary::None,
                 policy_code: None,
                 resource: None,
                 cause: provenant_records::run::CauseKind::AccessPolicyRefused,

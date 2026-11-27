@@ -373,11 +373,11 @@ fn host_denied_handoff_remains_best_effort() -> Result<(), Box<dyn std::error::E
 #[test]
 fn commit_source_preparation_refusal_retains_preselection_permission_diagnostics()
 -> Result<(), Box<dyn std::error::Error>> {
-    use provenant_records::diagnostic::BoundaryClass;
+    use provenant_records::policy::Boundary;
     for (plan_error, boundary) in [
-        ("credential_root", BoundaryClass::Credentials),
-        ("invalid_roots", BoundaryClass::Authority),
-        ("resolver", BoundaryClass::Credentials),
+        ("credential_root", Boundary::Credentials),
+        ("invalid_roots", Boundary::Authority),
+        ("resolver", Boundary::Credentials),
     ] {
         let mut fixture = CommitSourcePreparation::new()?;
         if plan_error == "invalid_roots" {
@@ -426,7 +426,7 @@ fn commit_source_preparation_refusal_retains_preselection_permission_diagnostics
                 Some("route resolver classification: family_separation"),
             );
             // A denied adapter check cannot reclassify a separate router error.
-            assert_eq!(refusal.boundary_class, BoundaryClass::None);
+            assert_eq!(refusal.boundary_class, Boundary::None);
         } else {
             assert_eq!(refusal.boundary_class, boundary);
         }

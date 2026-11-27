@@ -3180,7 +3180,7 @@ impl WriterLaunch {
                 base: base.to_string(),
                 head: head.to_string(),
                 strength: policy.rule("WRITE_SCOPE").rule.strength,
-                source: policy.rule("WRITE_SCOPE").source,
+                source: policy.rule("WRITE_SCOPE").source.clone(),
                 out_of_scope_paths: paths,
             })?,
             provenant_records::run::TERMINAL_RECORD_LIMIT,
@@ -3413,7 +3413,7 @@ impl WriterLaunch {
             source.as_ref(),
             enforcement,
         ) {
-            if error.boundary_class() != provenant_records::diagnostic::BoundaryClass::None {
+            if error.boundary_class() != provenant_records::policy::Boundary::None {
                 return Err(error);
             }
             let effect = enforcement.check(

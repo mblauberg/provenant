@@ -351,7 +351,7 @@ impl PreparedProvider<'_> {
                 detail,
             ),
         );
-        refusal.boundary_class = provenant_records::diagnostic::BoundaryClass::Authority;
+        refusal.boundary_class = provenant_records::policy::Boundary::Authority;
         refusal.policy_code = Some(code.to_owned());
         refusal
     }

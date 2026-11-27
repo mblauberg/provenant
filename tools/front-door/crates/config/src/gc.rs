@@ -678,7 +678,7 @@ pub const DISK_FLOOR: &str = "DISK_FLOOR";
 pub struct DiskGate {
     pub limits: DiskLimits,
     pub strength: provenant_records::policy::Strength,
-    pub source: provenant_records::policy::Source,
+    pub source: provenant_records::Layer,
 }
 impl DiskGate {
     pub fn new(limits: DiskLimits, policy: &provenant_records::policy::Policy) -> Self {
@@ -686,7 +686,7 @@ impl DiskGate {
         Self {
             limits,
             strength: rule.rule.strength,
-            source: rule.source,
+            source: rule.source.layer,
         }
     }
 
@@ -1522,7 +1522,7 @@ mod disk_limit_tests {
     #[test]
     fn disk_gate_effect_follows_the_declared_disk_floor_rule()
     -> Result<(), Box<dyn std::error::Error>> {
-        use provenant_records::policy::{Effect, Policy, Source, Strength};
+        use provenant_records::policy::{Effect, Policy, Strength};
         let temp = tempfile::tempdir()?;
         let limits = GcSettings {
             free_floor: Some("100B".into()),
@@ -1532,7 +1532,7 @@ mod disk_limit_tests {
         .disk_limits(temp.path())?;
         let shipped = DiskGate::new(limits, &Policy::default());
         assert_eq!(shipped.strength, Strength::Warn);
-        assert_eq!(shipped.source, Source::CompiledDefault);
+        assert_eq!(shipped.source, Layer::Default);
         for strength in provenant_records::policy::table()
             .iter()
             .find(|rule| rule.code == DISK_FLOOR)
@@ -1542,10 +1542,10 @@ mod disk_limit_tests {
             let mut policy = Policy::default();
             policy.overlay(
                 &BTreeMap::from([(DISK_FLOOR.to_owned(), strength)]),
-                Source::Host,
+                Layer::Host,
             );
             let gate = DiskGate::new(limits, &policy);
-            assert_eq!((gate.strength, gate.source), (strength, Source::Host));
+            assert_eq!((gate.strength, gate.source), (strength, Layer::Host));
             let decoded: DiskGate = serde_json::from_slice(&serde_json::to_vec(&gate)?)?;
             for free in [0, 49, 50, 99, 100] {
                 let effect = decoded.decide(free);

@@ -41,21 +41,21 @@ fn typed_local(
     };
     let message = format!("{phase}: {error}");
     let class = error.boundary_class();
-    if class != provenant_records::diagnostic::BoundaryClass::None {
+    if class != provenant_records::policy::Boundary::None {
         let code = match class {
-            provenant_records::diagnostic::BoundaryClass::Credentials => {
+            provenant_records::policy::Boundary::Credentials => {
                 "PREPARATION_PREPARE_WITH_CREDENTIALS"
             }
-            provenant_records::diagnostic::BoundaryClass::LaneGit => {
+            provenant_records::policy::Boundary::OtherWork => {
                 "HAND_OFF_RUNSTORE_HAND_OFF_GIT_ISOLATION"
             }
-            provenant_records::diagnostic::BoundaryClass::Integrity => {
+            provenant_records::policy::Boundary::Operation => {
                 "ARTIFACTS_RUNSTORE_ARTIFACT_BYTES_DATA_INTEGRITY"
             }
-            provenant_records::diagnostic::BoundaryClass::Authority => {
+            provenant_records::policy::Boundary::Authority => {
                 "HAND_OFF_RUNSTORE_HAND_OFF_AUTHORITY"
             }
-            provenant_records::diagnostic::BoundaryClass::None => {
+            provenant_records::policy::Boundary::None => {
                 return HandOff::Local(message);
             }
         };
@@ -103,7 +103,7 @@ fn launch_lineage_refusal(policy: &provenant_records::policy::Policy, error: &Ru
             policy,
             "CONTROLS_RUNSTORE_CHECK_WRITER_LINEAGE_AUTHORITY",
             format!("writer lineage: {error}"),
-            provenant_records::diagnostic::BoundaryClass::Authority,
+            provenant_records::policy::Boundary::Authority,
         ),
         RunError::WriterLineage(detail) => HandOff::TypedLocal {
             message: format!("writer lineage mismatch: {detail}"),
@@ -117,7 +117,7 @@ fn boundary_handoff(
     policy: &provenant_records::policy::Policy,
     code: &str,
     message: String,
-    class: provenant_records::diagnostic::BoundaryClass,
+    class: provenant_records::policy::Boundary,
 ) -> HandOff {
     let message = policy.boundary_error(
         code,
@@ -147,7 +147,7 @@ fn custody_local(
             policy,
             "HAND_OFF_RUNSTORE_HAND_OFF_AUTHORITY",
             message,
-            provenant_records::diagnostic::BoundaryClass::Authority,
+            provenant_records::policy::Boundary::Authority,
         ),
         _ => HandOff::Local(message),
     }
@@ -233,7 +233,7 @@ impl RunStore {
                 &policy,
                 "HAND_OFF_RUNSTORE_HAND_OFF_AUTHORITY",
                 "writer confinement: does not match the task".into(),
-                provenant_records::diagnostic::BoundaryClass::Authority,
+                provenant_records::policy::Boundary::Authority,
             ));
         }
         let writer_path = writer
@@ -246,7 +246,7 @@ impl RunStore {
                         &policy,
                         "HAND_OFF_RUNSTORE_HAND_OFF_AUTHORITY",
                         "writer custody: missing".into(),
-                        provenant_records::diagnostic::BoundaryClass::Authority,
+                        provenant_records::policy::Boundary::Authority,
                     )
                 })?;
                 self.acquire_writer_fenced(directory, scope, binding, acquire_writer, call)
@@ -316,7 +316,7 @@ impl RunStore {
                     &policy,
                     "HAND_OFF_RUNSTORE_HAND_OFF_GIT_ISOLATION",
                     "shared writer checkout differs from its owning lane's grant".into(),
-                    provenant_records::diagnostic::BoundaryClass::LaneGit,
+                    provenant_records::policy::Boundary::OtherWork,
                 )));
             }
         }
@@ -349,7 +349,7 @@ impl RunStore {
                     &policy,
                     "HAND_OFF_RUNSTORE_HAND_OFF_AUTHORITY_2",
                     "attempt: changed before handoff".into(),
-                    provenant_records::diagnostic::BoundaryClass::Authority,
+                    provenant_records::policy::Boundary::Authority,
                 )));
             }
             Err(error) => {
@@ -939,7 +939,7 @@ mod tests {
     #[test]
     fn custody_refusals_distinguish_authority_from_operational_failures() {
         use crate::writer::WriterCustodyError;
-        use provenant_records::diagnostic::BoundaryClass;
+        use provenant_records::policy::Boundary;
         for error in [
             custody::CustodyError::Fenced,
             custody::CustodyError::UnknownIdentity,
@@ -949,14 +949,14 @@ mod tests {
             assert!(matches!(
                 custody_local(&test_policy(), "publication reservation", &error),
                 HandOff::Boundary {
-                    class: BoundaryClass::Authority,
+                    class: Boundary::Authority,
                     ..
                 }
             ));
             assert!(matches!(
                 custody_refusal(&test_policy(), WriterCustodyError::Admission(error), None),
                 HandOff::Boundary {
-                    class: BoundaryClass::Authority,
+                    class: Boundary::Authority,
                     ..
                 }
             ));
@@ -1000,7 +1000,7 @@ mod tests {
         assert!(matches!(
             custody_local(&test_policy(), "publication reservation", &error),
             HandOff::Boundary {
-                class: provenant_records::diagnostic::BoundaryClass::Authority,
+                class: provenant_records::policy::Boundary::Authority,
                 ..
             }
         ));
@@ -1033,14 +1033,14 @@ mod tests {
     #[test]
     fn typed_handoff_preserves_boundary_and_terminal_cause() {
         use provenant_confinement::permissions::{AvailabilityReason, PermissionError};
-        use provenant_records::diagnostic::BoundaryClass;
+        use provenant_records::policy::Boundary;
         let error = RunError::Confinement(PermissionError::BackendNotAvailable(
             AvailabilityReason::UnsupportedPlatform,
         ));
         assert!(matches!(
             typed_local(&test_policy(), "confinement command", &error),
             HandOff::Boundary {
-                class: BoundaryClass::Authority,
+                class: Boundary::Authority,
                 cause: Some(CauseKind::UnsupportedPlatform),
                 ..
             }
@@ -1053,7 +1053,7 @@ mod tests {
         assert!(matches!(
             typed_local(&test_policy(), "Git setup", &credential),
             HandOff::Boundary {
-                class: BoundaryClass::Credentials,
+                class: Boundary::Credentials,
                 cause: None,
                 ..
             }
@@ -1084,7 +1084,7 @@ mod tests {
                 assert!(matches!(
                     handoff,
                     HandOff::Boundary {
-                        class: BoundaryClass::Credentials,
+                        class: Boundary::Credentials,
                         cause: Some(CauseKind::DeliveryPrepareCredentialHelper),
                         ..
                     }
@@ -1111,7 +1111,7 @@ mod tests {
         assert!(matches!(
             typed_local(&test_policy(), "lane Git objects", &retained),
             HandOff::Boundary {
-                class: BoundaryClass::LaneGit,
+                class: Boundary::OtherWork,
                 cause: None,
                 ..
             }
@@ -1123,7 +1123,7 @@ mod tests {
                 &RunError::WriterHeadNotLaneBranch
             ),
             HandOff::Boundary {
-                class: BoundaryClass::LaneGit,
+                class: Boundary::OtherWork,
                 cause: None,
                 ..
             }
@@ -1172,7 +1172,7 @@ mod tests {
             &call,
         );
         assert!(
-            matches!(result, Err(HandOff::Boundary { message, class: provenant_records::diagnostic::BoundaryClass::Authority, .. }) if message.contains("writer confinement"))
+            matches!(result, Err(HandOff::Boundary { message, class: provenant_records::policy::Boundary::Authority, .. }) if message.contains("writer confinement"))
         );
         Ok(())
     }
@@ -1345,7 +1345,7 @@ mod tests {
             matches!(
                 result,
                 Err(HandOff::Boundary {
-                    class: provenant_records::diagnostic::BoundaryClass::LaneGit,
+                    class: provenant_records::policy::Boundary::OtherWork,
                     ..
                 })
             ),

@@ -889,7 +889,7 @@ fn pool_refusal_covers_its_pool_and_a_model_refusal_only_its_model()
 fn failed_probe_ranks_last_warns_expires_and_can_refuse() -> Result<(), Box<dyn std::error::Error>>
 {
     use provenant_quota::{ReadinessReason as Why, ReadinessState as State};
-    use provenant_records::policy::{Source, Strength};
+    use provenant_records::policy::Strength;
 
     let catalogue = Catalogue::bundled()?;
     let mut config = RoutingConfig::default();
@@ -945,8 +945,8 @@ fn failed_probe_ranks_last_warns_expires_and_can_refuse() -> Result<(), Box<dyn 
         Strength::Warn
     );
     assert_eq!(
-        config.launch_policy.rule("PROBE_FAILURE").source,
-        Source::CompiledDefault
+        config.launch_policy.rule("PROBE_FAILURE").source.layer,
+        provenant_records::Layer::Default
     );
 
     let stale = readiness_over(vec![failed((80, 100))]);
@@ -960,11 +960,11 @@ fn failed_probe_ranks_last_warns_expires_and_can_refuse() -> Result<(), Box<dyn 
 
     config.launch_policy.overlay(
         &BTreeMap::from([("PROBE_FAILURE".into(), Strength::Refuse)]),
-        Source::Dispatch,
+        provenant_records::Layer::Route,
     );
     assert_eq!(
-        config.launch_policy.rule("PROBE_FAILURE").source,
-        Source::Dispatch
+        config.launch_policy.rule("PROBE_FAILURE").source.layer,
+        provenant_records::Layer::Route
     );
     let ctx = RoutingContext {
         availability: only_a,

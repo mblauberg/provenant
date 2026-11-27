@@ -992,7 +992,7 @@ pub enum SandboxFloorStrength {
 #[serde(default)]
 pub struct SandboxAdmissionReceipt {
     pub parent_sandboxed: bool,
-    pub boundary: crate::diagnostic::BoundaryClass,
+    pub boundary: crate::policy::Boundary,
     pub strength: SandboxFloorStrength,
     pub knob: String,
     pub source: crate::Layer,
@@ -2057,7 +2057,7 @@ pub struct SkippedRoute {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan_error: Option<crate::diagnostic::PlanFailure>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub guard_boundary: Option<crate::diagnostic::BoundaryClass>,
+    pub guard_boundary: Option<crate::policy::Boundary>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub guard_resource: Option<crate::diagnostic::ResourceFact>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2109,7 +2109,7 @@ impl SkippedRoute {
     /// Preserve an individual candidate's safe guard facts across fallback.
     pub fn set_guard_facts(
         &mut self,
-        boundary: Option<crate::diagnostic::BoundaryClass>,
+        boundary: Option<crate::policy::Boundary>,
         resource: Option<crate::diagnostic::ResourceFact>,
     ) -> Result<(), serde_json::Error> {
         self.guard_boundary = boundary;
@@ -3315,7 +3315,7 @@ mod tests {
             guard_resource: Some(crate::diagnostic::ResourceFact::PacingReserve {
                 percent: 10,
                 setting: crate::diagnostic::PacingReserveSetting::Account,
-                origin: crate::diagnostic::PacingSettingSource::Configuration,
+                origin: crate::Layer::Host,
                 hold: Box::new(crate::diagnostic::PacingHold {
                     account: "codex/opaque-account".into(),
                     window: "five_hour".into(),
@@ -3552,7 +3552,7 @@ mod tests {
         skipped = serde_json::from_slice(&serde_json::to_vec(&skipped)?)?;
         assert_eq!(
             skipped.guard_boundary,
-            Some(crate::diagnostic::BoundaryClass::Authority)
+            Some(crate::policy::Boundary::Authority)
         );
         assert_eq!(
             skipped.diagnostic().detail.as_deref(),

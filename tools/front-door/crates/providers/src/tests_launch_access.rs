@@ -592,7 +592,7 @@ fn cursor_uses_outer_confinement_for_fresh_and_resumed_tool_access() -> Result<(
             "ARGV_PROMPT".into(),
             provenant_records::policy::Strength::Refuse,
         )]),
-        provenant_records::policy::Source::Project,
+        provenant_records::Layer::Project,
     );
     let mut input = fixture_input(&route, &plan, &prompt, Path::new("/fixture/repo"), None);
     input.policy = &strict;

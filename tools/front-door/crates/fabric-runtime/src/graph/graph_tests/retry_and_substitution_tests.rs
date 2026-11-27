@@ -472,7 +472,7 @@ fn review_substitute_prefers_a_new_family_but_can_use_the_same_family() {
 
 #[test]
 fn configured_graph_concurrency_refusal_uses_the_owner_policy() {
-    use provenant_records::policy::{Policy, Source, Strength};
+    use provenant_records::policy::{Policy, Strength};
     let document = graph(vec![
         node("one", route("first")),
         node("two", route("first")),
@@ -484,7 +484,7 @@ fn configured_graph_concurrency_refusal_uses_the_owner_policy() {
     let mut policy = Policy::default();
     policy.overlay(
         &[("GRAPH_CONCURRENCY_CAP".to_owned(), Strength::Refuse)].into(),
-        Source::Project,
+        provenant_records::Layer::Project,
     );
     let mut owner = FakeOwner {
         admission_policy: Some(policy),

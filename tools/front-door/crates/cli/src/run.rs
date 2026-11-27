@@ -910,7 +910,7 @@ fn settlement_policy(
             let mut policy = provenant_records::policy::Policy::default();
             policy.overlay(
                 &provenant_config::policy::dispatch(&task.profile),
-                provenant_records::policy::Source::Dispatch,
+                provenant_records::Layer::Route,
             );
             policy
         }

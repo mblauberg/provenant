@@ -16,18 +16,6 @@ impl fmt::Display for Layer {
 /// Maximum UTF-8 bytes in each projected field, after terminal escaping.
 pub const MAX_DIAGNOSTIC_BYTES: usize = 1024;
 
-/// The hard boundary protected by a typed refusal, if any.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum BoundaryClass {
-    #[default]
-    None,
-    LaneGit,
-    Credentials,
-    Integrity,
-    Authority,
-}
-
 /// Closed preparation failures; paths and provider output never enter receipts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -307,49 +295,12 @@ pub enum PacingReserveSetting {
     Account,
     Free,
 }
-/// Source of the reserve selected by routing. Adapter overrides need the
-/// configuration loader's per-field origin before they are projected.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PacingSettingSource {
-    Configuration,
-    ShippedDefault,
-    Unresolved,
-}
-impl PacingSettingSource {
-    pub fn description(self) -> &'static str {
-        match self {
-            Self::Configuration => "host configuration",
-            Self::ShippedDefault => "shipped default",
-            Self::Unresolved => "origin unavailable",
-        }
-    }
-}
-
 /// Details identifying the account, window and configuration behind a pacing hold.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PacingHold {
     pub account: String,
     pub window: String,
     pub setting_path: String,
-}
-
-/// Origin of a lane-port block count in the handed-off plan.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PortSettingSource {
-    Configuration,
-    ShippedDefault,
-    RecordedPlan,
-}
-impl PortSettingSource {
-    pub fn description(self) -> &'static str {
-        match self {
-            Self::Configuration => "host configuration",
-            Self::ShippedDefault => "shipped default",
-            Self::RecordedPlan => "recorded plan",
-        }
-    }
 }
 
 /// Configurable budgets for copying retained provider state. These never alter
@@ -417,12 +368,12 @@ pub enum ResourceFact {
     },
     LanePorts {
         blocks: u32,
-        origin: PortSettingSource,
+        origin: Layer,
     },
     PacingReserve {
         percent: u8,
         setting: PacingReserveSetting,
-        origin: PacingSettingSource,
+        origin: Layer,
         #[serde(flatten)]
         hold: Box<PacingHold>,
     },

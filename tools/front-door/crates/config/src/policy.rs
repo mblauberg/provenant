@@ -1,6 +1,7 @@
 //! Host/project policy overlays; the executable defaults belong to records.
 use crate::{DomainConfig, DomainSection, FieldMetadata};
-use provenant_records::policy::{Policy, Source, Strength};
+use provenant_records::Layer;
+use provenant_records::policy::{Policy, Strength};
 use provenant_records::warning::{CONFIG_UNAVAILABLE, Warning, warn};
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, path::Path};
@@ -58,17 +59,17 @@ impl Settings {
         let mut policy = Policy::default();
         overlay_knobs(&mut policy, knobs);
         if let Some(project) = self.projects.get(project) {
-            policy.overlay(&project.rules, Source::Project);
+            policy.overlay(&project.rules, Layer::Project);
         }
-        policy.overlay(dispatch, Source::Dispatch);
+        policy.overlay(dispatch, Layer::Route);
         policy
     }
     pub fn resolve(&self, project: &str, dispatch: &BTreeMap<String, Strength>) -> Policy {
         let mut policy = Policy::default();
         if let Some(project) = self.projects.get(project) {
-            policy.overlay(&project.rules, Source::Project);
+            policy.overlay(&project.rules, Layer::Project);
         }
-        policy.overlay(dispatch, Source::Dispatch);
+        policy.overlay(dispatch, Layer::Route);
         policy
     }
 }
@@ -114,12 +115,12 @@ pub fn read_reporting(
                 values.insert(code.to_owned(), strength);
             }
         }
-        policy.overlay(&values, Source::Host);
+        policy.overlay(&values, Layer::Host);
     }
     if let Some(project) = settings.projects.get(project) {
-        policy.overlay(&project.rules, Source::Project);
+        policy.overlay(&project.rules, Layer::Project);
     }
-    policy.overlay(dispatch, Source::Dispatch);
+    policy.overlay(dispatch, Layer::Route);
     policy
 }
 /// Dispatch overrides are already parsed and sealed by `dispatch_profile`.
@@ -162,7 +163,7 @@ pub fn overlay_knobs(
             ))
         })
         .collect();
-    policy.overlay(&values, Source::Host);
+    policy.overlay(&values, Layer::Host);
 }
 
 #[cfg(test)]

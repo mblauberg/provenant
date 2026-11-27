@@ -1262,7 +1262,7 @@ fn peer_pacing_refusal_is_definite_and_preserves_its_fact_on_receipt_replay() ->
         return Ok(());
     }
     use graph::GraphJournal;
-    use provenant_records::diagnostic::{PacingReserveSetting, PacingSettingSource, ResourceFact};
+    use provenant_records::diagnostic::{PacingReserveSetting, ResourceFact};
     struct Pacing(ResourceFact);
     impl provenant_run::Providers for Pacing {
         fn prepare(
@@ -1337,7 +1337,7 @@ fn peer_pacing_refusal_is_definite_and_preserves_its_fact_on_receipt_replay() ->
     let fact = ResourceFact::PacingReserve {
         percent: 23,
         setting: PacingReserveSetting::AdapterFiveHour,
-        origin: PacingSettingSource::Configuration,
+        origin: provenant_records::Layer::Host,
         hold: Box::new(provenant_records::diagnostic::PacingHold {
             account: "codex/opaque-account".into(),
             window: "five_hour".into(),

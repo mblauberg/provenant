@@ -567,11 +567,11 @@ fn a_waiting_parent_yields_its_slot_to_its_child() {
         ..Default::default()
     };
     let refusing_policy = || {
-        use provenant_records::policy::{Policy, Source, Strength};
+        use provenant_records::policy::{Policy, Strength};
         let mut policy = Policy::default();
         policy.overlay(
             &[("GRAPH_CONCURRENCY_CAP".to_owned(), Strength::Refuse)].into(),
-            Source::Project,
+            provenant_records::Layer::Project,
         );
         policy
     };
@@ -1348,11 +1348,11 @@ fn yielded_writer_parent_drains_more_children_than_the_slot_limit() {
         add(&document, &mut checkpoint, "a", &request).unwrap();
         let mut owner = FakeOwner {
             admission_policy: Some({
-                use provenant_records::policy::{Policy, Source, Strength};
+                use provenant_records::policy::{Policy, Strength};
                 let mut policy = Policy::default();
                 policy.overlay(
                     &[("GRAPH_CONCURRENCY_CAP".to_owned(), Strength::Refuse)].into(),
-                    Source::Project,
+                    provenant_records::Layer::Project,
                 );
                 policy
             }),

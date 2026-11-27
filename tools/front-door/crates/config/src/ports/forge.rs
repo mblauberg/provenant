@@ -1257,7 +1257,7 @@ esac
     // Spec: docs/specs/state.md#config-never-widens-authority
     #[test]
     fn adapter_retains_project_policy() {
-        use provenant_records::policy::{Source, Strength};
+        use provenant_records::policy::Strength;
         let mut settings = crate::policy::Settings::default();
         settings.projects.insert(
             "project".into(),
@@ -1283,8 +1283,8 @@ esac
             Strength::Refuse
         );
         assert_eq!(
-            adapter.policy.rule("PORT_COMMAND_EVIDENCE").source,
-            Source::Project
+            adapter.policy.rule("PORT_COMMAND_EVIDENCE").source.layer,
+            Layer::Project
         );
     }
 

@@ -1065,10 +1065,10 @@ impl provenant_os::capture::DecodedEventSink for Events {
     }
 }
 #[derive(Debug, thiserror::Error)]
-#[error("no free lane port block; domains.fabric.lanes.lane_port_blocks={blocks} ({}); raise or disable this setting", match origin { provenant_records::diagnostic::PortSettingSource::Configuration => "host configuration", provenant_records::diagnostic::PortSettingSource::ShippedDefault => "compiled default", provenant_records::diagnostic::PortSettingSource::RecordedPlan => "recorded plan" })]
+#[error("no free lane port block; domains.fabric.lanes.lane_port_blocks={blocks} ({}); raise or disable this setting", match origin { provenant_records::Layer::Host => "host configuration", provenant_records::Layer::Default => "compiled default", provenant_records::Layer::Detected => "recorded plan", other => other.description() })]
 struct LanePortRefusal {
     blocks: u32,
-    origin: provenant_records::diagnostic::PortSettingSource,
+    origin: provenant_records::Layer,
 }
 impl LanePortRefusal {
     fn fact(&self) -> provenant_records::diagnostic::ResourceFact {
@@ -1102,15 +1102,14 @@ fn lane_port_allocation(
                 Effect::Warn(warning) => return Ok((None, Some(warning))),
                 Effect::Refuse(_) | Effect::Stop(_) => {}
             }
-            use provenant_records::diagnostic::PortSettingSource;
             let origin = match plan.blocks_origin {
                 Some(provenant_os::lane_ports::BlocksOrigin::CompiledDefault) => {
-                    PortSettingSource::ShippedDefault
+                    provenant_records::Layer::Default
                 }
                 Some(provenant_os::lane_ports::BlocksOrigin::HostConfig) => {
-                    PortSettingSource::Configuration
+                    provenant_records::Layer::Host
                 }
-                None => PortSettingSource::RecordedPlan,
+                None => provenant_records::Layer::Detected,
             };
             Err(LanePortRefusal {
                 blocks: plan.blocks,

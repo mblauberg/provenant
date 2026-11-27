@@ -680,10 +680,8 @@ fn base_thirteen_migration_rewrites_v282_usage_and_receipts() -> TestResult {
          "guard_resource":{"kind":"disk","free":1,"floor":2,"origin":"configuration"}},
         {"route":"b","kind":"unavailable","detail":"fixture",
          "guard_resource":{"kind":"grant_limit","limit":7,"origin":"shipped_default"}},
-        // These two guards use their own setting-source enums, which still
-        // spell these origins `configuration` / `shipped_default`. The
-        // Layer-typed rewrite must leave them alone or this terminal row
-        // would stop decoding after migration.
+        // These two guards used their own setting-source enums; the
+        // migration rewrites their old spellings to the Layer vocabulary.
         {"route":"c","kind":"unavailable","detail":"fixture",
          "guard_resource":{"kind":"pacing_reserve","percent":25,"setting":"account",
                            "origin":"configuration","account":"acct",
@@ -768,20 +766,19 @@ fn base_thirteen_migration_rewrites_v282_usage_and_receipts() -> TestResult {
             ..
         }
     ));
-    // These origins belong to PacingSettingSource and PortSettingSource,
-    // whose current spellings are still configuration / shipped_default.
-    // Rewriting them would make this terminal row undecodable.
+    // These origins now use the shared provenance layer; their wire spellings
+    // keep the terminal row decodable.
     assert!(matches!(
         guards[2],
         provenant_records::diagnostic::ResourceFact::PacingReserve {
-            origin: provenant_records::diagnostic::PacingSettingSource::Configuration,
+            origin: provenant_records::Layer::Host,
             ..
         }
     ));
     assert!(matches!(
         guards[3],
         provenant_records::diagnostic::ResourceFact::LanePorts {
-            origin: provenant_records::diagnostic::PortSettingSource::ShippedDefault,
+            origin: provenant_records::Layer::Default,
             ..
         }
     ));

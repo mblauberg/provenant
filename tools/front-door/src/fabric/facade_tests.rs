@@ -800,12 +800,12 @@ fn lane_cap_refusal_retains_the_setting_through_both_adapters() {
 #[test]
 fn pacing_dispatch_refusal_keeps_the_route_and_monthly_window_note() {
     use provenant_records::diagnostic::{
-        Diagnostic, DiagnosticFact, PacingReserveSetting, PacingSettingSource, ResourceFact,
+        Diagnostic, DiagnosticFact, PacingReserveSetting, ResourceFact,
     };
     let fact = ResourceFact::PacingReserve {
         percent: 10,
         setting: PacingReserveSetting::Account,
-        origin: PacingSettingSource::Configuration,
+        origin: Layer::Host,
         hold: Box::new(provenant_records::diagnostic::PacingHold {
             account: "codex/opaque-account".into(),
             window: "five_hour".into(),

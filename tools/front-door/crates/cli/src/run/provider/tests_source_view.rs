@@ -217,7 +217,7 @@ fn unsafe_project_binding_source_refusal_keeps_typed_peer_guard() {
     );
     assert_eq!(
         refusal.boundary_class,
-        provenant_records::diagnostic::BoundaryClass::Authority
+        provenant_records::policy::Boundary::Authority
     );
 }
 

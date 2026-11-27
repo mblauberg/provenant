@@ -3634,7 +3634,7 @@ mod tests {
         assert!(matches!(error, ProviderError::InvalidInvocation(_)));
         assert_eq!(
             error.boundary_class(),
-            provenant_records::diagnostic::BoundaryClass::None
+            provenant_records::policy::Boundary::None
         );
         let bad = PathBuf::from(OsString::from_vec(b"/fixture/\xff".to_vec()));
         assert!(matches!(
@@ -3695,7 +3695,7 @@ mod tests {
             .expect_err("the required command context cannot encode the selected executable");
         assert_eq!(
             error.boundary_class(),
-            provenant_records::diagnostic::BoundaryClass::Authority
+            provenant_records::policy::Boundary::Authority
         );
         assert!(matches!(error, ProviderError::InvalidPath));
     }

@@ -1415,7 +1415,7 @@ mod tests {
     fn recovery_stream_without_host_context_uses_the_compiled_default()
     -> Result<(), Box<dyn std::error::Error>> {
         use provenant_providers::Adapter;
-        use provenant_records::policy::{Source, Strength};
+        use provenant_records::policy::Strength;
         let dir = tempfile::tempdir()?;
         let (_, child) = child_fixture(dir.path(), &SystemClock::new())?;
         // A request carries dispatch overrides, never a resolved policy snapshot;
@@ -1428,8 +1428,8 @@ mod tests {
             Strength::Warn
         );
         assert_eq!(
-            stream.policy.rule("STREAM_IDENTITY_MISMATCH").source,
-            Source::CompiledDefault
+            stream.policy.rule("STREAM_IDENTITY_MISMATCH").source.layer,
+            provenant_records::Layer::Default
         );
         Ok(())
     }
@@ -1439,7 +1439,7 @@ mod tests {
     fn recovery_stream_without_host_context_applies_the_sealed_dispatch_override()
     -> Result<(), Box<dyn std::error::Error>> {
         use provenant_providers::Adapter;
-        use provenant_records::policy::{Source, Strength};
+        use provenant_records::policy::Strength;
         let dir = tempfile::tempdir()?;
         let (_, mut child) = child_fixture(dir.path(), &SystemClock::new())?;
         child
@@ -1456,8 +1456,8 @@ mod tests {
             Strength::Refuse
         );
         assert_eq!(
-            stream.policy.rule("STREAM_IDENTITY_MISMATCH").source,
-            Source::Dispatch
+            stream.policy.rule("STREAM_IDENTITY_MISMATCH").source.layer,
+            provenant_records::Layer::Route
         );
         Ok(())
     }

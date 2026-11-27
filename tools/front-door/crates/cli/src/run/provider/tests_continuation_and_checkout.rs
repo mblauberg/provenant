@@ -1082,7 +1082,7 @@ fn missing_legacy_sessions_fail_and_retained_codex_remains_resumable()
                 ));
                 assert_eq!(
                     error.boundary_class(),
-                    provenant_records::diagnostic::BoundaryClass::Authority
+                    provenant_records::policy::Boundary::Authority
                 );
             } else {
                 let error = error.to_string();

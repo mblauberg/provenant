@@ -1171,7 +1171,7 @@ fn argv_prompt_limit_counts_utf8_bytes() {
             "ARGV_PROMPT".into(),
             provenant_records::policy::Strength::Refuse,
         )]),
-        provenant_records::policy::Source::Project,
+        provenant_records::Layer::Project,
     );
     assert!(matches!(
         Prompt::new("é".repeat(32_769)).check_argv(&strict),
@@ -1432,12 +1432,12 @@ fn rust_less_hosts_keep_repository_execution_in_the_rendered_profile()
 // Spec: docs/specs/fabric.md#bounded-graphs-and-route-fallback
 #[test]
 fn continuation_stream_keeps_the_supplied_policy_snapshot() -> Result<(), ProviderError> {
-    use provenant_records::policy::{Policy, Source, Strength};
+    use provenant_records::policy::{Policy, Strength};
     let mut policy = Policy::default();
-    policy.overlay(&[("STREAM_IDENTITY_MISMATCH".into(), Strength::Refuse)].into(), Source::Project);
+    policy.overlay(&[("STREAM_IDENTITY_MISMATCH".into(), Strength::Refuse)].into(), provenant_records::Layer::Project);
     let stream = codex::Codex.stream_for_continuation("session", "model", &policy)?;
-    policy.overlay(&[("STREAM_IDENTITY_MISMATCH".into(), Strength::Warn)].into(), Source::Project);
+    policy.overlay(&[("STREAM_IDENTITY_MISMATCH".into(), Strength::Warn)].into(), provenant_records::Layer::Project);
     assert_eq!(stream.policy.rule("STREAM_IDENTITY_MISMATCH").rule.strength, Strength::Refuse);
-    assert_eq!(stream.policy.rule("STREAM_IDENTITY_MISMATCH").source, Source::Project);
+    assert_eq!(stream.policy.rule("STREAM_IDENTITY_MISMATCH").source.layer, provenant_records::Layer::Project);
     Ok(())
 }

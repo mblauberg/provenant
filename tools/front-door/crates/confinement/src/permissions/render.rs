@@ -193,16 +193,16 @@ pub(super) fn compile_sbpl_impl(
 
 #[cfg(target_os = "macos")]
 fn compile_boundary_error(error: PermissionError) -> PermissionError {
-    use provenant_records::diagnostic::BoundaryClass;
+    use provenant_records::policy::Boundary;
     let code = match error.boundary_class() {
-        BoundaryClass::Credentials => Some("RENDER_COMPILE_SBPL_CREDENTIALS"),
-        BoundaryClass::LaneGit => Some("RENDER_COMPILE_SBPL_GIT_ISOLATION"),
-        BoundaryClass::Authority => Some(match &error {
+        Boundary::Credentials => Some("RENDER_COMPILE_SBPL_CREDENTIALS"),
+        Boundary::OtherWork => Some("RENDER_COMPILE_SBPL_GIT_ISOLATION"),
+        Boundary::Authority => Some(match &error {
             PermissionError::NestedConfinementUnsupported => "RENDER_COMPILE_SBPL_AUTHORITY",
             PermissionError::PermissionNotRecorded => "RENDER_COMPILE_SBPL_AUTHORITY_3",
             _ => "RENDER_COMPILE_SBPL_AUTHORITY_2",
         }),
-        BoundaryClass::Integrity | BoundaryClass::None => None,
+        Boundary::Operation | Boundary::None => None,
     };
     match code {
         Some(code) => {

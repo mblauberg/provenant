@@ -144,8 +144,8 @@ pub enum PlanError {
 
 impl PlanError {
     /// Boundary established by the typed plan failure itself.
-    pub fn boundary_class(&self) -> provenant_records::diagnostic::BoundaryClass {
-        use provenant_records::diagnostic::BoundaryClass as B;
+    pub fn boundary_class(&self) -> provenant_records::policy::Boundary {
+        use provenant_records::policy::Boundary as B;
         match self {
             Self::UnconfinedExtensions | Self::InvalidRoots => B::Authority,
             Self::Permission(error) => error.boundary_class(),

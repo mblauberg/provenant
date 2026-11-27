@@ -840,11 +840,11 @@ fn composite_running_status_does_not_consume_an_attempt_slot() {
     };
     let mut owner = FakeOwner {
         admission_policy: Some({
-            use provenant_records::policy::{Policy, Source, Strength};
+            use provenant_records::policy::{Policy, Strength};
             let mut policy = Policy::default();
             policy.overlay(
                 &[("GRAPH_CONCURRENCY_CAP".to_owned(), Strength::Refuse)].into(),
-                Source::Project,
+                provenant_records::Layer::Project,
             );
             policy
         }),

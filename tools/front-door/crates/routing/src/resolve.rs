@@ -2919,9 +2919,7 @@ fn candidate(
         .0 == PacingPolicy::Pace
         && let Some(quota) = latest_reading(model, availability, context, true)
     {
-        use provenant_records::diagnostic::{
-            PacingReserveSetting, PacingSettingSource, ResourceFact,
-        };
+        use provenant_records::diagnostic::{PacingReserveSetting, ResourceFact};
         let (_, profile, _, _) = account_pacing(
             context.catalogue,
             context.config,
@@ -2960,11 +2958,11 @@ fn candidate(
                 PacingReserveSetting::Free
             };
             let origin = if window.profile {
-                PacingSettingSource::Configuration
+                Layer::Host
             } else if context.config.pacing_reserve.contains_key(model.adapter()) {
-                PacingSettingSource::Unresolved
+                Layer::Default
             } else {
-                PacingSettingSource::ShippedDefault
+                Layer::Default
             };
             let window_name = window.name();
             let account = format!(

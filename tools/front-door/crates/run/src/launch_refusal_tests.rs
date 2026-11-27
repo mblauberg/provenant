@@ -21,7 +21,7 @@ fn exact_model_refusal_keeps_safe_cause_without_skipped_routes()
         fn check_policy(&self, _: &TaskRequest) -> std::result::Result<(), Box<PrepareRefusal>> {
             if self.disk {
                 return Err(Box::new(PrepareRefusal {
-                    boundary_class: provenant_records::diagnostic::BoundaryClass::None,
+                    boundary_class: provenant_records::policy::Boundary::None,
                     policy_code: None,
                     resource: None,
                     cause: CauseKind::DiskFloor,
@@ -46,7 +46,7 @@ fn exact_model_refusal_keeps_safe_cause_without_skipped_routes()
                 format!("PROVIDER_SECRET_SENTINEL {PROVIDER_TOKEN}"),
             );
             if self.source_overlap {
-                refusal.boundary_class = provenant_records::diagnostic::BoundaryClass::Authority;
+                refusal.boundary_class = provenant_records::policy::Boundary::Authority;
                 refusal.terminal_note =
                     Some("product assets overlap the live graph source checkout".into());
             }
@@ -327,7 +327,7 @@ fn git_setup_handoff_maps_to_git_setup_failure_and_remote_remedy()
     assert_eq!(failure, Some(PreparationFailure::AdapterUnavailable));
     let boundary = HandOff::Boundary {
         message: "authority".into(),
-        class: provenant_records::diagnostic::BoundaryClass::Authority,
+        class: provenant_records::policy::Boundary::Authority,
         cause: None,
     };
     let (failure, note) =

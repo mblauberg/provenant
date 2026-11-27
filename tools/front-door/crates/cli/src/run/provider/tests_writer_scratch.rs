@@ -747,7 +747,7 @@ fn writer_preparation_steps(
         );
         assert_eq!(
             skipped_routes[0].guard_boundary,
-            Some(provenant_records::diagnostic::BoundaryClass::Authority)
+            Some(provenant_records::policy::Boundary::Authority)
         );
         assert_eq!(
             skipped_routes[0].confinement_guard,

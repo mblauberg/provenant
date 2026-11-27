@@ -57,7 +57,7 @@ fn unsupported_nested_confinement_is_reported_as_a_capability_error() {
     ));
     assert_eq!(
         error.boundary_class(),
-        provenant_records::diagnostic::BoundaryClass::None
+        provenant_records::policy::Boundary::None
     );
 }
 

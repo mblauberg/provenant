@@ -78,7 +78,7 @@ fn registered_project_inventory_keeps_unsafe_directory_diagnostic_typed()
     );
     assert_eq!(
         refusal.boundary_class,
-        provenant_records::diagnostic::BoundaryClass::Authority
+        provenant_records::policy::Boundary::Authority
     );
     assert!(
         refusal
