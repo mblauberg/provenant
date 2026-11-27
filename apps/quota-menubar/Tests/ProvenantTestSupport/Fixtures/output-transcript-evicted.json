@@ -27,6 +27,7 @@
     "eof": true,
     "exit_code": 0,
     "finished_at": "1970-01-01T00:00:00.000003Z",
+    "first_output_at": null,
     "git_grants_digest": null,
     "graph": "output-transcript-evicted",
     "head": null,

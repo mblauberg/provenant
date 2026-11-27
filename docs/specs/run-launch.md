@@ -196,7 +196,9 @@ graph exclusions, the submission snapshot, the refusal of host-authored writer-p
 fields, protected delivery targets and every declared writer branch, read from an existing
 checkout or from the node's `new_worktree` declaration. It allocates no graph execution,
 attempt record or writer checkout, and its `source_admission` rows report a proposed worktree
-without registering it. The dirty-worktree preflight and its WIP commit stay launch-only:
+without registering it. A writer placed on a peer is proposed on that peer: its row names the
+peer and the worktree it will provision from the branch, and no caller path is admitted for it.
+The dirty-worktree preflight and its WIP commit stay launch-only:
 they inspect and may write each existing writer checkout, so explain neither runs nor previews
 them. An explanation that passes therefore passes the same admission gates, and the launch can
 still refuse at its dirty-writer preflight before proceeding to writer provisioning and
