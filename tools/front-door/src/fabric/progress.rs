@@ -7,33 +7,17 @@
 //! steps through [`WakeSource`], so the same coordinator is used by readers,
 //! the tick scheduler and deterministic tests.
 //!
-//! [`wake_with`] is the single injected-driver seam: the caller supplies the
-//! bounded advance and the coordinator supplies the fixed order around it.
 //! [`wake`] is the lane-side entry. It relays the wake to the host that owns
 //! the subject's custody, as a read-class frame with no mutation authority.
 
-use provenant_core::{Clock, Deadline, ProjectId};
+use provenant_core::{Clock, Deadline};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-#[allow(dead_code)]
-pub(crate) enum WakeSubject {
-    Graph {
-        project: ProjectId,
-        id: String,
-    },
-    QueueItem {
-        project: ProjectId,
-        queue: String,
-        item: String,
-    },
-}
+pub(crate) use provenant_records::progress::WakeSubjectRef;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-#[allow(dead_code)]
 pub(crate) enum WakeReason {
     Tick,
     Wait,
@@ -47,7 +31,6 @@ pub(crate) enum WakeReason {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-#[allow(dead_code)]
 pub(crate) enum WakeOutcome {
     Advanced { transitions: usize },
     Busy { holder: String },
@@ -98,8 +81,8 @@ impl WakeOutcome {
 }
 
 /// The claim a caller reports after reconciling, selecting and taking the
-/// subject's journal lock. `revision` is the checkpoint revision read under
-/// the lock; it is compared with a fresh read before advancing.
+/// subject's journal lock. `revision` is the pre-lock checkpoint revision;
+/// the coordinator compares it with a fresh read while the lock is held.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) enum WakeClaim {
     Ready {
@@ -119,17 +102,21 @@ pub(crate) enum WakeClaim {
 /// scheduler, the readers and the tests drive the same coordinator.
 pub(crate) trait WakeSource {
     /// Step 1: reconcile queue controls scoped to the subject's queue.
-    fn reconcile(&mut self, subject: &WakeSubject, reason: WakeReason) -> Result<(), WakeOutcome>;
+    fn reconcile(
+        &mut self,
+        subject: &WakeSubjectRef,
+        reason: WakeReason,
+    ) -> Result<(), WakeOutcome>;
     /// Steps 2-3: select/claim the subject and take the journal lock with
     /// `try_lock`. A held lock reports `Busy` at once.
-    fn claim(&mut self, subject: &WakeSubject, deadline: Deadline) -> WakeClaim;
+    fn claim(&mut self, subject: &WakeSubjectRef, deadline: Deadline) -> WakeClaim;
     /// Step 4: read the live revision while the lock is still held.
-    fn live_revision(&self, subject: &WakeSubject) -> u64;
+    fn live_revision(&self, subject: &WakeSubjectRef) -> u64;
     /// Step 5: advance under the checkpoint's sealed execution binding with
     /// `budget = deadline.remaining()`.
     fn advance(
         &mut self,
-        subject: &WakeSubject,
+        subject: &WakeSubjectRef,
         reason: WakeReason,
         deadline: Deadline,
     ) -> WakeOutcome;
@@ -139,7 +126,7 @@ pub(crate) trait WakeSource {
 /// subject that moved between the pre-lock read and the locked read is
 /// abandoned and retried on the next pass; no advance is attempted twice.
 pub(crate) fn wake_subject(
-    subject: WakeSubject,
+    subject: WakeSubjectRef,
     reason: WakeReason,
     deadline: Deadline,
     source: &mut impl WakeSource,
@@ -155,63 +142,44 @@ pub(crate) fn wake_subject(
     };
     if source.live_revision(&subject) != locked {
         return WakeOutcome::Skipped {
-            code: "WAKE_REVISION_MOVED".into(),
+            code: "STALE_REVISION".into(),
         };
     }
     source.advance(&subject, reason, deadline)
 }
 
-/// Inject one subject-scoped advance into the coordinator. The driver is
-/// called once with the exact subject, reason and remaining budget; the
-/// reconcile/claim/revision steps are inert for an injected driver because it
-/// has already been claimed by its caller.
-pub(crate) fn wake_with(
-    subject: WakeSubject,
+/// Relay a wake for the graph identified by an initial host status reading.
+pub(crate) fn wake_lane_reading(
+    value: &Value,
     reason: WakeReason,
-    deadline: Deadline,
-    advance: impl FnOnce(WakeSubject, WakeReason, Deadline) -> WakeOutcome,
+    within: std::time::Duration,
 ) -> WakeOutcome {
-    struct Injected<F> {
-        advance: Option<F>,
-    }
-    impl<F> WakeSource for Injected<F>
-    where
-        F: FnOnce(WakeSubject, WakeReason, Deadline) -> WakeOutcome,
-    {
-        fn reconcile(
-            &mut self,
-            _subject: &WakeSubject,
-            _reason: WakeReason,
-        ) -> Result<(), WakeOutcome> {
-            Ok(())
-        }
-        fn claim(&mut self, _subject: &WakeSubject, _deadline: Deadline) -> WakeClaim {
-            WakeClaim::Ready { revision: 0 }
-        }
-        fn live_revision(&self, _subject: &WakeSubject) -> u64 {
-            0
-        }
-        fn advance(
-            &mut self,
-            subject: &WakeSubject,
-            reason: WakeReason,
-            deadline: Deadline,
-        ) -> WakeOutcome {
-            match self.advance.take() {
-                Some(advance) => advance(subject.clone(), reason, deadline),
-                None => WakeOutcome::Skipped {
-                    code: "WAKE_DRIVER_SPENT".into(),
-                },
-            }
-        }
-    }
-    wake_subject(
-        subject,
+    let Some(project) = value["wake_project"]
+        .as_str()
+        .and_then(|value| value.parse().ok())
+    else {
+        return WakeOutcome::Skipped {
+            code: "WAKE_PROJECT_UNAVAILABLE".into(),
+        };
+    };
+    let Some(id) = value["rows"]
+        .as_array()
+        .and_then(|rows| rows.iter().find_map(|row| row["graph_id"].as_str()))
+    else {
+        return WakeOutcome::Idle;
+    };
+    let now = provenant_os::clock::SystemClock::new().mono_now();
+    let duration = provenant_core::DurationMicros::from_micros(
+        u64::try_from(within.as_micros()).unwrap_or(u64::MAX),
+    );
+    let deadline = Deadline::after(now, duration).unwrap_or(Deadline::at(now));
+    wake(
+        WakeSubjectRef::Graph {
+            project,
+            id: id.to_owned(),
+        },
         reason,
         deadline,
-        &mut Injected {
-            advance: Some(advance),
-        },
     )
 }
 
@@ -222,7 +190,7 @@ pub(crate) fn wake_with(
     clippy::disallowed_methods,
     reason = "wake transport uses the caller's remaining real-time budget"
 )]
-pub(crate) fn wake(subject: WakeSubject, reason: WakeReason, deadline: Deadline) -> WakeOutcome {
+pub(crate) fn wake(subject: WakeSubjectRef, reason: WakeReason, deadline: Deadline) -> WakeOutcome {
     // The wire frame carries only the subject: the host classifies the wake
     // from the reader that received it, so the reason is metadata here.
     let _ = reason;
@@ -231,29 +199,12 @@ pub(crate) fn wake(subject: WakeSubject, reason: WakeReason, deadline: Deadline)
             code: "WAKE_HOST_READER_OWNS_ADVANCE".into(),
         };
     }
-    let wire = match &subject {
-        WakeSubject::Graph { project, id } => {
-            provenant_cli::fabric::graph_relay::WakeSubjectRef::Graph {
-                project: *project,
-                id: id.clone(),
-            }
-        }
-        WakeSubject::QueueItem {
-            project,
-            queue,
-            item,
-        } => provenant_cli::fabric::graph_relay::WakeSubjectRef::QueueItem {
-            project: *project,
-            queue: queue.clone(),
-            item: item.clone(),
-        },
-    };
     let now = provenant_os::clock::SystemClock::new().mono_now();
     let within = std::time::Duration::from_micros(
         deadline.remaining(now).as_micros().min(u64::MAX as u128) as u64,
     );
     let cancel = provenant_core::CancelToken::new();
-    match provenant_cli::fabric::graph_relay::wake_from_lane(&wire, &cancel, within) {
+    match provenant_cli::fabric::graph_relay::wake_from_lane(subject, &cancel, within) {
         Ok(value) => WakeOutcome::from_value(&value),
         Err(error) => WakeOutcome::Skipped {
             code: error.code().to_owned(),
@@ -264,7 +215,7 @@ pub(crate) fn wake(subject: WakeSubject, reason: WakeReason, deadline: Deadline)
 #[cfg(test)]
 mod tests {
     use super::*;
-    use provenant_core::{DurationMicros, MonoTime};
+    use provenant_core::{DurationMicros, MonoTime, ProjectId};
     use std::cell::RefCell;
 
     fn deadline() -> Deadline {
@@ -275,8 +226,8 @@ mod tests {
         .unwrap_or_else(|_| Deadline::at(MonoTime::from_micros(11_000)))
     }
 
-    fn graph_subject() -> WakeSubject {
-        WakeSubject::Graph {
+    fn graph_subject() -> WakeSubjectRef {
+        WakeSubjectRef::Graph {
             project: ProjectId::from_bytes([1; 16]),
             id: "graph-one".into(),
         }
@@ -292,25 +243,120 @@ mod tests {
     }
 
     impl WakeSource for Fake {
-        fn reconcile(&mut self, _s: &WakeSubject, _r: WakeReason) -> Result<(), WakeOutcome> {
+        fn reconcile(&mut self, _s: &WakeSubjectRef, _r: WakeReason) -> Result<(), WakeOutcome> {
             self.steps.borrow_mut().push("reconcile");
             Ok(())
         }
-        fn claim(&mut self, _s: &WakeSubject, _d: Deadline) -> WakeClaim {
+        fn claim(&mut self, _s: &WakeSubjectRef, _d: Deadline) -> WakeClaim {
             self.steps.borrow_mut().push("claim");
             self.claim.clone()
         }
-        fn live_revision(&self, _s: &WakeSubject) -> u64 {
+        fn live_revision(&self, _s: &WakeSubjectRef) -> u64 {
             self.steps.borrow_mut().push("revision");
             if self.moved { 2 } else { 1 }
         }
-        fn advance(&mut self, _s: &WakeSubject, _r: WakeReason, _d: Deadline) -> WakeOutcome {
+        fn advance(&mut self, _s: &WakeSubjectRef, _r: WakeReason, _d: Deadline) -> WakeOutcome {
             self.steps.borrow_mut().push("advance");
             *self.advances.borrow_mut() += 1;
             self.outcome
                 .clone()
                 .unwrap_or(WakeOutcome::Advanced { transitions: 1 })
         }
+    }
+
+    // Census the production call chain and use one counting source for all
+    // reasons. The source assertions fail when an entry point loses its route.
+    #[test]
+    fn every_reader_and_tick_reaches_the_common_wake() {
+        fn body<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
+            let (_, tail) = source.split_once(start).expect("entry point exists");
+            tail.split_once(end).expect("entry point end exists").0
+        }
+        let unified = include_str!("unified.rs");
+        let wait = include_str!("unified/graph_wait.rs");
+        let observation = include_str!("interface/observation.rs");
+        let interface = include_str!("interface.rs");
+        let tick = include_str!("graph_execution.rs");
+        for (source, start, end, call) in [
+            (
+                wait,
+                "fn read_status_rows_with_recovery(",
+                "fn missing_graph_context(",
+                "wake_graph_for_reader",
+            ),
+            (
+                wait,
+                "fn wake_pr_item(",
+                "fn reader_wake_budget(",
+                "wake_in_host",
+            ),
+            (
+                unified,
+                "fn unified_graph_result(",
+                "fn finding_severity_counts(",
+                "read_status_rows_with_recovery",
+            ),
+            (
+                unified,
+                "fn unified_graph_command(",
+                "fn graph_listing(",
+                "wake_graph_for_reader",
+            ),
+            (
+                unified,
+                "fn unified_graph_output(",
+                "fn host_graph_output(",
+                "wake_graph_for_reader",
+            ),
+            (
+                observation,
+                "fn observe_remote_graph_attempts(",
+                "fn graph_run_has_remote_pending(",
+                "wake_graph_for_reader",
+            ),
+            (
+                interface,
+                "fn wait_document(",
+                "fn graph_trace(",
+                "wake_graph_for_reader",
+            ),
+            (
+                tick,
+                "fn tick_graphs(",
+                "fn graph_wake_due(",
+                "wake_in_host",
+            ),
+            (
+                wait,
+                "fn wake_in_host(",
+                "fn read_lane_graph(",
+                "wake_subject",
+            ),
+        ] {
+            assert!(
+                body(source, start, end).contains(call),
+                "{start} must route through {call}"
+            );
+        }
+        let mut source = Fake {
+            claim: WakeClaim::Ready { revision: 1 },
+            ..Default::default()
+        };
+        for reason in [
+            WakeReason::Wait,
+            WakeReason::PullRequest,
+            WakeReason::Result,
+            WakeReason::InlineRun,
+            WakeReason::Status,
+            WakeReason::Output,
+            WakeReason::Tick,
+        ] {
+            assert_eq!(
+                wake_subject(graph_subject(), reason, deadline(), &mut source),
+                WakeOutcome::Advanced { transitions: 1 }
+            );
+        }
+        assert_eq!(*source.advances.borrow(), 7);
     }
 
     #[test]
@@ -324,11 +370,77 @@ mod tests {
         assert_eq!(
             outcome,
             WakeOutcome::Skipped {
-                code: "WAKE_REVISION_MOVED".into()
+                code: "STALE_REVISION".into()
             }
         );
         assert_eq!(*fake.advances.borrow(), 0);
         assert_eq!(fake.steps.into_inner(), ["reconcile", "claim", "revision"]);
+    }
+
+    #[test]
+    fn concurrent_revision_change_is_rejected_under_the_claimed_lock() {
+        use std::sync::{
+            Barrier, Mutex, MutexGuard,
+            atomic::{AtomicU64, Ordering},
+        };
+        struct RacingSource<'a> {
+            lock: &'a Mutex<()>,
+            revision: &'a AtomicU64,
+            read: &'a Barrier,
+            written: &'a Barrier,
+            guard: Option<MutexGuard<'a, ()>>,
+            advanced: bool,
+        }
+        impl WakeSource for RacingSource<'_> {
+            fn reconcile(&mut self, _: &WakeSubjectRef, _: WakeReason) -> Result<(), WakeOutcome> {
+                Ok(())
+            }
+            fn claim(&mut self, _: &WakeSubjectRef, _: Deadline) -> WakeClaim {
+                let revision = self.revision.load(Ordering::SeqCst);
+                self.read.wait();
+                self.written.wait();
+                self.guard = Some(self.lock.lock().unwrap());
+                WakeClaim::Ready { revision }
+            }
+            fn live_revision(&self, _: &WakeSubjectRef) -> u64 {
+                assert!(self.guard.is_some());
+                assert!(self.lock.try_lock().is_err());
+                self.revision.load(Ordering::SeqCst)
+            }
+            fn advance(&mut self, _: &WakeSubjectRef, _: WakeReason, _: Deadline) -> WakeOutcome {
+                self.advanced = true;
+                WakeOutcome::Advanced { transitions: 1 }
+            }
+        }
+        let lock = Mutex::new(());
+        let revision = AtomicU64::new(1);
+        let read = Barrier::new(2);
+        let written = Barrier::new(2);
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                read.wait();
+                {
+                    let _guard = lock.lock().unwrap();
+                    revision.store(2, Ordering::SeqCst);
+                }
+                written.wait();
+            });
+            let mut source = RacingSource {
+                lock: &lock,
+                revision: &revision,
+                read: &read,
+                written: &written,
+                guard: None,
+                advanced: false,
+            };
+            assert_eq!(
+                wake_subject(graph_subject(), WakeReason::Wait, deadline(), &mut source),
+                WakeOutcome::Skipped {
+                    code: "STALE_REVISION".into()
+                }
+            );
+            assert!(!source.advanced);
+        });
     }
 
     #[test]
@@ -380,10 +492,14 @@ mod tests {
         let claimed = std::cell::Cell::new(false);
         struct Lease<'a>(&'a std::cell::Cell<bool>);
         impl WakeSource for Lease<'_> {
-            fn reconcile(&mut self, _s: &WakeSubject, _r: WakeReason) -> Result<(), WakeOutcome> {
+            fn reconcile(
+                &mut self,
+                _s: &WakeSubjectRef,
+                _r: WakeReason,
+            ) -> Result<(), WakeOutcome> {
                 Ok(())
             }
-            fn claim(&mut self, _s: &WakeSubject, _d: Deadline) -> WakeClaim {
+            fn claim(&mut self, _s: &WakeSubjectRef, _d: Deadline) -> WakeClaim {
                 if self.0.replace(true) {
                     WakeClaim::Busy {
                         holder: "waiter-1".into(),
@@ -392,10 +508,15 @@ mod tests {
                     WakeClaim::Ready { revision: 1 }
                 }
             }
-            fn live_revision(&self, _s: &WakeSubject) -> u64 {
+            fn live_revision(&self, _s: &WakeSubjectRef) -> u64 {
                 1
             }
-            fn advance(&mut self, _s: &WakeSubject, _r: WakeReason, _d: Deadline) -> WakeOutcome {
+            fn advance(
+                &mut self,
+                _s: &WakeSubjectRef,
+                _r: WakeReason,
+                _d: Deadline,
+            ) -> WakeOutcome {
                 WakeOutcome::Advanced { transitions: 1 }
             }
         }
@@ -439,24 +560,33 @@ mod tests {
         let created = RefCell::new(false);
         struct Adopt<'a>(&'a RefCell<bool>);
         impl WakeSource for Adopt<'_> {
-            fn reconcile(&mut self, _s: &WakeSubject, _r: WakeReason) -> Result<(), WakeOutcome> {
+            fn reconcile(
+                &mut self,
+                _s: &WakeSubjectRef,
+                _r: WakeReason,
+            ) -> Result<(), WakeOutcome> {
                 Ok(())
             }
-            fn claim(&mut self, s: &WakeSubject, _d: Deadline) -> WakeClaim {
-                assert!(matches!(s, WakeSubject::QueueItem { .. }));
+            fn claim(&mut self, s: &WakeSubjectRef, _d: Deadline) -> WakeClaim {
+                assert!(matches!(s, WakeSubjectRef::QueueItem { .. }));
                 *self.0.borrow_mut() = true;
                 WakeClaim::Ready { revision: 1 }
             }
-            fn live_revision(&self, _s: &WakeSubject) -> u64 {
+            fn live_revision(&self, _s: &WakeSubjectRef) -> u64 {
                 1
             }
-            fn advance(&mut self, _s: &WakeSubject, _r: WakeReason, _d: Deadline) -> WakeOutcome {
+            fn advance(
+                &mut self,
+                _s: &WakeSubjectRef,
+                _r: WakeReason,
+                _d: Deadline,
+            ) -> WakeOutcome {
                 assert!(*self.0.borrow());
                 WakeOutcome::Advanced { transitions: 1 }
             }
         }
         let outcome = wake_subject(
-            WakeSubject::QueueItem {
+            WakeSubjectRef::QueueItem {
                 project: ProjectId::from_bytes([1; 16]),
                 queue: "deliver".into(),
                 item: "issue-42".into(),
@@ -469,48 +599,8 @@ mod tests {
     }
 
     #[test]
-    fn wake_with_preserves_the_injected_seam() {
-        let outcome = wake_with(
-            graph_subject(),
-            WakeReason::Wait,
-            deadline(),
-            |subject, reason, budget| {
-                assert!(matches!(subject, WakeSubject::Graph { id, .. } if id == "graph-one"));
-                assert_eq!(reason, WakeReason::Wait);
-                assert_eq!(
-                    budget.remaining(MonoTime::from_micros(1_000)).as_micros(),
-                    10_000
-                );
-                WakeOutcome::Advanced { transitions: 1 }
-            },
-        );
-        assert_eq!(outcome, WakeOutcome::Advanced { transitions: 1 });
-    }
-
-    #[test]
-    fn wait_settles_due_graph_with_tick_disabled() {
-        // A wait drives the same wake the tick would, so a due graph settles
-        // with no scheduler running. The driver reports the transitions it
-        // made while the reader holds the subject's custody.
-        let settled = RefCell::new(false);
-        let outcome = wake_with(
-            graph_subject(),
-            WakeReason::Wait,
-            deadline(),
-            |subject, reason, _deadline| {
-                assert!(matches!(subject, WakeSubject::Graph { .. }));
-                assert_eq!(reason, WakeReason::Wait);
-                *settled.borrow_mut() = true;
-                WakeOutcome::Advanced { transitions: 1 }
-            },
-        );
-        assert!(*settled.borrow());
-        assert_eq!(outcome, WakeOutcome::Advanced { transitions: 1 });
-    }
-
-    #[test]
     fn lane_wake_relays_without_mutation_authority() {
-        use provenant_cli::fabric::graph_relay::{GraphRelay, WakeSubjectRef};
+        use provenant_cli::fabric::graph_relay::GraphRelay;
         let wire = GraphRelay::Wake {
             subject: WakeSubjectRef::Graph {
                 project: ProjectId::from_bytes([1; 16]),

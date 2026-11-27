@@ -136,14 +136,77 @@ mod graph_writer_admission_tests {
         })?;
         graph::advance_with_budget(&document, &mut Pending(factory.context.identity.inbox.actor), &mut journal, &Default::default(), &Default::default())?;
         drop(journal);
+        std::fs::write(rig.state.join("config.toml"), "schema_version=1\n[knobs]\n'domains.wait.advance'='off'\n")?;
+        let before = graph::FileJournal::read_checkpoint(&roots.state, project, "limit-resume")?.unwrap();
+        for reason in [super::progress::WakeReason::Status, super::progress::WakeReason::Output, super::progress::WakeReason::Result] {
+            assert_eq!(super::unified::graph_wait::wake_graph_for_reader(&factory, "limit-resume", reason, budget, &cancel), super::progress::WakeOutcome::Idle);
+            assert_eq!(graph::FileJournal::read_checkpoint(&roots.state, project, "limit-resume")?.unwrap(), before);
+        }
+        std::fs::write(rig.state.join("config.toml"), "schema_version=1\n")?;
         factory.context.config.graph.limits.nodes = 1;
         let resume = || GraphInput::Resume { extra: Default::default(), document: "limit-resume".into(), extend: vec![] };
         let paused = factory.graph(resume(), budget, &cancel)?;
         assert_eq!(paused.checkpoint.pause_cause(), Some(PauseCause::StructuralLimit));
         assert_eq!(graph::FileJournal::read_checkpoint(&roots.state, project, "limit-resume")?.unwrap().pause_cause(), Some(PauseCause::StructuralLimit));
+        assert_eq!(super::unified::graph_wait::wake_in_host(
+            &mut factory, budget, &cancel,
+            super::progress::WakeSubjectRef::Graph { project, id: "limit-resume".into() },
+            super::progress::WakeReason::Status,
+        ), super::progress::WakeOutcome::Idle);
+        assert_eq!(graph::FileJournal::read_checkpoint(&roots.state, project, "limit-resume")?.unwrap().pause_cause(), Some(PauseCause::StructuralLimit));
         factory.context.config.graph.limits.nodes = provenant_fabric_runtime::config::GraphLimits::default().nodes;
         let resumed = factory.graph(resume(), budget, &cancel)?;
         assert_ne!(resumed.checkpoint.pause_cause(), Some(PauseCause::StructuralLimit));
+
+        // A writer advances the persisted revision after the first read but
+        // before the wake acquires its journal lock. The locked re-read must
+        // reject it, and another writer cannot acquire the held journal.
+        struct RacingJournal<'a> {
+            root: &'a provenant_core::StateRoot,
+            project: provenant_core::ProjectId,
+            start: std::sync::mpsc::Sender<()>,
+            finished: std::sync::mpsc::Receiver<Result<(), String>>,
+            journal: Option<graph::FileJournal>,
+        }
+        impl super::progress::WakeSource for RacingJournal<'_> {
+            fn reconcile(&mut self, _: &super::progress::WakeSubjectRef, _: super::progress::WakeReason) -> Result<(), super::progress::WakeOutcome> { Ok(()) }
+            fn claim(&mut self, _: &super::progress::WakeSubjectRef, _: provenant_core::Deadline) -> super::progress::WakeClaim {
+                let before = graph::FileJournal::read_checkpoint(self.root, self.project, "limit-resume").unwrap().unwrap();
+                self.start.send(()).unwrap();
+                self.finished.recv().unwrap().unwrap();
+                self.journal = Some(graph::FileJournal::try_open(self.root, self.project, "limit-resume").unwrap());
+                super::progress::WakeClaim::Ready { revision: graph::patch::revision(&before) }
+            }
+            fn live_revision(&self, _: &super::progress::WakeSubjectRef) -> u64 {
+                assert!(self.journal.is_some());
+                assert!(graph::FileJournal::try_open(self.root, self.project, "limit-resume").err().is_some_and(|error| error.is_lock_timeout()));
+                graph::patch::revision(&graph::FileJournal::read_checkpoint(self.root, self.project, "limit-resume").unwrap().unwrap())
+            }
+            fn advance(&mut self, _: &super::progress::WakeSubjectRef, _: super::progress::WakeReason, _: provenant_core::Deadline) -> super::progress::WakeOutcome {
+                panic!("a stale wake must not advance")
+            }
+        }
+        let (start_tx, start_rx) = std::sync::mpsc::channel();
+        let (finished_tx, finished_rx) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            let state = &roots.state;
+            scope.spawn(move || {
+                let result = (|| -> Result<(), String> {
+                    start_rx.recv().map_err(|error| error.to_string())?;
+                    let mut writer = graph::FileJournal::try_open(state, project, "limit-resume").map_err(|error| error.to_string())?;
+                    let mut checkpoint = writer.load("limit-resume").map_err(|error| error.to_string())?.ok_or("missing checkpoint")?;
+                    checkpoint.expansions.push(serde_json::from_value(serde_json::json!({"source":"one", "nodes":[]})).map_err(|error| error.to_string())?);
+                    writer.save(&checkpoint).map_err(|error| error.to_string())?;
+                    Ok(())
+                })();
+                finished_tx.send(result).unwrap();
+            });
+            let mut source = RacingJournal { root: &roots.state, project, start: start_tx, finished: finished_rx, journal: None };
+            assert_eq!(super::progress::wake_subject(
+                super::progress::WakeSubjectRef::Graph { project, id: "limit-resume".into() },
+                super::progress::WakeReason::Wait, budget.deadline(), &mut source,
+            ), super::progress::WakeOutcome::Skipped { code: "STALE_REVISION".into() });
+        });
         Ok(())
     }
 
@@ -560,11 +623,11 @@ mod graph_writer_admission_tests {
                 match call {
                     1 => Err(FacadeError::HomeUnavailable),
                     2 => Err(FacadeError::Busy),
-                    _ => super::interface::observation::wake_after_remote_terminal(run, true, || {
+                    _ => {
                         advancements.set(advancements.get() + 1);
                         advance(&document, &mut owner, &mut journal)
                             .map_err(|_| FacadeError::StateCorrupt)
-                    }),
+                    },
                 }
             },
         )
@@ -627,11 +690,11 @@ mod graph_writer_admission_tests {
                 if call <= 4 {
                     Err(FacadeError::HomeUnavailable)
                 } else {
-                    super::interface::observation::wake_after_remote_terminal(run, true, || {
+                    {
                         advancements.set(advancements.get() + 1);
                         advance(&document, &mut owner, &mut journal)
                             .map_err(|_| FacadeError::StateCorrupt)
-                    })
+                    }
                 }
             },
         )

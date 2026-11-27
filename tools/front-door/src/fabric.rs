@@ -762,6 +762,7 @@ fn factory_mode(
 }
 
 mod graph_execution;
+mod wake_queue;
 use graph_execution::*;
 pub(crate) use graph_execution::{Announce, tick_graphs};
 

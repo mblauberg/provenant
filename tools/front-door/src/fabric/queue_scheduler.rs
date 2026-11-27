@@ -640,13 +640,13 @@ fn mark_observed_terminal(
     )
 }
 
-enum QueueLaunchDisposition {
+pub(super) enum QueueLaunchDisposition {
     Observed,
     Launched,
     Unavailable(String),
 }
 
-fn launch_item(
+pub(super) fn launch_item(
     factory: &Factory,
     registry: &QueueRegistry,
     queue_id: &str,
