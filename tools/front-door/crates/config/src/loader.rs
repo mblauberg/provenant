@@ -87,7 +87,21 @@ pub fn read(roots: &Roots) -> Result<ResolvedConfig, ConfigError> {
 /// knobs: they do not know the domain sections, so they would otherwise report
 /// every configured domain as an unknown key.
 pub fn read_knobs(roots: &Roots) -> Result<ResolvedConfig, ConfigError> {
-    config_show(roots, &NO_DOMAINS)
+    read_knobs_at_state(roots.state.as_path())
+}
+/// Read the host knob snapshot from an already-authorised state root.
+/// Callers that hold the host state path but not the original root inputs use
+/// the same anchored file reader and schema/source resolution as `read_knobs`.
+pub fn read_knobs_at_state(state: &Path) -> Result<ResolvedConfig, ConfigError> {
+    let path = state.join("config.toml");
+    let text = open_at_state(state)?
+        .map(|reader| bounded_text(reader, &path))
+        .transpose()?;
+    let inspection = inspect(text.as_deref(), &NO_DOMAINS)?;
+    if let Some(error) = inspection.error {
+        return Err(error);
+    }
+    Ok(inspection.snapshot)
 }
 pub fn read_with_domains<T: DeserializeOwned + Serialize>(
     roots: &Roots,
@@ -443,8 +457,11 @@ pub fn inspect_config<T: DeserializeOwned + Serialize>(
     })
 }
 pub(crate) fn open(roots: &Roots) -> Result<Option<provenant_os::fs::FileHandle>, ConfigError> {
-    let path = roots.state.as_path().join("config.toml");
-    let dir = match provenant_os::fs::Directory::open_anchor(roots.state.as_path()) {
+    open_at_state(roots.state.as_path())
+}
+fn open_at_state(state: &Path) -> Result<Option<provenant_os::fs::FileHandle>, ConfigError> {
+    let path = state.join("config.toml");
+    let dir = match provenant_os::fs::Directory::open_anchor(state) {
         Ok(dir) => dir,
         Err(e) if e.is_not_found() => return Ok(None),
         Err(source) => return Err(ConfigError::Read { path, source }),

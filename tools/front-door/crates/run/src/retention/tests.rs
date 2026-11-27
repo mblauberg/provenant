@@ -1245,6 +1245,7 @@ fn event_retention_stops_between_committed_batches_and_keeps_newest() -> TestRes
         &observer,
         &RetentionScan {
             start_at: Some(input.attempt_id),
+            detail: partial.continuation.as_deref(),
             ..Default::default()
         },
     )?;
@@ -1546,6 +1547,90 @@ fn gc_preserves_tmp_for_lost_attempt_without_exit_evidence() -> TestResult {
     )?;
     assert!(scratch.attempt_tmp.is_empty());
     assert!(temporary.exists());
+    Ok(())
+}
+
+// Spec: docs/specs/disk.md#bounded-sweeps
+#[test]
+fn scratch_budget_resume_finishes_the_open_sequence_page() -> TestResult {
+    let (_temp, context, store, first, first_attempt) = seeded()?;
+    let (initial_clock, initial_cancel) = (clock(), CancelToken::new());
+    let initial_call = call(&initial_clock, &initial_cancel);
+    withdraw(&store, &first, &initial_call)?;
+
+    let mut second = crate::tests::input();
+    second.attempt_id = AttemptId::from_bytes([7; 16]);
+    crate::tests::rekey(&mut second);
+    store.create(&second, &initial_call)?;
+    let second_attempt = context
+        .state_root
+        .as_path()
+        .join(format!("attempts/{}", second.attempt_id));
+    withdraw(&store, &second, &initial_call)?;
+
+    let first_tmp = scratch_root_of(&first_attempt).join("tmp");
+    let second_tmp = scratch_root_of(&second_attempt).join("tmp");
+    fs::DirBuilder::new().mode(0o700).create(&first_tmp)?;
+    fs::DirBuilder::new().mode(0o700).create(&second_tmp)?;
+    fs::write(first_tmp.join("small"), b"first sequence")?;
+    fs::write(second_tmp.join("large"), vec![7; 1_000_000])?;
+
+    // Scratch is ranked by size, so the later attempt is reclaimed first.
+    // Stop as soon as it is gone, at the earlier attempt's apply boundary.
+    let keep_going = || second_tmp.exists();
+    let root = Directory::open_anchor(context.state_root.as_path())?;
+    let now = WallTime::from_micros(200 + 31 * DAY_MICROS)?;
+    let partial = store.gc_temporary(
+        &root,
+        &ScratchPolicy::new(0),
+        now,
+        false,
+        &initial_call,
+        &RetentionScan {
+            keep_going: Some(&keep_going),
+            ..Default::default()
+        },
+    )?;
+    assert_eq!(
+        partial.interrupted_at.as_deref(),
+        Some(first_attempt.as_path())
+    );
+    assert!(
+        !second_tmp.exists(),
+        "the larger later row was applied first"
+    );
+    assert!(
+        first_tmp.exists(),
+        "the lower-sequence row remains for resume"
+    );
+    let detail = partial
+        .continuation
+        .as_deref()
+        .ok_or_else(|| std::io::Error::other("budget stop did not persist the open page"))?;
+    let (class, cursor) = crate::reclaim::decode_cursor(detail)
+        .map_err(|_| std::io::Error::other("reclaim cursor did not parse"))?
+        .ok_or_else(|| std::io::Error::other("missing reclaim cursor"))?;
+    assert_eq!(class, "attempt_scratch");
+    assert!(cursor.page_open());
+    assert!(cursor.is_visited(&second.attempt_id.to_string()));
+    assert!(!cursor.is_visited(&first.attempt_id.to_string()));
+
+    let (resume_clock, resume_cancel) = (clock(), CancelToken::new());
+    let resume_call = call(&resume_clock, &resume_cancel);
+    let resumed = store.gc_temporary(
+        &root,
+        &ScratchPolicy::new(0),
+        now,
+        false,
+        &resume_call,
+        &RetentionScan {
+            start_at: Some(first.attempt_id),
+            detail: Some(detail),
+            ..Default::default()
+        },
+    )?;
+    assert!(resumed.interrupted_at.is_none(), "{resumed:?}");
+    assert!(!first_tmp.exists(), "resume applied the earlier row");
     Ok(())
 }
 

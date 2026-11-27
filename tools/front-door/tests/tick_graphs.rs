@@ -175,6 +175,18 @@ fn missing_graph_worktree_warns_once_and_scheduled_gc_completes() -> Result {
             std::time::SystemTime::now() - std::time::Duration::from_secs(2 * 86_400),
         ),
     )?;
+    let reports = rig.state.join("reports");
+    std::fs::create_dir_all(&reports)?;
+    let old_report = reports.join("old.json");
+    let recent_report = reports.join("recent.json");
+    std::fs::write(&old_report, b"old")?;
+    std::fs::write(&recent_report, b"recent")?;
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&old_report)?
+        .set_times(std::fs::FileTimes::new().set_modified(
+            std::time::SystemTime::now() - std::time::Duration::from_secs(8 * 86_400),
+        ))?;
     let manual = rig.command(&["gc", "--apply", "--json"])?;
     assert_eq!(code(&manual), 0, "{manual:?}");
     let manual: Value = serde_json::from_slice(&manual.stdout.bytes)?;
@@ -183,6 +195,8 @@ fn missing_graph_worktree_warns_once_and_scheduled_gc_completes() -> Result {
         !checkpoint.exists(),
         "manual GC left the old terminal checkpoint"
     );
+    assert!(!old_report.exists(), "manual GC left the old report");
+    assert!(recent_report.exists(), "manual GC removed a recent report");
     Ok(())
 }
 

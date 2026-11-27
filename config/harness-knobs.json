@@ -1732,7 +1732,8 @@
     "domains.fabric.lanes.lease_unreachable_seconds": {
       "type": "int",
       "default": 900,
-      "status": "declared",
+      "status": "wired",
+      "reader": "tools/front-door/crates/confinement/src/worktrees/custody.rs",
       "effect": "Time an unreachable lease holder remains live before its lease lapses, in seconds."
     },
     "domains.fabric.lanes.index_lock_retries": {

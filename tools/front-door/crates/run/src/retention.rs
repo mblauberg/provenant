@@ -1,4 +1,5 @@
 //! Temporary and provider-private state retention after terminal settlement.
+use crate::reclaim::Reclaimable;
 use crate::{
     artifacts::{seal, subdir},
     *,
@@ -19,6 +20,15 @@ const STATE: &str = AttemptFile::ProviderState.name();
 const HISTORY: &str = AttemptFile::ProviderHistory.name();
 pub const TOMBSTONE: &str = ".provider-gc-";
 const PAYLOAD_LOW_WATER_RATIO: (u64, u64) = (3, 4);
+type RetentionRow = (i64, String, String, Vec<u8>);
+
+fn retention_row_sequence(row: &RetentionRow) -> u64 {
+    row.0.max(0) as u64
+}
+
+fn retention_row_identity(row: &RetentionRow) -> &str {
+    &row.1
+}
 
 // These are fetched or generated again by Codex at startup. Sessions and
 // history databases deliberately do not appear here. Other adapters need
@@ -150,6 +160,35 @@ impl RetentionScan<'_> {
         }
         true
     }
+
+    fn reclaim_cursor(&self, class: &str) -> Result<Option<crate::reclaim::ReclaimCursor>> {
+        let Some(detail) = self.detail else {
+            return Ok(None);
+        };
+        let Some((saved_class, cursor)) = crate::reclaim::decode_cursor(detail)
+            .map_err(|_| RunError::Validation("reclaim cursor"))?
+        else {
+            return Ok(None);
+        };
+        if saved_class != class {
+            return Err(RunError::Validation("reclaim cursor class"));
+        }
+        Ok(Some(cursor))
+    }
+}
+
+fn reclaim_after(cursor: &crate::reclaim::ReclaimCursor) -> i64 {
+    let next = if cursor.page_open() {
+        cursor.page_start_seq
+    } else {
+        cursor.page_end_seq
+    };
+    next.saturating_sub(1).min(i64::MAX as u64) as i64
+}
+
+fn encode_reclaim_cursor(class: &str, cursor: &crate::reclaim::ReclaimCursor) -> Result<String> {
+    crate::reclaim::encode_cursor(class, cursor)
+        .map_err(|_| RunError::Validation("reclaim cursor serialization"))
 }
 
 /// SQLite's interrupt handle is designed for cross-thread cancellation. The
@@ -437,7 +476,22 @@ impl RunStore {
                 Ok(None) => {}
             }
         }
-        let mut after = self.retention_after(scan.start_at)?;
+        let reclaim_class = if scratch.is_some() {
+            "attempt_scratch"
+        } else {
+            "provider_state"
+        };
+        let cursor = scan.reclaim_cursor(reclaim_class)?;
+        let mut after = cursor.as_ref().map_or_else(
+            || self.retention_after(scan.start_at),
+            |cursor| Ok(reclaim_after(cursor)),
+        )?;
+        let mut reclaimable = crate::reclaim::ReclaimDriver::<RetentionRow, RunError>::new(
+            reclaim_class,
+            retention_row_sequence,
+            retention_row_identity,
+            cursor,
+        );
         let mut report = ProviderStateGc::default();
         let mut temporary_sizes = provenant_os::disk::DiskReport::with_walk_budget(
             self.context.state_root.as_path().into(),
@@ -450,15 +504,24 @@ impl RunStore {
         let preview_started = std::time::Instant::now();
         let preview_budget = scan.preview_budget;
         loop {
-            let mut rows =
-                self.retention_page(scratch.is_some(), scratch.and_then(|p| p.attempts), after)?;
-            if rows.is_empty() {
-                break;
-            }
-            // The resume cursor is sequence-based, so the whole page is
-            // consumed before ranking: a cooperative stop still resumes after
-            // the last row of this page, never inside it.
-            after = rows.iter().map(|row| row.0).max().unwrap_or(after);
+            let mut rows = match self.retention_page(
+                scratch.is_some(),
+                scratch.and_then(|p| p.attempts),
+                after,
+            ) {
+                Ok(rows) => rows,
+                Err(error) if retention_interrupted(&error) => {
+                    report.interrupted_at =
+                        Some(self.context.state_root.as_path().join("attempts"));
+                    report.continuation = reclaimable
+                        .cursor()
+                        .map(|cursor| encode_reclaim_cursor(reclaimable.class(), cursor))
+                        .transpose()?
+                        .or_else(|| scan.detail.map(str::to_owned));
+                    return Ok(report);
+                }
+                Err(error) => return Err(error),
+            };
             if scratch.is_some() {
                 // Best-effort sizes rank collection within the page. A bounded
                 // census cannot rank attempts in pages it has not read yet, and
@@ -502,16 +565,53 @@ impl RunStore {
                 });
                 rows = ranked.into_iter().map(|(_, row)| row).collect();
             }
-            for (_sequence, id, project, raw) in rows {
+            let saved_cursor = reclaimable.cursor().cloned();
+            let Some(page) = reclaimable.scan(saved_cursor.as_ref(), &rows, keep_going, 64)? else {
+                report.interrupted_at = Some(self.context.state_root.as_path().join("attempts"));
+                report.continuation = reclaimable
+                    .cursor()
+                    .map(|cursor| encode_reclaim_cursor(reclaimable.class(), cursor))
+                    .transpose()?
+                    .or_else(|| scan.detail.map(str::to_owned));
+                return Ok(report);
+            };
+            if page.indices.is_empty() {
+                if reclaimable
+                    .cursor()
+                    .is_some_and(|cursor| cursor.page_open())
+                {
+                    // Every outstanding row in this persisted range vanished
+                    // between passes. Close only after checking the entire
+                    // range; the next query starts at its exclusive end.
+                    reclaimable.finish_page();
+                    if let Some(cursor) = reclaimable.cursor() {
+                        after = reclaim_after(cursor);
+                    }
+                    if rows.is_empty() {
+                        break;
+                    }
+                    continue;
+                }
+                break;
+            }
+            let selected = page
+                .indices
+                .into_iter()
+                .collect::<std::collections::BTreeSet<_>>();
+            rows = rows
+                .into_iter()
+                .enumerate()
+                .filter_map(|(index, row)| selected.contains(&index).then_some(row))
+                .collect();
+            for row in rows {
+                let id = row.1.clone();
+                let project = row.2.clone();
+                let raw = &row.3;
                 let attempt_path = self
                     .context
                     .state_root
                     .as_path()
                     .join(format!("attempts/{id}"));
-                if !scan.permits(call) {
-                    report.interrupted_at = Some(attempt_path);
-                    return Ok(report);
-                }
                 if dry_run && preview_started.elapsed() >= preview_budget {
                     report.preview_budget_stopped = true;
                     report.kept.push(ProviderStateIssue {
@@ -522,12 +622,25 @@ impl RunStore {
                         ),
                     });
                     report.interrupted_at = Some(attempt_path);
+                    report.continuation = reclaimable
+                        .cursor()
+                        .map(|cursor| encode_reclaim_cursor(reclaimable.class(), cursor))
+                        .transpose()?;
                     return Ok(report);
                 }
                 if scratch
                     .and_then(|policy| policy.projects)
                     .is_some_and(|projects| !projects.iter().any(|id| id.to_string() == project))
                 {
+                    let applied = reclaimable.apply(&row, keep_going, || Ok(()))?;
+                    if !applied {
+                        report.interrupted_at = Some(attempt_path);
+                        report.continuation = reclaimable
+                            .cursor()
+                            .map(|cursor| encode_reclaim_cursor(reclaimable.class(), cursor))
+                            .transpose()?;
+                        return Ok(report);
+                    }
                     continue;
                 }
                 let path = self
@@ -538,8 +651,9 @@ impl RunStore {
                 let first_scratch = report.attempt_tmp.len();
                 let first_removal = report.removed.len();
                 let first_tightened = report.tightened.len();
-                let result = (|| -> Result<()> {
-                    let mut record: AttemptRecord = match crate::db::decode_attempt(&raw) {
+                let applied = reclaimable.apply(&row, keep_going, || {
+                    let result = (|| -> Result<()> {
+                    let mut record: AttemptRecord = match crate::db::decode_attempt(raw.as_slice()) {
                         Ok(record) => record,
                         Err(error) => {
                             if let Some(policy) = scratch {
@@ -871,57 +985,87 @@ impl RunStore {
                     if age >= DAY_MICROS.saturating_mul(days as i64) {
                         expire(&attempt, dry_run, &mut report, keep_going)?;
                     }
-                    Ok(())
-                })();
-                let parent = path
-                    .parent()
-                    .ok_or_else(|| RunError::unsafe_path(path.clone(), PathCheck::Containment))?;
-                prefix_removals(&mut report, first_removal, parent);
-                for tightened in &mut report.tightened[first_tightened..] {
-                    *tightened = parent.join(&*tightened);
-                }
-                if scratch.is_some() && report.attempt_tmp.len() == first_scratch {
-                    let temporary = self
-                        .context
-                        .state_root
-                        .as_path()
-                        .join(crate::plan::ATTEMPT_SCRATCH)
-                        .join(&id)
-                        .join("tmp");
-                    if !std::fs::symlink_metadata(&temporary)
-                        .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
-                    {
-                        temporary_sizes.entries.clear();
-                        temporary_sizes.errors.clear();
-                        let measured = if scan.permits(call) {
-                            temporary_sizes.measure("attempt_tmp", &temporary)
-                        } else {
-                            None
-                        };
-                        let bytes = measured
-                            .filter(|_| temporary_sizes.errors.is_empty())
-                            .map(|index| temporary_sizes.entries[index].allocated_bytes);
-                        report.scratch_deferred.push(DeferredScratch {
-                            path: temporary,
-                            bytes,
-                        });
+                        Ok(())
+                    })();
+                    let parent = path.parent().ok_or_else(|| {
+                        RunError::unsafe_path(path.clone(), PathCheck::Containment)
+                    })?;
+                    prefix_removals(&mut report, first_removal, parent);
+                    for tightened in &mut report.tightened[first_tightened..] {
+                        *tightened = parent.join(&*tightened);
                     }
-                }
-                if let Err(error) = result {
-                    let cancelled = call.cancel.is_cancelled()
-                        || matches!(
-                            error,
-                            RunError::Cancelled
-                                | RunError::Filesystem(provenant_os::fs::FsError::Cancelled { .. })
-                        );
-                    if cancelled {
+                    if scratch.is_some() && report.attempt_tmp.len() == first_scratch {
+                        let temporary = self
+                            .context
+                            .state_root
+                            .as_path()
+                            .join(crate::plan::ATTEMPT_SCRATCH)
+                            .join(&id)
+                            .join("tmp");
+                        if !std::fs::symlink_metadata(&temporary)
+                            .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+                        {
+                            temporary_sizes.entries.clear();
+                            temporary_sizes.errors.clear();
+                            let measured = if scan.permits(call) {
+                                temporary_sizes.measure("attempt_tmp", &temporary)
+                            } else {
+                                None
+                            };
+                            let bytes = measured
+                                .filter(|_| temporary_sizes.errors.is_empty())
+                                .map(|index| temporary_sizes.entries[index].allocated_bytes);
+                            report.scratch_deferred.push(DeferredScratch {
+                                path: temporary,
+                                bytes,
+                            });
+                        }
+                    }
+                    if let Err(error) = result {
+                        let cancelled = call.cancel.is_cancelled()
+                            || matches!(
+                                error,
+                                RunError::Cancelled
+                                    | RunError::Filesystem(provenant_os::fs::FsError::Cancelled {
+                                        ..
+                                    })
+                            );
+                        if cancelled {
+                            return Err(error);
+                        }
+                        // This closure can fail before provider state is touched, so
+                        // name the attempt row that failed to read, not a child path.
+                        record_issue(&mut report, attempt_path.clone(), &error);
+                    }
+                    if call.cancel.is_cancelled() {
+                        return Err(RunError::Cancelled);
+                    }
+                    Ok(())
+                });
+                match applied {
+                    Ok(true) => {}
+                    Ok(false) => {
                         report.interrupted_at = Some(attempt_path);
+                        report.continuation = reclaimable
+                            .cursor()
+                            .map(|cursor| encode_reclaim_cursor(reclaimable.class(), cursor))
+                            .transpose()?;
                         return Ok(report);
                     }
-                    // This closure can fail before provider state is touched, so
-                    // name the attempt row that failed to read, not a child path.
-                    record_issue(&mut report, attempt_path, &error);
+                    Err(error) if call.cancel.is_cancelled() || retention_interrupted(&error) => {
+                        report.interrupted_at = Some(attempt_path);
+                        report.continuation = reclaimable
+                            .cursor()
+                            .map(|cursor| encode_reclaim_cursor(reclaimable.class(), cursor))
+                            .transpose()?;
+                        return Ok(report);
+                    }
+                    Err(error) => return Err(error),
                 }
+            }
+            reclaimable.finish_page();
+            if let Some(cursor) = reclaimable.cursor() {
+                after = reclaim_after(cursor);
             }
         }
         Ok(report)

@@ -43,7 +43,6 @@ src/lane_cleanup.rs	#[allow(dead_code)]	Also compiled by the harness=false workt
 src/lane_cleanup.rs	#[allow(dead_code, clippy::too_many_arguments)]	Also compiled by the harness=false worktree driver.
 src/lane_cleanup.rs	#[allow(dead_code, unused_imports)]	test module included by custom worktree driver
 src/lib.rs	#[allow(dead_code, unused_imports)]	test module included by custom worktree driver
-src/output.rs	#[allow(dead_code)]	removed by W2
 src/pr/git.rs	#[allow(unused_imports, dead_code)]	The custom worktree driver compiles without a test harness.
 src/pr/git.rs	#[allow(unused_imports, dead_code)]	The custom worktree driver compiles without a test harness.
 src/pr/land.rs	#[allow(unused_imports, dead_code)]	The custom worktree driver compiles without a test harness.

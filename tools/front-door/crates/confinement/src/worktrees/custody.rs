@@ -1488,21 +1488,71 @@ fn cache_writer_guard_under_gate(
 // destructive operation touches another lane's live work.
 
 use provenant_core::WallTime;
+use provenant_records::command_result::SettingRef;
 use provenant_records::custody::{
     Admit, LeaseObservation, LeaseState, Sharing, Subject as CustodySubject, WorktreeLease,
     admit_writer as records_admit_writer, default_sharing,
     guard_destructive as records_guard_destructive,
 };
 use provenant_records::policy::DESTROYS_LIVE_WORK;
-use provenant_records::provenance::Sourced;
+use provenant_records::provenance::{Layer, Source, Sourced};
 use provenant_records::warning::{CONFIG_UNAVAILABLE, Warning, detected_source, warn};
+use serde::{Deserialize, Serialize};
 
 /// The single setting that selects live-worktree sharing behaviour.
 pub const WORKTREE_SHARING_KEY: &str = provenant_records::custody::WORKTREE_SHARING_KEY;
 
+const LEASE_UNREACHABLE_SECONDS_KEY: &str = "domains.fabric.lanes.lease_unreachable_seconds";
+const LEASE_UNREACHABLE_SECONDS_DEFAULT: u64 = 900;
+const UNREACHABLE_MARKER_FILE: &str = "lease-unreachable.json";
+
 /// The one file name of a worktree slot's lease. Launch, handover, migration
 /// and the confinement reader all write and read this one entry.
 pub const LEASE_FILE: &str = "lease.json";
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct UnreachableMarker {
+    /// Attempt id plus reservation generation identifies one holder incarnation.
+    holder: provenant_core::AttemptId,
+    generation: u64,
+    state: UnreachableMarkerState,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+enum UnreachableMarkerState {
+    Observed,
+    Unreachable { since: WallTime },
+}
+
+fn unreachable_setting_ref(grace: &Sourced<u64>) -> SettingRef {
+    SettingRef {
+        key: LEASE_UNREACHABLE_SECONDS_KEY.to_owned(),
+        value: grace.value.to_string(),
+        layer: grace.source.layer,
+        origin: grace.source.origin.clone().unwrap_or_default(),
+    }
+}
+
+fn default_unreachable_grace() -> Sourced<u64> {
+    Sourced {
+        value: LEASE_UNREACHABLE_SECONDS_DEFAULT,
+        source: Source::default(),
+    }
+}
+
+fn resolved_host_knobs(
+    host_state: &Path,
+    home: &Path,
+    checkout: &Path,
+) -> Result<provenant_config::ResolvedConfig, String> {
+    let mut inputs = provenant_core::RootInputs::new(home.to_path_buf(), checkout.to_path_buf());
+    inputs.state_dir = Some(host_state.to_path_buf());
+    inputs
+        .resolve(&provenant_os::fs::SystemPathResolver)
+        .map_err(|error| error.to_string())
+        .and_then(|roots| provenant_config::read_knobs(&roots).map_err(|error| error.to_string()))
+}
 
 /// The one path at which a worktree slot's lease lives. `slot` is the slot
 /// directory below `<state>/worktrees/<project>/`; every writer of the lease
@@ -1515,13 +1565,7 @@ pub fn lease_path(slot: &std::path::Path) -> std::path::PathBuf {
 /// configuration resolver. A failed read warns and uses the compiled default.
 pub fn configured_sharing(host_state: &Path, home: &Path, checkout: &Path) -> Sourced<Sharing> {
     let fallback = default_sharing();
-    let mut inputs = provenant_core::RootInputs::new(home.to_path_buf(), checkout.to_path_buf());
-    inputs.state_dir = Some(host_state.to_path_buf());
-    let config = inputs
-        .resolve(&provenant_os::fs::SystemPathResolver)
-        .map_err(|error| error.to_string())
-        .and_then(|roots| provenant_config::read_knobs(&roots).map_err(|error| error.to_string()));
-    let config = match config {
+    let config = match resolved_host_knobs(host_state, home, checkout) {
         Ok(config) => config,
         Err(error) => {
             warn(
@@ -1549,6 +1593,56 @@ pub fn configured_sharing(host_state: &Path, home: &Path, checkout: &Path) -> So
         .unwrap_or(fallback)
 }
 
+/// Resolve the host's unreachable-holder grace from an authorised state path,
+/// retaining the setting source for custody warnings and downstream readers.
+/// A config read failure keeps the conservative compiled grace.
+pub fn configured_unreachable_grace_at(host_state: &Path) -> Sourced<u64> {
+    let fallback = default_unreachable_grace();
+    let config = match provenant_config::read_knobs_at_state(host_state) {
+        Ok(config) => config,
+        Err(error) => {
+            warn(
+                Warning::new(
+                    CONFIG_UNAVAILABLE,
+                    format!("{LEASE_UNREACHABLE_SECONDS_KEY} could not be resolved ({error}); using the default"),
+                    detected_source(CONFIG_UNAVAILABLE),
+                )
+                .setting(unreachable_setting_ref(&fallback)),
+            );
+            return fallback;
+        }
+    };
+    config
+        .knobs
+        .get(LEASE_UNREACHABLE_SECONDS_KEY)
+        .and_then(|knob| {
+            Some(Sourced {
+                value: knob.value.as_u64()?,
+                source: knob.source.clone(),
+            })
+        })
+        .unwrap_or(fallback)
+}
+
+/// Resolve the host's unreachable-holder grace, retaining its setting source.
+fn configured_unreachable_grace(context: &WorktreeContext<'_>) -> Sourced<u64> {
+    match context.host_state() {
+        Ok(host_state) => configured_unreachable_grace_at(&host_state),
+        Err(error) => {
+            let fallback = default_unreachable_grace();
+            warn(
+                Warning::new(
+                    CONFIG_UNAVAILABLE,
+                    format!("{LEASE_UNREACHABLE_SECONDS_KEY} could not be resolved ({error}); using the default"),
+                    detected_source(CONFIG_UNAVAILABLE),
+                )
+                .setting(unreachable_setting_ref(&fallback)),
+            );
+            fallback
+        }
+    }
+}
+
 /// Build the lease observation consumed by the records admission seam. A
 /// holder whose process is present owns a live lease, one whose process is
 /// gone has a lapsed lease, and one that cannot be observed is unreachable
@@ -1568,7 +1662,10 @@ pub(crate) fn lease_observation(
         Some(false) => LeaseState::Lapsed {
             attempt_state: "terminal".to_owned(),
         },
-        None => LeaseState::Unreachable { retry_at },
+        None => LeaseState::Unreachable {
+            retry_at,
+            setting: unreachable_setting_ref(&default_unreachable_grace()),
+        },
     };
     LeaseObservation {
         lease: WorktreeLease {
@@ -1604,49 +1701,449 @@ pub(crate) fn emit_admission_warning(admit: &Admit) {
     warn(warning.clone());
 }
 
-/// Read the one durable lease stored in this worktree slot.
-fn slot_lease(project_state: &Directory, path: &Path) -> Option<WorktreeLease> {
-    let Ok(slot) = project_state.open_verified_directory(&state_dir_name(path)) else {
-        return None;
-    };
-    let Ok(bytes) = slot.read_stable(OsStr::new(LEASE_FILE), 4096) else {
-        return None;
-    };
-    serde_json::from_slice(&bytes).ok()
+fn retry_at(since: WallTime, seconds: u64) -> WallTime {
+    let duration = provenant_core::DurationMicros::from_seconds(seconds)
+        .unwrap_or_else(|_| provenant_core::DurationMicros::from_micros(u64::MAX));
+    since.checked_add(duration).unwrap_or(WallTime::MAX)
+}
+
+fn unreachable_state(since: WallTime, now: WallTime, grace: &Sourced<u64>) -> LeaseState {
+    let retry_at = retry_at(since, grace.value);
+    let setting = unreachable_setting_ref(grace);
+    if retry_at <= now {
+        LeaseState::LapsedUnreachable { retry_at, setting }
+    } else {
+        LeaseState::Unreachable { retry_at, setting }
+    }
+}
+
+fn write_unreachable_marker(
+    slot: &Directory,
+    holder: provenant_core::AttemptId,
+    generation: u64,
+    state: UnreachableMarkerState,
+) -> Option<()> {
+    let bytes = serde_json::to_vec(&UnreachableMarker {
+        holder,
+        generation,
+        state,
+    })
+    .ok()?;
+    slot.atomic_write(
+        OsStr::new(UNREACHABLE_MARKER_FILE),
+        ".lease-unreachable-",
+        &bytes,
+        provenant_os::fs::PublishMode::Replace,
+    )
+    .ok()?
+    .require_durable()
+    .ok()
+}
+
+/// Persist every observed presence transition while holding the slot's
+/// observation gate. A missing or unreadable marker starts a fresh grace;
+/// failure to publish it keeps an unreachable holder live for this read.
+#[cfg(test)]
+fn observe_reservation_liveness(
+    slot: &Directory,
+    holder: provenant_core::AttemptId,
+    generation: u64,
+    live: Option<bool>,
+    now: WallTime,
+    grace: &Sourced<u64>,
+) -> Option<LeaseState> {
+    let _observation = provenant_supervisor::custody::writer_observation_guard(slot).ok()?;
+    observe_reservation_liveness_locked(slot, holder, generation, live, now, grace)
+}
+
+fn observe_reservation_liveness_locked(
+    slot: &Directory,
+    holder: provenant_core::AttemptId,
+    generation: u64,
+    live: Option<bool>,
+    now: WallTime,
+    grace: &Sourced<u64>,
+) -> Option<LeaseState> {
+    match live {
+        Some(true) => {
+            write_unreachable_marker(slot, holder, generation, UnreachableMarkerState::Observed)?;
+            Some(LeaseState::Live {
+                attempt_state: "nonterminal".to_owned(),
+            })
+        }
+        Some(false) => {
+            write_unreachable_marker(slot, holder, generation, UnreachableMarkerState::Observed)?;
+            Some(LeaseState::Lapsed {
+                attempt_state: "terminal".to_owned(),
+            })
+        }
+        None => {
+            let marker = slot
+                .read_stable(OsStr::new(UNREACHABLE_MARKER_FILE), 4096)
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<UnreachableMarker>(&bytes).ok());
+            let since = match marker {
+                Some(UnreachableMarker {
+                    holder: marked_holder,
+                    generation: marked_generation,
+                    state: UnreachableMarkerState::Unreachable { since },
+                }) if marked_holder == holder
+                    && marked_generation == generation
+                    && since <= now =>
+                {
+                    since
+                }
+                _ => now,
+            };
+            let already_persisted = marker_matches_since(slot, holder, generation, since);
+            if !already_persisted
+                && write_unreachable_marker(
+                    slot,
+                    holder,
+                    generation,
+                    UnreachableMarkerState::Unreachable { since },
+                )
+                .is_none()
+            {
+                return Some(LeaseState::Unreachable {
+                    retry_at: retry_at(now, grace.value),
+                    setting: unreachable_setting_ref(grace),
+                });
+            }
+            Some(unreachable_state(since, now, grace))
+        }
+    }
+}
+
+fn marker_matches_since(
+    slot: &Directory,
+    holder: provenant_core::AttemptId,
+    generation: u64,
+    since: WallTime,
+) -> bool {
+    slot.read_stable(OsStr::new(UNREACHABLE_MARKER_FILE), 4096)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<UnreachableMarker>(&bytes).ok())
+        .is_some_and(|marker| {
+            marker.holder == holder
+                && marker.generation == generation
+                && matches!(marker.state, UnreachableMarkerState::Unreachable { since: saved } if saved == since)
+        })
+}
+
+fn protects_holder(live: Option<bool>, state: Option<&LeaseState>) -> bool {
+    match state {
+        Some(LeaseState::Live { .. } | LeaseState::Unreachable { .. }) => true,
+        Some(LeaseState::Lapsed { .. } | LeaseState::LapsedUnreachable { .. }) => false,
+        None => live != Some(false),
+    }
 }
 
 /// Pair the authoritative slot lease with the reservation's current holder
 /// state. The reservation supplies liveness; identity, timestamp and sharing
 /// come from the B3 lease written for this slot.
-fn reservation_observation(context: &WorktreeContext<'_>, path: &Path) -> Option<LeaseObservation> {
-    let slot = PathBuf::from(state_dir_name(path));
-    let listing =
-        provenant_supervisor::custody::list_writer_reservations(context.project_state).ok()?;
-    let reservation = listing
-        .reservations
-        .into_iter()
-        .find(|record| record.custody_directory() == Some(slot.as_path()))?;
-    let lease = slot_lease(context.project_state, path)?;
-    if lease.holder != reservation.scope.attempt {
-        return None;
+type ReservationSnapshot = (
+    Directory,
+    provenant_os::fs::LockGuard,
+    provenant_supervisor::custody::WriterReservation,
+    WorktreeLease,
+);
+type GatedReservationSnapshot = (
+    Directory,
+    provenant_os::fs::LockGuard,
+    Option<(
+        provenant_supervisor::custody::WriterReservation,
+        WorktreeLease,
+    )>,
+    Vec<provenant_supervisor::custody::WriterReservation>,
+);
+
+fn reservation_snapshot(
+    project_state: &Directory,
+    path: &Path,
+    adopter: Option<provenant_records::custody::Scope>,
+) -> Result<Option<ReservationSnapshot>, String> {
+    let slot = match project_state.open_verified_directory(&state_dir_name(path)) {
+        Ok(slot) => slot,
+        Err(error) if error.is_not_found() => return Ok(None),
+        Err(error) => {
+            return Err(format!(
+                "worktree custody slot could not be opened: {error}"
+            ));
+        }
+    };
+    let observation = match slot.metadata_at(OsStr::new("writer-probe.lock"), false) {
+        Ok(_) => provenant_supervisor::custody::writer_observation_guard(&slot)
+            .map_err(|error| format!("worktree custody observation is busy: {error}"))?,
+        Err(error) if error.is_not_found() => {
+            // Registry mutation owns gate creation. A legacy unowned slot is
+            // still observable without changing it; reservation evidence in a
+            // gate-less slot remains unknown and therefore protected.
+            let listing = provenant_supervisor::custody::list_writer_reservations_in_slot(&slot)
+                .map_err(|error| format!("writer reservations could not be checked: {error}"))?;
+            if let Some(issue) = listing.issues.first() {
+                return Err(format!(
+                    "writer reservation evidence could not be verified at {}: {}",
+                    issue.reservation.display(),
+                    issue.reason
+                ));
+            }
+            if listing.reservations.is_empty() {
+                return Ok(None);
+            }
+            return Err("writer reservation evidence exists without an observation gate".into());
+        }
+        Err(error) => {
+            return Err(format!(
+                "writer observation gate could not be checked: {error}"
+            ));
+        }
+    };
+    reservation_snapshot_under_gate(slot, observation, adopter).map(
+        |(slot, observation, evidence, _)| {
+            evidence.map(|(reservation, lease)| (slot, observation, reservation, lease))
+        },
+    )
+}
+
+fn reservation_snapshot_under_gate(
+    slot: Directory,
+    observation: provenant_os::fs::LockGuard,
+    adopter: Option<provenant_records::custody::Scope>,
+) -> Result<GatedReservationSnapshot, String> {
+    let listing = provenant_supervisor::custody::list_writer_reservations_in_slot(&slot)
+        .map_err(|error| format!("writer reservations could not be checked: {error}"))?;
+    if let Some(issue) = listing.issues.first() {
+        return Err(format!(
+            "writer reservation evidence could not be verified at {}: {}",
+            issue.reservation.display(),
+            issue.reason
+        ));
     }
+    let lease_bytes = match slot.read_stable(OsStr::new(LEASE_FILE), 4096) {
+        Ok(bytes) => bytes,
+        Err(error) if error.is_not_found() => {
+            // Before its first lease snapshot, a launch may have only its own
+            // prepared reservation. Every other reservation without a lease
+            // remains unexplained custody evidence.
+            let only_adopter = adopter.is_some_and(|adopter| {
+                listing.reservations.len() == 1 && listing.reservations[0].scope == adopter
+            });
+            if listing.reservations.is_empty() || only_adopter {
+                return Ok((slot, observation, None, Vec::new()));
+            }
+            return Err("writer reservations exist without a worktree lease".into());
+        }
+        Err(error) => return Err(format!("worktree lease could not be read: {error}")),
+    };
+    let lease: WorktreeLease = serde_json::from_slice(&lease_bytes)
+        .map_err(|error| format!("worktree lease is malformed: {error}"))?;
+    let mut holder = None;
+    let mut siblings = Vec::new();
+    for reservation in listing.reservations {
+        if reservation.scope.attempt == lease.holder {
+            holder = Some(reservation);
+        } else {
+            siblings.push(reservation);
+        }
+    }
+    let Some(reservation) = holder else {
+        return if siblings.is_empty() {
+            Ok((slot, observation, None, siblings))
+        } else {
+            Err("worktree lease does not match a recorded writer reservation".into())
+        };
+    };
+    Ok((slot, observation, Some((reservation, lease)), siblings))
+}
+
+/// Admission gate retained across a lapsed-lease handover. The apply path
+/// creates the gate when needed, classifies the current reservation under it
+/// and keeps it held until the successor lease is published.
+#[must_use = "keep the handover gate alive through lease publication"]
+pub struct WriterLeaseHandoverGuard {
+    slot: Option<Directory>,
+    _observation: Option<provenant_os::fs::LockGuard>,
+    observation: Option<LeaseObservation>,
+    other_protected_holder: bool,
+}
+
+impl WriterLeaseHandoverGuard {
+    pub fn slot(&self) -> Option<&Directory> {
+        self.slot.as_ref()
+    }
+
+    pub fn observation(&self) -> Option<&LeaseObservation> {
+        self.observation.as_ref()
+    }
+
+    pub fn has_other_protected_holder(&self) -> bool {
+        self.other_protected_holder
+    }
+}
+
+/// Acquire the admission gate and classify the lease for a handover. Unlike
+/// read-only observations, this mutation path may create the gate. The caller
+/// must retain the returned value through publication of the successor lease.
+pub fn lock_writer_lease_handover(
+    project_state: &Directory,
+    path: &Path,
+    now: WallTime,
+    grace: &Sourced<u64>,
+    adopter: provenant_records::custody::Scope,
+) -> Result<WriterLeaseHandoverGuard, WorktreeError> {
+    let slot = match project_state.open_verified_directory(&state_dir_name(path)) {
+        Ok(slot) => slot,
+        Err(error) if error.is_not_found() => {
+            return Ok(WriterLeaseHandoverGuard {
+                slot: None,
+                _observation: None,
+                observation: None,
+                other_protected_holder: false,
+            });
+        }
+        Err(error) => {
+            return Err(WorktreeError::UnknownOccupancy {
+                path: path.to_path_buf(),
+                detail: format!("worktree custody slot could not be opened: {error}"),
+            });
+        }
+    };
+    let observation =
+        provenant_supervisor::custody::writer_admission_guard(&slot).map_err(|error| {
+            WorktreeError::UnknownOccupancy {
+                path: path.to_path_buf(),
+                detail: format!("worktree custody observation is busy: {error}"),
+            }
+        })?;
+    let (slot, observation, evidence, siblings) =
+        reservation_snapshot_under_gate(slot, observation, Some(adopter)).map_err(|detail| {
+            WorktreeError::UnknownOccupancy {
+                path: path.to_path_buf(),
+                detail,
+            }
+        })?;
+    let other_protected_holder = siblings
+        .iter()
+        .any(|reservation| reservation.scope != adopter && reservation.live != Some(false));
+    let lease_observation = evidence
+        .map(
+            |(reservation, lease)| -> std::result::Result<LeaseObservation, WorktreeError> {
+                let state = observe_reservation_liveness_locked(
+                    &slot,
+                    reservation.scope.attempt,
+                    reservation.scope.generation,
+                    reservation.live,
+                    now,
+                    grace,
+                )
+                .ok_or_else(|| WorktreeError::UnknownOccupancy {
+                    path: path.to_path_buf(),
+                    detail: "worktree holder liveness could not be persisted".into(),
+                })?;
+                Ok(LeaseObservation { lease, state })
+            },
+        )
+        .transpose()?;
+    Ok(WriterLeaseHandoverGuard {
+        slot: Some(slot),
+        _observation: Some(observation),
+        observation: lease_observation,
+        other_protected_holder,
+    })
+}
+
+/// Observe the current slot lease with the current configured grace. This is
+/// shared with run lineage so adoption and confinement use one classifier.
+/// The observation gate protects the reservation listing and marker update.
+pub fn writer_lease_observation(
+    project_state: &Directory,
+    path: &Path,
+    now: WallTime,
+    grace: &Sourced<u64>,
+) -> Result<Option<LeaseObservation>, WorktreeError> {
+    observe_writer_lease(project_state, path, now, grace, None)
+}
+
+/// Observe the lease during launch admission. A sole reservation for the
+/// launching attempt may precede its first lease snapshot; other reservation
+/// evidence without a lease remains an unknown-occupancy error.
+pub fn writer_lease_observation_for_adopter(
+    project_state: &Directory,
+    path: &Path,
+    now: WallTime,
+    grace: &Sourced<u64>,
+    adopter: provenant_records::custody::Scope,
+) -> Result<Option<LeaseObservation>, WorktreeError> {
+    observe_writer_lease(project_state, path, now, grace, Some(adopter))
+}
+
+fn observe_writer_lease(
+    project_state: &Directory,
+    path: &Path,
+    now: WallTime,
+    grace: &Sourced<u64>,
+    adopter: Option<provenant_records::custody::Scope>,
+) -> Result<Option<LeaseObservation>, WorktreeError> {
+    let Some((slot, _observation, reservation, lease)) =
+        reservation_snapshot(project_state, path, adopter).map_err(|detail| {
+            WorktreeError::UnknownOccupancy {
+                path: path.to_path_buf(),
+                detail,
+            }
+        })?
+    else {
+        return Ok(None);
+    };
+    let state = observe_reservation_liveness_locked(
+        &slot,
+        reservation.scope.attempt,
+        reservation.scope.generation,
+        reservation.live,
+        now,
+        grace,
+    )
+    .ok_or_else(|| WorktreeError::UnknownOccupancy {
+        path: path.to_path_buf(),
+        detail: "worktree holder liveness could not be persisted".into(),
+    })?;
+    Ok(Some(LeaseObservation { lease, state }))
+}
+
+fn reservation_observation(
+    context: &WorktreeContext<'_>,
+    path: &Path,
+) -> Result<
+    Option<(
+        provenant_supervisor::custody::WriterReservation,
+        LeaseObservation,
+    )>,
+    String,
+> {
+    let Some((slot, _observation, reservation, lease)) =
+        reservation_snapshot(context.project_state, path, None)?
+    else {
+        return Ok(None);
+    };
     let now = context
         .clock
         .wall_now()
-        .unwrap_or_else(|_| WallTime::from_micros(0).unwrap_or(WallTime::MAX));
-    // An unreachable holder is retried on the next observation; the exact
-    // `lease_unreachable_seconds` grace is applied by the caller that can read
-    // the host setting.
-    let state = match reservation.live {
-        Some(true) => LeaseState::Live {
-            attempt_state: "nonterminal".to_owned(),
-        },
-        Some(false) => LeaseState::Lapsed {
-            attempt_state: "terminal".to_owned(),
-        },
-        None => LeaseState::Unreachable { retry_at: now },
+        .map_err(|error| format!("holder observation time is unavailable: {error}"))?;
+    let grace = if reservation.live.is_none() {
+        configured_unreachable_grace(context)
+    } else {
+        default_unreachable_grace()
     };
-    Some(LeaseObservation { lease, state })
+    let state = observe_reservation_liveness_locked(
+        &slot,
+        reservation.scope.attempt,
+        reservation.scope.generation,
+        reservation.live,
+        now,
+        &grace,
+    )
+    .ok_or_else(|| "worktree holder liveness could not be persisted".to_owned())?;
+    Ok(Some((reservation, LeaseObservation { lease, state })))
 }
 
 /// Translate a shared writer-occupancy refusal into the worktree contract.
@@ -1686,23 +2183,32 @@ pub fn admitted_writer_guard(
     context: &WorktreeContext<'_>,
     path: &Path,
 ) -> Result<LockGuard, WorktreeError> {
-    let Some(observation) = reservation_observation(context, path) else {
-        let directory = writer_directory(context.project_state, path)?;
-        let guard = provenant_supervisor::custody::lock_writer_occupancy(
-            &directory,
-            context.lock_budget,
-            &CancelToken::new(),
-            context.clock,
-        )
-        .map_err(|error| {
-            writer_occupancy_refusal(error, writer_holder(context.project_state, path), path)
-        })?;
-        retained_import(&directory).map_err(|detail| WorktreeError::UnknownOccupancy {
-            path: path.to_path_buf(),
-            detail,
-        })?;
-        outstanding_reservation(&directory, path).map_err(custody_refusal)?;
-        return Ok(guard);
+    let observation = match reservation_observation(context, path) {
+        Ok(Some((_, observation))) => observation,
+        Ok(None) => {
+            let directory = writer_directory(context.project_state, path)?;
+            let guard = provenant_supervisor::custody::lock_writer_occupancy(
+                &directory,
+                context.lock_budget,
+                &CancelToken::new(),
+                context.clock,
+            )
+            .map_err(|error| {
+                writer_occupancy_refusal(error, writer_holder(context.project_state, path), path)
+            })?;
+            retained_import(&directory).map_err(|detail| WorktreeError::UnknownOccupancy {
+                path: path.to_path_buf(),
+                detail,
+            })?;
+            outstanding_reservation(&directory, path).map_err(custody_refusal)?;
+            return Ok(guard);
+        }
+        Err(detail) => {
+            return Err(WorktreeError::UnknownOccupancy {
+                path: path.to_path_buf(),
+                detail,
+            });
+        }
     };
     let tree = CustodySubject {
         kind: provenant_records::custody::SubjectKind::Worktree,
@@ -1735,18 +2241,32 @@ pub fn admitted_writer_guard(
     Ok(guard)
 }
 
-/// The live holder of a worktree slot, when a reservation names one. A lapsed
-/// holder (terminal attempt) yields `None`, so no destruction guard can fire.
+/// The holder of a worktree slot while its reservation is live or unobservable
+/// within grace. A terminal or grace-lapsed holder yields `None`; incomplete
+/// evidence returns an unknown holder that still fires the destruction guard.
 pub(crate) fn live_writer_holder(
-    project_state: &Directory,
+    context: &WorktreeContext<'_>,
     path: &Path,
-) -> Option<(provenant_core::AttemptId, bool)> {
-    let slot = PathBuf::from(state_dir_name(path));
-    let listing = provenant_supervisor::custody::list_writer_reservations(project_state).ok()?;
-    listing.reservations.into_iter().find_map(|reservation| {
-        (reservation.custody_directory() == Some(slot.as_path()) && reservation.live == Some(true))
-            .then_some((reservation.scope.attempt, true))
-    })
+) -> Option<(Option<provenant_core::AttemptId>, bool)> {
+    let (reservation, observation) = match reservation_observation(context, path) {
+        Ok(Some(observation)) => observation,
+        Ok(None) => return None,
+        Err(_) => return Some((None, true)),
+    };
+    let holder = reservation.scope.attempt;
+    if matches!(&observation.state, LeaseState::LapsedUnreachable { .. }) {
+        let tree = CustodySubject {
+            kind: provenant_records::custody::SubjectKind::Worktree,
+            id: path.to_string_lossy().into_owned(),
+        };
+        // Lapsed-unreachable always carries its warning, regardless of the
+        // sharing policy; no second config read is needed here.
+        let sharing = default_sharing();
+        let admit = admit_shared_writer(&tree, Some(&observation), &sharing);
+        emit_admission_warning(&admit);
+    }
+    let live = protects_holder(reservation.live, Some(&observation.state));
+    live.then_some((Some(holder), true))
 }
 
 /// Apply the destruction guard before an operation that could overwrite a
@@ -1855,7 +2375,113 @@ mod sharing_tests {
             panic!("unreachable holder should warn and proceed");
         };
         assert_eq!(warning.code.as_ref(), LEASE_HOLDER_UNREACHABLE);
-        assert_eq!(warning.setting.as_ref().unwrap().layer, Layer::Host);
+        assert_eq!(warning.setting.as_ref().unwrap().layer, Layer::Default);
+        assert_eq!(
+            warning.setting.as_ref().unwrap().key,
+            LEASE_UNREACHABLE_SECONDS_KEY
+        );
+    }
+
+    #[test]
+    fn unreachable_grace_persists_first_observation_and_guards_destruction() {
+        let temp = tempfile::tempdir().unwrap();
+        let slot = Directory::open_anchor(temp.path()).unwrap();
+        provenant_supervisor::custody::prepare_writer_observation(&slot).unwrap();
+        let attempt = holder(8);
+        let started = WallTime::from_unix_seconds(1_700_000_000).unwrap();
+        let grace = Sourced {
+            value: 10,
+            source: Source::at(
+                Layer::Host,
+                "config.toml#domains.fabric.lanes.lease_unreachable_seconds",
+            ),
+        };
+
+        let first = observe_reservation_liveness(&slot, attempt, 1, None, started, &grace).unwrap();
+        let LeaseState::Unreachable {
+            retry_at: first_deadline,
+            ..
+        } = first
+        else {
+            panic!("a new unreachable observation must start its grace");
+        };
+        let within_grace = started
+            .checked_add(provenant_core::DurationMicros::from_seconds(9).unwrap())
+            .unwrap();
+        let resumed =
+            observe_reservation_liveness(&slot, attempt, 1, None, within_grace, &grace).unwrap();
+        assert!(matches!(
+            &resumed,
+            LeaseState::Unreachable { retry_at, .. } if *retry_at == first_deadline
+        ));
+        assert!(matches!(
+            guard_destructive_worktree(
+                "worktree remove",
+                &tree(),
+                protects_holder(None, Some(&resumed)),
+                Some(attempt),
+            ),
+            Err(WorktreeError::CustodyRefused {
+                code: DESTROYS_LIVE_WORK,
+                holder: Some(seen),
+                ..
+            }) if seen == attempt
+        ));
+
+        let after_grace = started
+            .checked_add(provenant_core::DurationMicros::from_seconds(10).unwrap())
+            .unwrap();
+        assert!(matches!(
+            observe_reservation_liveness(&slot, attempt, 1, None, after_grace, &grace),
+            Some(LeaseState::LapsedUnreachable { retry_at, .. }) if retry_at == first_deadline
+        ));
+    }
+
+    #[test]
+    fn unreadable_or_missing_holder_observation_stays_protected() {
+        assert!(protects_holder(None, None));
+        assert!(protects_holder(Some(true), None));
+        assert!(!protects_holder(Some(false), None));
+        let default_grace = default_unreachable_grace();
+        assert!(protects_holder(
+            None,
+            Some(&LeaseState::Unreachable {
+                retry_at: WallTime::from_micros(1).unwrap(),
+                setting: unreachable_setting_ref(&default_grace),
+            })
+        ));
+
+        let temp = tempfile::tempdir().unwrap();
+        let slot = Directory::open_anchor(temp.path()).unwrap();
+        provenant_supervisor::custody::prepare_writer_observation(&slot).unwrap();
+        std::fs::write(temp.path().join(UNREACHABLE_MARKER_FILE), b"not json").unwrap();
+        let now = WallTime::from_unix_seconds(1_700_000_000).unwrap();
+        assert!(matches!(
+            observe_reservation_liveness(&slot, holder(9), 1, None, now, &default_grace),
+            Some(LeaseState::Unreachable { .. })
+        ));
+    }
+
+    #[test]
+    fn unreachable_grace_marker_is_scoped_to_holder_incarnation() {
+        let temp = tempfile::tempdir().unwrap();
+        let slot = Directory::open_anchor(temp.path()).unwrap();
+        provenant_supervisor::custody::prepare_writer_observation(&slot).unwrap();
+        let grace = Sourced {
+            value: 10,
+            source: Source::at(Layer::Host, "fixture"),
+        };
+        let now = WallTime::from_unix_seconds(1_700_000_000).unwrap();
+        let attempt = holder(10);
+        observe_reservation_liveness(&slot, attempt, 1, None, now, &grace).unwrap();
+        let later = now
+            .checked_add(provenant_core::DurationMicros::from_seconds(20).unwrap())
+            .unwrap();
+        assert!(matches!(
+            observe_reservation_liveness(&slot, attempt, 2, None, later, &grace),
+            Some(LeaseState::Unreachable { retry_at, .. })
+                if retry_at == later.checked_add(provenant_core::DurationMicros::from_seconds(10).unwrap()).unwrap()
+        ));
     }
 
     #[test]
@@ -1882,6 +2508,30 @@ mod sharing_tests {
             configured_sharing(absent, Path::new("/provenant/home"), Path::new("/project")).value,
             Sharing::Warn
         );
+    }
+
+    #[test]
+    fn unreachable_grace_reads_the_host_knob_and_preserves_its_source()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let fixture = crate::test_support::Fixture::new()?;
+        let test = crate::worktrees::lifecycle_tests::TestContext::new(&fixture)?;
+        let context = test.context();
+        std::fs::write(
+            test.roots.state.as_path().join("config.toml"),
+            "schema_version = 1\n[knobs]\n'domains.fabric.lanes.lease_unreachable_seconds' = 12\n",
+        )?;
+
+        let grace = configured_unreachable_grace(&context);
+        assert_eq!(grace.value, 12);
+        assert_eq!(grace.source.layer, Layer::Host);
+        assert!(
+            grace
+                .source
+                .origin
+                .as_deref()
+                .is_some_and(|origin| origin.contains("config.toml"))
+        );
+        Ok(())
     }
 
     #[test]
