@@ -1719,11 +1719,57 @@ impl FileJournal {
                     decode_verified_checkpoint(&bytes, graph_id, bytes.len() as u64).ok()
                 });
                 cleanup(recovered.as_ref().map(|stored| &stored.checkpoint))?;
+                // A retired graph is archived, never deleted. Copy the exact
+                // stored bytes (and its marker) under the graph lock before
+                // clearing the live checkpoint, so an interrupted clear still
+                // leaves a recoverable record.
+                let stamp = clock
+                    .wall_now()
+                    .map(|now| now.as_micros())
+                    .unwrap_or_default();
+                let archive_name = format!("{graph_id}-{stamp}");
+                match directory.mkdir(OsStr::new("retired"), 0o700) {
+                    Ok(()) => {}
+                    Err(error) if error.is_exists() => {}
+                    Err(error) => return Err(error.into()),
+                }
+                let retired = directory.open_verified_directory(OsStr::new("retired"))?;
+                match retired.mkdir(OsStr::new(&archive_name), 0o700) {
+                    Ok(()) => {}
+                    Err(error) if error.is_exists() => {}
+                    Err(error) => return Err(error.into()),
+                }
+                let archive = retired.open_verified_directory(OsStr::new(&archive_name))?;
+                if let Some(bytes) = bytes.as_deref() {
+                    archive
+                        .atomic_write(
+                            OsStr::new(&format!("graph-{graph_id}.json")),
+                            ".graph-retired.",
+                            bytes,
+                            PublishMode::Replace,
+                        )?
+                        .require_durable()
+                        .map_err(JournalError::DurabilityUnconfirmed)?;
+                }
+                let marker = unreadable_marker_name(graph_id);
+                if let Ok(marker_bytes) = directory.read_bounded(&marker, 4 * 1024) {
+                    archive
+                        .atomic_write(
+                            &marker,
+                            ".graph-retired-marker.",
+                            &marker_bytes,
+                            PublishMode::Replace,
+                        )?
+                        .require_durable()
+                        .map_err(JournalError::DurabilityUnconfirmed)?;
+                }
+                archive.sync()?;
+                retired.sync()?;
                 directory.unlink(OsStr::new(&format!("graph-{graph_id}.json")))?;
                 directory
                     .sync()
                     .map_err(JournalError::DurabilityUnconfirmed)?;
-                let _ = directory.unlink(&unreadable_marker_name(graph_id));
+                let _ = directory.unlink(&marker);
                 Ok(true)
             }
             Err(error) => Err(error.for_graph(graph_id).into()),

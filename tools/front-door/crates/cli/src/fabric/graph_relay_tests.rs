@@ -410,22 +410,21 @@ mod provisioning_tests {
         );
         relay::clear_provisioning(&mut checkpoint, "parent--later");
         assert_eq!(checkpoint.nodes[0].provisioned_owner, Some(owner));
-        // A later admission cannot turn this target into another lane's
-        // creation simply because the original effect fence was cleared.
+        // A later admission is an advisory claim, not a refusal: it rebinds
+        // the target and warns under the custody sharing rule (#4120).
         let mut foreign = checkpoint.expansions[0].clone();
         foreign.nodes[0].id = "other--writer".into();
         checkpoint.expansions.push(foreign);
         let mut foreign_progress = checkpoint.nodes[0].clone();
         foreign_progress.id = "other--writer".into();
-        foreign_progress.provisioned_owner = None;
+        foreign_progress.provisioned_owner =
+            Some(provisioning_owner_digest("another-graph", "writer")?);
+        foreign_progress.worktree = Some(path.into());
         checkpoint.nodes.push(foreign_progress);
-        assert_eq!(
-            bind_admitted_provisioning_owners(&mut checkpoint)
-                .unwrap_err()
-                .code(),
-            "writer_parent_required"
-        );
-        assert_eq!(checkpoint.nodes[0].provisioned_owner, Some(owner));
+        bind_admitted_provisioning_owners(&mut checkpoint)?;
+        let rebound = checkpoint.nodes[1].provisioned_owner;
+        assert!(rebound.is_some());
+        assert_eq!(checkpoint.nodes[0].provisioned_owner, rebound);
         Ok(())
     }
 
@@ -2844,6 +2843,53 @@ mod panel_tests {
         assert!(refused.contains(named_family));
         assert!(refused.contains("count 1"));
         assert!(refused.contains("candidate account unavailable; excluded by policy"));
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod wake_tests {
+    use super::*;
+
+    // Spec: docs/specs/agent-native.md#34-wake
+    #[test]
+    fn lane_wake_frame_is_read_class_and_carries_no_mutation_authority()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let subject = WakeSubjectRef::Graph {
+            project: provenant_core::ProjectId::from_bytes([1; 16]),
+            id: "graph-one".into(),
+        };
+        let frame = serde_json::to_value(GraphRelay::Wake { subject })?;
+        assert_eq!(frame["op"], "wake");
+        assert_eq!(frame["subject"]["graph"]["id"], "graph-one");
+
+        let root = tempfile::tempdir()?;
+        let home = root.path().join("home");
+        let project = home.join("project");
+        std::fs::create_dir_all(&project)?;
+        provenant_os::fixture::run_git(&project, &["init", "-q"])?;
+        provenant_os::fixture::run_git(&project, &["commit", "--allow-empty", "-qm", "base"])?;
+        let mut inputs = provenant_core::RootInputs::new(home.clone(), project.clone());
+        inputs.state_dir = Some(root.path().join("state"));
+        let context = Context::open(
+            inputs.resolve(&provenant_os::fs::SystemPathResolver)?,
+            &home,
+            &project,
+        )?;
+        let clock = provenant_os::clock::SystemClock::new();
+        let cancel = CancelToken::new();
+        let budget = WaitBudget::cli(clock.mono_now(), 5)?;
+
+        // A wake is forwarded to the host reader, never through the mutation
+        // admission or journal path: the reader enforces the sibling session.
+        let delivered = std::cell::RefCell::new(Vec::new());
+        let read = |input: Value| -> Result<Value, ServiceError> {
+            delivered.borrow_mut().push(input.clone());
+            Ok(json!({"advanced": 1}))
+        };
+        let result = serve_with_read(&context, "attempt-1", frame, budget, &cancel, &clock, &read)?;
+        assert_eq!(result["advanced"], 1);
+        assert_eq!(delivered.borrow()[0]["op"], "wake");
         Ok(())
     }
 }

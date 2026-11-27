@@ -608,6 +608,21 @@ fn terminal_checkpoint_with_superseded_header_is_retired() {
         .unwrap()
     );
     assert!(!path.exists());
+    // Spec: docs/specs/agent-native.md#31-progress-without-tick — a retired
+    // graph is archived under the graph directory, never deleted.
+    let retired = root
+        .as_path()
+        .join("fabric/graphs")
+        .join(project.to_string())
+        .join("retired");
+    let archived = std::fs::read_dir(&retired)
+        .unwrap()
+        .filter_map(Result::ok)
+        .any(|entry| entry.path().join("graph-g-test.json").is_file());
+    assert!(
+        archived,
+        "retired checkpoint must be preserved under retired/"
+    );
 }
 
 #[test]
