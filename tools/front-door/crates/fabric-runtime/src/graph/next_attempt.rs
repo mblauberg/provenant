@@ -429,6 +429,9 @@ fn routing_outcome(outcome: GraphAttemptOutcome) -> provenant_routing::FallbackO
     match outcome {
         GraphAttemptOutcome::AuthRequired => provenant_routing::FallbackOutcome::AuthRequired,
         GraphAttemptOutcome::UsageLimited => provenant_routing::FallbackOutcome::UsageLimited,
+        GraphAttemptOutcome::ModelUnavailable => {
+            provenant_routing::FallbackOutcome::ModelUnavailable
+        }
         // Keep the pre-launch refusal's existing route policy. Its graph
         // outcome carries the real cause; this is only fallback eligibility.
         // A local preparation failure needs a local repair, not another route.
@@ -462,6 +465,7 @@ fn fallback_cause(outcome: GraphAttemptOutcome) -> Option<provenant_records::Sto
     match outcome {
         GraphAttemptOutcome::AuthRequired => Some(StopCause::AuthRequired),
         GraphAttemptOutcome::UsageLimited => Some(StopCause::UsageLimited),
+        GraphAttemptOutcome::ModelUnavailable => Some(StopCause::ModelUnavailable),
         GraphAttemptOutcome::PreparationRefused(
             provenant_records::run::CauseKind::SpawnFailure,
         ) => Some(StopCause::SpawnFailure),
@@ -564,6 +568,9 @@ pub(crate) fn fallback_denial(
     let reason = match outcome {
         GraphAttemptOutcome::AuthRequired => "The lane requires authentication.",
         GraphAttemptOutcome::UsageLimited => "The lane reached a usage limit.",
+        GraphAttemptOutcome::ModelUnavailable => {
+            "The model is unavailable for this account; another candidate may take over."
+        }
         GraphAttemptOutcome::AdapterUnavailable => "The lane's adapter is unavailable.",
         GraphAttemptOutcome::PreparationRefused(cause) => cause.detail(),
         GraphAttemptOutcome::Unclassified => "The provider reported an unclassified error.",

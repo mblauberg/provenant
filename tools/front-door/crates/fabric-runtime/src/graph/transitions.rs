@@ -744,6 +744,7 @@ pub(super) fn apply_attempt_observation(
                     }
                     GraphAttemptOutcome::AuthRequired
                     | GraphAttemptOutcome::UsageLimited
+                    | GraphAttemptOutcome::ModelUnavailable
                     | GraphAttemptOutcome::AdapterUnavailable
                     | GraphAttemptOutcome::PreparationRefused(_)
                     | GraphAttemptOutcome::Unclassified => {
