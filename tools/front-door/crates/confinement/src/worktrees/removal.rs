@@ -440,9 +440,15 @@ pub fn guard_destructive_branch(
             true,
             Some(reservation.scope.attempt),
         )
-        .map_err(WorktreeError::CustodyCommand)?;
+        .map_err(custody_command)?;
     }
     Ok(())
+}
+
+/// Preserve a shared custody refusal as a typed command error, with its
+/// setting source and next command intact, at the worktree boundary.
+fn custody_command(error: provenant_records::CommandError) -> WorktreeError {
+    WorktreeError::CustodyCommand(Box::new(error))
 }
 
 // The absence and exclusive occupancy proof stays held until the prepared ref
@@ -610,4 +616,36 @@ pub fn branch_checked_out(
 ) -> Result<bool, WorktreeError> {
     let entries = context.facts.fresh_inventory(context, cancel)?;
     checked_out_elsewhere(&entries, branch, None)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use provenant_records::policy::DESTROYS_LIVE_WORK;
+
+    #[test]
+    fn live_branch_refusal_keeps_the_typed_command_contract() {
+        let holder = AttemptId::from_bytes([9; 16]);
+        let subject = Subject::new(SubjectKind::Branch, "refs/heads/lane/repair");
+        let refusal = provenant_records::custody::guard_destructive(
+            "branch delete",
+            &subject,
+            true,
+            Some(holder),
+        )
+        .expect_err("a live branch holder must refuse destruction");
+
+        let WorktreeError::CustodyCommand(preserved) = custody_command(refusal) else {
+            panic!("expected a typed custody command refusal");
+        };
+        assert_eq!(preserved.code.as_str(), DESTROYS_LIVE_WORK);
+        assert!(preserved.message.contains("refs/heads/lane/repair"));
+        let holder_arg = holder.to_string();
+        assert_eq!(preserved.cause.as_deref(), Some(holder_arg.as_str()));
+        let expected_next: Vec<String> = ["provenant", "wait", holder_arg.as_str()]
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        assert_eq!(preserved.next[0].argv, expected_next);
+    }
 }
