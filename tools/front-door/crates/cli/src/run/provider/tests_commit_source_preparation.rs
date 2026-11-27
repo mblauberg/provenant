@@ -436,11 +436,15 @@ fn commit_source_preparation_refusal_retains_preselection_permission_diagnostics
         ("resolver", Boundary::Credentials),
     ] {
         let mut fixture = CommitSourcePreparation::new()?;
-        fixture
-            .task
-            .access
-            .write_roots
-            .push(fixture.home.join(".ssh"));
+        // Preflight uses host access before a model-specific access policy is
+        // selected. A protected state overlap is refused at that stage; a
+        // credential overlap is refused only for the selected isolated route.
+        let denied_root = if plan_error == "resolver" {
+            fixture.state.clone()
+        } else {
+            fixture.home.join(".ssh")
+        };
+        fixture.task.access.write_roots.push(denied_root);
         if plan_error == "resolver" {
             std::fs::write(
                 fixture.state.join("config.toml"),
@@ -485,10 +489,14 @@ fn commit_source_preparation_refusal_retains_preselection_permission_diagnostics
                 .iter()
                 .find(|route| route.route.starts_with("cursor"))
                 .ok_or("route refusal discarded the preselection permission diagnostic")?;
-            assert_eq!(skipped.guard_boundary, Some(Boundary::Credentials));
+            assert_eq!(skipped.guard_boundary, Some(Boundary::Authority));
             assert_eq!(
                 skipped.plan_error,
-                Some(provenant_records::diagnostic::PlanFailure::CredentialRoot)
+                Some(provenant_records::diagnostic::PlanFailure::ProtectedOverlap)
+            );
+            assert_eq!(
+                skipped.confinement_guard,
+                Some(provenant_records::diagnostic::ConfinementGuard::ProtectedPathOverlap)
             );
             continue;
         }
