@@ -1,5 +1,6 @@
 //! Ownership is host state, never part of the provider's checkout.
 //! GC consumers must still prove clean/merged state and acquire custody.
+use super::custody::admitted_writer_guard;
 use super::*;
 use provenant_core::{AttemptId, HostId, OperationId, WallTime};
 use provenant_records::custody::{RetirementStep, RetirementStepState};
@@ -467,13 +468,9 @@ pub fn update_owner_when_unchanged(
     if current.as_ref() != Some(expected) {
         return Err(WorktreeError::IdentityChanged);
     }
-    let _writer =
-        cache_writer_guard(context.project_state, tree.path()).map_err(|state| match state {
-            Occupancy::Held => WorktreeError::WriterBusy {
-                holder: expected.attempt_id,
-            },
-            other => custody_refusal(other),
-        })?;
+    // A live lease is shared under the policy; only an explicit `refuse`
+    // becomes a WriterBusy refusal (slice 35).
+    let _writer = admitted_writer_guard(context, tree.path(), expected.attempt_id)?;
     // Custody also excludes direct owner publications outside owner.lock.
     if load_owner(&tree)?.as_ref() != Some(expected) {
         return Err(WorktreeError::IdentityChanged);

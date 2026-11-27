@@ -1354,6 +1354,7 @@ pub fn facade_outcome(error: &FacadeError) -> (Outcome, provenant_run::ErrorKind
         // owning lane set `lanes.worktree.sharing = refuse`. Shared and warn
         // modes proceed, so a refusal here always names that setting's owner.
         FacadeError::WriterBusy { .. } => (Outcome::Refused, ErrorKind::WriterBusy),
+        FacadeError::CustodyRefused { .. } => (Outcome::Refused, ErrorKind::Refused),
         FacadeError::WriterLeaseHeld { .. } => (Outcome::Refused, ErrorKind::WriterLeaseHeld),
         FacadeError::WriterLockBusy { .. } => (Outcome::Refused, ErrorKind::WriterLockBusy),
         FacadeError::WriterUnknown => (Outcome::Refused, ErrorKind::WriterUnknown),
