@@ -285,7 +285,7 @@ fn read_only_plans_warn_and_proceed_on_extensions_and_inherited_codex_config() {
     let mut input = request(temp.path());
     input.extensions = ExtensionPolicy::Unconfined;
     let (plan, warnings) = warning::capture(|| ConfinedPlan::new(input));
-    assert!(plan.is_ok(), "{plan:?}");
+    assert!(plan.is_ok(), "{:?}", plan.as_ref().err());
     let warning = warnings.first().expect("confinement warning");
     assert_eq!(warning.code.as_ref(), "PLAN_CONFINEDPLAN_NEW_AUTHORITY");
     let setting = warning.setting.as_ref().expect("losing setting");
@@ -294,7 +294,7 @@ fn read_only_plans_warn_and_proceed_on_extensions_and_inherited_codex_config() {
     let mut input = request(temp.path());
     input.codex = CodexPolicy::Inherited;
     let (plan, warnings) = warning::capture(|| ConfinedPlan::new(input));
-    assert!(plan.is_ok(), "{plan:?}");
+    assert!(plan.is_ok(), "{:?}", plan.as_ref().err());
     assert_eq!(warnings.len(), 1);
     assert_eq!(warnings[0].code.as_ref(), "PLAN_CONFINEDPLAN_NEW_AUTHORITY");
 }

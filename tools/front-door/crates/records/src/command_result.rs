@@ -83,22 +83,17 @@ pub struct SettingRef {
 
 /// Whether an error is an immutable boundary, a configured stop, or an
 /// operation that cannot proceed.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ErrorClass {
     Boundary(crate::policy::Boundary),
     Configured,
+    #[default]
     Operation,
     Transient {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         retry_at: Option<jiff::Timestamp>,
     },
-}
-
-impl Default for ErrorClass {
-    fn default() -> Self {
-        Self::Operation
-    }
 }
 
 impl CommandError {

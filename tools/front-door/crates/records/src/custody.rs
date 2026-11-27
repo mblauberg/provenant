@@ -352,6 +352,7 @@ pub fn admit_writer(
 /// Boundary guard signature for operations that could destroy another live
 /// lane's work. The caller supplies the already-resolved fact; no filesystem
 /// or Git mutation belongs in this records crate.
+#[allow(clippy::result_large_err)] // CommandError is the workspace's shared refusal; it is cold-path only.
 pub fn guard_destructive(
     op: &str,
     subject: &Subject,

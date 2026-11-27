@@ -558,7 +558,7 @@ fn read_only_extension_guard_uses_layered_confinement_policy() {
             agy_state: None,
         })
     });
-    assert!(plan.is_ok(), "{plan:?}");
+    assert!(plan.is_ok(), "{:?}", plan.as_ref().err());
     assert_eq!(warnings.len(), 1);
     assert_eq!(warnings[0].code.as_ref(), "PLAN_CONFINEDPLAN_NEW_AUTHORITY");
 

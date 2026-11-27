@@ -293,6 +293,7 @@ impl Facts {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[allow(clippy::large_enum_variant)] // Warn is the common non-proceed effect; boxing it costs every caller.
 pub enum Effect {
     Proceed,
     Warn(Warning),

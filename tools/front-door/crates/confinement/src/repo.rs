@@ -2381,7 +2381,8 @@ mod tests {
             provenant_records::warning::capture(|| verify_worktree(&repo, &lane));
         assert!(
             result.is_ok(),
-            "stale registration should repair: {result:?}"
+            "stale registration should repair: {:?}",
+            result.as_ref().err()
         );
         assert!(
             warnings
