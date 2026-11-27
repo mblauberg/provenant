@@ -649,7 +649,9 @@ fn process_identity(pid: i64) -> Result<ProcessIdentity> {
     loop {
         match fixture::RecordedBootObserver.observe(pid) {
             ProcessObservation::Present(fact) => return Ok(fact.identity),
-            _ if Instant::now() < deadline => wait_step(deadline),
+            _ if Instant::now() < deadline => {
+                wait_step(deadline);
+            }
             other => {
                 return Err(io::Error::other(format!(
                     "process identity {pid} unavailable: {other:?}"
