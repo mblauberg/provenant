@@ -87,7 +87,7 @@ pub(crate) struct PatchReport {
 #[derive(Debug)]
 pub(crate) struct PatchError {
     pub code: String,
-    pub message: String,
+    pub message: Box<str>,
     pub cause: Option<String>,
     pub class: ErrorClass,
     pub setting: Option<Box<SettingRef>>,
@@ -105,7 +105,7 @@ impl PatchError {
     ) -> Self {
         Self {
             code: code.into(),
-            message: message.into(),
+            message: message.into().into_boxed_str(),
             cause,
             class,
             setting: None,
@@ -134,7 +134,7 @@ impl PatchError {
     fn configured(code: &str, message: String, subject: ErrorSubject) -> Self {
         Self {
             code: code.to_owned(),
-            message,
+            message: message.into_boxed_str(),
             cause: None,
             class: ErrorClass::Configured,
             setting: Some(Box::new(SettingRef {
@@ -154,7 +154,7 @@ impl PatchError {
     fn from_command(error: CommandError) -> Self {
         Self {
             code: error.code,
-            message: error.message,
+            message: error.message.into_boxed_str(),
             cause: error.cause,
             class: error.class,
             setting: error.setting.map(Box::new),
@@ -177,7 +177,7 @@ impl PatchError {
         } = self;
         let mut error = CommandError::new(
             code,
-            message,
+            message.into_string(),
             cause.as_deref(),
             "correct the reported condition and rerun the command",
         )
@@ -1344,6 +1344,27 @@ mod tests {
                 .code,
             "CI_PATCH_RUN_MISMATCH"
         );
+    }
+
+    #[test]
+    fn patch_error_transport_preserves_configured_failure() {
+        let (manifest, patch, identity, subject) = fixture(HEAD);
+        let error = verify(
+            &manifest,
+            &patch,
+            &identity,
+            GitOid::parse(OTHER).unwrap(),
+            &subject,
+        )
+        .unwrap_err()
+        .into_command_error();
+        assert_eq!(error.code, "CI_PATCH_HEAD_MISMATCH");
+        assert_eq!(error.class, ErrorClass::Configured);
+        assert!(error.message.contains(HEAD));
+        assert!(error.message.contains(OTHER));
+        assert_eq!(error.setting.unwrap().key, GENERATED_PATCH_KEY);
+        assert!(error.subject.is_some());
+        assert!(!error.next.is_empty());
     }
 
     struct Fake {

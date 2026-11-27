@@ -476,18 +476,20 @@ pub(crate) fn route(params: RouteParams<'_>) -> u8 {
         if follow && !any_active {
             return worst_exit;
         }
-        if follow && !has_events && !has_failure {
-            if let Err(error) = wait_for_next(clock, budget, cancel) {
-                let status = crate::fail(
-                    "events",
-                    Outcome::Error,
-                    "EVENTS_WAIT",
-                    &error,
-                    "check the monotonic clock and try again",
-                    globals,
-                );
-                return worst_exit.max(status);
-            }
+        if follow
+            && !has_events
+            && !has_failure
+            && let Err(error) = wait_for_next(clock, budget, cancel)
+        {
+            let status = crate::fail(
+                "events",
+                Outcome::Error,
+                "EVENTS_WAIT",
+                &error,
+                "check the monotonic clock and try again",
+                globals,
+            );
+            return worst_exit.max(status);
         }
     }
 }

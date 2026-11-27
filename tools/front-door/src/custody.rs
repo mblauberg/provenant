@@ -278,6 +278,14 @@ impl provenant_confinement::worktrees::RetirementPort for RetirementWriter<'_> {
     }
 }
 
+#[allow(clippy::disallowed_methods)] // Native read-only store open deadline.
+fn read_only_open_deadline() -> Instant {
+    Instant::now() + Duration::from_secs(2)
+}
+
+type StatusStream<'a> =
+    &'a mut dyn FnMut(&serde_json::Value) -> Result<(), Box<dyn std::error::Error>>;
+
 /// Read-only S2 view used by previews. It reads the same custody pointers and
 /// lifecycle records as apply, while every lifecycle mutation is rejected.
 pub(crate) struct RetirementReader<'a> {
@@ -288,21 +296,19 @@ pub(crate) struct RetirementReader<'a> {
 }
 
 impl<'a> RetirementReader<'a> {
-    #[allow(clippy::disallowed_methods)] // Native read-only store open deadline.
     pub(crate) fn open(
         roots: &'a Roots,
         project: ProjectId,
         clock: &'a dyn Clock,
         cancel: &'a CancelToken,
     ) -> Result<Self, provenant_confinement::worktrees::WorktreeError> {
-        let store =
-            HostStore::open_read_only(&roots.state, Instant::now() + Duration::from_secs(2))
-                .map_err(RetirementWriter::error)?
-                // The open deadline bounds acquisition, not the GC preview that
-                // reuses this reader for every later ref candidate.
-                .map(|store| store.live_read_only())
-                .transpose()
-                .map_err(RetirementWriter::error)?;
+        let store = HostStore::open_read_only(&roots.state, read_only_open_deadline())
+            .map_err(RetirementWriter::error)?
+            // The open deadline bounds acquisition, not the GC preview that
+            // reuses this reader for every later ref candidate.
+            .map(|store| store.live_read_only())
+            .transpose()
+            .map_err(RetirementWriter::error)?;
         Ok(Self {
             store,
             project,
@@ -799,9 +805,7 @@ fn status_data_with_stream(
     args: &Status,
     globals: &Globals,
     chair: Option<provenant_records::custody::Chair>,
-    mut stream: Option<
-        &mut dyn FnMut(&serde_json::Value) -> Result<(), Box<dyn std::error::Error>>,
-    >,
+    mut stream: Option<StatusStream<'_>>,
 ) -> Result<CommandResult<serde_json::Value>, Box<dyn std::error::Error>> {
     let resolved = roots::resolve(
         globals,
@@ -822,10 +826,7 @@ fn status_data_with_stream(
         clock: &clock,
         cancel: &cancel,
     };
-    let ledger = HostStore::open_read_only(
-        &resolved.roots.state,
-        Instant::now() + Duration::from_secs(2),
-    )?;
+    let ledger = HostStore::open_read_only(&resolved.roots.state, read_only_open_deadline())?;
     let query = CustodyQuery {
         project: globals.project.as_ref().map(|_| context.identity.project),
         state: Some(StateKind::Active),

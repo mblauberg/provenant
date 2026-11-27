@@ -30,9 +30,9 @@ mod tests {
         let mut err = Vec::new();
         assert_eq!(
             emit_with_writers_and_tty(
-                &result, &globals, &mut piped, &mut err, human, true, None, false,
+                &result, &globals, &mut piped, &mut err, human, true, None, false, false,
             ),
-            0
+            (0, true)
         );
         let printed = String::from_utf8(piped).expect("utf8");
         assert!(!printed.contains('\u{1b}'), "{printed:?}");
@@ -49,6 +49,7 @@ mod tests {
             true,
             None,
             true,
+            false,
         );
         assert!(
             String::from_utf8(terminal)
@@ -72,6 +73,7 @@ mod tests {
             "",
             true,
             Some(&summary),
+            false,
             false,
         );
         let compact = String::from_utf8(compact).expect("utf8");

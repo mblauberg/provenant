@@ -1485,7 +1485,7 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
         process,
     };
     if let Some(status) =
-        fabric::host_read::route_if_selected(&invocation.command, |command, selection| {
+        fabric::host_read::route_if_selected(invocation.command, |command, selection| {
             fabric::host_read::route(command, selection, globals, process.workers())
         })
     {

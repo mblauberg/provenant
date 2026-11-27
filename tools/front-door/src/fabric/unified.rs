@@ -1904,7 +1904,7 @@ fn graph_command_read(
         GraphCommand::Stop { .. } => "stop",
         GraphCommand::Retry { .. } => "retry",
     };
-    let result = (|| -> Result<GraphCommandReply, Box<dyn std::error::Error>> {
+    (|| -> Result<GraphCommandReply, Box<dyn std::error::Error>> {
         // A lane reads through the host, which holds the configuration.
         let lane_read = matches!(command, GraphCommand::Status) && provenant_cli::fabric::in_lane();
         let factory = if lane_read {
@@ -2166,8 +2166,7 @@ fn graph_command_read(
             Err(documents) => json!({"targets":documents}),
         };
         Ok((data, human, next_steps, superseded_next))
-    })();
-    result
+    })()
 }
 
 /// Read status data without rendering or writing to the process output streams.
@@ -2988,7 +2987,7 @@ fn collect_graph_listing(
     globals: &provenant_cli::Globals,
     workers: &'static dyn WorkerObserver,
 ) -> Result<Listing, Box<dyn std::error::Error>> {
-    let result = (|| -> Result<Listing, Box<dyn std::error::Error>> {
+    (|| -> Result<Listing, Box<dyn std::error::Error>> {
         let factory = match read_factory(globals, workers) {
             Ok(factory) => factory,
             Err(error) if missing_graph_context(error.as_ref()) => {
@@ -3119,8 +3118,7 @@ fn collect_graph_listing(
             finished.admission_waiters = provenant_os::admission::all_waiters(root.as_path());
         }
         Ok(finished)
-    })();
-    result
+    })()
 }
 
 pub(crate) fn graph_listing(
