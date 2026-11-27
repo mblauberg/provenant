@@ -244,6 +244,15 @@ pub enum WorktreeError {
     DetachedWorktree { head: GitOid },
     #[error("worktree writer is busy{}", .holder.as_ref().map_or_else(String::new, |attempt| format!(", held by attempt {attempt}")))]
     WriterBusy { holder: Option<AttemptId> },
+    /// A boundary-free custody refusal produced by the shared destruction
+    /// guard: an operation would destroy another live lane's work or branch.
+    #[error("error [{code}] {message}")]
+    CustodyRefused {
+        code: &'static str,
+        message: String,
+        cause: Option<String>,
+        holder: Option<AttemptId>,
+    },
     #[error(
         "writer lease held by attempt {holder} (branch {branch}, worktree {}, reservation age {age}, live: {live})",
         .worktree.display(), live = .live.map_or("unknown", |live| if live { "true" } else { "false" })
