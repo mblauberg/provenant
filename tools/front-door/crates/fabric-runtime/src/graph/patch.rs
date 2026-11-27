@@ -261,6 +261,9 @@ pub struct LadderChoice {
     pub target: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tier: Option<String>,
+    /// The `fallback{from,to,cause}` fact for a model-unavailable hand-off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fallback: Option<provenant_routing::FallbackFact>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
