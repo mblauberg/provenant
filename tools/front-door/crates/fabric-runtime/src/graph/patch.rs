@@ -572,13 +572,14 @@ pub fn admit_delivery_review_disposition(
     let mut candidate = graph.checkpoint.clone();
     candidate.nodes[progress_index].set_delivery_review_disposition(disposition);
     candidate.expansions.push(expansion.clone());
-    let admitted = admit_candidate(
+    let admitted = candidate::admit_candidate_with_review_policy(
         graph.document,
         Some(&candidate),
         &[],
         limits,
         budget,
         requester_path,
+        &candidate.review_policy(),
     )
     .map_err(|error| {
         let mut refusal = PatchError::invalid(error.to_string());
@@ -903,6 +904,46 @@ pub fn retry_node(
     context: &PatchContext<'_>,
 ) -> Result<Admitted, PatchError> {
     retry_node_scope(graph, id, brief, context, RetryOptions::default())
+}
+
+/// Reset one failed review leaf onto its persisted retry route. The caller
+/// journals `ReviewRetryState.pending_retry` before entering this boundary and
+/// clears that intent only after the admitted reset has been saved.
+pub(super) fn retry_review_leaf(
+    graph: &mut LiveGraph<'_>,
+    id: &str,
+    route: &GraphRoute,
+    attempt: &AttemptKey,
+    context: &PatchContext<'_>,
+) -> Result<Admitted, PatchError> {
+    let valid_intent = graph
+        .checkpoint
+        .nodes
+        .iter()
+        .find(|progress| progress.id == id)
+        .and_then(|progress| progress.review_retry.as_ref())
+        .and_then(|state| state.pending_retry.as_ref())
+        .is_some_and(|intent| &intent.route == route && &intent.attempt == attempt);
+    if !valid_intent {
+        return Err(PatchError::invalid(
+            "review retry intent does not match the leaf",
+        ));
+    }
+    let reason = format!(
+        "review retry {id} after attempt {} route {}",
+        attempt.attempt, attempt.route_index
+    );
+    retry_node_scope(
+        graph,
+        id,
+        None,
+        context,
+        RetryOptions {
+            reason: Some((&reason, None)),
+            replacement_routes: Some(std::slice::from_ref(route)),
+            ..Default::default()
+        },
+    )
 }
 
 /// A host restart after a stop uses the same checked, journalled reset as an
@@ -1351,6 +1392,7 @@ fn reset_progress(old: &NodeProgress, container: bool) -> Result<NodeProgress, P
                 | "source_binding"
                 | "source_commit"
                 | "review_base"
+                | "review_retry"
                 | "round"
                 | "title"
         )
@@ -1559,6 +1601,7 @@ pub fn compile_submission(
         queue_ci_wait: None,
         queue: None,
         review: None,
+        review_policy: None,
         subject: None,
         exclude: Vec::new(),
         network: None,
@@ -2186,13 +2229,14 @@ pub(super) fn prepare(
     candidate.expansions.push(expansion.clone());
     // Retry preparation may temporarily remove asks before it refreshes wake.
     asks::refresh_wake(&mut candidate);
-    let admitted = admit_candidate(
+    let admitted = candidate::admit_candidate_with_review_policy(
         source,
         Some(&candidate),
         &[],
         context.limits,
         &Default::default(),
         None,
+        &candidate.review_policy(),
     )
     .map_err(|error| {
         let mut refusal = PatchError::invalid(error.to_string());
@@ -2305,24 +2349,6 @@ pub(super) fn skipped_by_patch(checkpoint: &GraphCheckpoint, id: &str) -> bool {
             record.skipped.iter().any(|skipped| skipped == id)
                 && reason == format!("skipped by patch revision {}", record.revision)
         })
-}
-
-pub(super) fn correct_review_verdict(
-    graph: &mut LiveGraph<'_>,
-    id: &str,
-    brief: &str,
-    context: &PatchContext<'_>,
-) -> Result<Admitted, PatchError> {
-    retry_node_scope(
-        graph,
-        id,
-        Some(brief),
-        context,
-        RetryOptions {
-            reason: Some((&format!("correct review verdict {id}"), None)),
-            ..Default::default()
-        },
-    )
 }
 
 #[cfg(test)]

@@ -61,6 +61,7 @@ struct FakeOwner {
     usage: AttemptUsage,
     usage_fails: bool,
     refuse_expansion_target: bool,
+    refuse_review_retry_once: bool,
     expansion_validations: usize,
     integration_heads: VecDeque<String>,
     graph_bases: (
@@ -79,6 +80,9 @@ struct FakeOwner {
     observed_review_bases: Vec<Option<String>>,
     equal_range: bool,
     no_review_base: bool,
+    review_delta_is_ancestor: bool,
+    review_delta_checks: Vec<(String, String)>,
+    resolved_review_policy: Option<ReviewPolicy>,
     read_roots: Vec<Vec<String>>,
     attachments: Vec<Vec<String>>,
     capabilities: Vec<Option<Vec<String>>>,
@@ -138,6 +142,9 @@ fn reply(option: Option<&str>, text: Option<&str>) -> AskReply {
 
 impl AttemptOwner for FakeOwner {
     type Error = NoObservation;
+    fn review_policy(&self) -> ReviewPolicy {
+        self.resolved_review_policy.clone().unwrap_or_default()
+    }
     fn continuation_refused(&mut self, _reference: &str) -> Result<bool, Self::Error> {
         Ok(self.steer_refused)
     }
@@ -294,6 +301,8 @@ impl AttemptOwner for FakeOwner {
             effort: None,
             account: None,
             tier: None,
+            review_policy: None,
+            effective_review_policy: None,
         }))
     }
     fn attempt_models(&mut self, attempts: &[String]) -> Result<Vec<String>, Self::Error> {
@@ -400,9 +409,21 @@ impl AttemptOwner for FakeOwner {
     fn validate_expansion(
         &mut self,
         document: &GraphDocument,
-        _checkpoint: &GraphCheckpoint,
+        checkpoint: &GraphCheckpoint,
     ) -> Result<(), Self::Error> {
         self.expansion_validations += 1;
+        if self.refuse_review_retry_once
+            && checkpoint.nodes.iter().any(|progress| {
+                progress
+                    .review_retry
+                    .as_ref()
+                    .and_then(|state| state.pending_retry.as_ref())
+                    .is_some()
+            })
+        {
+            self.refuse_review_retry_once = false;
+            return Err(NoObservation);
+        }
         if self.refuse_expansion_target
             && document.nodes.iter().any(|node| {
                 matches!(
@@ -461,6 +482,12 @@ impl AttemptOwner for FakeOwner {
         } else {
             ReviewRange::Unknown
         })
+    }
+
+    fn review_delta_attributable(&mut self, base: &str, head: &str) -> bool {
+        self.review_delta_checks
+            .push((base.to_owned(), head.to_owned()));
+        self.review_delta_is_ancestor
     }
 
     fn observe_or_start(
@@ -554,6 +581,8 @@ fn route(adapter: &str) -> GraphRoute {
         alias: None,
         effort: None,
         tier: None,
+        review_policy: None,
+        effective_review_policy: None,
     }
 }
 
@@ -655,6 +684,7 @@ fn graph(nodes: Vec<GraphNode>) -> GraphDocument {
         queue_ci_wait: None,
         queue: None,
         review: None,
+        review_policy: None,
         subject: None,
         exclude: Vec::new(),
         network: None,

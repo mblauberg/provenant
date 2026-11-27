@@ -104,6 +104,72 @@ fn projection_setting_uses_the_resolved_layer_and_origin() -> Result<(), Box<dyn
 }
 
 #[test]
+fn review_policy_uses_effective_knob_values_and_their_sources() {
+    use provenant_fabric_runtime::{config::ReviewSettings, graph::AcceptBelow};
+    use provenant_records::{Layer, Source, Sourced};
+
+    let settings = ReviewSettings::default();
+    let knobs = std::collections::BTreeMap::from([
+        (
+            REVIEW_ACCEPT_BELOW_KEY.to_owned(),
+            Sourced {
+                value: serde_json::json!("blocking"),
+                source: Source {
+                    layer: Layer::Host,
+                    origin: Some("config.toml#knobs.domains.review.accept_below".into()),
+                },
+            },
+        ),
+        (
+            REVIEW_EVIDENCE_RETRIES_KEY.to_owned(),
+            Sourced {
+                value: serde_json::json!(7),
+                source: Source {
+                    layer: Layer::Project,
+                    origin: Some(".provenant/config.toml#domains.review.evidence_retries".into()),
+                },
+            },
+        ),
+    ]);
+    let origins = std::collections::BTreeMap::new();
+    let policy = super::review_policy(&settings, &knobs, &origins);
+
+    assert_eq!(policy.accept_below.value, AcceptBelow::Blocking);
+    assert_eq!(policy.accept_below.source.layer, Layer::Host);
+    assert_eq!(policy.evidence_retries.value, 7);
+    assert_eq!(policy.evidence_retries.source.layer, Layer::Project);
+    assert_eq!(policy.lens_retry.value, settings.lens_retry);
+    assert_eq!(policy.lens_retry.source.layer, Layer::Default);
+}
+
+#[test]
+fn project_review_settings_override_host_defaults_by_field()
+-> Result<(), Box<dyn std::error::Error>> {
+    use provenant_fabric_runtime::graph::{AcceptBelow, ReviewPolicy};
+    use provenant_records::Layer;
+
+    let root = tempfile::tempdir()?;
+    let state = root.path().join("state");
+    let project = root.path().join("project");
+    std::fs::create_dir_all(state.join("projects"))?;
+    std::fs::create_dir_all(project.join(".provenant"))?;
+    std::fs::create_dir_all(project.join(".git"))?;
+    std::fs::write(
+        project.join(".provenant/config.toml"),
+        "[domains.review]\naccept_below = 'blocking'\nevidence_retries = 4\n",
+    )?;
+
+    let policy = super::project_review_policy(ReviewPolicy::default(), &state, Some(&project));
+    assert_eq!(policy.accept_below.value, AcceptBelow::Blocking);
+    assert_eq!(policy.accept_below.source.layer, Layer::Project);
+    assert_eq!(policy.evidence_retries.value, 4);
+    assert_eq!(policy.evidence_retries.source.layer, Layer::Project);
+    assert_eq!(policy.lens_retry.value, 1);
+    assert_eq!(policy.lens_retry.source.layer, Layer::Default);
+    Ok(())
+}
+
+#[test]
 // Spec: docs/specs/cli.md#every-name-refusal-lists-close-matches
 fn a_one_edit_peer_label_typo_ranks_the_configured_label_first() {
     let close = super::close_host_names("worksttion", ["workstation", "laptop"]);

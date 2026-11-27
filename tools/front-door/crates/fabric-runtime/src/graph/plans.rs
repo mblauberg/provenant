@@ -1087,6 +1087,8 @@ fn prepare_nested(
                 effort: None,
                 account: None,
                 tier: None,
+                review_policy: None,
+                effective_review_policy: None,
             });
         }
         return Ok(());
@@ -1141,6 +1143,8 @@ fn prepare_nested(
                 effort: None,
                 account: None,
                 tier: None,
+                review_policy: None,
+                effective_review_policy: None,
             });
         }
     }
@@ -1467,6 +1471,7 @@ pub(super) fn flatten_fragment(
         queue_ci_wait: None,
         queue: None,
         review: None,
+        review_policy: document.review_policy.clone(),
         subject: None,
         exclude: Vec::new(),
         network: None,
@@ -1525,6 +1530,8 @@ pub(super) fn flatten_fragment(
                 effort: None,
                 account: None,
                 tier: None,
+                review_policy: None,
+                effective_review_policy: None,
             });
         }
     }
@@ -1825,9 +1832,13 @@ pub(super) fn settle(
             }
             let mut expansions = checkpoint.expansions.clone();
             expansions.push(addition.clone());
-            if let Some(reason) =
-                graph_envelope_reason(source, &expansions, &checkpoint.extensions, &plan)
-            {
+            if let Some(reason) = graph_envelope_reason_with_policy(
+                source,
+                &expansions,
+                &checkpoint.extensions,
+                &plan,
+                &checkpoint.review_policy(),
+            ) {
                 safe_fallback_error = reason.clone();
                 return Err(reason);
             }
@@ -2001,7 +2012,13 @@ pub(super) fn settle(
         }
         let mut expansions = checkpoint.expansions.clone();
         expansions.push(addition.clone());
-        let bound = graph_envelope_bound(source, &expansions, &checkpoint.extensions, &plan);
+        let bound = graph_envelope_bound_with_policy(
+            source,
+            &expansions,
+            &checkpoint.extensions,
+            &plan,
+            &checkpoint.review_policy(),
+        );
         if bound > MAX_CHECKPOINT_BYTES as usize {
             let limit = GraphEnvelopeLimit { bound };
             safe_reason = PlanFailureFact::Envelope(limit);
@@ -2062,9 +2079,13 @@ pub(super) fn settle(
                     }
                     let mut expansions = checkpoint.expansions.clone();
                     expansions.push(addition.clone());
-                    if let Some(reason) =
-                        graph_envelope_reason(source, &expansions, &checkpoint.extensions, &plan)
-                    {
+                    if let Some(reason) = graph_envelope_reason_with_policy(
+                        source,
+                        &expansions,
+                        &checkpoint.extensions,
+                        &plan,
+                        &checkpoint.review_policy(),
+                    ) {
                         safe_fallback_error = reason.clone();
                         return Err(reason);
                     }

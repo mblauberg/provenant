@@ -1382,14 +1382,17 @@ impl Factory {
                                 None,
                             )
                         }
-                        None => provenant_fabric_runtime::graph::admit_candidate(
-                            &document,
-                            None,
-                            extensions,
-                            &self.context.config.graph.limits,
-                            &self.context.config.graph.budget,
-                            None,
-                        ),
+                        None => {
+                            provenant_fabric_runtime::graph::admit_candidate_with_review_policy(
+                                &document,
+                                None,
+                                extensions,
+                                &self.context.config.graph.limits,
+                                &self.context.config.graph.budget,
+                                None,
+                                &self.context.review_policy,
+                            )
+                        }
                     }
                     .map_err(FacadeError::graph_candidate)?;
                     let expanded = candidate.expanded();
@@ -1490,6 +1493,7 @@ impl Factory {
                     integration_pin: None,
                     cancelled: false,
                     on_stop_defaults: provenant_records::OnStop::default(),
+                    review_policy: None,
                     cancel_reason: None,
                     pause: None,
                     unknown_usage: Vec::new(),
@@ -1821,13 +1825,14 @@ impl Factory {
                     &self.context.config.graph.budget,
                     Some(&requester_path),
                 ),
-                None => provenant_fabric_runtime::graph::admit_candidate(
+                None => provenant_fabric_runtime::graph::admit_candidate_with_review_policy(
                     document,
                     checkpoint.as_ref(),
                     extensions,
                     &self.context.config.graph.limits,
                     &self.context.config.graph.budget,
                     Some(&requester_path),
+                    &self.context.review_policy,
                 ),
             }
             .map_err(FacadeError::graph_candidate)?;

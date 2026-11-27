@@ -634,7 +634,14 @@ fn outputs(
     plan: &PlannedGraph,
     checkpoint: &GraphCheckpoint,
     positions: &BTreeMap<String, usize>,
-) -> Result<(NodeOutputs, Option<NodeDecisionCause>), String> {
+) -> Result<
+    (
+        NodeOutputs,
+        Option<NodeDecisionCause>,
+        Option<(String, FindingLedger)>,
+    ),
+    String,
+> {
     let mut selected = NodeOutputs {
         extra: Default::default(),
         repair_design: None,
@@ -796,6 +803,7 @@ fn outputs(
         }
     }
     let mut split = false;
+    let mut finding_ledger = None;
     if spec.reduce_verdict {
         use provenant_records::workflow::ReviewVerdict;
         let rank = |verdict| match verdict {
@@ -869,7 +877,21 @@ fn outputs(
             return Err("review members settled against different heads".into());
         }
         let head = settlement.head.to_string();
-        let mut ledger = review::ledger_from_checkpoint(plan, checkpoint, boundary, &head);
+        let owner_id = review::chain_owner_id(boundary, plan);
+        let persisted_ledger = positions
+            .get(&owner_id)
+            .and_then(|&owner| checkpoint.nodes.get(owner))
+            .and_then(|progress| progress.finding_ledger.clone());
+        let reconstructed = review::ledger_from_checkpoint(plan, checkpoint, boundary, &head);
+        // A partial panel is not a replacement snapshot. Its source rows may
+        // have been reset for a retry, so keep the durable owner ledger as the
+        // source of truth until a complete panel can replace this head.
+        let mut ledger = if selected.partial {
+            persisted_ledger.unwrap_or(reconstructed)
+        } else {
+            reconstructed
+        };
+        review::validate_ledger_blob(&ledger)?;
         let base = settlement.base.map(|oid| oid.to_string());
         let previous_base = ledger
             .last_reviewed_head
@@ -877,10 +899,16 @@ fn outputs(
             .and_then(|last| ledger.heads.get(last))
             .and_then(|entry| entry.dispositions.get("base"))
             .map(String::as_str);
-        let mode = if plan.nodes[boundary]
-            .round
+        let later_rounds = plan.nodes[boundary]
+            .effective_review_policy
             .as_ref()
-            .is_some_and(|round| round.round >= 2)
+            .map(|policy| policy.later_rounds.value)
+            .unwrap_or_else(|| checkpoint.review_policy().later_rounds.value);
+        let mode = if later_rounds == ReviewRounds::Delta
+            && plan.nodes[boundary]
+                .round
+                .as_ref()
+                .is_some_and(|round| round.round >= 1)
         {
             review::RoundMode::Delta
         } else {
@@ -893,18 +921,27 @@ fn outputs(
             previous_base,
             mode,
         );
+        let mut ledger_findings = ledger
+            .heads
+            .get(&head)
+            .map_or_else(Vec::new, |entry| entry.unresolved.clone());
         if let review::RoundScope::Delta { .. } = scope {
             let carried = review::carried_findings(
                 &ledger,
                 ledger.last_reviewed_head.as_deref().unwrap_or(""),
             );
-            for finding in carried {
+            for finding in &carried {
                 if !selected
                     .findings
                     .iter()
                     .any(|existing| existing.id == finding.id)
                 {
-                    selected.findings.push(finding);
+                    selected.findings.push(finding.clone());
+                }
+            }
+            for finding in carried {
+                if !ledger_findings.contains(&finding) {
+                    ledger_findings.push(finding);
                 }
             }
         }
@@ -912,11 +949,53 @@ fn outputs(
         review::record_head(
             &mut ledger,
             &head,
-            &selected.findings,
+            &ledger_findings,
             existing.dispositions,
             existing.covered_lenses,
             existing.invariant_coverage,
         );
+        if let Some(entry) = ledger.heads.get_mut(&head)
+            && let Some(verdict) = selected
+                .verdict
+                .as_deref()
+                .and_then(provenant_records::workflow::ReviewVerdict::from_token)
+        {
+            entry
+                .dispositions
+                .insert("panel_verdict".to_owned(), verdict.as_token().to_owned());
+        }
+        if let Some(entry) = ledger.heads.get_mut(&head) {
+            entry.unavailable_lenses.extend(
+                review_lens_statuses(boundary, plan, checkpoint, positions)
+                    .into_iter()
+                    .filter_map(|(lens, instances)| {
+                        instances.iter().all(Option::is_some).then_some(lens)
+                    }),
+            );
+        }
+        review::validate_ledger_blob(&ledger)?;
+        if !selected.partial {
+            let owner_id = review::chain_owner_id(boundary, plan);
+            let current_round = plan.nodes[boundary]
+                .round
+                .as_ref()
+                .map_or(0, |round| round.round);
+            let stored_round = positions
+                .get(&owner_id)
+                .and_then(|&owner| checkpoint.nodes.get(owner))
+                .and_then(|progress| {
+                    let stored = progress.finding_ledger.as_ref()?;
+                    let head = stored.last_reviewed_head.as_deref()?;
+                    Some(stored.heads.get(head)?.round)
+                })
+                .unwrap_or(0);
+            // Reconciliation can revisit an earlier boundary after a later
+            // round or adjudicator has settled. Its projection is useful, but
+            // it must not roll the chain owner back to an older head snapshot.
+            if current_round >= stored_round {
+                finding_ledger = Some((owner_id, ledger));
+            }
+        }
         let mut required_invariants = Vec::new();
         for finding in &selected.findings {
             if let Some(invariant) = finding.named_invariant()
@@ -1148,7 +1227,7 @@ fn outputs(
             path: None,
         });
     }
-    Ok((selected, truncation_cause))
+    Ok((selected, truncation_cause, finding_ledger))
 }
 
 /// Reserve each member's strongest finding when all such reservations fit,
@@ -1486,6 +1565,7 @@ fn reconcile_progress(
     }
     let mut exported = None;
     let mut export_error = None;
+    let mut finding_ledger_changed = false;
     if state == NodeState::Succeeded
         || (hard_shortfall && review::composite_review(spec, plan, positions))
     {
@@ -1505,6 +1585,13 @@ fn reconcile_progress(
                         ));
                     }
                 }
+                if let Some((owner_id, ledger)) = &value.2 {
+                    let owner = positions.get(owner_id).copied().unwrap_or(index);
+                    if checkpoint.nodes[owner].finding_ledger.as_ref() != Some(ledger) {
+                        checkpoint.nodes[owner].finding_ledger = Some(ledger.clone());
+                        finding_ledger_changed = true;
+                    }
+                }
                 exported = Some(value);
             }
             Err(reason) => {
@@ -1513,15 +1600,21 @@ fn reconcile_progress(
             }
         }
     }
-    let (exported, truncation_cause) =
-        exported.map_or((None, None), |(output, cause)| (Some(output), cause));
+    let (exported, truncation_cause) = exported.map_or((None, None), |(output, cause, _ledger)| {
+        (Some(output), cause)
+    });
     let (advance_code, advance_note) = if let Some(reason) = shortfall.filter(|_| hard_shortfall) {
         (
             Some("coverage_below_minimum".into()),
             Some(bounded(&reason, MAX_ADVANCE_NOTE_BYTES)),
         )
     } else if let Some(reason) = export_error {
-        (Some("composite_findings_exceed_cap".into()), Some(reason))
+        let code = if reason.starts_with("review finding ledger exceeds") {
+            "review_finding_ledger_exceeds_cap"
+        } else {
+            "composite_findings_exceed_cap"
+        };
+        (Some(code.into()), Some(reason))
     } else {
         (None, None)
     };
@@ -1530,7 +1623,8 @@ fn reconcile_progress(
         || progress.outputs != exported
         || progress.truncation_cause != truncation_cause
         || progress.advance_code != advance_code
-        || progress.advance_note != advance_note;
+        || progress.advance_note != advance_note
+        || finding_ledger_changed;
     progress.state = state;
     progress.outputs = exported;
     progress.truncation_cause = truncation_cause;
@@ -1672,7 +1766,7 @@ pub(super) fn validate_progress(
     if shortfall.is_some()
         && let Some(spec) = node.composite.as_ref()
         && spec.soft_review_coverage
-        && let Some(Ok((output, _))) = &mut export
+        && let Some(Ok((output, _, _))) = &mut export
     {
         let reason = coverage_shortfall(positions[&node.id], spec, plan, checkpoint, positions);
         if let Some(reason) = reason {
@@ -1685,13 +1779,16 @@ pub(super) fn validate_progress(
             }
         }
     }
-    if failed_for_coverage && let Some(Ok((output, _))) = &mut export {
+    if failed_for_coverage && let Some(Ok((output, _, _))) = &mut export {
         review::mark_partial(output);
     }
     let failed_for_export = progress.state == NodeState::Failed
         && state == NodeState::Succeeded
         && !hard_shortfall
-        && progress.advance_code.as_deref() == Some("composite_findings_exceed_cap")
+        && matches!(
+            progress.advance_code.as_deref(),
+            Some("composite_findings_exceed_cap" | "review_finding_ledger_exceeds_cap")
+        )
         && matches!(&export, Some(Err(reason)) if progress.advance_note.as_ref() == Some(reason));
     let valid = progress.attempts.is_empty()
         && (progress.state == NodeState::Succeeded
@@ -1707,7 +1804,7 @@ pub(super) fn validate_progress(
                     && export
                         .as_ref()
                         .and_then(|value| value.as_ref().ok())
-                        .is_some_and(|(output, cause)| {
+                        .is_some_and(|(output, cause, _)| {
                             progress.outputs.as_ref() == Some(output)
                                 && progress.truncation_cause == *cause
                         }))
@@ -1717,10 +1814,12 @@ pub(super) fn validate_progress(
             NodeState::Running => state == NodeState::Running && progress.outputs.is_none(),
             NodeState::Succeeded => {
                 state == NodeState::Succeeded && !hard_shortfall && {
-                    export.and_then(Result::ok).is_some_and(|(output, cause)| {
-                        progress.outputs.as_ref() == Some(&output)
-                            && progress.truncation_cause == cause
-                    })
+                    export
+                        .and_then(Result::ok)
+                        .is_some_and(|(output, cause, _)| {
+                            progress.outputs.as_ref() == Some(&output)
+                                && progress.truncation_cause == cause
+                        })
                 }
             }
             NodeState::Blocked => state == progress.state && progress.outputs.is_none(),
@@ -1770,7 +1869,7 @@ mod tests {
             verdict: provenant_records::workflow::ReviewVerdict::Approve,
             independent: true,
         });
-        let (first, _) = outputs(boundary, spec, &plan, &checkpoint, &positions).unwrap();
+        let (first, _, _) = outputs(boundary, spec, &plan, &checkpoint, &positions).unwrap();
         assert_eq!(first.verdict.as_deref(), Some("VERDICT: APPROVE"));
         assert!(
             !first
@@ -1781,8 +1880,458 @@ mod tests {
         checkpoint.nodes[boundary].outputs = Some(first.clone());
         let restored: GraphCheckpoint =
             serde_json::from_value(serde_json::to_value(&checkpoint).unwrap()).unwrap();
-        let (replayed, _) = outputs(boundary, spec, &plan, &restored, &positions).unwrap();
+        let (replayed, _, _) = outputs(boundary, spec, &plan, &restored, &positions).unwrap();
         assert_eq!(replayed, first);
+    }
+
+    #[test]
+    fn ledger_is_chain_scoped_materialises_overflow_and_uses_adjudicator() {
+        let panel = |id: &str| {
+            serde_json::json!({
+                "id": id,
+                "kind": "composite",
+                "access": "read_only",
+                "composite": {
+                    "reduce_verdict": true,
+                    "nodes": [{
+                        "id": "lens", "access": "read_only", "prompt": "review",
+                        "review_behaviour": "lens", "review_lens": "correctness",
+                        "route": {"alias": "fixture"}
+                    }],
+                    "exports": [{"node": "lens", "outputs": ["verdict", "findings"]}]
+                }
+            })
+        };
+        let document: GraphDocument = serde_json::from_value(serde_json::json!({
+            "schema_version": 2,
+            "graph_id": "review-ledger-chain",
+            "nodes": [
+                panel("initial"),
+                panel("current"),
+                panel("other-chain"),
+                panel("patch-skipped")
+            ]
+        }))
+        .unwrap();
+        let limits = crate::config::GraphLimits::default();
+        let expanded = plans::expand(&document, &[], &[], &limits).unwrap();
+        let (mut plan, mut positions) = validate_flat_plan(&expanded, &limits).unwrap();
+        let mut checkpoint =
+            transitions::initial_checkpoint(&expanded, &plan, "digest".into(), None, None, None);
+        let initial_head = "1".repeat(40);
+        let current_head = "2".repeat(40);
+        let finding = |id: String, disposition: Option<&str>| {
+            serde_json::from_value::<Finding>(serde_json::json!({
+                "id": id,
+                "severity": "high",
+                "file": "src/review.rs",
+                "line": 1,
+                "summary": "open finding",
+                "status": "open",
+                "disposition": disposition
+            }))
+            .unwrap()
+        };
+        let set_review = |checkpoint: &mut GraphCheckpoint,
+                          index: usize,
+                          head: &str,
+                          findings: Vec<Finding>,
+                          attempt: u8| {
+            let progress = &mut checkpoint.nodes[index];
+            let mut output = outputs::make_outputs(None, None, None, None, None);
+            output.verdict = Some("VERDICT: FAIL".into());
+            output.findings_available = Some(true);
+            output.findings = findings.iter().take(1).cloned().collect();
+            output.full_artifact_findings = Some(findings);
+            progress.outputs = Some(output);
+            progress.state = NodeState::Succeeded;
+            progress.review_settlement = Some(ReviewSettlement {
+                attempt_id: provenant_core::AttemptId::from_bytes([attempt; 16]),
+                head: provenant_core::GitOid::parse(head).unwrap(),
+                base: None,
+                verdict: provenant_records::workflow::ReviewVerdict::RequestChanges,
+                independent: true,
+            });
+        };
+        let initial_boundary = positions["initial"];
+        let initial_lens = positions["initial--lens"];
+        let current_boundary = positions["current"];
+        let current_lens = positions["current--lens"];
+        let unrelated_lens = positions["other-chain--lens"];
+        let skipped_boundary = positions["patch-skipped"];
+        set_review(
+            &mut checkpoint,
+            initial_lens,
+            &initial_head,
+            vec![finding("initial:F1".into(), None)],
+            1,
+        );
+        let full_current: Vec<_> = (0..40)
+            .map(|index| finding(format!("current:F{index}"), None))
+            .collect();
+        set_review(
+            &mut checkpoint,
+            current_lens,
+            &current_head,
+            full_current.clone(),
+            2,
+        );
+        set_review(
+            &mut checkpoint,
+            unrelated_lens,
+            &current_head,
+            vec![finding("other:F1".into(), None)],
+            3,
+        );
+        checkpoint.nodes[skipped_boundary].state = NodeState::Skipped;
+        checkpoint.nodes[skipped_boundary].skip_reason = Some("skipped by patch revision 7".into());
+        checkpoint.nodes[skipped_boundary].outputs = Some(NodeOutputs {
+            verdict: Some("PATCH SKIP SENTINEL".into()),
+            ..Default::default()
+        });
+
+        // This synthetic owner row expresses the production repeat bindings:
+        // the first round consumes the initial panel, later rows use loop_id.
+        let loop_round = LoopRound {
+            extra: Default::default(),
+            loop_id: "cycle-a".into(),
+            round: 1,
+            node_id: "review".into(),
+            until: false,
+            retry_on: false,
+            previous_gate: None,
+        };
+        plan.nodes[current_boundary].round = Some(loop_round.clone());
+        plan.nodes[current_lens].round = Some(loop_round);
+        let mut cycle = plan.nodes[current_boundary].clone();
+        cycle.id = "cycle-a".into();
+        cycle.composite = None;
+        cycle.composite_members.clear();
+        cycle.loop_body = Some(
+            serde_json::from_value(serde_json::json!({
+                "body": [], "until": "accepted", "max_rounds": 3,
+                "previous_bindings": {"review": "initial"}
+            }))
+            .unwrap(),
+        );
+        let cycle_index = plan.nodes.len();
+        positions.insert(cycle.id.clone(), cycle_index);
+        plan.nodes.push(cycle);
+        let mut cycle_progress = checkpoint.nodes[current_boundary].clone();
+        cycle_progress.id = "cycle-a".into();
+        cycle_progress.state = NodeState::Pending;
+        cycle_progress.outputs = None;
+        cycle_progress.review_settlement = None;
+        cycle_progress.children.clear();
+        checkpoint.nodes.push(cycle_progress);
+
+        // The panel parent is a composite boundary with no settlement of its
+        // own. The adjudicator is present only in the expansion record.
+        let mut adjudicator = plan.nodes[current_lens].clone();
+        adjudicator.id = "current--adjudicate".into();
+        adjudicator.kind = Some(NodeKind::Adjudicate);
+        adjudicator.parent_node = Some("current".into());
+        adjudicator.review_lens = None;
+        adjudicator.round = None;
+        adjudicator.source = Some(SourceBinding::Commit {
+            commit: current_head.clone(),
+        });
+        let adjudicator_index = plan.nodes.len();
+        positions.insert(adjudicator.id.clone(), adjudicator_index);
+        plan.nodes.push(adjudicator.clone());
+        let mut adjudicator_progress = checkpoint.nodes[current_lens].clone();
+        adjudicator_progress.id.clone_from(&adjudicator.id);
+        adjudicator_progress.review_settlement = None;
+        adjudicator_progress.round = None;
+        let mut adjudication = outputs::make_outputs(None, None, None, None, None);
+        adjudication.verdict = Some("VERDICT: PASS".into());
+        adjudication.findings_available = Some(true);
+        let mut adjudicated_findings = full_current;
+        adjudicated_findings[0].disposition = Some("rejected".into());
+        adjudication.findings = adjudicated_findings.iter().take(1).cloned().collect();
+        adjudication.full_artifact_findings = Some(adjudicated_findings);
+        adjudicator_progress.outputs = Some(adjudication);
+        adjudicator_progress.state = NodeState::Succeeded;
+        checkpoint.nodes.push(adjudicator_progress);
+        let expansion_node: GraphNode = serde_json::from_value(serde_json::json!({
+            "id": adjudicator.id,
+            "kind": "adjudicate",
+            "access": "read_only",
+            "parent_node": "current",
+            "source": {"type": "commit", "commit": current_head}
+        }))
+        .unwrap();
+        checkpoint.expansions.push(Expansion {
+            extra: Default::default(),
+            delivery_review_disposition: None,
+            delivery_review_node: None,
+            retired: None,
+            retry_generation: None,
+            final_result: false,
+            final_fragment: false,
+            floor_warnings: Vec::new(),
+            source: "current".into(),
+            nodes: vec![expansion_node],
+            uses: Vec::new(),
+            patch: None,
+        });
+        checkpoint.expansions.push(Expansion {
+            extra: Default::default(),
+            delivery_review_disposition: None,
+            delivery_review_node: None,
+            retired: None,
+            retry_generation: None,
+            final_result: false,
+            final_fragment: false,
+            floor_warnings: Vec::new(),
+            source: "patch-skipped".into(),
+            nodes: Vec::new(),
+            uses: Vec::new(),
+            patch: Some(patch::PatchRecord {
+                extra: Default::default(),
+                child_receipt: None,
+                revision: 7,
+                digest: "skip-digest".into(),
+                key: None,
+                parent: Some("patch-skipped".into()),
+                reason: Some("test patch skip".into()),
+                skipped: vec!["patch-skipped".into()],
+                replaced: Vec::new(),
+                journaled: true,
+                restart: None,
+            }),
+        });
+
+        let current_spec = plan.nodes[current_boundary].composite.as_ref().unwrap();
+        let (projected, _, persisted) = outputs(
+            current_boundary,
+            current_spec,
+            &plan,
+            &checkpoint,
+            &positions,
+        )
+        .unwrap();
+        assert_eq!(
+            persisted.as_ref().map(|(owner, _)| owner.as_str()),
+            Some("cycle-a")
+        );
+        assert!(
+            projected
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("composite findings truncated"))
+        );
+        let ledger =
+            review::ledger_from_checkpoint(&plan, &checkpoint, current_boundary, &current_head);
+        assert!(ledger.heads.contains_key(&initial_head));
+        let current = &ledger.heads[&current_head];
+        assert_eq!(current.unresolved.len(), 39);
+        assert!(
+            current
+                .unresolved
+                .iter()
+                .all(|finding| finding.id != "current:F0")
+        );
+        assert!(
+            current
+                .unresolved
+                .iter()
+                .all(|finding| finding.id != "other:F1")
+        );
+        assert_eq!(
+            current
+                .dispositions
+                .get("adjudicator_verdict:current")
+                .map(String::as_str),
+            Some("APPROVE")
+        );
+        assert_eq!(
+            current
+                .dispositions
+                .get("finding_disposition:current:current:F0")
+                .map(String::as_str),
+            Some("rejected")
+        );
+        assert_eq!(ledger.heads[&initial_head].unresolved[0].id, "initial:F1");
+        assert_eq!(positions["initial"], initial_boundary);
+
+        // The production reconciler commits the complete head ledger on the
+        // loop owner in the same checkpoint as its composite output.
+        reconcile_checkpoint(&plan, &mut checkpoint);
+        let stored_ledger = checkpoint.nodes[cycle_index]
+            .finding_ledger
+            .as_ref()
+            .expect("reconciliation persists the chain ledger");
+        assert_eq!(stored_ledger, &ledger);
+        assert_eq!(
+            repair::ledger_findings(&plan.nodes[current_boundary], &plan, &checkpoint)
+                .unwrap()
+                .len(),
+            39,
+            "repair reads the adjudicated unresolved head from the chain ledger"
+        );
+        let skipped_snapshot = checkpoint.nodes[skipped_boundary].clone();
+        assert_eq!(skipped_snapshot.state, NodeState::Skipped);
+        assert!(patch::skipped_by_patch(&checkpoint, "patch-skipped"));
+        let unrelated_boundary = positions["other-chain"];
+        let unrelated_snapshot = checkpoint.nodes[unrelated_boundary].clone();
+
+        // The typed ledger string is externalised by the existing prompt store
+        // and restored without losing the full per-finding evidence snapshot.
+        let directory_root = tempfile::tempdir().unwrap();
+        let directory = provenant_os::fs::Directory::open_anchor(directory_root.path()).unwrap();
+        let mut stored = serde_json::to_value(&checkpoint).unwrap();
+        prompt_store::externalise(&directory, "review-ledger-test", &mut stored).unwrap();
+        assert!(
+            stored["stored_text"]
+                .as_object()
+                .unwrap()
+                .keys()
+                .any(|path| path.contains("finding_ledger"))
+        );
+        let bytes = serde_json::to_vec(&stored).unwrap();
+        let restored = prompt_store::rehydrate(&directory, "review-ledger-test", &bytes).unwrap();
+        let restored: GraphCheckpoint = serde_json::from_slice(&restored).unwrap();
+        assert_eq!(
+            restored.nodes[cycle_index].finding_ledger,
+            checkpoint.nodes[cycle_index].finding_ledger
+        );
+
+        // Replaying an older composite cannot move the loop owner's reviewed
+        // head backwards, mutate an unrelated settled panel, or clear a patch
+        // skip that remains authoritative.
+        let newer_head = "3".repeat(40);
+        let mut newer_ledger = stored_ledger.clone();
+        newer_ledger.heads.insert(
+            newer_head.clone(),
+            FindingHead {
+                round: 2,
+                unresolved: vec![finding("current:newer".into(), None)],
+                ..Default::default()
+            },
+        );
+        newer_ledger.last_reviewed_head = Some(newer_head.clone());
+        checkpoint.nodes[cycle_index].finding_ledger = Some(newer_ledger.clone());
+        reconcile_checkpoint(&plan, &mut checkpoint);
+        assert_eq!(
+            checkpoint.nodes[cycle_index].finding_ledger.as_ref(),
+            Some(&newer_ledger)
+        );
+        assert_eq!(checkpoint.nodes[unrelated_boundary], unrelated_snapshot);
+        assert_eq!(checkpoint.nodes[skipped_boundary], skipped_snapshot);
+
+        // A retry replaces the source node output. Reconciliation must retain
+        // the owner ledger snapshot so repair can still consume the completed
+        // review evidence after replay.
+        checkpoint.nodes[current_lens].outputs = None;
+        checkpoint.nodes[current_lens].review_settlement = None;
+        checkpoint.nodes[current_lens].state = NodeState::Pending;
+        reconcile_checkpoint(&plan, &mut checkpoint);
+        assert_eq!(
+            checkpoint.nodes[cycle_index].finding_ledger.as_ref(),
+            Some(&newer_ledger)
+        );
+        assert_eq!(
+            repair::ledger_findings(&plan.nodes[current_boundary], &plan, &checkpoint)
+                .unwrap()
+                .iter()
+                .map(|finding| finding.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["current:newer"]
+        );
+    }
+
+    #[test]
+    fn incomplete_retry_reconciliation_keeps_the_persisted_head_snapshot() {
+        let document: GraphDocument = serde_json::from_value(serde_json::json!({
+            "schema_version": 1,
+            "graph_id": "persisted-review-retry",
+            "nodes": [{
+                "id": "panel",
+                "kind": "composite",
+                "access": "read_only",
+                "composite": {
+                    "reduce_verdict": true,
+                    "min_successful": 1,
+                    "nodes": [
+                        {"id":"lens-a", "access":"read_only", "prompt":"review a",
+                         "review_behaviour":"lens", "review_lens":"correctness"},
+                        {"id":"lens-b", "access":"read_only", "prompt":"review b",
+                         "review_behaviour":"lens", "review_lens":"tests"}
+                    ],
+                    "exports": [
+                        {"node":"lens-a", "outputs":["findings", "verdict"]},
+                        {"node":"lens-b", "outputs":["findings", "verdict"]}
+                    ]
+                }
+            }]
+        }))
+        .unwrap();
+        let limits = crate::config::GraphLimits::default();
+        let expanded = plans::expand(&document, &[], &[], &limits).unwrap();
+        let (plan, positions) = validate_flat_plan(&expanded, &limits).unwrap();
+        let mut checkpoint =
+            transitions::initial_checkpoint(&expanded, &plan, "digest".into(), None, None, None);
+        let boundary = positions["panel"];
+        let head = "4".repeat(40);
+        let base = provenant_core::GitOid::parse(&"5".repeat(40)).unwrap();
+        for (name, attempt, id) in [
+            ("panel--lens-a", 1, "lens-a:F1"),
+            ("panel--lens-b", 2, "lens-b:F2"),
+        ] {
+            let index = positions[name];
+            let progress = &mut checkpoint.nodes[index];
+            progress.state = NodeState::Succeeded;
+            let mut output = outputs::make_outputs(None, None, None, None, None);
+            output.verdict = Some("VERDICT: FAIL".into());
+            output.findings_available = Some(true);
+            let finding = serde_json::from_value::<Finding>(serde_json::json!({
+                "id": id,
+                "severity": "high",
+                "file": "src/lib.rs",
+                "line": 1,
+                "summary": "unresolved review evidence",
+                "status": "open"
+            }))
+            .unwrap();
+            output.findings = vec![finding.clone()];
+            output.full_artifact_findings = Some(vec![finding]);
+            progress.outputs = Some(output);
+            progress.review_settlement = Some(ReviewSettlement {
+                attempt_id: provenant_core::AttemptId::from_bytes([attempt; 16]),
+                head: provenant_core::GitOid::parse(&head).unwrap(),
+                base: Some(base.clone()),
+                verdict: provenant_records::workflow::ReviewVerdict::RequestChanges,
+                independent: true,
+            });
+        }
+        reconcile_checkpoint(&plan, &mut checkpoint);
+        let persisted = checkpoint.nodes[boundary]
+            .finding_ledger
+            .clone()
+            .expect("completed panel stores its ledger");
+        assert_eq!(persisted.heads[&head].unresolved.len(), 2);
+
+        // One retried leaf has replaced its output, while the second leaf still
+        // supplies a settlement. The partial reconstruction must not erase the
+        // durable finding from the retried leaf.
+        let retried = positions["panel--lens-a"];
+        checkpoint.nodes[retried].state = NodeState::Failed;
+        checkpoint.nodes[retried].outputs = None;
+        checkpoint.nodes[retried].review_settlement = None;
+        reconcile_checkpoint(&plan, &mut checkpoint);
+        assert_eq!(
+            checkpoint.nodes[boundary].finding_ledger.as_ref(),
+            Some(&persisted)
+        );
+        assert_eq!(
+            repair::ledger_findings(&plan.nodes[boundary], &plan, &checkpoint)
+                .unwrap()
+                .iter()
+                .map(|finding| finding.id.as_str())
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from(["lens-a:F1", "lens-b:F2"])
+        );
     }
 
     #[test]

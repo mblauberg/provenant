@@ -616,23 +616,24 @@ fn parse_findings_mode(
         // A blank severity is missing, not a word, and keeps the fail-safe below.
         if let Some(severity) = entry.get("severity").and_then(serde_json::Value::as_str)
             && !severity.trim().is_empty()
-            && severity_class(severity).is_none()
+            && model::decode_severity(severity).1
         {
             warnings.push(format!(
-                "finding: {}; treating it as should-fix",
+                "{}: finding: {}; treating it as high",
+                review::FINDING_SEVERITY_UNKNOWN.as_str(),
                 fail(
                     "severity",
                     &format!(
                         "unrecognised value; accepted words are {}",
                         SEVERITY_VOCABULARY
                             .iter()
-                            .map(|(word, _, _, _)| *word)
+                            .map(|(word, _)| *word)
                             .collect::<Vec<_>>()
                             .join(", ")
                     )
                 )
             ));
-            entry.insert("severity".into(), "should-fix".into());
+            entry.insert("severity".into(), "high".into());
         }
         // Expand one disposition to all copies, inheriting each separately.
         let copies: Vec<_> = source.map_or_else(
@@ -687,7 +688,7 @@ fn parse_findings_mode(
                     }
                     // A missing severity keeps the fail-safe blocking priority
                     // during compaction; an unrecognised word was already
-                    // reclassified as should-fix.
+                    // reclassified as high.
                     entry.insert(
                         field.into(),
                         match field {
@@ -981,7 +982,7 @@ pub(super) fn materialised_findings(
     checkpoint: &GraphCheckpoint,
     positions: &std::collections::BTreeMap<String, usize>,
 ) -> Vec<Finding> {
-    if let Some(outputs) = repair::panel_outputs(checkpoint, &checkpoint.nodes[index].id) {
+    if let Some(outputs) = repair::panel_outputs(plan, checkpoint, &checkpoint.nodes[index].id) {
         return outputs.findings.clone();
     }
     let Some(outputs) = checkpoint.nodes[index].outputs.as_ref() else {
@@ -1309,11 +1310,115 @@ pub(super) fn selected_findings(
     checkpoint: &GraphCheckpoint,
     positions: &std::collections::BTreeMap<String, usize>,
 ) -> Vec<(String, Finding)> {
-    resolved_inputs(node, plan, checkpoint, positions, false)
+    let threshold = schedule::effective_review_policy(node, checkpoint)
+        .accept_below
+        .value;
+    if repair_writer(node) {
+        return repair::ledger_findings(node, plan, checkpoint)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|finding| repair::repair_eligible_for(finding, threshold))
+            .map(|finding| ("review_ledger".to_owned(), finding))
+            .collect();
+    }
+    let mut selected: Vec<_> = resolved_inputs(node, plan, checkpoint, positions, false)
         .into_iter()
-        .filter(|item| !repair_writer(node) || repair::repair_eligible(&item.finding))
         .map(|item| (item.source, item.finding))
-        .collect()
+        .collect();
+    if let Some((_, findings, _, _)) = later_round_ledger(node, plan, checkpoint, positions) {
+        for finding in findings {
+            if !selected.iter().any(|(_, existing)| existing == &finding) {
+                selected.push(("review_ledger".to_owned(), finding));
+            }
+        }
+    }
+    selected
+}
+
+fn later_round_ledger(
+    node: &PlannedNode,
+    plan: &PlannedGraph,
+    checkpoint: &GraphCheckpoint,
+    positions: &std::collections::BTreeMap<String, usize>,
+) -> Option<(
+    review::RoundScope,
+    Vec<Finding>,
+    std::collections::BTreeSet<String>,
+    bool,
+)> {
+    let index = positions.get(&node.id).copied()?;
+    if node.round.as_ref().is_none_or(|round| round.round == 0) {
+        return None;
+    }
+    let scope = schedule::review_round_scope(index, plan, checkpoint, positions)?;
+    let owner = review::chain_owner_id(index, plan);
+    let ledger = checkpoint
+        .nodes
+        .iter()
+        .find(|progress| progress.id == owner)
+        .and_then(|progress| progress.finding_ledger.clone())
+        .or_else(|| {
+            node.round
+                .as_ref()
+                .and_then(|round| review::initial_chain_ledger(&round.loop_id, plan, checkpoint))
+        });
+    let Some(ledger) = ledger else {
+        return Some((scope, Vec::new(), Default::default(), false));
+    };
+    let entry = ledger
+        .last_reviewed_head
+        .as_deref()
+        .and_then(|head| ledger.heads.get(head));
+    let findings = entry.map_or_else(Vec::new, |entry| entry.unresolved.clone());
+    let mut invariants: std::collections::BTreeSet<String> = entry
+        .into_iter()
+        .flat_map(|entry| entry.invariant_coverage.keys().cloned())
+        .collect();
+    invariants.extend(
+        findings
+            .iter()
+            .filter_map(Finding::named_invariant)
+            .map(str::to_owned),
+    );
+    Some((scope, findings, invariants, entry.is_some()))
+}
+
+pub(super) fn review_ledger_artifact_required(
+    node: &PlannedNode,
+    plan: &PlannedGraph,
+    checkpoint: &GraphCheckpoint,
+    positions: &std::collections::BTreeMap<String, usize>,
+) -> bool {
+    let findings: Vec<_> = if repair_writer(node) {
+        selected_findings(node, plan, checkpoint, positions)
+            .into_iter()
+            .filter(|(source, _)| source == "review_ledger")
+            .map(|(_, finding)| finding)
+            .collect()
+    } else {
+        later_round_ledger(node, plan, checkpoint, positions)
+            .map(|(_, findings, _, _)| findings)
+            .unwrap_or_default()
+    };
+    findings.len() > MAX_FINDINGS || canonical_len(&findings) > FINDINGS_BYTES
+}
+
+pub(super) fn complete_review_ledger_artifact(
+    requests: &[InputRequest],
+    materialised: Option<&MaterialisedInputs>,
+) -> bool {
+    if !requests
+        .iter()
+        .any(|request| request.label == "review_ledger" && request.inline_findings.is_some())
+    {
+        return false;
+    }
+    materialised.is_some_and(|materialised| {
+        materialised.entries.iter().any(|entry| {
+            matches!(entry, MaterialisedInput::File { label, omitted: 0, bytes, .. }
+                if label == "review_ledger" && *bytes as usize <= NODE_INPUT_FILE_BYTES)
+        })
+    })
 }
 
 pub(super) fn repair_writer(node: &PlannedNode) -> bool {
@@ -1423,10 +1528,13 @@ pub(super) fn required_input_unavailable(
     checkpoint: &GraphCheckpoint,
     positions: &std::collections::BTreeMap<String, usize>,
 ) -> Option<String> {
+    if repair_writer(node) && !repair::ledger_available(node, plan, checkpoint) {
+        return Some("review finding ledger".into());
+    }
     if repair_writer(node)
-        && resolved_inputs(node, plan, checkpoint, positions, false)
+        && selected_findings(node, plan, checkpoint, positions)
             .iter()
-            .any(|item| item.finding.triage().is_none())
+            .any(|(_, finding)| finding.triage().is_none())
     {
         return Some("checked finding triage before repair writer".into());
     }
@@ -1505,6 +1613,63 @@ pub(super) fn render_input(
     }
     prompt.push_str(INPUT_OPEN);
     let selected = selected_findings(node, plan, checkpoint, positions);
+    if let Some((scope, carry_forward, invariants, ledger_present)) =
+        later_round_ledger(node, plan, checkpoint, positions)
+    {
+        let mut summary = carry_forward.clone();
+        let full_artifact =
+            summary.len() > MAX_FINDINGS || canonical_len(&summary) > FINDINGS_BYTES;
+        if full_artifact {
+            summarise_findings(&mut summary, FINDINGS_BYTES);
+        }
+        let scope = match scope {
+            review::RoundScope::Delta { base, head } => format!("delta {base}..{head}"),
+            review::RoundScope::Full { head } => format!("full head {head}"),
+        };
+        let carry_json = serde_json::to_string(&summary).unwrap_or_else(|_| "[]".into());
+        let invariant_json = serde_json::to_string(&invariants).unwrap_or_else(|_| "[]".into());
+        let ledger_state = if ledger_present {
+            String::new()
+        } else {
+            "Prior review ledger unavailable; perform a full review of this head.\n".into()
+        };
+        let artifact_note = if full_artifact {
+            "Read the staged full review_ledger artifact for every unresolved finding and complete evidence.\n"
+        } else {
+            ""
+        };
+        let section = format!(
+            "Later review scope: {scope}.\n{ledger_state}Carry-forward unresolved findings: {carry_json}\nOpen invariants: {invariant_json}\n{artifact_note}"
+        );
+        if section.len() + INPUT_CLOSE.len() > cap.saturating_sub(prompt.len()) {
+            return (prompt, true);
+        }
+        prompt.push_str(&section);
+    }
+    if repair_writer(node) {
+        let mut ledger_findings: Vec<_> = selected
+            .iter()
+            .filter(|(source, _)| source == "review_ledger")
+            .map(|(_, finding)| finding.clone())
+            .collect();
+        let full_artifact = ledger_findings.len() > MAX_FINDINGS
+            || canonical_len(&ledger_findings) > FINDINGS_BYTES;
+        if full_artifact {
+            summarise_findings(&mut ledger_findings, FINDINGS_BYTES);
+        }
+        let findings = serde_json::to_string(&ledger_findings).unwrap_or_else(|_| "[]".into());
+        let section = if full_artifact {
+            format!(
+                "review_ledger findings (summary): {findings}\nReview the staged full review_ledger artifact for every unresolved finding and its complete evidence.\n"
+            )
+        } else {
+            format!("review_ledger findings: {findings}\n")
+        };
+        if section.len() + INPUT_CLOSE.len() > cap.saturating_sub(prompt.len()) {
+            return (prompt, true);
+        }
+        prompt.push_str(&section);
+    }
     for input in &node.inputs {
         let Some(outputs) = positions
             .get(&input.node)
@@ -1798,6 +1963,21 @@ pub(super) fn upstream_results(
             );
         }
     }
+    let ledger_findings: Vec<_> = selected_findings(node, plan, checkpoint, positions)
+        .into_iter()
+        .filter(|(source, _)| source == "review_ledger")
+        .map(|(_, finding)| finding)
+        .collect();
+    if !repair_writer(node) && !ledger_findings.is_empty() {
+        found.push(InputRequest {
+            label: "review_ledger".into(),
+            attempt_ref: None,
+            attempt_key: None,
+            launch_actor: None,
+            inline_findings: Some(ledger_findings),
+            finding_prefix: Some(String::new()),
+        });
+    }
     found
 }
 
@@ -1934,7 +2114,13 @@ pub(super) fn attempt_input_manifest(
             .writer_binding
             .as_ref()
             .map(|binding| binding.head.clone()),
-        review_base: progress.review_base.clone(),
+        review_base: schedule::review_base_for_attempt(
+            positions[&node.id],
+            plan,
+            checkpoint,
+            positions,
+        )
+        .or_else(|| progress.review_base.clone()),
         graph_review_base: checkpoint
             .bases
             .and_then(|bases| bases.review)
@@ -2049,7 +2235,7 @@ mod alias_tests {
     use super::*;
 
     #[test]
-    fn missing_trigger_is_a_note_without_parse_refusal() {
+    fn missing_trigger_preserves_severity_without_parse_refusal() {
         let block = serde_json::json!({"schema_version":1,"findings":[{
             "id":"F1","severity":"high","file":"a.rs","summary":"hypothesis","status":"open"
         }]})
@@ -2059,8 +2245,8 @@ mod alias_tests {
         assert!(parsed.skipped.is_empty());
         let findings = parsed.findings;
         assert_eq!(findings[0].severity, "high");
-        assert_eq!(findings[0].effective_severity(), "note");
-        assert!(!repair::repair_eligible(&findings[0]));
+        assert_eq!(findings[0].effective_severity(), "high");
+        assert!(repair::repair_eligible(&findings[0]));
         let mut restored = findings[0].clone();
         restored.trigger = Some(FindingTrigger {
             sequence: "default invocation".into(),
@@ -2071,7 +2257,30 @@ mod alias_tests {
     }
 
     #[test]
-    fn unrecognised_severity_is_a_warned_should_fix_not_an_invalid_review() {
+    fn parsed_severity_applies_on_every_trigger_path() {
+        for trigger in [
+            serde_json::Value::Null,
+            serde_json::json!({"sequence":"operator action","reach":"operator_mistake","observed":true}),
+            serde_json::json!({"sequence":"attacker action","reach":"attacker_or_unreachable","observed":true}),
+        ] {
+            let block = serde_json::json!({"schema_version":1,"findings":[{
+                "id":"F1", "severity":"blocking", "file":"a.rs", "summary":"defect",
+                "status":"open", "trigger":trigger
+            }]})
+            .to_string();
+            let parsed = parse_findings(&block, &[]).unwrap();
+            let finding = &parsed.findings[0];
+            assert!(repair::blocks_acceptance(finding));
+            assert!(repair::repair_eligible(finding));
+            assert!(matches!(
+                review::acceptance_decision(&parsed.findings, AcceptBelow::Blocking, true),
+                review::Acceptance::Reject(_)
+            ));
+        }
+    }
+
+    #[test]
+    fn unrecognised_severity_is_warned_and_treated_as_high() {
         let block = serde_json::json!({"schema_version":1,"findings":[{
             "id":"F1","severity":"urgent","file":"a.rs","summary":"s","status":"open",
             "trigger":{"sequence":"invoke the default operation","reach":"default_path","observed":true},
@@ -2085,18 +2294,19 @@ mod alias_tests {
         let outputs = make_outputs(Some(&capture.finish()), None, None, None, None);
         assert_eq!(outputs.findings_available, Some(true));
         assert_eq!(outputs.findings.len(), 1);
-        assert_eq!(outputs.findings[0].severity, "should-fix");
+        assert_eq!(outputs.findings[0].severity, "high");
         assert!(
             outputs
                 .warnings
                 .iter()
-                .any(|warning| warning.contains("unrecognised value")
+                .any(|warning| warning.contains("FINDING_SEVERITY_UNKNOWN")
+                    && warning.contains("unrecognised value")
                     && warning.contains("critical, blocker, blocking")),
             "{:?}",
             outputs.warnings
         );
         assert!(repair::repair_eligible(&outputs.findings[0]));
-        assert!(!repair::blocks_acceptance(&outputs.findings[0]));
+        assert!(repair::blocks_acceptance(&outputs.findings[0]));
     }
 
     #[test]
@@ -2352,7 +2562,7 @@ mod alias_tests {
         for finding in outputs.findings {
             assert_eq!(finding.id, "F1");
             assert_eq!(finding.severity, "high");
-            assert_eq!(finding.effective_severity(), "note");
+            assert_eq!(finding.effective_severity(), "high");
             assert_eq!(finding.file, "src/lib.rs");
             assert_eq!(finding.line, Some(17));
             assert_eq!(finding.disposition.as_deref(), Some("accepted"));

@@ -229,9 +229,9 @@ fn node_progress_host_fields_round_trip_and_reject_malformed_values() {
             json!(false),
         ),
         field(
-            "review_verdict_correction_refused",
-            json!("bounded reason"),
-            json!(false),
+            "review_round_scope",
+            json!({"type":"delta","base":"1111111111111111111111111111111111111111","head":"2222222222222222222222222222222222222222"}),
+            json!({"type":"delta","base":"bad","head":"head"}),
         ),
         field("provisioned_source", json!("abc123"), json!(false)),
         field(

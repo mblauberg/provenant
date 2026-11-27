@@ -258,6 +258,163 @@ fn each_split_panel_uses_its_own_adjudicator_on_its_pinned_head() {
     assert_eq!(owner.calls.len(), 6);
 }
 
+// Spec: docs/specs/agent-native.md#3-7-review-convergence
+#[test]
+fn separate_review_chains_on_the_same_head_get_separate_adjudicators() {
+    let answer = |verdict: &str| format!(
+        "```findings\n{{\"schema_version\":1,\"findings\":[]}}\n```\nVERDICT: {verdict}\n"
+    );
+    let head = "c".repeat(40);
+    let panel = |id: &str, dependency: Option<&str>| {
+        let lens = |name: &str| serde_json::json!({
+            "id": name, "access": "read_only", "review_lens": name,
+            "review_behaviour": "lens", "require_findings": true,
+            "prompt": "review", "route": {"alias": "fixture",
+                "review_policy": {"adjudicator_route": "principal"}},
+            "source": {"type": "commit", "commit": head}
+        });
+        serde_json::json!({
+            "id": id, "kind": "composite", "access": "read_only",
+            "depends_on": dependency.into_iter().collect::<Vec<_>>(),
+            "composite": {"min_successful": 2, "reduce_verdict": true,
+                "nodes": [lens("changes"), lens("approve")],
+                "exports": [
+                    {"node": "changes", "outputs": ["result", "findings", "verdict"]},
+                    {"node": "approve", "outputs": ["result", "findings", "verdict"]}
+                ]}
+        })
+    };
+    let gate = |id: &str, source: &str| serde_json::json!({
+        "id": id, "kind": "gate", "access": "read_only", "depends_on": [source],
+        "inputs": [{"node": source, "outputs": ["verdict"]}],
+        "condition": {"type": "verdict", "expected": "VERDICT: PASS", "threshold": "all"}
+    });
+    let document: GraphDocument = serde_json::from_value(serde_json::json!({
+        "schema_version": 1, "graph_id": "two-review-chains-same-head",
+        "review_policy": {"adjudicator_route": "fixture"}, "nodes": [
+            panel("first", None), gate("first-gate", "first"),
+            panel("second", Some("first-gate")), gate("second-gate", "second")
+        ]
+    })).unwrap();
+    let mut owner = FakeOwner {
+        observations: ["FAIL", "PASS", "PASS", "FAIL", "PASS", "FAIL"]
+            .into_iter()
+            .map(|verdict| terminal_with_result(GraphAttemptOutcome::Succeeded, &answer(verdict)))
+            .collect(),
+        ..Default::default()
+    };
+    let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
+    let adjudicators: Vec<_> = run
+        .checkpoint
+        .nodes
+        .iter()
+        .filter(|node| node.id.ends_with("adjudicate"))
+        .collect();
+    assert_eq!(adjudicators.len(), 2, "the key is (review chain, pinned head)");
+    for (panel, verdict) in [("first", "VERDICT: PASS"), ("second", "VERDICT: FAIL")] {
+        let adjudicator = run
+            .checkpoint
+            .nodes
+            .iter()
+            .find(|node| node.id == format!("{panel}--adjudicate"))
+            .unwrap();
+        assert_eq!(adjudicator.source_commit.as_deref(), Some(head.as_str()));
+        assert_eq!(
+            adjudicator
+                .attempts
+                .last()
+                .and_then(|attempt| attempt.route.alias.as_deref()),
+            Some("principal"),
+            "route-scoped adjudicator setting reaches the launched node"
+        );
+        assert_eq!(
+            adjudicator
+                .outputs
+                .as_ref()
+                .and_then(|outputs| outputs.verdict.as_deref()),
+            Some(verdict)
+        );
+    }
+    assert_eq!(owner.calls.len(), 6, "four panel lenses and two adjudicators run");
+    for gate_id in ["first-gate", "second-gate"] {
+        let gate = run.checkpoint.nodes.iter().find(|node| node.id == gate_id).unwrap();
+        assert!(gate.gate.as_ref().is_some_and(|gate| gate.passed), "{gate_id}");
+    }
+}
+
+// Spec: docs/specs/agent-native.md#3-7-review-convergence
+#[test]
+fn same_chain_panels_on_one_head_share_complete_adjudication_inputs() {
+    let answer = |verdict: &str| format!(
+        "```findings\n{{\"schema_version\":1,\"findings\":[]}}\n```\nVERDICT: {verdict}\n"
+    );
+    let head = "d".repeat(40);
+    let panel = |id: &str| {
+        let lens = |name: &str| serde_json::json!({
+            "id": name, "access": "read_only", "review_lens": name,
+            "review_behaviour": "lens", "require_findings": true,
+            "prompt": "review", "route": {"alias": "fixture"},
+            "source": {"type": "commit", "commit": head}
+        });
+        serde_json::json!({
+            "id": id, "kind": "composite", "access": "read_only",
+            "composite": {"min_successful": 2, "reduce_verdict": true,
+                "nodes": [lens("changes"), lens("approve")],
+                "exports": [
+                    {"node": "changes", "outputs": ["result", "findings", "verdict"]},
+                    {"node": "approve", "outputs": ["result", "findings", "verdict"]}
+                ]}
+        })
+    };
+    let document: GraphDocument = serde_json::from_value(serde_json::json!({
+        "schema_version": 1, "graph_id": "same-chain-same-head", "nodes": [{
+            "id": "review-chain", "kind": "loop", "access": "read_only",
+            "loop": {"until": "done", "max_rounds": 1, "body": [
+                panel("first"), panel("second"),
+                {"id":"done", "kind":"gate", "access":"read_only",
+                 "depends_on":["first","second"],
+                 "inputs":[
+                    {"node":"first","outputs":["verdict"]},
+                    {"node":"second","outputs":["verdict"]}
+                 ],
+                 "condition":{"type":"verdict","expected":"VERDICT: PASS","threshold":"all"}}
+            ]}
+        }]
+    })).unwrap();
+    let mut owner = FakeOwner {
+        observations: ["FAIL", "PASS", "FAIL", "PASS", "PASS"]
+            .into_iter()
+            .map(|verdict| terminal_with_result(GraphAttemptOutcome::Succeeded, &answer(verdict)))
+            .collect(),
+        ..Default::default()
+    };
+    let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
+    let adjudicators: Vec<_> = run
+        .checkpoint
+        .nodes
+        .iter()
+        .filter(|node| node.id.ends_with("adjudicate"))
+        .collect();
+    assert_eq!(adjudicators.len(), 1);
+    assert_eq!(adjudicators[0].source_commit.as_deref(), Some(head.as_str()));
+    let adjudicator = run
+        .checkpoint
+        .expansions
+        .iter()
+        .flat_map(|expansion| &expansion.nodes)
+        .find(|node| node.kind == Some(NodeKind::Adjudicate))
+        .unwrap();
+    assert_eq!(adjudicator.inputs.len(), 2, "both split panels are adjudicated together");
+    assert_eq!(owner.calls.len(), 5, "four panel lenses and one adjudicator run");
+    let gate = run
+        .checkpoint
+        .nodes
+        .iter()
+        .find(|node| node.id == "review-chain--r1--done")
+        .unwrap();
+    assert!(gate.gate.as_ref().is_some_and(|gate| gate.passed));
+}
+
 // Spec: docs/specs/fabric.md#composite-settlement
 #[test]
 fn soft_panel_settles_and_names_its_stopped_lens() {
@@ -484,7 +641,7 @@ fn malformed_finding_fields_reach_composite_and_consumer() {
     let outputs = lens.outputs.as_ref().unwrap();
     assert_eq!(outputs.findings.len(), 3);
     assert_eq!(outputs.findings[0].severity, "blocking");
-    assert_eq!(outputs.findings[1].severity, "should-fix");
+    assert_eq!(outputs.findings[1].severity, "high");
     assert_eq!(outputs.findings[0].status, "open");
     assert_eq!(outputs.findings[2].id, "F3");
     assert_eq!(outputs.findings[2].severity, "high");
@@ -498,7 +655,7 @@ fn malformed_finding_fields_reach_composite_and_consumer() {
     );
     assert!(
         outputs.findings.iter().all(|finding| {
-            finding.effective_severity() == "note" && finding.trigger().is_none()
+            finding.effective_severity() == finding.severity && finding.trigger().is_none()
         })
     );
     assert_eq!(outputs.findings[2].summary, "valid finding");
@@ -535,10 +692,10 @@ fn malformed_finding_fields_reach_composite_and_consumer() {
     for (finding, severity) in composite
         .findings
         .iter()
-        .zip(["blocking", "should-fix", "high"])
+        .zip(["blocking", "high", "high"])
     {
         assert_eq!(finding.severity, severity);
-        assert_eq!(finding.effective_severity(), "note");
+        assert_eq!(finding.effective_severity(), finding.severity);
         assert!(finding.trigger().is_none());
         // Typed composite findings above cover severity; the consumer must
         // receive the finding and its warnings regardless of JSON formatting.
@@ -1079,7 +1236,7 @@ fn qualified_findings_survive_model_synthesis() {
                 .unwrap();
             let finding = &node.outputs.as_ref().unwrap().findings[0];
             assert!(finding.id.ends_with(":F1"));
-            assert_eq!(finding.effective_severity(), "note");
+            assert_eq!(finding.effective_severity(), finding.severity);
             assert_eq!((finding.file.as_str(), finding.line), ("a.rs", None));
             assert_eq!(finding.lens.as_deref().unwrap(), "tests");
             assert_eq!(finding.evidence.as_deref().unwrap(), "observed failure");

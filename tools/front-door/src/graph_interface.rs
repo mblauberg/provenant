@@ -1254,6 +1254,7 @@ fn run_input(
         // Values travel as the text the caller wrote. The launch owner holds the
         // template library, so it types each one by the declaration it meets.
         let mut parameters = json!({});
+        let mut review_policy = json!({});
         for item in request.set {
             let (key, value) = item
                 .split_once('=')
@@ -1262,7 +1263,12 @@ fn run_input(
                 return Err(cli_input_error("--set parameter name is empty"));
             }
             validate_set_path(key)?;
-            if key == "attempt" {
+            if let Some(field) = key.strip_prefix("domains.review.") {
+                let value = toml_edit::de::from_str::<Value>(&format!("value = {value}"))
+                    .map(|parsed| parsed["value"].clone())
+                    .unwrap_or_else(|_| json!(value));
+                review_policy[field] = value;
+            } else if key == "attempt" {
                 let parsed: Value = toml_edit::de::from_str(&format!("value = {value}"))
                     .map_err(|_| cli_input_error("--set `attempt`: value is not valid TOML"))?;
                 validate_set_value_path(key, &parsed["value"])?;
@@ -1286,6 +1292,12 @@ fn run_input(
         }
         if !policy_inputs.is_empty() {
             parameters["attempt.policy_inputs"] = json!(policy_inputs);
+        }
+        if review_policy
+            .as_object()
+            .is_some_and(|policy| !policy.is_empty())
+        {
+            input["review_policy"] = review_policy;
         }
         input["set"] = parameters;
         if let Some(source) = brief_source {

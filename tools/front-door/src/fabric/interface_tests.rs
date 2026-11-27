@@ -1,4 +1,20 @@
 include!("interface_implement_invariants.rs");
+
+#[test]
+fn review_policy_launch_set_is_removed_from_template_parameters() {
+    let input = super::extract_review_policy_set(json!({
+        "set": {
+            "domains.review.later_rounds": "full",
+            "domains.review.evidence_retries": "4",
+            "brief": "review this"
+        }
+    }))
+    .unwrap();
+    assert_eq!(input["review_policy"]["later_rounds"], "full");
+    assert_eq!(input["review_policy"]["evidence_retries"], 4);
+    assert_eq!(input["set"], json!({"brief":"review this"}));
+}
+
 #[test]
 fn route_overrides_skip_host_owned_delivery_nodes() {
     use provenant_fabric_runtime::graph::GraphNode;

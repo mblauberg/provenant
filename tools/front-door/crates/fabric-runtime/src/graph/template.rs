@@ -819,10 +819,10 @@ impl ReviewBehaviour {
     fn apply(self, node: &mut Map<String, Value>) {
         let instruction = match self {
             Self::Lens => {
-                "Report concrete defects against the pinned subject and base. Include id, severity, file, summary, status, evidence and proposed_fix for each finding; line is optional. Include trigger {sequence: one string naming the real steps reaching the state in order, reach: default_path or operator_mistake or attacker_or_unreachable, observed: boolean}. Findings without a trigger are notes; off-default-path findings are notes except ADR 0035 boundary breaches (class boundary) and data loss (class data_loss). Use kind spec_defect for evidenced specification problems routed to the chair. Set design_defect=true with evidence when the design cannot hold or findings share a flaw, and name the invariant in the top-level `class` of each finding and the structural alternative."
+                "Report concrete defects against the pinned subject and base. Include id, severity, file, summary, status, evidence and proposed_fix for each finding; line is optional. Include trigger {sequence: one string naming the real steps reaching the state in order, reach: default_path or operator_mistake or attacker_or_unreachable, observed: boolean}. Severity applies regardless of trigger or reach; ADR 0035 boundary breaches (class boundary) and data loss (class data_loss) retain their blocking override. Use kind spec_defect for evidenced specification problems routed to the chair. Set design_defect=true with evidence when the design cannot hold or findings share a flaw, and name the invariant in the top-level `class` of each finding and the structural alternative."
             }
             Self::Verify => {
-                "Check every input finding against the pinned subject and its callers. Preserve its exact qualified id and evidence. Set verification to upheld, falsified or unverifiable, and include a non-empty top-level `reason` explaining that verification; this field is separate from `triage.reason`. For newly discovered findings set verification=new and include a non-empty top-level `reason`. For every finding emit triage {decision: confirmed or rejected, reason: code evidence, worth_fixing: boolean, root_cause: invariant under repair, blocking_class: acceptance or default_path_defect or boundary or data_loss or none, shared_flaw: boolean} and set top-level `class` to the named invariant. Two distinct findings with the same invariant are one shared flaw and route to design. Rejected findings stay in the record. Check the trigger sequence and reach; absent or off-default triggers are notes except ADR 0035 boundaries and data loss."
+                "Check every input finding against the pinned subject and its callers. Preserve its exact qualified id and evidence. Set verification to upheld, falsified or unverifiable, and include a non-empty top-level `reason` explaining that verification; this field is separate from `triage.reason`. For newly discovered findings set verification=new and include a non-empty top-level `reason`. For every finding emit triage {decision: confirmed or rejected, reason: code evidence, worth_fixing: boolean, root_cause: invariant under repair, blocking_class: acceptance or default_path_defect or boundary or data_loss or none, shared_flaw: boolean} and set top-level `class` to the named invariant. Two distinct findings with the same invariant are one shared flaw and route to design. Rejected findings stay in the record. Check the trigger sequence and reach; severity applies regardless of trigger or reach, and ADR 0035 boundaries and data loss retain their blocking override."
             }
             Self::Synthesis => {
                 "Reconcile every input finding by code evidence. Preserve each input's exact qualified id. Every findings entry, including any new finding, must have a top-level disposition of accepted, rejected or deferred and a non-empty top-level `reason` explaining that disposition. This top-level field is separate from `triage.reason`. Emit checked triage for every finding: decision confirmed or rejected, reason, worth_fixing boolean, root_cause naming the invariant, blocking_class acceptance/default_path_defect/boundary/data_loss/none, shared_flaw boolean, and set top-level `class` to the named invariant. Two distinct findings with the same invariant are one shared flaw and route to design. Group confirmed worthwhile findings by shared cause before a writer starts. Keep rejected findings in the record. Evaluate disputed repair_items by evidence; a dispute is not automatically unresolved; a fix round must return sweep, sites and pin for each invariant. A design-cannot-hold outcome or shared design flaw routes to principal design. Never decide by majority vote."
@@ -894,6 +894,9 @@ pub struct Template {
     /// Review output protocol, enforced independently of the brief.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review: Option<ReviewBehaviour>,
+    /// Review convergence values supplied by this template layer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_policy: Option<ReviewPolicyOverride>,
     #[serde(flatten)]
     pub extra: provenant_records::ExtraFields,
     /// Set when templates travel as a list, as in a planner catalogue.
@@ -1228,6 +1231,26 @@ impl Template {
         base.extra.extend(own.extra.clone());
         base.composite_behaviour = own.composite_behaviour.or(base.composite_behaviour);
         base.review = own.review.or(base.review);
+        if let Some(own_policy) = &own.review_policy {
+            let policy = base
+                .review_policy
+                .get_or_insert_with(ReviewPolicyOverride::default);
+            if let Some(value) = own_policy.later_rounds {
+                policy.later_rounds = Some(value);
+            }
+            if let Some(value) = &own_policy.adjudicator_route {
+                policy.adjudicator_route = Some(value.clone());
+            }
+            if let Some(value) = own_policy.accept_below {
+                policy.accept_below = Some(value);
+            }
+            if let Some(value) = own_policy.evidence_retries {
+                policy.evidence_retries = Some(value);
+            }
+            if let Some(value) = own_policy.lens_retry {
+                policy.lens_retry = Some(value);
+            }
+        }
         base.name = own.name.clone().or(base.name);
         base.doc = own.doc.clone().or(base.doc);
         base.parameters.extend(own.parameters.clone());
@@ -2680,6 +2703,9 @@ impl<'a> Compiler<'a> {
             let mut boundary = Map::new();
             boundary.insert("kind".into(), Value::String("composite".into()));
             boundary.insert("access".into(), Value::String("read_only".into()));
+            boundary
+                .entry(TEMPLATE_FIELD)
+                .or_insert_with(|| Value::String(name.to_owned()));
             boundary.insert("composite".into(), Value::Object(composite));
             boundary.extend(overrides);
             return self.finish(boundary, stack);

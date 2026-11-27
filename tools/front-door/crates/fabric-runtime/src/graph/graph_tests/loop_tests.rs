@@ -3311,7 +3311,7 @@ fn clean_initial_review_starts_no_repair_attempt() {
 fn confirmed_should_fix_on_the_default_path_runs_a_repair_writer() {
     let document = review_repair_document();
     let should_fix = repair_finding(false)
-        .replace("\"severity\":\"high\"", "\"severity\":\"should-fix\"")
+        .replace("\"severity\":\"high\"", "\"severity\":\"medium\"")
         .replace(
             "\"blocking_class\":\"default_path_defect\"",
             "\"blocking_class\":\"none\"",
@@ -3561,10 +3561,18 @@ fn raised_repair_cycle_budget_runs_every_round_and_refuses_extension() {
 }
 
 #[test]
-fn delta_review_runs_only_the_lens_that_raised_findings() {
+fn round_one_rereview_uses_verified_delta_or_widens_before_lens_selection() {
     let mut document = review_repair_document();
     document.context =
         Some(serde_json::from_value(serde_json::json!({"risk_tier":"substantial"})).unwrap());
+    let original_base = "0".repeat(40);
+    let original_head = "1".repeat(40);
+    let repaired_head = "a".repeat(40);
+    document.review_base = Some(original_base.clone());
+    document.schema_version = 2;
+    document.nodes[0].source = Some(SourceBinding::Commit {
+        commit: original_head.clone(),
+    });
     let check = serde_json::from_value(serde_json::json!({
         "id":"check","kind":"composite","access":"read_only","depends_on":["fix"],
         "composite":{"nodes":[
@@ -3575,39 +3583,70 @@ fn delta_review_runs_only_the_lens_that_raised_findings() {
     document.nodes[1].loop_body.as_mut().unwrap().body[1] = check;
     let finding = repair_finding(false);
     let pass = "```findings\n{\"schema_version\":1,\"risk_tier\":\"substantial\",\"findings\":[]}\n```\nVERDICT: PASS";
-    let mut owner = repair_reviews(&[&finding, "fixed", pass]);
-    if let AttemptObservation::Terminal { commit, .. } = &mut owner.observations[1] {
-        *commit = Some("a".repeat(40));
+    for (attributable, expected_calls) in [(true, 3), (false, 4)] {
+        let mut owner = repair_reviews(&[&finding, "fixed", pass, pass]);
+        owner.review_delta_is_ancestor = attributable;
+        if let AttemptObservation::Terminal { commit, .. } = &mut owner.observations[1] {
+            *commit = Some(repaired_head.clone());
+        }
+        let mut journal = MemoryJournal::default();
+        let run = advance(&document, &mut owner, &mut journal).unwrap();
+        assert!(run.checkpoint.successful());
+        assert_eq!(owner.calls.len(), expected_calls);
+        assert_eq!(owner.repair_growth_calls, 1);
+        assert_eq!(
+            owner.review_delta_checks,
+            vec![(original_head.clone(), repaired_head.clone())]
+        );
+        assert_eq!(owner.repair_panel_calls, 0);
+        assert!(owner.calls[2].0.node_id.ends_with("check--correctness"));
+        let correctness = run
+            .checkpoint
+            .nodes
+            .iter()
+            .find(|node| node.id == "repair--r1--check--correctness")
+            .unwrap();
+        assert_eq!(
+            correctness.review_round_scope,
+            Some(if attributable {
+                ReviewRoundScope::Delta {
+                    base: original_head.clone(),
+                    head: repaired_head.clone(),
+                }
+            } else {
+                ReviewRoundScope::Full {
+                    head: repaired_head.clone(),
+                }
+            })
+        );
+        assert_eq!(
+            owner.observed_review_bases[2].as_deref(),
+            Some(if attributable {
+                original_head.as_str()
+            } else {
+                original_base.as_str()
+            })
+        );
+        let security = run
+            .checkpoint
+            .nodes
+            .iter()
+            .find(|node| node.id == "repair--r1--check--security")
+            .unwrap();
+        if attributable {
+            assert_eq!(security.state, NodeState::Skipped);
+            assert!(security.attempts.is_empty());
+        } else {
+            assert_eq!(security.state, NodeState::Succeeded);
+            assert!(owner.calls[3].0.node_id.ends_with("check--security"));
+        }
+        assert_eq!(
+            advance(&document, &mut FakeOwner::default(), &mut journal)
+                .unwrap()
+                .checkpoint,
+            run.checkpoint
+        );
     }
-    let mut journal = MemoryJournal::default();
-    let run = advance(&document, &mut owner, &mut journal).unwrap();
-    assert!(run.checkpoint.successful());
-    assert_eq!(owner.calls.len(), 3);
-    assert_eq!(owner.repair_growth_calls, 1);
-    assert_eq!(owner.repair_panel_calls, 0);
-    assert!(
-        owner
-            .calls
-            .last()
-            .unwrap()
-            .0
-            .node_id
-            .ends_with("check--correctness")
-    );
-    let skipped = run
-        .checkpoint
-        .nodes
-        .iter()
-        .find(|node| node.id == "repair--r1--check--security")
-        .unwrap();
-    assert_eq!(skipped.state, NodeState::Skipped);
-    assert!(skipped.attempts.is_empty());
-    assert_eq!(
-        advance(&document, &mut FakeOwner::default(), &mut journal)
-            .unwrap()
-            .checkpoint,
-        run.checkpoint
-    );
 }
 
 #[test]
@@ -4267,6 +4306,7 @@ fn repair_replan_preserves_full_topology_and_single_reviewer_flattens() {
 
 struct CrashBeforeRepairGate {
     memory: MemoryJournal,
+    document: GraphDocument,
     after_panel: bool,
     crashed: bool,
 }
@@ -4277,6 +4317,16 @@ impl GraphJournal for CrashBeforeRepairGate {
     }
     fn save(&mut self, checkpoint: &GraphCheckpoint) -> Result<(), Self::Error> {
         self.memory.0 = Some(checkpoint.clone());
+        let limits = crate::config::GraphLimits {
+            expansion_depth: 64,
+            ..Default::default()
+        };
+        let plan = self
+            .after_panel
+            .then(|| plans::expand(&self.document, &[], &checkpoint.expansions, &limits).ok())
+            .flatten()
+            .and_then(|document| validation::validate_flat_plan(&document, &limits).ok())
+            .map(|(plan, _)| plan);
         let gate_pending = checkpoint
             .nodes
             .iter()
@@ -4286,7 +4336,9 @@ impl GraphJournal for CrashBeforeRepairGate {
                 expansion.patch.as_ref().is_some_and(|record| {
                     record.reason.as_deref() == Some("repair expanded risk or scope")
                 }) && !repair::panel_pending(checkpoint, expansion)
-                    && repair::panel_failure(checkpoint, expansion).is_none()
+                    && plan.as_ref().is_some_and(|plan| {
+                        repair::panel_failure(plan, checkpoint, expansion).is_none()
+                    })
             })
         } else {
             checkpoint.nodes.iter().any(|node| {
@@ -4321,6 +4373,7 @@ fn pending_repair_cache_and_panel_never_certify_a_redone_fix() {
         }
         let mut journal = CrashBeforeRepairGate {
             memory: MemoryJournal::default(),
+            document: document.clone(),
             after_panel,
             crashed: false,
         };

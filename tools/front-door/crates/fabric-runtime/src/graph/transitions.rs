@@ -303,6 +303,8 @@ pub(super) fn apply_attempt_observation(
     let marker_inputs = propagation_inputs(node, plan, checkpoint, positions);
     let partial_review = template::review_behaviour(node).is_some()
         && review::partial_inputs(node, checkpoint, positions);
+    let effective_review_base =
+        schedule::review_base_for_attempt(node_index, plan, checkpoint, positions);
     let mut settled_result = None;
     let retry_was_pending;
     let should_continue = {
@@ -423,7 +425,14 @@ pub(super) fn apply_attempt_observation(
                 let review_contract_error = if stopped_without_reply {
                     None
                 } else {
-                    review::contract_error(node, &upstream_findings, &outputs)
+                    review::contract_error(
+                        node,
+                        &upstream_findings,
+                        &outputs,
+                        schedule::effective_review_policy(node, checkpoint)
+                            .accept_below
+                            .value,
+                    )
                 };
                 if node.access == AccessMode::ReadOnly
                     && template::review_node(node)
@@ -515,7 +524,16 @@ pub(super) fn apply_attempt_observation(
                     .or(propagation_error)
                     .or(review_contract_error)
                     .or_else(|| review::invariant_error(node, &outputs))
-                    .or_else(|| review::repair_result_error(node, &upstream_findings, &outputs));
+                    .or_else(|| {
+                        review::repair_result_error(
+                            node,
+                            &upstream_findings,
+                            &outputs,
+                            schedule::effective_review_policy(node, checkpoint)
+                                .accept_below
+                                .value,
+                        )
+                    });
                 if template::review_behaviour(node).is_some() {
                     retain_synthesis_findings(&mut outputs, &upstream_findings);
                     if let Some((code, _)) = &disposition_error {
@@ -682,9 +700,9 @@ pub(super) fn apply_attempt_observation(
                                     _ => None,
                                 }
                                 .or_else(|| {
-                                    progress
-                                        .review_base
+                                    effective_review_base
                                         .as_deref()
+                                        .or(progress.review_base.as_deref())
                                         .or(graph_review_base.as_deref())
                                         .or(node.review_base.as_deref())
                                         .and_then(|b| GitOid::parse(b).ok())
@@ -760,6 +778,17 @@ pub(super) fn apply_attempt_observation(
                                 }
                             }
                         }
+                        false
+                    }
+                    GraphAttemptOutcome::ModelUnavailable
+                        if template::review_behaviour(node)
+                            == Some(template::ReviewBehaviour::Lens) =>
+                    {
+                        // Review lens route changes are bounded and journalled
+                        // by ReviewRetryState, not the generic route fallback.
+                        progress.advance_code = Some("model_unavailable".into());
+                        progress.advance_note = Some("review lens route is unavailable".into());
+                        progress.state = NodeState::Failed;
                         false
                     }
                     GraphAttemptOutcome::AuthRequired
@@ -921,6 +950,7 @@ pub(super) fn initial_checkpoint(
         // The caller resolves the configured defaults once at admission and
         // stamps them on the checkpoint after this skeleton is returned.
         on_stop_defaults: provenant_records::OnStop::default(),
+        review_policy: None,
         delivery_ci_superseded: Vec::new(),
         cancel_reason: None,
         integration_pin: None,
@@ -978,7 +1008,6 @@ pub(super) fn initial_checkpoint(
                 container_retry: false,
                 concurrency_warning: None,
                 repair_growth: None,
-                review_verdict_correction_refused: None,
                 provisioned_source: None,
                 provisioned_owner: None,
                 warnings: Vec::new(),
@@ -987,6 +1016,9 @@ pub(super) fn initial_checkpoint(
                 blocked: false,
                 decisions: Vec::new(),
                 review_settlement: None,
+                review_retry: None,
+                finding_ledger: None,
+                review_round_scope: None,
                 expansion_pause: None,
                 expansion_cause: None,
                 loop_pause: None,
@@ -1211,6 +1243,17 @@ pub(super) fn admit_attempt(
         checkpoint.set_pause(PauseCause::BudgetExceeded, &reason);
     }
     if checkpoint.pause.is_some() {
+        return Admission::SaveAndWait;
+    }
+    if outputs::repair_writer(node) && !repair::ledger_available(node, plan, checkpoint) {
+        fail_with(
+            &mut checkpoint.nodes[node_index],
+            "review_ledger_unavailable",
+            format!(
+                "node {}: the current review-chain finding ledger is unavailable; repair cannot use an individual reviewer's output",
+                node.id
+            ),
+        );
         return Admission::SaveAndWait;
     }
     if let Some(missing) = required_input_unavailable(node, plan, checkpoint, positions) {
@@ -2036,19 +2079,6 @@ fn recovery_pending(checkpoint: &GraphCheckpoint) -> bool {
                 node.state == NodeState::Blocked
                     && node.advance_code.as_deref() == Some("steer_continuation_refused")
             })
-        || checkpoint.nodes.iter().any(|node| {
-            node.state == NodeState::Failed
-                && node.advance_code.as_deref() == Some("review_verdict_invalid")
-                && node.review_verdict_correction_refused.is_none()
-                && !checkpoint
-                    .expansions
-                    .iter()
-                    .filter_map(|expansion| expansion.patch.as_ref())
-                    .any(|patch| {
-                        patch.reason.as_deref()
-                            == Some(format!("correct review verdict {}", node.id).as_str())
-                    })
-        })
 }
 
 pub(super) fn refresh_structure_pause(

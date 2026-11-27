@@ -186,6 +186,21 @@ mod tests {
     }
 
     #[test]
+    fn review_settings_set_at_launch_are_forwarded_as_typed_policy() {
+        let mut request = run_request();
+        request.set.extend([
+            "domains.review.later_rounds='full'".into(),
+            "domains.review.accept_below='blocking'".into(),
+            "domains.review.evidence_retries=3".into(),
+        ]);
+        let input = run_input_fixture(request).unwrap();
+        assert_eq!(input["review_policy"]["later_rounds"], "full");
+        assert_eq!(input["review_policy"]["accept_below"], "blocking");
+        assert_eq!(input["review_policy"]["evidence_retries"], 3);
+        assert!(input["set"].as_object().unwrap().is_empty());
+    }
+
+    #[test]
     fn malformed_set_and_missing_file_preserve_input_detail()
     -> Result<(), Box<dyn std::error::Error>> {
         for (setting, detail) in [

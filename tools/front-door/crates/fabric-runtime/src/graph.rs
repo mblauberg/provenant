@@ -26,7 +26,10 @@ mod candidate;
 mod canonical;
 pub use canonical::{canonicalise_route_models, canonicalise_route_nodes};
 pub mod refusal;
-pub use candidate::{AdmittedCandidate, CandidateError, admit_candidate, admit_running_candidate};
+pub use candidate::{
+    AdmittedCandidate, CandidateError, admit_candidate, admit_candidate_with_review_policy,
+    admit_running_candidate,
+};
 mod cancellation_intent;
 #[cfg(test)]
 #[path = "graph/checkpoint_tests.rs"]
@@ -314,11 +317,28 @@ fn graph_envelope_reason(
     extensions: &[String],
     plan: &PlannedGraph,
 ) -> Option<String> {
-    envelope::reason(
+    graph_envelope_reason_with_policy(
+        document,
+        expansions,
+        extensions,
+        plan,
+        &ReviewPolicy::default(),
+    )
+}
+
+fn graph_envelope_reason_with_policy(
+    document: &GraphDocument,
+    expansions: &[Expansion],
+    extensions: &[String],
+    plan: &PlannedGraph,
+    review_policy: &ReviewPolicy,
+) -> Option<String> {
+    envelope::reason_with_policy(
         document,
         expansions,
         extensions,
         &bounded_envelope_plan(plan),
+        review_policy,
     )
 }
 
@@ -328,11 +348,28 @@ fn graph_envelope_bound(
     extensions: &[String],
     plan: &PlannedGraph,
 ) -> usize {
-    envelope::checkpoint_bound(
+    graph_envelope_bound_with_policy(
         document,
         expansions,
         extensions,
         &bounded_envelope_plan(plan),
+        &ReviewPolicy::default(),
+    )
+}
+
+fn graph_envelope_bound_with_policy(
+    document: &GraphDocument,
+    expansions: &[Expansion],
+    extensions: &[String],
+    plan: &PlannedGraph,
+    review_policy: &ReviewPolicy,
+) -> usize {
+    envelope::checkpoint_bound_with_policy(
+        document,
+        expansions,
+        extensions,
+        &bounded_envelope_plan(plan),
+        review_policy,
     )
 }
 
@@ -488,6 +525,12 @@ pub trait AttemptOwner {
     /// every model a patch admits. Hosts without routing policy keep `None`.
     fn catalogue(&self) -> Option<provenant_routing::Catalogue> {
         None
+    }
+
+    /// Review convergence resolved from the host's effective config. A new
+    /// graph seals this value; replay reads the checkpoint copy instead.
+    fn review_policy(&self) -> ReviewPolicy {
+        ReviewPolicy::default()
     }
 
     /// Read the admitted successor of a terminal attempt, without replacing
@@ -948,6 +991,13 @@ pub trait AttemptOwner {
         Ok(ReviewRange::Unknown)
     }
 
+    /// Prove that `head` descends from the last reviewed head before a
+    /// later-round delta is staged. Owners without a read-only source resolver
+    /// widen the round to the full pinned head.
+    fn review_delta_attributable(&mut self, _base: &str, _head: &str) -> bool {
+        false
+    }
+
     fn observe_or_start(
         &mut self,
         key: &AttemptKey,
@@ -1147,6 +1197,8 @@ struct PlannedNode {
     escalate: Option<EscalateSpec>,
     #[serde(skip_serializing_if = "Option::is_none")]
     delivery_review: Option<DeliveryReviewSpec>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    effective_review_policy: Option<ReviewPolicy>,
     #[serde(skip_serializing_if = "Option::is_none")]
     delivery_adoption: Option<DeliveryAdoptionIntent>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2036,6 +2088,49 @@ fn stage_attempt<R: AttemptOwner, J: GraphJournal>(
 ) -> Result<Staged, GraphError<R::Error, J::Error>> {
     let node = &plan.nodes[node_index];
     let cap = limits.node_prompt_bytes;
+    let later_review_round = node.round.as_ref().is_some_and(|round| round.round > 0)
+        && node.access == AccessMode::ReadOnly
+        && template::review_node(node);
+    if later_review_round
+        && node.source.is_some()
+        && checkpoint.nodes[node_index].source_commit.is_none()
+    {
+        let commit = match node.source.as_ref() {
+            Some(SourceBinding::Commit { commit }) => Some(commit.clone()),
+            Some(SourceBinding::Node { node: source }) => positions
+                .get(source)
+                .and_then(|index| checkpoint.nodes[*index].outputs.as_ref())
+                .and_then(|outputs| outputs.commit.clone()),
+            Some(SourceBinding::Head { node: writer }) => {
+                land::chain_head(plan, &*checkpoint, positions, &node.id, writer)
+            }
+            Some(SourceBinding::Integration) => {
+                owner.integration_head().map_err(GraphError::Run)?
+            }
+            None => None,
+        };
+        let valid = transitions::apply_source_commit(node, &mut *checkpoint, node_index, commit);
+        journal.save(&*checkpoint).map_err(GraphError::Journal)?;
+        if !valid {
+            return Ok(Staged::Wait);
+        }
+    }
+    if later_review_round {
+        let changed =
+            schedule::seal_review_round_scope(owner, node_index, plan, checkpoint, positions);
+        if checkpoint.nodes[node_index].review_round_scope.is_none() {
+            transitions::fail_with(
+                &mut checkpoint.nodes[node_index],
+                "review_round_scope_unavailable",
+                "later review round has no pinned current head; it cannot safely launch".into(),
+            );
+            journal.save(&*checkpoint).map_err(GraphError::Journal)?;
+            return Ok(Staged::Wait);
+        }
+        if changed {
+            journal.save(&*checkpoint).map_err(GraphError::Journal)?;
+        }
+    }
     match transitions::admit_attempt(
         node_index,
         plan,
@@ -2086,7 +2181,12 @@ fn stage_attempt<R: AttemptOwner, J: GraphJournal>(
             .bases
             .and_then(|bases| bases.review)
             .map(|base| base.to_string());
-        let base = progress.review_base.as_ref().or(graph_review_base.as_ref());
+        let effective_review_base =
+            schedule::review_base_for_attempt(node_index, plan, checkpoint, positions);
+        let base = effective_review_base
+            .as_ref()
+            .or(progress.review_base.as_ref())
+            .or(graph_review_base.as_ref());
         if base
             .zip(progress.source_commit.as_ref())
             .is_some_and(|(base, head)| base == head)
@@ -2128,6 +2228,20 @@ fn stage_attempt<R: AttemptOwner, J: GraphJournal>(
     } else {
         owner.materialise_inputs(key, &requests, NODE_INPUT_FILE_BYTES)
     };
+    if outputs::review_ledger_artifact_required(node, plan, checkpoint, positions)
+        && !outputs::complete_review_ledger_artifact(&requests, materialised.as_ref())
+    {
+        transitions::fail_with(
+            &mut checkpoint.nodes[node_index],
+            "review_ledger_artifact_unavailable",
+            format!(
+                "node {}: the full review-chain ledger could not be staged within the {} byte input limit; the reviewer will not launch with a summary only",
+                node.id, NODE_INPUT_FILE_BYTES
+            ),
+        );
+        journal.save(&*checkpoint).map_err(GraphError::Journal)?;
+        return Ok(Staged::Wait);
+    }
     let files = materialised.as_ref().map_or_else(String::new, |files| {
         render_files(&files.entries, &requests, files.index.as_deref())
     });
@@ -2523,6 +2637,8 @@ fn observe_attempt<R: AttemptOwner, J: GraphJournal>(
         materialised,
     } = input;
     let require_distinct = *require_distinct;
+    let effective_review_base =
+        schedule::review_base_for_attempt(node_index, plan, checkpoint, positions);
     let mut launch_attempt = node.attempt.clone().unwrap_or_default();
     if !node.write_scope.is_empty() {
         launch_attempt.write_scope = node.write_scope.clone();
@@ -2558,7 +2674,9 @@ fn observe_attempt<R: AttemptOwner, J: GraphJournal>(
             distinct_from_attempts: distinct_attempts,
             require_distinct,
             source_commit: checkpoint.nodes[node_index].source_commit.as_deref(),
-            review_base: checkpoint.nodes[node_index].review_base.as_deref(),
+            review_base: effective_review_base
+                .as_deref()
+                .or(checkpoint.nodes[node_index].review_base.as_deref()),
             title: node.title.as_deref().unwrap_or(&node.id),
             prompt,
             required_verdict: node.required_verdict.as_deref(),
@@ -2717,6 +2835,10 @@ fn record_observed_attempt<R: AttemptOwner, J: GraphJournal>(
         if applied.pool_selection.is_none() {
             applied.pool_selection = route.pool_selection.clone();
         }
+        // Runtime routing facts do not author review policy. Keep the
+        // host-resolved policy that was admitted with this route.
+        applied.review_policy = route.review_policy.clone();
+        applied.effective_review_policy = route.effective_review_policy.clone();
         for (key, value) in &route.extra {
             applied
                 .extra
@@ -2879,6 +3001,7 @@ fn record_observed_attempt<R: AttemptOwner, J: GraphJournal>(
                 node: node.id.clone(),
                 invariant,
             })?;
+        composites::reconcile_checkpoint(plan, checkpoint);
         journal.save(&*checkpoint).map_err(GraphError::Journal)?;
         return Ok(Observed::NextAttempt);
     }
@@ -2937,10 +3060,9 @@ fn record_observed_attempt<R: AttemptOwner, J: GraphJournal>(
             attempt_ref: Some(reference),
             ..
         } if node.access == AccessMode::ReadOnly && template::review_node(node) => {
-            let explicit_base = node
-                .review_base
-                .as_deref()
-                .is_some_and(|base| !base.is_empty());
+            let explicit_base =
+                schedule::review_base_for_attempt(node_index, plan, checkpoint, positions)
+                    .is_some_and(|base| !base.is_empty());
             owner
                 .review_range(reference, explicit_base)
                 .map_err(GraphError::Run)?
@@ -2986,6 +3108,7 @@ fn record_observed_attempt<R: AttemptOwner, J: GraphJournal>(
             cost_error,
         },
     );
+    composites::reconcile_checkpoint(plan, checkpoint);
     if steer_refused {
         let reason = format!(
             "node {}: steer successor preparation was refused; correct the cause and retry the node",
@@ -3048,6 +3171,10 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
     let stored = journal
         .load(&document.graph_id)
         .map_err(GraphError::Journal)?;
+    let resolved_review_policy = stored
+        .as_ref()
+        .map(GraphCheckpoint::review_policy)
+        .unwrap_or_else(|| owner.review_policy());
     let (base, _) = if stored.is_some() {
         validate_replay_plan(document, &unbounded)
             .map_err(|error| GraphError::Invalid(error.to_string()))?
@@ -3059,6 +3186,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
             if candidate.source != *document
                 || candidate.checkpoint != stored
                 || candidate.extensions != extensions
+                || candidate.review_policy != resolved_review_policy
             {
                 return Err(GraphError::Invalid(
                     "admitted candidate does not match the execution state".into(),
@@ -3070,7 +3198,15 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
             Some(checkpoint) => {
                 admit_running_candidate(document, checkpoint, extensions, limits, budget, None)
             }
-            None => admit_candidate(document, None, extensions, limits, budget, None),
+            None => admit_candidate_with_review_policy(
+                document,
+                None,
+                extensions,
+                limits,
+                budget,
+                None,
+                &resolved_review_policy,
+            ),
         }
         .map_err(|error| match error {
             CandidateError::CheckpointTopology { node, invariant } => GraphError::BadCheckpoint {
@@ -3117,7 +3253,13 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
             checkpoint
         }
         None => {
-            if let Some(reason) = graph_envelope_reason(document, &[], &[], &plan) {
+            let review_policy = resolved_review_policy;
+            review_policy
+                .validate()
+                .map_err(|error| GraphError::Invalid(error.into()))?;
+            if let Some(reason) =
+                graph_envelope_reason_with_policy(document, &[], &[], &plan, &review_policy)
+            {
                 return Err(GraphError::Invalid(reason));
             }
             let asks = may_ask(&plan);
@@ -3140,6 +3282,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                 ask_actor,
             );
             checkpoint.on_stop_defaults = on_stop_defaults;
+            checkpoint.review_policy = Some(review_policy);
             if let Some(submission) = document.submission_patch.as_ref() {
                 let library = template::TemplateLibrary::bundled();
                 let resolvers = Default::default();
@@ -3513,7 +3656,12 @@ fn delivery_review_gate_failed(
         {
             return false;
         }
-        if !review::delivery_matches(policy, outputs, expected)
+        let threshold = policy.accept_below.unwrap_or_else(|| {
+            schedule::effective_review_policy(&plan.nodes[index], checkpoint)
+                .accept_below
+                .value
+        });
+        if !review::delivery_matches(threshold, outputs, expected)
             && !delivery_review_disposition_matches(progress, outputs)
         {
             if verdict == ReviewVerdict::Approve {
@@ -3703,14 +3851,24 @@ fn gate_failure(
                     let outputs = checkpoint.nodes[index].outputs.as_ref();
                     if let Some(policy) = &plan.nodes[index].delivery_review {
                         return outputs.is_some_and(|outputs| {
-                            review::delivery_matches(policy, outputs, expected)
-                                || (plan.queue.is_some()
-                                    && ReviewVerdict::from_token(expected)
-                                        == Some(ReviewVerdict::Approve)
-                                    && delivery_review_disposition_matches(
-                                        &checkpoint.nodes[index],
-                                        outputs,
-                                    ))
+                            review::delivery_matches(
+                                policy.accept_below.unwrap_or_else(|| {
+                                    schedule::effective_review_policy(
+                                        &plan.nodes[index],
+                                        checkpoint,
+                                    )
+                                    .accept_below
+                                    .value
+                                }),
+                                outputs,
+                                expected,
+                            ) || (plan.queue.is_some()
+                                && ReviewVerdict::from_token(expected)
+                                    == Some(ReviewVerdict::Approve)
+                                && delivery_review_disposition_matches(
+                                    &checkpoint.nodes[index],
+                                    outputs,
+                                ))
                         });
                     }
                     let head = repair::split_panel_head(&input.node, checkpoint)
