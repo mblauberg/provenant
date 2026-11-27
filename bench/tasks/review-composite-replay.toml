@@ -1,0 +1,7 @@
+repo = "mblauberg/provenant"
+parent_sha = "45066ddbfb9f95ebd82dffee58d0efec366169f6"
+merge_sha = "0e69fd11b26a6e3ba6183ba58dd9e9d9bf620073"
+prompt = "Derive composite replay from current member settlement so a running upstream hold keeps its composite running, as in slice 24 (E1)."
+hidden_test_command = "cargo test --manifest-path tools/front-door/Cargo.toml -p provenant-fabric-runtime --lib public_patch_skip_survives_unrelated_edits_and_retry_supersedes_it"
+split = "acceptance"
+family = "review"

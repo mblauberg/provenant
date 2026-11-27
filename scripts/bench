@@ -1,8 +1,9 @@
 #!/bin/sh
 set -eu
 
-cmd=${1:?expected mine, verify or run}
+cmd=${1:?expected mine, verify, run, report or replay}
 shift
+script_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)
 repo=$(pwd -P)
 root=$(git -C "$repo" rev-parse --show-toplevel)
 tasks=$root/bench/tasks
@@ -13,9 +14,11 @@ field() {
 import sys,tomllib
 with open(sys.argv[2],"rb") as source:
     task=tomllib.load(source)
-expected={"repo","parent_sha","merge_sha","prompt","hidden_test_command","split"}
+expected={"repo","parent_sha","merge_sha","prompt","hidden_test_command","split","family"}
 if set(task) != expected or task["split"] not in {"search","acceptance","held-out"}:
     raise SystemExit("invalid benchmark task fields or split")
+if task["family"] not in {"writer","fix","review","read-only","unclassified"}:
+    raise SystemExit("invalid benchmark task family")
 value=task[sys.argv[1]]
 if not isinstance(value,str):
     raise SystemExit("benchmark task fields must be strings")
@@ -63,12 +66,26 @@ print(digest.hexdigest())
 PY
 }
 
+family_wanted() {
+    if [ -z "$families" ]; then return 0; fi
+    case " $families " in
+        *" $1 "*) return 0 ;;
+    esac
+    return 1
+}
+
 case "$cmd" in
 mine)
     limit=100
+    family=unclassified
     while [ "$#" -gt 0 ]; do
-        case "$1" in --limit) limit=$2; shift 2 ;; *) echo "unknown mine option: $1" >&2; exit 2 ;; esac
+        case "$1" in
+            --limit) limit=$2; shift 2 ;;
+            --family) family=$2; shift 2 ;;
+            *) echo "unknown mine option: $1" >&2; exit 2 ;;
+        esac
     done
+    case "$family" in writer|fix|review|read-only|unclassified) ;; *) echo "unknown task family: $family" >&2; exit 2 ;; esac
     count=0
     merge_log=$(mktemp "${TMPDIR:-/tmp}/provenant-bench-log.XXXXXX")
     trap 'rm -f "$merge_log"' EXIT HUP INT TERM
@@ -92,6 +109,7 @@ merge_sha = "$merge"
 prompt = "Implement the change from merge $short: $title"
 hidden_test_command = "$escaped_command"
 split = "search"
+family = "$family"
 EOF
         git -C "$root" diff --binary --unified=0 "$parent" "$merge" -- ':(glob)**/*test*.rs' ':(glob)**/*_tests.rs' ':(glob)**/tests/**/*.rs' > "$tasks/candidate-$short.patch"
         count=$((count + 1))
@@ -119,19 +137,23 @@ verify)
     echo "verified $task"
     ;;
 run)
-    route='' split=acceptance limit=100 repeats=1
+    route='' split=acceptance limit=100 repeats=1 families=
     while [ "$#" -gt 0 ]; do
         case "$1" in
             --route) route=$2; shift 2 ;;
             --split) split=$2; shift 2 ;;
             --limit) limit=$2; shift 2 ;;
             --repeats) repeats=$2; shift 2 ;;
+            --family) families="$families $2"; shift 2 ;;
             *) echo "unknown run option: $1" >&2; exit 2 ;;
         esac
     done
     [ -n "$route" ] || { echo "--route is required" >&2; exit 2; }
     case "$repeats" in ''|*[!0-9]*) echo "--repeats must be a positive integer" >&2; exit 2 ;; esac
     [ "$repeats" -gt 0 ] || { echo "--repeats must be a positive integer" >&2; exit 2; }
+    for family in $families; do
+        case "$family" in writer|fix|review|read-only) ;; *) echo "unknown task family: $family" >&2; exit 2 ;; esac
+    done
     model=${route%@*}; effort=${route##*@}; [ "$model" != "$route" ] || effort=
     bin=${PROVENANT_BIN:-provenant}
     state=$("$bin" root --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["data"]["state_directory"])')
@@ -144,6 +166,8 @@ run)
         [ "$count" -lt "$limit" ] || break
         task_split=$(field split "$task")
         [ "$task_split" = "$split" ] || continue
+        task_family=$(field family "$task")
+        family_wanted "$task_family" || continue
         parent=$(field parent_sha "$task")
         prompt=$(field prompt "$task")
         command=$(field hidden_test_command "$task")
@@ -193,27 +217,10 @@ run)
                 passed=true
             fi
             seconds=$(( $(date +%s) - start ))
-            python3 - "$task" "$route" "$model" "$passed" "$seconds" "$tmp/stats.json" "$reason" "$tmp/usage.json" "$repeat" "$repeats" >> "$ledger" <<'PY'
-import json,sys
-report=json.load(open(sys.argv[6])).get("data")
-totals=None if report is None else report["totals"]
-# telemetry cost reports money coverage; the provider token categories come
-# from telemetry stats, scoped to this task's throw-away project.
-usage_doc=json.load(open(sys.argv[8])).get("data")
-tokens=None
-if isinstance(usage_doc,dict) and isinstance(usage_doc.get("totals"),dict):
-    usage=usage_doc["totals"].get("usage") or {}
-    tokens={
-        "input":(usage.get("uncached_input") or {}).get("known"),
-        "cache_read":(usage.get("cache_read") or {}).get("known"),
-        "cache_write":(usage.get("cache_write") or {}).get("known"),
-        "output":(usage.get("output_excluding_reasoning") or {}).get("known"),
-        "reasoning":(usage.get("reasoning") or {}).get("known"),
-    }
-cost=None if totals is None or not totals["complete"] else totals["usd"]
-turns=None if totals is None else totals["attempts"]
-print(json.dumps({"task":sys.argv[1],"route":sys.argv[2],"model":sys.argv[3],"pass":None if sys.argv[7] else sys.argv[4]=="true","reason":sys.argv[7] or None,"tokens":tokens,"cost":cost,"turns":turns,"seconds":int(sys.argv[5]),"repeat":int(sys.argv[9]),"repeats":int(sys.argv[10])},separators=(",",":")))
-PY
+            python3 "$script_dir/bench-report" row \
+                "$task" "$task_family" "$route" "$model" "$passed" "$seconds" \
+                "$tmp/stats.json" "$reason" "$tmp/usage.json" \
+                "$repeat" "$repeats" >> "$ledger"
             git -C "$tmp/repo" worktree remove --force "$worktree" >/dev/null
             rm -rf "$tmp"
             trap - EXIT HUP INT TERM
@@ -222,7 +229,55 @@ PY
         done
         count=$((count + 1))
     done
-    echo "recorded $runs run(s) across $count task(s) in $ledger"
+    echo "recorded $runs run(s) across $count task(s) in $ledger (repeats=$repeats split=$split families=${families:-all})"
+    ;;
+report)
+    ledger='' route='' repeats='' families=''
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --ledger) ledger=$2; shift 2 ;;
+            --route) route=$2; shift 2 ;;
+            --repeats) repeats=$2; shift 2 ;;
+            --family) families="$families $2"; shift 2 ;;
+            *) echo "unknown report option: $1" >&2; exit 2 ;;
+        esac
+    done
+    if [ -z "$ledger" ]; then
+        bin=${PROVENANT_BIN:-provenant}
+        state=$("$bin" root --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["data"]["state_directory"])')
+        ledger=$state/bench.jsonl
+    fi
+    set -- python3 "$script_dir/bench-report" report --ledger "$ledger"
+    [ -z "$route" ] || set -- "$@" --route "$route"
+    [ -z "$repeats" ] || set -- "$@" --repeats "$repeats"
+    for family in $families; do set -- "$@" --family "$family"; done
+    exec "$@"
+    ;;
+replay)
+    route='' split='' limit='' repeats='' ledger='' families=''
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --route) route=$2; shift 2 ;;
+            --split) split=$2; shift 2 ;;
+            --limit) limit=$2; shift 2 ;;
+            --repeats) repeats=$2; shift 2 ;;
+            --ledger) ledger=$2; shift 2 ;;
+            --family) families="$families $2"; shift 2 ;;
+            *) echo "unknown replay option: $1" >&2; exit 2 ;;
+        esac
+    done
+    [ -n "$route" ] || { echo "--route is required" >&2; exit 2; }
+    set -- run --route "$route"
+    [ -z "$split" ] || set -- "$@" --split "$split"
+    [ -z "$limit" ] || set -- "$@" --limit "$limit"
+    [ -z "$repeats" ] || set -- "$@" --repeats "$repeats"
+    for family in $families; do set -- "$@" --family "$family"; done
+    "$script_dir/bench" "$@"
+    set -- report --route "$route"
+    [ -z "$repeats" ] || set -- "$@" --repeats "$repeats"
+    [ -z "$ledger" ] || set -- "$@" --ledger "$ledger"
+    for family in $families; do set -- "$@" --family "$family"; done
+    "$script_dir/bench" "$@"
     ;;
 *) echo "unknown bench command: $cmd" >&2; exit 2 ;;
 esac

@@ -1,0 +1,7 @@
+repo = "mblauberg/provenant"
+parent_sha = "bb011c2a6cfcba4dcbee2c994ecac6d7d263de6c"
+merge_sha = "a07e14f1eab1f38ebe24a01318cfc445d4f5f045"
+prompt = "Make a read-only task name the fetched upstream head of a checkout behind its default branch, from #3714."
+hidden_test_command = "cargo test --manifest-path tools/front-door/Cargo.toml -p provenant-cli --lib read_only_source_ref_names_the_fetched_upstream_head_of_a_behind_checkout"
+split = "acceptance"
+family = "read-only"

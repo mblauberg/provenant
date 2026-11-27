@@ -26,5 +26,6 @@ task=$(sed -n '1p' "$tmp/out")
 [ -f "$task" ]
 grep -F "parent_sha = \"$parent\"" "$task" >/dev/null
 grep -F "merge_sha = \"$merge\"" "$task" >/dev/null
+grep -F 'family = "unclassified"' "$task" >/dev/null
 [ -s "${task%.toml}.patch" ]
 echo 'candidate miner fixture passed'

@@ -1,0 +1,7 @@
+repo = "mblauberg/provenant"
+parent_sha = "5d3d44b9cbaf9a53a8f97cd06e2b8ab92730f35b"
+merge_sha = "d19d33028f20df22df17b9860b7748bb1b899fdd"
+prompt = "Render confinement permission sources as typed Layer and Source values, as in slice 3 (E1)."
+hidden_test_command = "cargo test --manifest-path tools/front-door/Cargo.toml -p provenant-confinement --lib renderer_applies_all_network_ceiling_pairs_and_offline_denial"
+split = "acceptance"
+family = "writer"

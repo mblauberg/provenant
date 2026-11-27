@@ -1,0 +1,24 @@
+diff --git a/tools/front-door/crates/confinement/src/permissions/tests/render.rs b/tools/front-door/crates/confinement/src/permissions/tests/render.rs
+index ab5ade207b..48afbc266a 100644
+--- a/tools/front-door/crates/confinement/src/permissions/tests/render.rs
++++ b/tools/front-door/crates/confinement/src/permissions/tests/render.rs
+@@ -11,0 +12 @@ use provenant_records::policy::Policy;
++use provenant_records::{Layer, Source};
+@@ -1663 +1664 @@ fn ambient_policy_renders_complete_mandatory_and_host_denials()
+-            .any(|source| matches!(source, ConfinementSource::Host(_)))
++            .any(|source| source.layer == Layer::Host)
+@@ -1801 +1802,4 @@ fn renderer_applies_all_network_ceiling_pairs_and_offline_denial()
+-                resolved.sources().contains(&ConfinementSource::Plan),
++                resolved.sources().contains(&Source {
++                    layer: Layer::Launch,
++                    origin: None
++                }),
+@@ -1808 +1812 @@ fn renderer_applies_all_network_ceiling_pairs_and_offline_denial()
+-                    .any(|source| matches!(source, ConfinementSource::Host(_))),
++                    .any(|source| source.layer == Layer::Host),
+@@ -1827 +1831,4 @@ fn renderer_applies_all_network_ceiling_pairs_and_offline_denial()
+-            assert!(resolved.sources().contains(&ConfinementSource::Provider));
++            assert!(resolved.sources().contains(&Source {
++                layer: Layer::Route,
++                origin: None
++            }));

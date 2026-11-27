@@ -1,0 +1,196 @@
+#!/bin/sh
+set -eu
+
+bench_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)
+bench=$bench_dir/bench
+helper=$bench_dir/bench-report
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/provenant-bench-report.XXXXXX")
+trap 'rm -rf "$tmp"' EXIT HUP INT TERM
+
+cat > "$tmp/cost.json" <<'JSON'
+{"data":{"totals":{"complete":true,"usd":0.25,"attempts":3}}}
+JSON
+cat > "$tmp/full.json" <<'JSON'
+{"data":{"totals":{"usage":{"uncached_input":{"known":100,"missing":0},"cache_read":{"known":20,"missing":0},"cache_write":{"known":0,"missing":0},"output_excluding_reasoning":{"known":50,"missing":0},"reasoning":{"known":5,"missing":0}}}}}
+JSON
+cat > "$tmp/partial.json" <<'JSON'
+{"data":{"totals":{"usage":{"uncached_input":{"known":100,"missing":1},"cache_read":{"known":20,"missing":0},"cache_write":{"known":0,"missing":0},"output_excluding_reasoning":{"known":50,"missing":0},"reasoning":{"known":5,"missing":0}}}}}
+JSON
+printf '{"data":{"totals":{"usage":{}}}}\n' > "$tmp/no-usage.json"
+printf '{"data":null}\n' > "$tmp/no-data.json"
+
+row() {
+    python3 "$helper" row task-a writer fixture/route model-x "$1" "$2" \
+        "$tmp/cost.json" '' "$3" 1 2
+}
+
+row true 12 "$tmp/full.json" > "$tmp/full-row.json"
+row true 12 "$tmp/no-usage.json" > "$tmp/none-row.json"
+row true 12 "$tmp/no-data.json" > "$tmp/nodata-row.json"
+row true 12 "$tmp/partial.json" > "$tmp/partial-row.json"
+
+python3 - "$tmp" <<'PY'
+import json, sys
+path = sys.argv[1]
+def load(name):
+    with open(f"{path}/{name}.json") as source:
+        return json.load(source)
+full = load("full-row")["tokens"]
+none = load("none-row")["tokens"]
+nodata = load("nodata-row")["tokens"]
+partial = load("partial-row")["tokens"]
+assert full == {"input":100,"cache_read":20,"cache_write":0,"output":50,"reasoning":5}, full
+assert set(none.values()) == {None}, none
+assert set(nodata.values()) == {None}, nodata
+assert partial["input"] is None, "a lower bound is not a token total"
+assert partial["cache_read"] == 20 and partial["cache_write"] == 0, partial
+assert load("full-row")["cost"] == 0.25 and load("full-row")["turns"] == 3
+PY
+
+cat > "$tmp/ledger.jsonl" <<'JSON'
+{"task":"task-a","family":"writer","route":"fixture/route","model":"model-x","pass":true,"reason":null,"tokens":{"input":100,"cache_read":10,"cache_write":0,"output":40,"reasoning":null},"cost":0.2,"turns":3,"seconds":10,"repeat":1,"repeats":2}
+{"task":"task-a","family":"writer","route":"fixture/route","model":"model-x","pass":false,"reason":"test failed","tokens":{"input":300,"cache_read":null,"cache_write":null,"output":null,"reasoning":null},"cost":null,"turns":3,"seconds":20,"repeat":2,"repeats":2}
+{"task":"task-b","family":"fix","route":"fixture/route","model":"model-x","pass":true,"reason":null,"tokens":{"input":50,"cache_read":5,"cache_write":0,"output":10,"reasoning":0},"cost":0.1,"turns":2,"seconds":5,"repeat":1,"repeats":2}
+{"task":"task-b","family":"fix","route":"fixture/route","model":"model-x","pass":true,"reason":null,"tokens":{"input":50,"cache_read":5,"cache_write":0,"output":10,"reasoning":0},"cost":0.1,"turns":2,"seconds":7,"repeat":2,"repeats":2}
+{"task":"task-c","family":"review","route":"other/route","model":"model-y","pass":null,"reason":"dispatch failed","tokens":null,"cost":null,"turns":null,"seconds":30,"repeat":1,"repeats":1}
+JSON
+
+python3 "$helper" report --ledger "$tmp/ledger.jsonl" > "$tmp/report.json"
+python3 "$helper" report --ledger "$tmp/ledger.jsonl" --family fix --repeats 2 > "$tmp/filtered.json"
+
+python3 - "$tmp" <<'PY'
+import json, sys
+path = sys.argv[1]
+def load(name):
+    with open(f"{path}/{name}.json") as source:
+        return json.load(source)
+report = load("report")
+assert report["attempts"] == 5 and report["repeats"] == 2, report
+assert report["families"] is None and report["repeats_filter"] is None
+writer = report["family_summary"]["writer"]
+assert writer["attempts"] == 2 and writer["pass"] == {"passed":1,"failed":1,"unknown":0,"rate":0.5}, writer
+assert writer["seconds"] == {"mean":15.0,"min":10,"max":20,"stdev":5.0}, writer
+assert writer["tokens"]["input"] == {"mean":200.0,"reported":2}, writer
+assert writer["tokens"]["reasoning"] == {"mean":None,"reported":0}, writer
+assert report["family_summary"]["fix"]["pass"]["rate"] == 1.0
+assert report["family_summary"]["review"]["pass"] == {"passed":0,"failed":0,"unknown":1,"rate":None}
+task = report["tasks"]["task-a"]
+assert task["family"] == "writer" and task["repeats"] == 2
+assert task["seconds"]["stdev"] == 5.0, "per-task variance across repeats"
+assert report["tasks"]["task-b"]["seconds"]["stdev"] == 1.0
+filtered = load("filtered")
+assert filtered["families"] == ["fix"] and filtered["repeats_filter"] == 2
+assert filtered["attempts"] == 2 and set(filtered["tasks"]) == {"task-b"}
+PY
+
+# Drive the ledger row through scripts/bench run with a stubbed host and git,
+# so the provider-with-usage and provider-without-usage cases use the real path.
+repo=$tmp/repo
+state=$tmp/state
+mkdir -p "$repo" "$state"
+cat > "$tmp/provenant" <<'SH'
+#!/bin/sh
+case "$1" in
+    root)
+        printf '{"data":{"state_directory":"%s"}}\n' "$STATE" ;;
+    worktree)
+        if [ "$2" = create ]; then
+            branch=$3
+            project=
+            while [ "$#" -gt 0 ]; do
+                if [ "$1" = --project ]; then project=$2; shift 2; else shift; fi
+            done
+            mkdir -p "$project/.worktrees/$branch"
+        fi
+        printf '{}\n' ;;
+    task|wait) printf '{}\n' ;;
+    telemetry)
+        if [ "$2" = cost ]; then cat "$COST_DOC"; else cat "$USAGE_DOC"; fi ;;
+    *) printf '{}\n' ;;
+esac
+SH
+cat > "$tmp/git" <<'SH'
+#!/bin/sh
+case "$1" in
+    -C)
+        shift 2
+        if [ "${1:-}" = rev-parse ]; then
+            case "${2:-}" in
+                --path-format=absolute) printf '%s/.git\n' "$REPO" ;;
+                *) printf '%s\n' "$REPO" ;;
+            esac
+        fi
+        ;;
+    init) mkdir -p "$3/.git/objects/info" ;;
+esac
+exit 0
+SH
+chmod +x "$tmp/provenant" "$tmp/git"
+mkdir -p "$repo/bench/tasks"
+cat > "$repo/bench/tasks/fixture.toml" <<'TOML'
+repo = "."
+parent_sha = "fixture-parent"
+merge_sha = "fixture-merge"
+prompt = "Fixture task"
+hidden_test_command = "true"
+split = "acceptance"
+family = "writer"
+TOML
+printf 'fixture patch\n' > "$repo/bench/tasks/fixture.patch"
+python3 - "$repo/bench/tasks/fixture.toml" "$repo/bench/tasks/fixture.patch" <<'PY' > "$repo/bench/tasks/fixture.toml.verified"
+import hashlib, sys
+digest = hashlib.sha256()
+for path in sys.argv[1:]:
+    with open(path, "rb") as source:
+        digest.update(source.read())
+    digest.update(b"\0")
+print(digest.hexdigest())
+PY
+
+export PROVENANT_BIN="$tmp/provenant"
+export PATH="$tmp:$PATH"
+export STATE="$state" REPO="$repo" COST_DOC="$tmp/cost.json" USAGE_DOC="$tmp/full.json"
+
+(cd "$repo" && "$bench" run --route fixture/route --limit 1 --repeats 1 --family writer) > "$tmp/run.log"
+python3 - "$state/bench.jsonl" <<'PY'
+import json, sys
+with open(sys.argv[1]) as ledger:
+    row = json.loads(ledger.readline())
+assert row["family"] == "writer", row
+assert row["tokens"] == {"input":100,"cache_read":20,"cache_write":0,"output":50,"reasoning":5}, row
+assert row["pass"] is True and row["seconds"] >= 0
+PY
+
+export USAGE_DOC="$tmp/no-usage.json"
+(cd "$repo" && "$bench" run --route fixture/route --limit 1 --repeats 1) > "$tmp/run2.log"
+python3 - "$state/bench.jsonl" <<'PY'
+import json, sys
+with open(sys.argv[1]) as ledger:
+    rows = [json.loads(line) for line in ledger if line.strip()]
+assert set(rows[-1]["tokens"].values()) == {None}, rows[-1]
+assert len(rows) == 2
+PY
+
+(cd "$repo" && "$bench" report --family writer) > "$tmp/host-report.json"
+python3 - "$tmp/host-report.json" <<'PY'
+import json, sys
+with open(sys.argv[1]) as source:
+    report = json.load(source)
+assert report["families"] == ["writer"], report
+assert report["family_summary"]["writer"]["attempts"] == 2
+assert report["family_summary"]["writer"]["tokens"]["input"] == {"mean":100.0,"reported":1}
+PY
+
+(cd "$repo" && "$bench" replay --route fixture/route --limit 1 --family writer \
+    --ledger "$state/bench.jsonl") > "$tmp/replay.log"
+python3 - "$tmp/replay.log" <<'PY'
+import json, sys
+with open(sys.argv[1]) as source:
+    lines = [line for line in source if line.strip()]
+assert "recorded 1 run(s)" in lines[0], lines
+report = json.loads(lines[-1])
+assert report["families"] == ["writer"] and report["route"] == "fixture/route"
+assert report["family_summary"]["writer"]["attempts"] == 3
+PY
+
+echo 'bench report fixture passed'
