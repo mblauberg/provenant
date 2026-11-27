@@ -241,6 +241,13 @@ pub(super) fn confinement_request(
             &fixture_roots
         }
     };
+    // The pinned tree is materialised for every access profile. Grant the view
+    // wherever the recorded head selects it, not only where an access flag does.
+    let pinned_view = matches!(
+        &sandbox_context,
+        InventoryContext::Launch(task, _, _)
+            if writer.is_none() && task.head.is_some() && !access.source_live
+    );
     let sandboxed = match sandbox_context {
         InventoryContext::Preflight => false,
         #[cfg(any(test, feature = "fixture"))]
@@ -276,7 +283,7 @@ pub(super) fn confinement_request(
             sandboxed,
             lane_access,
         )?;
-    if writer.is_none() && access.source_root.is_some() && !access.source_live {
+    if pinned_view {
         // The host materialises a commit source beside candidate scratch under
         // state. Its ordinary read root cannot override the state denial, and
         // every adapter starts in this cwd; keep the view immutable.
