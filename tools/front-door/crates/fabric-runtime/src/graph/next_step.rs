@@ -881,8 +881,10 @@ pub(super) fn settlement_fallback_decision(
     // in decide(); there is no same-route retry to spend before launch.
     let cause = stop.or_else(|| next_attempt::fallback_cause(outcome));
     let custody_released = live_fallback_allowed(outcome, launched, fallback_evidence);
+    // A launched attempt never carries released custody (that is preparation
+    // evidence), so a sealed same-route cause decides on its own: the node
+    // retries its route instead of reporting the provider's label.
     if launched
-        && custody_released
         && !review_limit_reached
         && route_index + 1 == node.routes.len()
         && cause.is_some_and(|cause| {
