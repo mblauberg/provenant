@@ -966,6 +966,15 @@ impl TargetProtection {
     }
 }
 
+/// A private Cargo cache whose owner worktree is still held by a live lane is
+/// not reclaimable: removing it would destroy that lane's build work. Shared
+/// caches have no worktree owner and are protected by project key instead.
+/// This is the cache-GC half of the `guard_destructive` contract (#4120); a
+/// lapsed owner is `Available` in the census, so its cache stays reclaimable.
+pub(crate) fn cache_owner_is_live(kind: CacheKind, owner: Option<&Path>, protected: bool) -> bool {
+    matches!(kind, CacheKind::Lane) && owner.is_some() && protected
+}
+
 enum Outcome {
     Removed {
         worktree: Option<PathBuf>,
@@ -3391,13 +3400,34 @@ fn remove(
             }
         ))));
     }
-    if (candidate.kind == CacheKind::Lane && owner.is_none())
-        || protection.protects(
-            candidate.kind,
-            OsStr::new(&candidate.cache),
-            owner.as_deref(),
+    let protected = protection.protects(
+        candidate.kind,
+        OsStr::new(&candidate.cache),
+        owner.as_deref(),
+    );
+    if cache_owner_is_live(candidate.kind, owner.as_deref(), protected) {
+        // Name the boundary this keep protects, then leave the target in
+        // place and carry on with unrelated candidates. Only destruction refuses.
+        let owner_path = owner.as_deref().unwrap_or_else(|| Path::new(""));
+        let subject = provenant_records::custody::Subject {
+            kind: provenant_records::custody::SubjectKind::Worktree,
+            id: owner_path.to_string_lossy().into_owned(),
+        };
+        if provenant_records::custody::guard_destructive(
+            "cargo target remove",
+            &subject,
+            true,
+            None,
         )
-    {
+        .is_ok()
+        {
+            return Err(io::Error::other(
+                "a live cache owner passed the destruction guard",
+            ));
+        }
+        return Ok(Outcome::Busy(None));
+    }
+    if (candidate.kind == CacheKind::Lane && owner.is_none()) || protected {
         return Ok(Outcome::Busy(None));
     }
     let name = OsStr::new(&candidate.target);
@@ -3575,6 +3605,34 @@ mod tests {
     };
 
     const TEST_NOW_SECONDS: u64 = 100_000;
+
+    #[test]
+    fn live_cache_owner_keeps_the_target_lapsed_owner_does_not() {
+        let owner = Path::new("/worktrees/lane");
+        assert!(cache_owner_is_live(CacheKind::Lane, Some(owner), true));
+        // A lapsed or unreachable owner is not in the live-lease protection
+        // set, so its cache is reclaimable like any other idle target.
+        assert!(!cache_owner_is_live(CacheKind::Lane, Some(owner), false));
+        assert!(!cache_owner_is_live(CacheKind::Lane, None, true));
+        // Shared targets carry no worktree owner and are guarded by key.
+        assert!(!cache_owner_is_live(CacheKind::Shared, Some(owner), true));
+    }
+
+    #[test]
+    fn destruction_guard_refuses_a_live_cache_owner() {
+        let subject = provenant_records::custody::Subject {
+            kind: provenant_records::custody::SubjectKind::Worktree,
+            id: "/worktrees/lane".into(),
+        };
+        let guarded = provenant_records::custody::guard_destructive(
+            "cargo target remove",
+            &subject,
+            true,
+            None,
+        );
+        assert!(guarded.is_err());
+        assert_eq!(guarded.unwrap_err().code, "DESTROYS_LIVE_WORK");
+    }
 
     // Spec: docs/specs/disk.md#scratch-and-cache-custody
     #[test]
