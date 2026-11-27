@@ -695,6 +695,13 @@ fn fallback_outcomes_are_named_by_access_and_launch_state() {
             false,
         ),
         (
+            "reader unavailable model after launch",
+            AccessMode::ReadOnly,
+            true,
+            GraphAttemptOutcome::ModelUnavailable,
+            false,
+        ),
+        (
             "reader unavailable adapter after launch",
             AccessMode::ReadOnly,
             true,
@@ -756,7 +763,7 @@ fn fallback_outcomes_are_named_by_access_and_launch_state() {
 }
 
 #[test]
-fn launched_reader_reports_pinned_route() {
+fn launched_reader_pinned_route_note_uses_cause_neutral_fallback_options() {
     let task = node("node", route("first"));
     let mut owner = FakeOwner {
         observations: VecDeque::from([AttemptObservation::Terminal {
@@ -785,6 +792,11 @@ fn launched_reader_reports_pinned_route() {
         run.checkpoint.nodes[0].advance_code.as_deref(),
         Some("fallback_route_pinned")
     );
+    let note = run.checkpoint.nodes[0].advance_note.as_deref().unwrap();
+    assert!(note.contains("`node.routes`"), "{note}");
+    assert!(note.contains("`depletion.rungs`"), "{note}");
+    assert!(note.contains("account/model pin"), "{note}");
+    assert!(!note.contains("on_stop.model_unavailable"), "{note}");
 }
 
 #[test]

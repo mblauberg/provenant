@@ -133,7 +133,11 @@ from the forge, while the diff narrows to `review_base...head`, matching the
 three-dot range the host writes into its review context. `subject` stays
 exclusive with `--pr`, since both would name the head and `--pr` takes it
 from the forge. Diff evidence and selection use base...head, including branches that
-merged main. Because the forge can report the previous head seconds after a
+merged main. The admitted subject's base is merge-base(head, base), not the
+base tip, so every consumer of the pinned pair, the lane's own two-dot diff
+included, sees only the head's changes even when the head is behind its base.
+When the merge base cannot be computed the base tip is kept and the launch warns,
+naming the missing merge base. Because the forge can report the previous head seconds after a
 push, `--pr N --head SHA` pins the expected head: the host rereads the forge
 within a bounded wait and, if the mismatch persists, refuses naming `--head`,
 saying the supplied head is not the PR's head and showing both SHAs.
@@ -234,11 +238,16 @@ warns and forwards the exact invocation; host publication authority is separate.
 
 Capacity (`model_unavailable`) and account allowance (`quota_limited`) are
 separate outcomes. A capacity cooldown is an advisory selection preference that
-explicit models ignore; only a quota-limited outcome cools an account. An
-unclassified provider error settles as `Unclassified`, including after text and
-exit 0, keeps the provider message and is never recorded as usage-limited; a
-clean exit without an error still settles as `Succeeded`. Retries spend the
-single lineage allowance in [retry owner](retry-owner.md).
+explicit models ignore; only a quota-limited outcome cools an account. When the
+provider reports capacity for a launched candidate, the typed outcome stays
+distinct from an adapter failure: the depletion ladder hands the work to the
+next eligible candidate in the same tier and records the cause. An exact model
+pin has no pool selection, so its family names the stand-in tier from
+`depletion.tiers`. An unclassified provider error settles as `Unclassified`,
+including after text and exit 0, keeps the provider message and is never
+recorded as usage-limited; a clean exit without an error still settles as
+`Succeeded`. Retries spend the single lineage allowance in
+[retry owner](retry-owner.md).
 
 - Why: capacity and quota need different remedies without multiplying retries.
 

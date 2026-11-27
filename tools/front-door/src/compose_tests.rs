@@ -239,9 +239,11 @@ pub(crate) fn read_only_dispatch_applies_bound_git_and_project_writes() -> Resul
     for configured in [false, true] {
         let rig = fixture()?;
         // This proves confinement's denied writes and selected exceptions.
+        // Bound project writes apply to a reader of the live checkout, so the
+        // lane reads live rather than the pinned snapshot `auto` selects.
         fs::write(
             rig.state.join("config.toml"),
-            "schema_version = 1\n[knobs]\n\"lanes.sandbox\" = \"on\"\n\"lanes.access\" = \"isolated\"\n[gc]\nfree_floor='1B'\n",
+            "schema_version = 1\n[knobs]\n\"lanes.sandbox\" = \"on\"\n\"lanes.access\" = \"isolated\"\n\"lanes.read_source\" = \"live\"\n[gc]\nfree_floor='1B'\n",
         )?;
         let cleanup = provenant_supervisor::fixture::ProcessCleanupGuard::new(&rig.state);
         let (_, context) = writer_context(&rig)?;

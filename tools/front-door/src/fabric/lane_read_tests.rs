@@ -776,6 +776,8 @@ fn parent_reads_child_result_failure_status_and_trace_through_host_relay() -> Re
     };
     let child_state = rig.state.join("children").join(caller.to_string());
     provenant_os::fixture::private_state_dir(&child_state)?;
+    let declared = rig.lane_project()?;
+    rig.env.push(declared);
     rig.env.extend([
         (
             provenant_core::RUN_STATE_DIRECTORY_ENV.into(),

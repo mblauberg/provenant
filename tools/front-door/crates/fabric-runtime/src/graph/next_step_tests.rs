@@ -492,6 +492,85 @@ fn a_depleted_writer_moves_to_a_new_route_at_once_in_its_worktree() {
 }
 
 #[test]
+fn a_pinned_model_unavailable_lens_falls_back_to_the_next_candidate() {
+    // A lens pinned to an exact model has no pool selection and no recorded
+    // tier. A capacity stop on it must hand the work to another eligible
+    // candidate and record the typed cause on the restart.
+    let document = document("read_only", serde_json::Value::Null);
+    let spare = "claude/claude-haiku-5-5";
+    let config: provenant_routing::RoutingConfig = serde_json::from_value(json!({
+        "pools": {
+            "utility": [{"model": spare, "weight": 1, "efforts": []}],
+            "senior": [{"model": "codex/gpt-6.1-sol", "weight": 1, "efforts": []}]
+        },
+        "depletion": {
+            "rungs": ["other_provider_same_tier", "adjacent_tier"],
+            "tiers": ["utility", "senior"],
+            "adjacent": ["lower"]
+        }
+    }))
+    .unwrap();
+    let facts = DepletionFacts {
+        catalogue: provenant_routing::Catalogue::bundled().unwrap(),
+        config,
+        stopped: provenant_routing::Stopped {
+            model: provenant_routing::ModelId::parse("codex/gpt-6.1-luna").unwrap(),
+            account: Some("pinned".into()),
+            effort: None,
+            tier: None,
+            family: Some("openai".into()),
+        },
+        readiness: vec![provenant_routing::ReadinessFact {
+            model: provenant_routing::ModelId::parse(spare).unwrap(),
+            account: Some("spare".into()),
+            state: provenant_routing::Readiness::Ready,
+        }],
+        tried: Vec::new(),
+        host_native: Vec::new(),
+        exclusions: Vec::new(),
+        intent: Default::default(),
+        confidential: false,
+        now: provenant_core::WallTime::from_unix_seconds(100).unwrap(),
+    };
+    let mut owner = Owner {
+        observations: [
+            terminal(
+                "a/1",
+                GraphAttemptOutcome::ModelUnavailable,
+                Some(StopCause::ModelUnavailable),
+                None,
+            ),
+            done("b/1"),
+        ]
+        .into(),
+        facts: Some(facts),
+        ..Default::default()
+    };
+    let mut journal = journal(&document);
+    let run = advance(&document, &mut owner, &mut journal).unwrap();
+    assert!(run.checkpoint.successful(), "{:?}", run.checkpoint.nodes[0]);
+    assert_eq!(owner.routes.len(), 2);
+    assert_eq!(owner.routes[1].model.as_deref(), Some(spare));
+    assert_eq!(
+        restarts(&run.checkpoint),
+        [(StopCause::ModelUnavailable, NextStep::NewRoute)]
+    );
+    let restart = run.checkpoint.expansions[0]
+        .patch
+        .as_ref()
+        .expect("a restart was saved")
+        .restart
+        .as_ref()
+        .expect("a restart was saved");
+    let choice = restart
+        .ladder
+        .as_ref()
+        .expect("the ladder names the fallback it took");
+    assert_eq!(choice.target, format!("{spare} (spare)"));
+    assert_eq!(choice.tier.as_deref(), Some("utility"));
+}
+
+#[test]
 fn a_writer_that_lost_its_lane_token_continues_from_its_handoff_on_a_new_route() {
     let document = document("worktree_write", serde_json::Value::Null);
     let handoff = "```handoff\n{\"schema_version\":2,\"status\":\"stopped_early\",\"note\":\"Renderer half done\",\"remaining\":[\"Finish renderer\"],\"decisions\":[],\"verify\":[]}\n```";

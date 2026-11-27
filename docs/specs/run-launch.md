@@ -255,40 +255,34 @@ control (access mode, worktree, branch, base or write scope) and the first one g
 the refusal; the bundled `smoke` template is the exception for worktree and branch/base, which
 bind to its write node only. Remote placement takes no caller path: a caller `worktree` is refused,
 but `--branch` with an optional `--base` is carried as peer-owned worktree intent so the peer
-creates the writer in its own clone. A bundled smoke launch with no branch provisions that intent
-from a sourced scratch branch (overridable with `--branch`/`--base` or `--set write_attempt`), so
-`upgrade --verify --host PEER` exercises the remote writer without a caller-supplied branch. The
-sender's graph does not bind or provision a local worktree for that writer; its checkpoint retains
-the peer provisioning intent for replay. A graph reader without an explicit worktree or attempt
-directory uses its selected project as its source; `upgrade --verify` selects a temporary
-committed scratch project for its smoke graph and binds a fixed review range so no lens fails on
-an empty range. That scratch lives under a home-relative state path so a peer can project it as a
-cross-host project and admit the graph; a fixture in `$TMPDIR` has no cross-host key and refuses
-before submission. A remote reader binds the peer's **own** checkout HEAD, not the sender's pinned
-commit: the sender's head names a commit in its scratch project that the peer clone may never
-have seen, and the source view materialiser refuses an absent commit rather than substituting a
-nearby ref. The peer's HEAD first parent supplies its review base; when Git evidence is missing,
-the launch warns and falls back to the sender's pins. A bundled smoke review runs after the write
-node and reads the commit the writer produced in its scratch worktree, so its diff is the writer's
-own smoke change and needs no delivered pr or push; its base is the commit the writer branched
-from, or the existing linked checkout's HEAD immediately before the write, unless
-`--set diff_base=BASE` pins another one. The chosen source is shown in the warnings.
-A manual smoke launch with no writer has no scratch commit to review, so review is skipped with a
-reason and the other eligible nodes continue. A node may name a small project-relative fixture;
-the host stages its bytes with the task, so a peer places the same file in its own candidate
-scratch and the brief names its path instead of leaking a caller path. A remotely placed reader
-binds the receiving peer's checkout `HEAD` as its source and `HEAD^` as its review base, so
-sender-only commits do not prevent the reader from seeing the peer's tree. If Git cannot resolve
-that evidence, the peer warns and falls back to the sender's pins; this does not refuse the launch.
-The upgrade smoke fixture
-carries a fresh random fact that exists only in those staged bytes, never in a committed tree or
-the bundled template, so a reader that reconstructs the answer from source cannot report it; the
-review asserts that exact token against the read lane's report.
-- Why: a verification graph must run on a real install and exercise a writer, a skipped node must
-  not refuse the run it does not take part in, and a smoke review must stay bounded by its own
-  scratch change rather than the caller checkout. A fixture must reach every host that runs a
-  reader, not just the host that owns the checkout; a stale peer clone must still read a valid
-  tree, and a smoke pass must be evidence that the staged fixture was actually read.
+creates the writer in its own clone. There is no default remote provisioning: a remote write
+node needs an explicit `--branch` (and optional `--base`) to own that worktree; without one the
+write node is skipped with a repair warning. The sender's graph does not bind or provision a
+local worktree for that writer; its checkpoint retains the peer provisioning intent for replay.
+
+`run smoke` and `upgrade --verify` share one hermetic lifecycle. It creates a deterministic
+fixture repository under `domains.smoke.fixture_root` (default `.local/state/provenant-smoke`,
+home-relative, owner-only) in the home of every target host; a peer can only project a project
+whose common directory is relative to its own home, so a fixture in `$TMPDIR` would refuse before
+submission. A fresh six-byte hex nonce names the fixture;
+fixed author, committer and 2000-01-01 timestamps make the same nonce yield the same OIDs on any
+host. A `.git/provenant-smoke.json` marker records the nonce, creation time and `FIXTURE_RECIPE`;
+the sweep removes only expired marked fixtures and warns `SMOKE_FIXTURE_FOREIGN` for an unmarked
+directory. The writer commits in the fixture and the review covers that commit. The verdict
+counts only when the nonce appears in both the read and review result summaries; a row that loses
+its nonce fails with the row named, so a false pass cannot masquerade as a result. `--project` on
+`run smoke` is ignored with `SMOKE_PROJECT_IGNORED`, because a caller project would reintroduce
+the checkout leak. `diff_base` defaults to the fixture head and any caller value resolves inside
+the fixture; an unresolvable value is refused with `INVALID (field diff_base)`. A peer below
+`SMOKE_FIXTURE_PROTOCOL` cannot verify the fixture and yields `SmokeVerdict::Unverified`, never a
+pass; `domains.smoke.unverified` chooses warn (exit 0) or fail. The result reports five phases
+(fixture, launch, wait, status, cleanup) and the effective values and sources of the
+`domains.smoke` keys (`fixture_root`, `sweep_after_hours`, `branch_prefix`, `unverified` and
+`set.{parameter}`). Afterwards the lifecycle forgets the fixture's binding and removes it on
+success, failure and refused launch.
+- Why: a verification graph must run on a real install and exercise a writer against evidence
+  only it produced, and a skipped node must not refuse the run it does not take part in. A caller
+  checkout, a caller project or an old peer must never turn a failed smoke into a pass.
 
 Every refusal of a launch input names the field that caused it, or the decoded path of a document
 or patch field; an unnamed `invalid input` is a defect. A refused bind keeps its typed cause to
@@ -546,18 +540,18 @@ proceeds, and records `effective=false` and the reason in the sandbox receipt.
 
 ## Inputs and resources
 
-The tree a read-only lane reads is the sourced `lanes.read_source` setting, resolved by one
-resolver, `read_only_source_ref`. `auto` (the registry default, also the empty value) pins only a
-checkout behind its fetched upstream, as last fetched; a level or ahead checkout keeps its local
-tree. `checkout` keeps the local checkout; `default_branch` pins the fetched default branch
-(remote HEAD, then the forge API), never this checkout's configured tracking upstream; any other
-value is an explicit Git ref; `lanes.read_source_fetch_first` fetches from the resolved remote
-before the ref is read. `--source local` maps onto `checkout` and `--source upstream` onto
-`default_branch` at the launch layer, so the flag wins over the host or project knob. The registry
-default and the resolver agree: `config schema` reports `auto` when no knob is set.
-`bind_default_read_only_source` pins the graph's read-only nodes to the resolved commit. A writer
-launch instead resolves one base by role before sealing its identity: explicit `--base`; else the
-`--branch` default; else the HEAD of a named `--worktree` or a composite bound with
+The tree a read-only lane reads is selected by `lanes.read_source`, resolved by
+`resolve_read_source`. `auto` pins the fetched upstream when the checkout is behind,
+and otherwise pins checkout HEAD. `live` reads the live tree locally; on a peer it
+pins HEAD and warns `READ_SOURCE_PINNED_FOR_PEER`. `default_branch` pins the fetched
+default branch; any other value is a Git ref. `--source` accepts the same values
+and overrides configuration. `lanes.read_source_fetch_first` fetches before resolution.
+`bind_read_source` is the one binder: it pins each agent leaf, never a gate or composite, to
+the writer base when one resolved and otherwise to the pinned read source. A
+repository file still naming `checkout` warns `READ_SOURCE_VALUE_RENAMED` and resolves as `auto`;
+it never acts as the live choice. A writer launch instead resolves one base by role before
+sealing its identity: explicit `--base`; else the `--branch` default; else the HEAD of a named
+`--worktree` or a composite bound with
 `--set worktree=PATH`; else none, with an advisory warning that its identity falls back to the
 caller checkout. The writer's own nodes, its launch identity and the stale-checkout warning skip
 the read-only default; its read-only members (a plan node, or a composite's review and gate nodes)
@@ -566,7 +560,12 @@ authored document keep resolving their own subject. Writer-ness is the resolved 
 launch is a writer when a node that will run writes a worktree — not one launch input. The warning
 names the ref, the commit and the layer that chose it; `read_source` on the launch result and the
 explain status names the same commit. Absent or unusable Git evidence stays advisory and never
-refuses the launch.
+refuses the launch. The `lanes.writer_base` knob chooses that default: `default_branch` resolves
+the remote the read-source resolver finds (never a hard-coded `origin`), `checkout` pins the
+caller HEAD at admission, and any other value is a Git ref; provisioning creates the branch from
+the admitted commit. Explicit `--base` always wins; an
+unresolvable value warns and falls back to the caller checkout, naming the key and its source.
+The run result reports `writer_base` with its commit and source.
 - Why: file:line evidence from a stale working tree reports findings upstream has fixed, and a
   plan should read the base it will implement rather than the caller's checkout.
 

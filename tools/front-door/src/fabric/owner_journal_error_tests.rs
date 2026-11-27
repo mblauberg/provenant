@@ -105,7 +105,11 @@ fn review_launch_fixture(scenario: &str) -> Result<(), Box<dyn std::error::Error
             "source":{"type":"commit","commit":subject}}]
     });
     if scenario == "parent-missing" {
-        document["review_subject_missing"] = serde_json::json!(true);
+        document["subject"] = serde_json::json!({
+            "head": subject,
+            "origin": {"kind":"local_ref","name":"HEAD"},
+            "pinned_at": "2000-01-01T00:00:00.000000Z"
+        });
     }
     let graph_base = scenario == "graph-base" || scenario == "behaviour";
     if graph_base {

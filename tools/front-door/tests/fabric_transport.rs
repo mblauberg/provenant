@@ -2,6 +2,7 @@
 use crate::support;
 use provenant_fabric_runtime::hosts::{
     CONSOLE_DETAIL_PROTOCOL, CONSOLE_INBOX_PROTOCOL, DOCTOR_PROTOCOL, PROTOCOL,
+    SMOKE_FIXTURE_PROTOCOL,
 };
 use serde_json::{Value, json};
 use std::{
@@ -15,11 +16,6 @@ fn federated_identity(rig: &mut TestRig) -> Result<Value> {
     let moved = rig.home.join("repo");
     std::fs::rename(&rig.project, &moved)?;
     rig.project = moved;
-    for (key, value) in &mut rig.env {
-        if key == "PROVENANT_ROOT" {
-            *value = rig.project.clone().into();
-        }
-    }
     let output = rig.command(&["fabric", "identity", "--json"])?;
     assert_eq!(code(&output), 0);
     Ok(serde_json::from_slice(&output.stdout.bytes)?)
@@ -520,11 +516,6 @@ fn peer_replays_a_home_mutation_once_with_the_original_actor() -> Result {
     let moved = rig.home.join("repo");
     std::fs::rename(&rig.project, &moved)?;
     rig.project = moved;
-    for (key, value) in &mut rig.env {
-        if key == "PROVENANT_ROOT" {
-            *value = rig.project.clone().into();
-        }
-    }
     let identity = rig.command(&["fabric", "identity", "--json"])?;
     assert_eq!(code(&identity), 0);
     let identity: Value = serde_json::from_slice(&identity.stdout.bytes)?;
@@ -1573,186 +1564,87 @@ fn unanswered_peer_submission_is_recorded_as_launch_uncertainty() -> Result {
 }
 
 #[test]
-fn remote_smoke_executes_with_and_without_writer_and_stages_fixture() -> Result {
+fn peer_smoke_fixture_create_and_remove_without_a_staged_fixture() -> Result {
     let mut rig = TestRig::new()?;
     let cleanup = rig.process_cleanup();
-    let executor = provenant_os::exec::SystemExecutor::new(1)?;
-    let cancel = provenant_core::CancelToken::new();
-    if let Err(error) = provenant_confinement::permissions::system_backend(
-        &provenant_confinement::permissions::BackendContext {
-            executor: &executor,
-            cancel: &cancel,
-            #[cfg(target_os = "macos")]
-            env: &[],
-        },
-    ) {
-        provenant_test_support::skip_sandbox_dependent_test(error.to_string())?;
-        return Ok(());
-    }
-
-    support::git(&rig, &["commit", "-qm", "smoke base"])?;
-    let base = support::git(&rig, &["rev-parse", "HEAD"])?;
-    support::git(&rig, &["commit", "--allow-empty", "-qm", "smoke subject"])?;
-    let head = support::git(&rig, &["rev-parse", "HEAD"])?;
-    assert_ne!(base, head);
-    assert_eq!(support::git(&rig, &["merge-base", &base, &head])?, base);
-    // The fixture path is absent from both committed trees. The fresh fact is
-    // carried only by the staged working file, so a reader that reconstructs
-    // an answer from the checkout cannot pass the remote read check below.
-    for commit in [&base, &head] {
-        let paths = support::git(&rig, &["ls-tree", "-r", "--name-only", commit])?;
-        assert!(
-            !paths.lines().any(|path| path == "fixture.txt"),
-            "fixture.txt must be absent from committed tree {commit}"
-        );
-    }
-    let nonce = provenant_os::fs::entropy_128()?;
-    let fact = format!("smoke fact {}", provenant_core::hex(&nonce[..8]));
-    std::fs::write(rig.project.join("fixture.txt"), format!("{fact}\n"))?;
-
-    let bin = rig.root.join("provider/bin");
-    std::fs::create_dir_all(&bin)?;
-    std::fs::write(
-        bin.join("agy"),
-        r##"#!/bin/sh
-if [ "$1" = --version ]; then echo 'agy 1.0.0'; exit 0; fi
-while [ "$#" -gt 0 ] && [ "$1" != --print ]; do shift; done
-[ "$#" -gt 1 ] || exit 2
-shift
-task=${1#Read the file at }
-task=${task% first and treat its full contents as your task instructions.}
-if grep -q 'Read the supplied fixture' "$task"; then
-  fixture=$(sed -n 's/^Supplied fixture for this lane: \(.*\)\. Read it to answer the brief\.$/\1/p' "$task")
-  [ -n "$fixture" ] && [ "$(cat "$fixture")" = "$SMOKE_EXPECTED_FACT" ] || exit 3
-fi
-if grep -q 'Review the change at its pinned head through' "$task"; then
-  review_base=$(git rev-parse refs/provenant/review/base) || exit 5
-  review_head=$(git rev-parse HEAD) || exit 6
-  [ "$review_base" = "$SMOKE_EXPECTED_BASE" ] && [ "$review_head" = "$SMOKE_EXPECTED_HEAD" ] || exit 7
-  [ "$review_base" != "$review_head" ] && git merge-base --is-ancestor "$review_base" "$review_head" || exit 8
-fi
-if grep -q 'create exactly one file named smoke.txt' "$task"; then
-  printf 'smoke ok\n' > smoke.txt
-  git add smoke.txt && git commit -qm 'smoke fixture writer' || exit 4
-fi
-printf '%s\n' '{"event":"init","conversation_id":"fixture","init":{"model":"gemini-3.8-flash"}}'
-printf '%s\n' '{"event":"result","result":{"conversation_id":"fixture","status":"SUCCESS","response":"```findings\n{\"schema_version\":1,\"findings\":[]}\n```\nVERDICT: PASS\n```handoff\n{\"schema_version\":2,\"status\":\"done\",\"note\":\"fixture complete\",\"remaining\":[],\"decisions\":[],\"verify\":[]}\n```","error":null,"usage":{"input_tokens":0,"output_tokens":0}}}'
-"##,
-    )?;
-    std::fs::set_permissions(bin.join("agy"), std::fs::Permissions::from_mode(0o755))?;
-    std::fs::create_dir_all(rig.home.join("Library/Keychains"))?;
-    std::fs::write(
-        rig.home.join("Library/Keychains/login.keychain-db"),
-        "fixture",
-    )?;
-    rig.env.retain(|(key, _)| key != "PATH");
-    rig.env.push((
-        "PATH".into(),
-        format!("{}:/usr/bin:/bin", bin.display()).into(),
-    ));
-    rig.env
-        .push(("SMOKE_EXPECTED_BASE".into(), base.clone().into()));
-    rig.env.push(("SMOKE_EXPECTED_HEAD".into(), head.into()));
-    rig.env.push(("SMOKE_EXPECTED_FACT".into(), fact.into()));
-    let peer = loopback_peer(&mut rig)?;
-    let diff_base = format!("diff_base={base}");
-    for (name, writer) in [("smoke-skipped", false), ("smoke-provisioned", true)] {
-        let mut args = vec![
-            "smoke",
-            "--host",
-            "workshop",
-            "--model",
-            "agy/gemini-3.8-flash",
-            "--set",
-            &diff_base,
-        ];
-        if writer {
-            args.extend(["--branch", "smoke/peer-test", "--base", "HEAD"]);
-        } else {
-            args.extend(["--set", "smoke-write=false"]);
-        }
-        args.extend(["--set", "smoke-retry=false", "--set", "smoke-steer=false"]);
-        let (status, launched) = launch_named_and_wait(&rig, &args, name, "30s")?;
-        assert_eq!(status, 0, "{launched}");
-        let settled = tick_until(
-            &rig,
-            name,
-            std::time::Duration::from_secs(60),
-            |checkpoint| {
-                checkpoint["nodes"].as_array().is_some_and(|nodes| {
-                    nodes.iter().all(|node| {
-                        matches!(
-                            node["state"].as_str(),
-                            Some("succeeded" | "skipped" | "failed" | "blocked")
-                        )
-                    })
-                })
-            },
+    let identity = federated_identity(&mut rig)?;
+    let host = identity["data"]["host"].as_str().ok_or("host")?.to_owned();
+    let source = next_host(host.parse()?)?;
+    configure_fixture_peer(&rig, source)?;
+    // A hermetic smoke fixture is named by a nonce under a home-relative root.
+    // No caller checkout or staged fixture is carried on the wire: the peer
+    // builds the same deterministic repository for the same nonce.
+    let nonce = "0123456789ab";
+    let root = ".local/state/provenant-smoke";
+    let common = format!("{root}/{nonce}/.git");
+    let common_path = rig.home.join(&common);
+    let key = provenant_fabric_runtime::identity::CrossHostProjectKey::from_home(
+        &rig.home,
+        &common_path,
+    )?
+    .as_str()
+    .to_owned();
+    let request = |action: Value| {
+        json!({
+            "version": 1, "protocol": SMOKE_FIXTURE_PROTOCOL,
+            "target_host": host, "source_host": source.to_string(), "agent": "fixture",
+            "project": {"key": key, "common_dir": common},
+            "action": action
+        })
+    };
+    let call = |action: Value| -> Result<Value> {
+        let input = serde_json::to_vec(&request(action))?;
+        let output = rig.execute_os(
+            Path::new(env!("CARGO_BIN_EXE_provenant")),
+            &[
+                "--state-dir".into(),
+                rig.state.clone().into(),
+                "fabric".into(),
+                "peer".into(),
+            ],
+            Some(&input),
         )?;
-        let nodes = settled["data"]["checkpoint"]["nodes"]
-            .as_array()
-            .ok_or("nodes")?;
-        let read = nodes
-            .iter()
-            .find(|node| {
-                node["id"]
-                    .as_str()
-                    .is_some_and(|id| id.ends_with("task--read"))
-            })
-            .ok_or("read node")?;
-        assert_eq!(read["state"], "succeeded", "{settled}");
-        let reference = read["attempts"][0]["attempt_ref"]
-            .as_str()
-            .ok_or("read attempt")?;
-        assert!(reference.starts_with(&format!("{peer}/")), "{settled}");
-        let mut lenses = 0;
-        for review in nodes.iter().filter(|node| {
-            node["id"]
-                .as_str()
-                .is_some_and(|id| id.contains("review--"))
-                && node["attempts"]
-                    .as_array()
-                    .is_some_and(|attempts| !attempts.is_empty())
-        }) {
-            let reference = review["attempts"][0]["attempt_ref"]
-                .as_str()
-                .ok_or("review attempt")?;
-            let (host, attempt) = reference.split_once('/').ok_or("review reference")?;
-            assert_eq!(host, peer.to_string());
-            let prompt = std::fs::read_to_string(
-                rig.root
-                    .join("peer-state/attempts")
-                    .join(attempt)
-                    .join("prompt.md"),
-            )?;
-            if prompt.contains("Review the change at its pinned head through") {
-                lenses += 1;
-                // The provider only succeeds after resolving both expected
-                // commits in its own review view and checking ancestry.
-                assert_eq!(review["state"], "succeeded", "{settled}");
-            }
-        }
-        assert_eq!(lenses, 2, "{settled}");
-        let write = nodes
-            .iter()
-            .find(|node| {
-                node["id"]
-                    .as_str()
-                    .is_some_and(|id| id.ends_with("task--write"))
-            })
-            .ok_or("write node")?;
         assert_eq!(
-            write["state"],
-            if writer { "succeeded" } else { "skipped" },
-            "{settled}"
+            code(&output),
+            0,
+            "{}",
+            String::from_utf8_lossy(&output.stderr.bytes)
         );
-        if writer {
-            let reference = write["attempts"][0]["attempt_ref"]
-                .as_str()
-                .ok_or("writer attempt")?;
-            assert!(reference.starts_with(&format!("{peer}/")), "{settled}");
-        }
-    }
+        Ok(serde_json::from_slice(&output.stdout.bytes)?)
+    };
+
+    let created = call(json!({
+        "action": "smoke_fixture",
+        "op": {"op": "create", "nonce": nonce, "recipe": 1, "root": root}
+    }))?;
+    assert_eq!(created["result"]["result"], "smoke_fixture", "{created}");
+    let commits = &created["result"]["data"];
+    assert_eq!(commits["recipe"], json!(1), "{commits}");
+    assert!(
+        commits["base"].is_string() && commits["head"].is_string(),
+        "{commits}"
+    );
+    assert_ne!(commits["base"], commits["head"], "{commits}");
+
+    let fixture = rig.home.join(root).join(nonce);
+    assert!(
+        fixture.join("fixture.txt").exists(),
+        "the peer must create the fixture under its own home: {}",
+        fixture.display()
+    );
+    assert_eq!(
+        std::fs::read_to_string(fixture.join("fixture.txt"))?,
+        format!("nonce: {nonce}\n")
+    );
+
+    let removed = call(json!({
+        "action": "smoke_fixture",
+        "op": {"op": "remove", "nonce": nonce}
+    }))?;
+    assert_eq!(removed["result"]["result"], "smoke_fixture", "{removed}");
+    assert_eq!(removed["result"]["data"]["reason"], "removed", "{removed}");
+    assert!(!fixture.exists(), "the peer must remove its fixture");
+
     rig.assert_v1_root_untouched()?;
     cleanup.disarm();
     Ok(())

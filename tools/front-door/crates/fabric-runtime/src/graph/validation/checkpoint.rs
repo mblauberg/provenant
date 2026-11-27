@@ -54,27 +54,7 @@ pub(in crate::graph) fn validate_checkpoint<R: Error + 'static, J: Error + 'stat
             invariant: "delivery CI supersession must identify unique exact queue publication heads",
         });
     }
-    let active_expansions = checkpoint
-        .nodes
-        .iter()
-        .filter(|node| {
-            matches!(
-                node.expansion_cause,
-                Some(NodeDecisionCause::PlanExpansionPaused { active: true, .. })
-            )
-        })
-        .count();
-    if active_expansions > 1
-        || (active_expansions == 1
-            && !checkpoint.nodes.iter().any(|node| {
-                matches!(
-                    node.expansion_cause,
-                    Some(NodeDecisionCause::PlanExpansionPaused { active: true, .. })
-                ) && Some(plans::expansion_pause_cause(node)) == checkpoint.pause_cause()
-            }))
-        || (active_expansions == 0
-            && checkpoint.pause_cause() == Some(PauseCause::InvalidPlanExpansion))
-    {
+    if !checkpoint.expansion_pause_owns_graph_pause() {
         return Err(GraphError::BadCheckpoint {
             node: checkpoint.graph_id.clone(),
             invariant: "active expansion pause must own the graph pause",

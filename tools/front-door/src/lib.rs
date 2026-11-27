@@ -56,6 +56,7 @@ mod scratch_dir;
 mod scratch_owner;
 mod session_handoff;
 mod settlement;
+mod smoke;
 mod staging_gc;
 mod state_handoff;
 mod status_wait;
