@@ -133,6 +133,49 @@ fn writer_dirty_setting(
     provenant_run::writer_dirty::ResolvedWriterDirty::resolve(value.as_deref(), &source)
 }
 
+/// Apply preflight writer outcomes to a submitted document. A node whose
+/// launch condition is false never runs, so neither it nor anything under it
+/// may receive a writer binding: doing so would eagerly bind a writer for a
+/// node that checkpoint creation already skips (#4105). The guard is applied
+/// before recursing so a false-`when` composite cannot leak a binding to its
+/// members or loop body either.
+fn apply_writer_outcomes(
+    nodes: &mut [provenant_fabric_runtime::graph::GraphNode],
+    outcomes: &std::collections::BTreeMap<String, (Option<String>, Option<String>)>,
+) {
+    use provenant_fabric_runtime::graph::AccessMode;
+    for node in nodes {
+        if !provenant_fabric_runtime::graph::when::holds(&node.when) {
+            continue;
+        }
+        if node.access == AccessMode::WorktreeWrite
+            && let Some((head, warning)) =
+                node.worktree.as_ref().and_then(|path| outcomes.get(path))
+        {
+            if let Some(head) = head {
+                node.wip_commit = Some(head.clone());
+                if matches!(
+                    node.source,
+                    None | Some(provenant_fabric_runtime::graph::SourceBinding::Commit { .. })
+                ) {
+                    node.source = Some(provenant_fabric_runtime::graph::SourceBinding::Commit {
+                        commit: head.clone(),
+                    });
+                }
+            }
+            if let Some(warning) = warning {
+                node.writer_dirty_warning = Some(warning.clone());
+            }
+        }
+        if let Some(composite) = &mut node.composite {
+            apply_writer_outcomes(&mut composite.nodes, outcomes);
+        }
+        if let Some(body) = &mut node.loop_body {
+            apply_writer_outcomes(&mut body.body, outcomes);
+        }
+    }
+}
+
 /// Preflight every existing writer worktree at graph submission, before any
 /// plan node can spend tokens. An unheld dirty tree is adopted as a WIP commit
 /// and warned with `WORKTREE_ADOPTED_DIRTY`; a tree another lane holds is
@@ -312,40 +355,7 @@ fn preflight_writer_worktrees(
             outcomes.insert(alias, outcome);
         }
     }
-    fn apply(
-        nodes: &mut [provenant_fabric_runtime::graph::GraphNode],
-        outcomes: &std::collections::BTreeMap<String, (Option<String>, Option<String>)>,
-    ) {
-        for node in nodes {
-            if node.access == AccessMode::WorktreeWrite
-                && let Some((head, warning)) =
-                    node.worktree.as_ref().and_then(|path| outcomes.get(path))
-            {
-                if let Some(head) = head {
-                    node.wip_commit = Some(head.clone());
-                    if matches!(
-                        node.source,
-                        None | Some(provenant_fabric_runtime::graph::SourceBinding::Commit { .. })
-                    ) {
-                        node.source =
-                            Some(provenant_fabric_runtime::graph::SourceBinding::Commit {
-                                commit: head.clone(),
-                            });
-                    }
-                }
-                if let Some(warning) = warning {
-                    node.writer_dirty_warning = Some(warning.clone());
-                }
-            }
-            if let Some(composite) = &mut node.composite {
-                apply(&mut composite.nodes, outcomes);
-            }
-            if let Some(body) = &mut node.loop_body {
-                apply(&mut body.body, outcomes);
-            }
-        }
-    }
-    apply(&mut document.nodes, &outcomes);
+    apply_writer_outcomes(&mut document.nodes, &outcomes);
     Ok(refusals)
 }
 
@@ -683,6 +693,72 @@ pub(crate) fn tick_graphs(
     let mut report = super::queue_scheduler::reconcile_controls_before_tick(resolved, workers);
     for binding in provenant_config::registered_projects(&resolved.roots)? {
         let project = binding.project_id();
+        // A retired project keeps its registration but is fenced out of all
+        // scheduling until `provenant adopt project:ID` removes the fence.
+        match provenant_config::project_is_retired(&resolved.roots, project) {
+            Ok(true) => continue,
+            Ok(false) => {}
+            Err(error) => {
+                report.errors.push(format!(
+                    "{project}: project disposition fence unavailable: {error}"
+                ));
+                continue;
+            }
+        }
+        // One presence classification for all scheduling. A permission or I/O
+        // error is unreachable with a bounded retry, not a false `Present`, and
+        // a condition is reported once per registration incarnation.
+        let retry =
+            provenant_core::DurationMicros::from_seconds(provenant_config::PROJECT_RETRY_SECONDS)
+                .unwrap_or(provenant_core::DurationMicros::ZERO);
+        let (presence, incarnation) =
+            match provenant_config::project_presence(&resolved.roots, &binding, now, retry) {
+                Ok(classified) => classified,
+                Err(error) => {
+                    report
+                        .errors
+                        .push(format!("{project}: project presence unavailable: {error}"));
+                    continue;
+                }
+            };
+        match presence {
+            provenant_config::ProjectPresence::Unreachable { error, retry_at }
+                if now < retry_at =>
+            {
+                provenant_records::warning::warn(
+                    provenant_records::warning::Warning::new(
+                        provenant_records::warning::PROJECT_UNAVAILABLE,
+                        format!(
+                            "project {project} is unreachable ({error}); skipping until {retry_at}"
+                        ),
+                        provenant_records::warning::detected_source(
+                            provenant_records::warning::PROJECT_UNAVAILABLE,
+                        ),
+                    )
+                    .subject(incarnation.key())
+                    .once_per_change(),
+                );
+                continue;
+            }
+            provenant_config::ProjectPresence::Absent { since } => {
+                provenant_records::warning::warn(
+                    provenant_records::warning::Warning::new(
+                        provenant_records::warning::PROJECT_UNAVAILABLE,
+                        format!("project {project} is absent since {since}; skipping"),
+                        provenant_records::warning::detected_source(
+                            provenant_records::warning::PROJECT_UNAVAILABLE,
+                        ),
+                    )
+                    .subject(incarnation.key())
+                    .once_per_change(),
+                );
+                continue;
+            }
+            // Present, or an unreachable checkout whose retry window elapsed:
+            // probe its pending graphs again this pass.
+            provenant_config::ProjectPresence::Present
+            | provenant_config::ProjectPresence::Unreachable { .. } => {}
+        }
         let ids = match FileJournal::pending_graph_ids(&resolved.roots.state, project) {
             Ok(ids) => ids,
             Err(error) => {
@@ -2255,6 +2331,68 @@ pub(super) fn graph_operation(
 )]
 mod tests {
     use super::*;
+
+    #[test]
+    fn when_false_node_never_binds_writer() {
+        use provenant_fabric_runtime::graph::{AccessMode, GraphNode, WhenTerm};
+        let outcomes = std::collections::BTreeMap::from([(
+            "lane".to_owned(),
+            (Some("abc123".to_owned()), None),
+        )]);
+        let mut live = GraphNode::default();
+        live.access = AccessMode::WorktreeWrite;
+        live.worktree = Some("lane".into());
+        let mut skipped = GraphNode::default();
+        skipped.access = AccessMode::WorktreeWrite;
+        skipped.worktree = Some("lane".into());
+        skipped.when = vec![WhenTerm {
+            name: "write".into(),
+            expected: "true".into(),
+            actual: "false".into(),
+        }];
+        let mut nodes = vec![live, skipped];
+        apply_writer_outcomes(&mut nodes, &outcomes);
+        assert_eq!(nodes[0].wip_commit.as_deref(), Some("abc123"));
+        assert!(
+            nodes[1].wip_commit.is_none(),
+            "a false-`when` node must not be bound eagerly"
+        );
+        assert!(nodes[1].writer_dirty_warning.is_none());
+    }
+
+    #[test]
+    fn unreadable_checkpoint_reported_once_then_skipped() {
+        use provenant_core::StateRoot;
+        use provenant_os::fs::SystemPathResolver;
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let base = std::fs::canonicalize(temp.path()).unwrap();
+        let inputs = provenant_test_support::root_inputs(&base).unwrap();
+        let root = StateRoot::resolve(&inputs, &SystemPathResolver).unwrap();
+        let project = provenant_core::ProjectId::from_bytes([11; 16]);
+        let directory = base.join("state/fabric/graphs").join(project.to_string());
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(directory.join("graph-g.json"), b"{} corrupt").unwrap();
+
+        // The first sighting of unreadable bytes is reported once.
+        assert!(
+            provenant_fabric_runtime::graph::FileJournal::read_checkpoint_for_tick(
+                &root, project, "g"
+            )
+            .is_err()
+        );
+        // Later ticks over the same bytes skip the quarantined record, and the
+        // quarantine marker names the reason.
+        assert!(
+            provenant_fabric_runtime::graph::FileJournal::read_checkpoint_for_tick(
+                &root, project, "g"
+            )
+            .unwrap()
+            .is_none()
+        );
+        assert!(directory.join("graph-g.unreadable").is_file());
+    }
 
     #[derive(Default)]
     struct HygieneFixture {

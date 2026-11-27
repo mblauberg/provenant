@@ -650,6 +650,33 @@ pub fn command(globals: &Globals, subject: Subject, release: bool) -> u8 {
                 Origin::Adopted,
                 &call,
             )?;
+            // Adopting a retired project restores it to scheduling: the
+            // disposition fence is removed, while the registration and its
+            // settings stay in place.
+            if subject.kind == SubjectKind::Project {
+                let target = match provenant_core::ProjectId::parse(&subject.id) {
+                    Ok(project) => Some(project),
+                    Err(_) => {
+                        provenant_config::project_id_for_path(std::path::Path::new(&subject.id))
+                    }
+                };
+                if let Some(target) = target
+                    && let Err(error) = provenant_config::unfence_project(&resolved.roots, target)
+                {
+                    provenant_records::warning::warn(
+                        provenant_records::warning::Warning::new(
+                            provenant_records::warning::PROJECT_UNAVAILABLE,
+                            format!(
+                                "adopt could not clear the retirement fence for {target}: {error}"
+                            ),
+                            provenant_records::warning::detected_source(
+                                provenant_records::warning::PROJECT_UNAVAILABLE,
+                            ),
+                        )
+                        .subject(target.to_string()),
+                    );
+                }
+            }
             provenant_fabric_runtime::custody::warn(std::slice::from_ref(&change));
             Ok(change.record)
         }

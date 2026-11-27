@@ -7,11 +7,6 @@ pub static DOMAIN: Domain = Domain {
     name: "contracts",
     verbs: &[
         Verb {
-            path: &["retire"],
-            stability: Stability::Evolving,
-            run,
-        },
-        Verb {
             path: &["queue", "hold"],
             stability: Stability::Evolving,
             run,
