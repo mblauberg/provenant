@@ -2,6 +2,8 @@ use super::*;
 use crate::permissions::{AccessMode, NetworkAccess, PathGrant, PathScope, PlanPermissions};
 use provenant_core::{ProjectId, WorkScope};
 use provenant_os::home::HomeError;
+use provenant_records::policy::{Boundary, Strength};
+use provenant_records::warning;
 use std::{
     fs,
     os::unix::fs::{PermissionsExt, symlink},
@@ -55,10 +57,17 @@ fn unsupported_nested_confinement_is_reported_as_a_capability_error() {
         &error,
         PlanError::Permission(PermissionError::NestedConfinementUnsupported)
     ));
-    assert_eq!(
-        error.boundary_class(),
-        provenant_records::policy::Boundary::None
-    );
+    assert_eq!(error.boundary_class(), Boundary::None);
+    // Split from the warn half: the nested claim is an immutable operation
+    // row, so an explicit policy code cannot override it.
+    let policy = Policy::default();
+    let rule = policy
+        .rule("PLAN_NESTED_CONFINEMENT_UNSUPPORTED")
+        .rule
+        .clone();
+    assert_eq!(rule.boundary, Boundary::Operation);
+    assert_eq!(rule.strength, Strength::Refuse);
+    assert!(rule.knob.is_none());
 }
 
 #[test]
@@ -264,20 +273,30 @@ fn copy_back_refuses_links_and_private_home_replacement() {
 }
 
 #[test]
-fn read_only_plans_refuse_unconfined_extensions_and_inherited_codex_config() {
+fn read_only_plans_warn_and_proceed_on_extensions_and_inherited_codex_config() {
+    let policy = Policy::default();
+    let rule = policy.rule("PLAN_CONFINEDPLAN_NEW_AUTHORITY").rule.clone();
+    assert_eq!(rule.boundary, Boundary::None);
+    assert_eq!(rule.group.as_deref(), Some("confinement"));
+    assert_eq!(rule.strength, Strength::Warn);
+    assert!(rule.refusable);
+
     let temp = fixture();
     let mut input = request(temp.path());
     input.extensions = ExtensionPolicy::Unconfined;
-    assert!(matches!(
-        ConfinedPlan::new(input),
-        Err(PlanError::UnconfinedExtensions)
-    ));
+    let (plan, warnings) = warning::capture(|| ConfinedPlan::new(input));
+    assert!(plan.is_ok(), "{plan:?}");
+    let warning = warnings.first().expect("confinement warning");
+    assert_eq!(warning.code.as_ref(), "PLAN_CONFINEDPLAN_NEW_AUTHORITY");
+    let setting = warning.setting.as_ref().expect("losing setting");
+    assert_eq!(setting.key, "policy.PLAN_CONFINEDPLAN_NEW_AUTHORITY");
+
     let mut input = request(temp.path());
     input.codex = CodexPolicy::Inherited;
-    assert!(matches!(
-        ConfinedPlan::new(input),
-        Err(PlanError::UnconfinedExtensions)
-    ));
+    let (plan, warnings) = warning::capture(|| ConfinedPlan::new(input));
+    assert!(plan.is_ok(), "{plan:?}");
+    assert_eq!(warnings.len(), 1);
+    assert_eq!(warnings[0].code.as_ref(), "PLAN_CONFINEDPLAN_NEW_AUTHORITY");
 }
 
 #[test]

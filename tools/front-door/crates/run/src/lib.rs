@@ -38,7 +38,7 @@ pub mod reactions;
 pub use reactions::Reaction;
 mod reader;
 mod verification;
-pub use verification::{VerificationResolution, conflict_cause};
+pub use verification::VerificationResolution;
 mod retention;
 mod service;
 #[cfg(test)]

@@ -543,35 +543,37 @@ fn capacity_policy_controls_warning_off_and_typed_refusal() {
 
 #[cfg(any(target_os = "macos", feature = "snapshot"))]
 #[test]
-fn read_only_extension_guard_uses_immutable_authority_policy() {
+fn read_only_extension_guard_uses_layered_confinement_policy() {
     use crate::plan::{CodexPolicy, ConfinedPlan, ExtensionPolicy, PlanRequest};
     use provenant_records::policy::{Boundary, Effect, Facts, Strength};
 
     let (permissions, _) = write_grants_fixture();
-    let error = ConfinedPlan::new(PlanRequest {
-        scope: provenant_core::WorkScope::Project(provenant_core::ProjectId::from_bytes([1; 16])),
-        permissions,
-        codex: CodexPolicy::Inherited,
-        extensions: ExtensionPolicy::Unconfined,
-        agy_state: None,
-    })
-    .err()
-    .expect("unconfined read-only extensions are refused");
-    assert!(matches!(
-        error,
-        crate::plan::PlanError::UnconfinedExtensions
-    ));
+    let (plan, warnings) = provenant_records::warning::capture(|| {
+        ConfinedPlan::new(PlanRequest {
+            scope: provenant_core::WorkScope::Project(provenant_core::ProjectId::from_bytes(
+                [1; 16],
+            )),
+            permissions,
+            codex: CodexPolicy::Inherited,
+            extensions: ExtensionPolicy::Unconfined,
+            agy_state: None,
+        })
+    });
+    assert!(plan.is_ok(), "{plan:?}");
+    assert_eq!(warnings.len(), 1);
+    assert_eq!(warnings[0].code.as_ref(), "PLAN_CONFINEDPLAN_NEW_AUTHORITY");
 
     let policy = provenant_records::policy::Policy::default();
     let rule = policy.rule("PLAN_CONFINEDPLAN_NEW_AUTHORITY");
-    assert_eq!(rule.rule.boundary, Boundary::Authority);
-    assert_eq!(rule.rule.strength, Strength::Refuse);
+    assert_eq!(rule.rule.boundary, Boundary::None);
+    assert_eq!(rule.rule.group.as_deref(), Some("confinement"));
+    assert_eq!(rule.rule.strength, Strength::Warn);
     assert!(matches!(
         policy.check(
             "PLAN_CONFINEDPLAN_NEW_AUTHORITY",
             Facts::violation("guard failed"),
         ),
-        Effect::Refuse(_)
+        Effect::Warn(_)
     ));
 }
 
