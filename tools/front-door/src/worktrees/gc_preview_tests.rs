@@ -781,7 +781,7 @@ fn gc_budget_stop_exits_zero_partial_with_actionable_output()
         let warning = result
             .warnings
             .iter()
-            .find(|warning| warning.code.as_str() == "GC_BUDGET_STOP")
+            .find(|warning| warning.code.as_ref() == "GC_BUDGET_STOP")
             .expect("a partial result names its budget");
         assert!(warning.message.contains(setting), "{warning:?}");
         assert_eq!(

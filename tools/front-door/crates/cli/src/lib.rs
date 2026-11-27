@@ -2311,6 +2311,24 @@ mod tests {
     }
 
     #[test]
+    fn upgrade_host_and_verify_host_are_independent() {
+        let Command::Upgrade(upgrade) = valid(&[
+            "upgrade",
+            "--host",
+            "all",
+            "--verify",
+            "--verify-host",
+            "peer-a",
+        ])
+        .command
+        else {
+            panic!("upgrade command");
+        };
+        assert_eq!(upgrade.common.host, vec![crate::grammar::HostArg::All]);
+        assert_eq!(upgrade.host.as_deref(), Some("peer-a"));
+    }
+
+    #[test]
     fn common_host_and_timeout_options_parse_on_owned_verbs() {
         let cases: &[&[&str]] = &[
             &["status", "--host", "host-a", "--timeout", "90s"],

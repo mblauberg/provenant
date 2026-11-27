@@ -413,7 +413,7 @@ fn every_accepted_note_fits_replay_and_oversize_rejection_has_no_effect() {
         default_read_cap(),
         Sourced {
             value: limit * 2,
-            source: Layer::Host,
+            source: provenant_records::Source::at(Layer::Host, "test"),
         },
     )
     .unwrap();

@@ -2495,7 +2495,7 @@ mod tests {
             let next = refusal.next.first().expect("next").display_text();
             assert!(next.contains("git remote set-head bound --auto"), "{next}");
             assert!(next.contains("git.default_branch"), "{next}");
-            assert!(repair.contains("provenant gc"), "{repair}");
+            assert!(next.contains("provenant gc"), "{next}");
             Ok(())
         })?;
         Ok(())

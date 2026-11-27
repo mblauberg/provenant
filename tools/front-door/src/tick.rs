@@ -1219,9 +1219,9 @@ mod tests {
         assert_eq!(warned[0].subject.as_deref(), Some(subject.as_str()));
         assert!(
             warned[0]
-                .repair
-                .as_deref()
-                .is_some_and(|repair| repair.contains("provenant gc --apply")),
+                .next
+                .iter()
+                .any(|step| step.display_text().contains("provenant gc --apply")),
             "the warning names the unregister command: {:?}",
             warned[0]
         );

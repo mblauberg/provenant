@@ -1,5 +1,5 @@
-//! #4106 repro: every non-expansion pause writer yields an active expansion
-//! pause, so a checkpoint can never be saved with a disagreeing pause pair.
+// #4106 repro: every non-expansion pause writer yields an active expansion
+// pause, so a checkpoint can never be saved with a disagreeing pause pair.
 
 use super::*;
 use serde_json::json;

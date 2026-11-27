@@ -625,9 +625,8 @@ fn exact_pin_refusal_names_routing_pin() {
 
 #[test]
 fn a_pinned_model_unavailable_lens_falls_back_to_the_next_candidate() {
-    // A lens pinned to an exact model has no pool selection and no recorded
-    // tier. A capacity stop on it must hand the work to another eligible
-    // candidate and record the typed cause on the restart.
+    // A tier-scoped model pin may hand work to another eligible provider in
+    // the same tier and must record the typed cause on the restart.
     let document = document("read_only", serde_json::Value::Null);
     let spare = "claude/claude-haiku-5-5";
     let config: provenant_routing::RoutingConfig = serde_json::from_value(json!({
@@ -649,7 +648,7 @@ fn a_pinned_model_unavailable_lens_falls_back_to_the_next_candidate() {
             model: provenant_routing::ModelId::parse("codex/gpt-6.1-luna").unwrap(),
             account: Some("pinned".into()),
             effort: None,
-            tier: None,
+            tier: Some("utility".into()),
             family: Some("openai".into()),
         },
         readiness: vec![provenant_routing::ReadinessFact {
@@ -663,6 +662,7 @@ fn a_pinned_model_unavailable_lens_falls_back_to_the_next_candidate() {
         intent: Default::default(),
         confidential: false,
         now: provenant_core::WallTime::from_unix_seconds(100).unwrap(),
+        pin: provenant_routing::RoutePin::Tier,
     };
     let mut owner = Owner {
         observations: [

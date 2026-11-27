@@ -170,22 +170,20 @@ fn share(inv: &Call, mode: &str) -> Result<Outcome, CommandError> {
             Some(error.to_string()),
         )
     })?;
-    let publication = slot
-        .atomic_write(
-            std::ffi::OsStr::new(LEASE_FILE),
-            ".lease-",
-            &bytes,
-            provenant_os::fs::PublishMode::Replace,
+    slot.atomic_write(
+        std::ffi::OsStr::new(LEASE_FILE),
+        ".lease-",
+        &bytes,
+        provenant_os::fs::PublishMode::Replace,
+    )
+    .and_then(|publication| publication.require_durable())
+    .map_err(|error| {
+        failure(
+            "OPERATION_ERROR",
+            "the owning lane's sharing rule could not be stored",
+            Some(error.to_string()),
         )
-        .and_then(|publication| publication.require_durable())
-        .map_err(|error| {
-            failure(
-                "OPERATION_ERROR",
-                "the owning lane's sharing rule could not be stored",
-                Some(error.to_string()),
-            )
-        })?;
-    drop(publication);
+    })?;
     Ok(Outcome::Ok)
 }
 

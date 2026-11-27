@@ -146,8 +146,8 @@ and those that may still be running, prints the quoted state directory and asks
 you to rerun the original install command with its original options (`--source`,
 `--state-dir`, `--bin-dir`). Agents restart after a successful install.
 
-`provenant upgrade --verify` then runs the bundled smoke graph (`--host PEER`
-places it on a peer; repeatable `--set NAME=VALUE` overrides its parameters).
+`provenant upgrade --verify` then runs the bundled smoke graph (`--verify-host PEER`
+places it on a peer; `--host` selects upgrade targets; repeatable `--set NAME=VALUE` overrides its parameters).
 `--route` takes a tier alias, a `role=tier` map, or an exact `ADAPTER/ID` model
 just like `run implement --model`; a short or full catalogue id is canonicalised
 once and applied to every smoke node. Adding `--dry-run` previews it without

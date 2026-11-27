@@ -826,9 +826,9 @@ fn delivery_queue_knobs_resolve_and_seal_with_sources() {
     ];
     let shipped = QueueKnobs::default();
     let defaults = BTreeMap::from([
-        (QUEUE_MAX_PARALLEL_KEY, shipped.max_parallel),
-        (QUEUE_CI_SLOTS_KEY, shipped.ci_slots),
-        (QUEUE_PREP_RETRIES_KEY, shipped.prep_retries),
+        (QUEUE_MAX_PARALLEL_KEY, shipped.max_parallel.value),
+        (QUEUE_CI_SLOTS_KEY, shipped.ci_slots.value),
+        (QUEUE_PREP_RETRIES_KEY, shipped.prep_retries.value),
     ]);
     let overrides = BTreeMap::from([(
         QUEUE_MAX_PARALLEL_KEY,

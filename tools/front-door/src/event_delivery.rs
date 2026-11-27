@@ -1307,7 +1307,10 @@ mod tests {
             claude_config: None,
             codex_home: None,
         };
-        tick(&resolved)?;
+        tick(
+            &resolved,
+            provenant_core::Deadline::at(provenant_core::MonoTime::from_micros(u64::MAX)),
+        )?;
         Ok(())
     }
 
@@ -1362,7 +1365,12 @@ mod tests {
             claude_config: None,
             codex_home: None,
         };
-        let (result, warnings) = provenant_records::warning::capture(|| tick(&resolved));
+        let (result, warnings) = provenant_records::warning::capture(|| {
+            tick(
+                &resolved,
+                provenant_core::Deadline::at(provenant_core::MonoTime::from_micros(u64::MAX)),
+            )
+        });
         result?;
         let warned = warnings
             .iter()
@@ -1373,9 +1381,9 @@ mod tests {
         assert_eq!(warned.len(), 1, "reported once: {warnings:?}");
         assert!(
             warned[0]
-                .repair
-                .as_deref()
-                .is_some_and(|repair| repair.contains("provenant gc --apply")),
+                .next
+                .iter()
+                .any(|step| step.display_text().contains("provenant gc --apply")),
             "the warning names the unregister command: {:?}",
             warned[0]
         );

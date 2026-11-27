@@ -67,7 +67,7 @@ pub struct Upgrade {
     #[arg(long, requires = "verify")]
     pub dry_run: bool,
     /// Place the smoke graph on this Fabric peer
-    #[arg(long = "verify-host", requires = "verify")]
+    #[arg(id = "verify_host", long = "verify-host", requires = "verify")]
     pub host: Option<String>,
     /// Override smoke graph routes
     #[arg(long, requires = "verify")]

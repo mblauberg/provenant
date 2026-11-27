@@ -2283,7 +2283,7 @@ impl Factory {
             read,
             warnings: subject_warnings,
             review_warning,
-            read_source: mut read_source,
+            mut read_source,
             writer_base_setting,
             read_pin,
             writer_warnings,

@@ -228,6 +228,7 @@ impl Drop for CommandSinkGuard {
 
 /// Install the command's sink. The guard restores the previous sink on drop,
 /// so nested dispatch in tests cannot leak one command's warnings into another.
+#[cfg(test)]
 pub(crate) fn install_command_sink(json: bool) -> CommandSinkGuard {
     install_command_sink_with(json, false)
 }

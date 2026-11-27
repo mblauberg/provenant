@@ -800,7 +800,7 @@ fn lane_cap_refusal_retains_the_setting_through_both_adapters() {
 #[test]
 fn pacing_dispatch_refusal_keeps_the_route_and_monthly_window_note() {
     use provenant_records::diagnostic::{
-        Diagnostic, DiagnosticFact, PacingReserveSetting, ResourceFact,
+        Diagnostic, DiagnosticFact, Layer, PacingReserveSetting, ResourceFact,
     };
     let fact = ResourceFact::PacingReserve {
         percent: 10,

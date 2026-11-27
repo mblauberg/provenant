@@ -244,10 +244,10 @@ fn stopped_lane_branch_continues_with_handover_warning()
             provenant_records::custody::admit_writer(
                 &subject,
                 Some(&observation),
-                Sharing::Refuse
+                &provenant_records::Sourced { value: Sharing::Refuse, source: provenant_records::Source::at(provenant_records::Layer::Launch, "test") }
             ),
-            provenant_records::custody::Admit::Refuse { holder: Some(holder) }
-                if holder == child.attempt_id
+            provenant_records::custody::Admit::Refuse { error }
+                if error.message.contains(&child.attempt_id.to_string())
         ),
         "C must observe B as the slot holder after handover"
     );
@@ -912,7 +912,12 @@ fn retry_and_resume_on_lapsed_lease_need_no_flag()
         let queued = store.record(first.attempt_id, &call).unwrap();
         // Another lane's lease on the same path is advisory: a resume or retry
         // proceeds under the shared-writer rule, with no special flag.
-        assert!(store.check_writer_lineage(&queued, &tree, &call)?.is_some());
+        assert!(
+            store
+                .check_writer_lineage(&queued, &tree, &call)
+                .expect("lineage check")
+                .is_some()
+        );
         Ok(())
     })?;
     let next = Resume {

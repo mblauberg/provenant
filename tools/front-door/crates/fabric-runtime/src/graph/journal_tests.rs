@@ -172,7 +172,7 @@ fn graph_retirement_archives_prompt_blobs_before_finalisation_and_clearing()
     let decoded = decode_checkpoint_in(&archive_directory, &archived_checkpoint, graph_id)?;
     assert_eq!(decoded.execution.document.nodes[0].prompt, prompt);
     for (name, bytes) in original_prompts {
-        assert_eq!(std::fs::read(archive.join(name))?, bytes);
+        assert_eq!(std::fs::read(archive.join(&name))?, bytes);
         assert!(!graph_directory.join(name).exists());
     }
 

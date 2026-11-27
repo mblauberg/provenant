@@ -41,9 +41,9 @@ impl Drop for ScratchDir {
 
 #[cfg(test)]
 mod tests {
+    use super::ScratchDir;
     #[test]
     fn scratch_is_private_unique_and_removed_on_drop() -> std::io::Result<()> {
-        use super::ScratchDir;
         use std::os::unix::fs::PermissionsExt;
         let parent = tempfile::tempdir()?;
         let first = ScratchDir::new_in(parent.path(), "scratch-")?;

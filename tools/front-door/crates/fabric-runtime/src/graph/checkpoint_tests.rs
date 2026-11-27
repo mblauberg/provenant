@@ -22,7 +22,7 @@ fn migrate_fixture(temp: &std::path::Path, graph_id: &str, checkpoint: &[u8]) ->
     std::fs::set_permissions(&project, std::fs::Permissions::from_mode(0o700)).unwrap();
     std::fs::set_permissions(&checkpoint_path, std::fs::Permissions::from_mode(0o600)).unwrap();
     super::journal::migrate_store(temp).unwrap();
-    Directory::open_anchor(project).unwrap()
+    Directory::open_anchor(&project).unwrap()
 }
 
 #[test]
