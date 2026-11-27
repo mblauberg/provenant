@@ -1061,6 +1061,38 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn fallback_evidence_retry_respects_the_sealed_stop_cause() {
+        let node = planned(serde_json::json!({
+            "id": "n", "prompt": "p", "access": "worktree_write", "worktree": "/w",
+            "routes": [{"adapter": "a", "model": "a/m"}, {"adapter": "b", "model": "b/m"}]
+        }));
+        let facts = || FallbackEvidence {
+            preparation: None,
+            unreadable: false,
+            review_limit_reached: false,
+            cause: None,
+            skipped_accounts: &[],
+        };
+
+        assert!(custody_release_pending(
+            &node,
+            0,
+            GraphAttemptOutcome::AuthRequired,
+            None,
+            false,
+            facts(),
+        ));
+        assert!(!custody_release_pending(
+            &node,
+            0,
+            GraphAttemptOutcome::AuthRequired,
+            Some(provenant_records::StopCause::PermissionDenied),
+            false,
+            facts(),
+        ));
+    }
+
     fn at(seconds: i64) -> provenant_core::WallTime {
         provenant_core::WallTime::from_micros(1_800_000_000_000_000 + seconds * 1_000_000).unwrap()
     }
