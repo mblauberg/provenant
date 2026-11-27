@@ -1245,7 +1245,7 @@ mod graph_writer_admission_tests {
         let first = advance(&document, &mut owner, &mut journal)?;
         let node = &first.checkpoint.nodes[0];
         assert_eq!(node.state, NodeState::Failed, "{node:?}");
-        assert_eq!(node.advance_code.as_deref(), Some("preparation_refused"));
+        assert_eq!(node.advance_code.as_deref(), Some("unregistered_account"));
         assert_eq!(node.attempts.len(), 1);
         assert_eq!(node.attempts[0].key.route_index, 0);
         assert_eq!(node.attempts[0].stop, Some(provenant_records::StopCause::UnregisteredAccount));
