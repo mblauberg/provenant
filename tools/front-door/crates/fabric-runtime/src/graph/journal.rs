@@ -2759,7 +2759,7 @@ pub fn migrate_store(state_root: &std::path::Path) -> Result<Vec<String>, Journa
     std::fs::write(&marker, b"")?;
     let result = (|| -> Result<(), JournalError> {
         for (path, project_name, text, id, _guard, migrated) in prepared {
-            let directory = Directory::open_anchor(path)?;
+            let directory = Directory::open_anchor(&path)?;
             let mut value: serde_json::Value =
                 serde_json::from_slice(&migrated).map_err(|_| JournalError::BadEnvelope)?;
             prompt_store::externalise(&directory, &id, &mut value)?;

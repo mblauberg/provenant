@@ -674,6 +674,7 @@ impl RunStore {
     }
     /// Resolve a worktree owner by its globally unique attempt ID. The owner
     /// can belong to another project scope; only its state is used for lineage.
+    #[cfg(test)]
     pub(crate) fn writer_owner_terminal(&self, id: AttemptId, call: &Request<'_>) -> Result<bool> {
         call.check()?;
         let project: String = self

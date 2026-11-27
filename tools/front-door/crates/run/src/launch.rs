@@ -370,7 +370,7 @@ pub fn commit_own_paths(
         }
         let tree_oid = tree.stdout.trim().to_owned();
 
-        let mut commit_args = vec![
+        let commit_args = vec![
             "commit-tree",
             &tree_oid,
             "-p",

@@ -4,7 +4,7 @@ use provenant_os::fs::{Directory, LockMode, PublishMode};
 use provenant_records::lane_contract::{
     Coverage, ObservationCursor, ObservationEvent, ObservationKind, ObservationLineage, Sourced,
 };
-use provenant_records::{CommandResult, Layer, Outcome, RecordHeader, WorkKey};
+use provenant_records::{CommandResult, Layer, Outcome, RecordHeader, Source, WorkKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{ffi::OsStr, path::Path};
@@ -399,12 +399,18 @@ impl Board {
                     false,
                     Sourced {
                         value: u64::MAX,
-                        source: Layer::Template,
+                        source: Source {
+                            layer: Layer::Template,
+                            origin: None,
+                        },
                     },
                 );
                 preview.byte_cap = Sourced {
                     value: u64::MAX,
-                    source: Layer::Template,
+                    source: Source {
+                        layer: Layer::Template,
+                        origin: None,
+                    },
                 };
                 preview.events.push(event.clone());
                 if preview.response_bytes()? as u64
@@ -432,7 +438,10 @@ impl Board {
                     Some(0) => return Err(Error::Invalid("read cap")),
                     Some(value) => Sourced {
                         value,
-                        source: Layer::Launch,
+                        source: Source {
+                            layer: Layer::Launch,
+                            origin: None,
+                        },
                     },
                     None => self.read_cap.clone(),
                 };
@@ -514,13 +523,19 @@ fn subdir(parent: &Directory, name: &str) -> Result<Directory, Error> {
 pub fn default_read_cap() -> Sourced<u64> {
     Sourced {
         value: 50,
-        source: Layer::Default,
+        source: Source {
+            layer: Layer::Default,
+            origin: None,
+        },
     }
 }
 pub fn default_byte_cap() -> Sourced<u64> {
     Sourced {
         value: 262_144,
-        source: Layer::Default,
+        source: Source {
+            layer: Layer::Default,
+            origin: None,
+        },
     }
 }
 

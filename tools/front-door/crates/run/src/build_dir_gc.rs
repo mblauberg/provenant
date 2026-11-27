@@ -971,7 +971,7 @@ impl TargetProtection {
 /// caches have no worktree owner and are protected by project key instead.
 /// This is the cache-GC half of the `guard_destructive` contract (#4120); a
 /// lapsed owner is `Available` in the census, so its cache stays reclaimable.
-pub(crate) fn cache_owner_is_live(kind: CacheKind, owner: Option<&Path>, protected: bool) -> bool {
+fn cache_owner_is_live(kind: CacheKind, owner: Option<&Path>, protected: bool) -> bool {
     matches!(kind, CacheKind::Lane) && owner.is_some() && protected
 }
 

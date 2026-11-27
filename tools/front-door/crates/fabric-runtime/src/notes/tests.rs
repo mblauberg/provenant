@@ -45,6 +45,20 @@ fn read(scope: Scope, reader: &str, after: Option<i64>, limit: Option<u64>) -> I
         limit,
     }
 }
+
+#[test]
+fn explicit_read_cap_reports_its_launch_source() {
+    let dir = tempfile::tempdir().unwrap();
+    let result = page(
+        &board(dir.path()),
+        read(Scope::Project, "reader", None, Some(1)),
+    );
+
+    assert_eq!(result.read_cap.value, 1);
+    assert_eq!(result.read_cap.source.layer, Layer::Launch);
+    assert_eq!(result.read_cap.source.origin, None);
+}
+
 fn execute(board: &Board, input: Input) -> serde_json::Value {
     board
         .execute(&host("root"), input, &clock(), &CancelToken::new())
@@ -169,7 +183,6 @@ fn delta_ack_replay_cap_and_cursor_recovery_never_lose_source() {
     }
     let first = page(&board, read(Scope::Project, "r", None, Some(1)));
     assert!(first.truncated);
-    assert_eq!(first.read_cap.source, Layer::Launch);
     assert_eq!(first.next, 1);
     // No ACK means the same page is redelivered after reconnect.
     let retry = page(
