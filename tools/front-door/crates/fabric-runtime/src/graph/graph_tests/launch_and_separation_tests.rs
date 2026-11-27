@@ -20,6 +20,42 @@ fn node_pr_opt_in_resolves_with_launch_source() {
 }
 
 #[test]
+fn launch_flags_seal_their_settings_at_the_launch_layer()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let roots = provenant_test_support::test_roots(temp.path())?
+        .resolve(&provenant_test_support::IdentityPathResolver)?;
+    let spec = AttemptSpec {
+        read_source: Some("1111111111111111111111111111111111111111".into()),
+        destination: Some("new".into()),
+        worktree_sharing: Some("refuse".into()),
+        checks_mode: Some("strict".into()),
+        ..Default::default()
+    };
+    let knobs = spec.lane_knobs();
+    assert!(knobs.contains(
+        &"lanes.read_source=1111111111111111111111111111111111111111".to_string()
+    ));
+    assert!(knobs.contains(&"lanes.destination.write=new".to_string()));
+    assert!(knobs.contains(&"lanes.worktree.sharing=refuse".to_string()));
+    assert!(knobs.contains(&"policy.default=refuse".to_string()));
+    let profile = provenant_config::read(&roots)?.dispatch_profile(&knobs)?;
+    for key in [
+        "lanes.read_source",
+        "lanes.destination.write",
+        "lanes.worktree.sharing",
+        "policy.default",
+    ] {
+        assert_eq!(
+            provenant_config::knob_source(&profile, key),
+            provenant_records::Layer::Launch,
+            "{key}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn node_attempt_spec_reaches_the_launch() {
     let spec = AttemptSpec {
         host: Some("workshop".into()),

@@ -236,6 +236,93 @@ fn control_receipt_unfinished(
     }
 }
 
+/// The launch flags decoded once, here at the host interface edge. Every
+/// setting they select is written at `Layer::Launch`, so warnings, receipts
+/// and custody can all name the flag that chose it.
+#[derive(Clone, Debug, Default)]
+struct LaunchFlags {
+    checks_mode: Option<String>,
+    isolated: bool,
+    destination: Option<String>,
+    worktree_sharing: Option<String>,
+}
+
+impl LaunchFlags {
+    fn from_input(input: &Value) -> Self {
+        Self {
+            checks_mode: input
+                .get("checks_mode")
+                .and_then(Value::as_str)
+                .filter(|value| provenant_records::policy::ChecksMode::from_checks(value).is_some())
+                .map(str::to_owned),
+            isolated: input["isolated"] == true,
+            destination: input
+                .get("destination")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            worktree_sharing: input
+                .get("worktree_sharing")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+        }
+    }
+}
+
+/// One launch setting in the receipt, in the same `Sourced` shape other
+/// settings use: the value with the layer and origin that selected it.
+fn launch_setting(value: Value, origin: &str) -> Value {
+    json!({"value": value, "source": {"layer": "launch", "origin": origin}})
+}
+
+/// The effective launch-layer settings, reported by both `run --explain` and
+/// the launch receipt so the flags are never silently dropped.
+fn launch_settings_report(
+    flags: &LaunchFlags,
+    read_source: &provenant_cli::run::ReadSourceChoice,
+) -> Value {
+    let mut settings = serde_json::Map::new();
+    if let Some(mode) = &flags.checks_mode
+        && let Some(strength) = match provenant_records::policy::ChecksMode::from_checks(mode) {
+            Some(provenant_records::policy::ChecksMode::Strict) => Some("refuse"),
+            Some(provenant_records::policy::ChecksMode::Warn) => Some("warn"),
+            Some(provenant_records::policy::ChecksMode::Off) => Some("off"),
+            Some(provenant_records::policy::ChecksMode::On) | None => None,
+        }
+    {
+        settings.insert(
+            "policy.default".into(),
+            launch_setting(json!(strength), "--checks/--strict"),
+        );
+    }
+    if flags.isolated {
+        for (key, value, origin) in [
+            ("lanes.access", "isolated", "--isolated"),
+            ("lanes.sandbox", "on", "--isolated"),
+            ("lanes.destination.write", "new", "--isolated"),
+            ("lanes.worktree.sharing", "refuse", "--isolated"),
+        ] {
+            settings.insert(key.into(), launch_setting(json!(value), origin));
+        }
+        settings.insert(
+            "lanes.read_source".into(),
+            launch_setting(json!(read_source.source.to_string()), "--isolated"),
+        );
+    }
+    if let Some(destination) = &flags.destination {
+        settings.insert(
+            "lanes.destination.write".into(),
+            launch_setting(json!(destination), "--destination"),
+        );
+    }
+    if let Some(sharing) = &flags.worktree_sharing {
+        settings.insert(
+            "lanes.worktree.sharing".into(),
+            launch_setting(json!(sharing), "--worktree-sharing"),
+        );
+    }
+    Value::Object(settings)
+}
+
 /// Attempt settings are reserved launch controls, not template parameters.
 pub(super) fn launch_input(input: &Value) -> Result<Value, FacadeError> {
     let mut input = input.clone();
@@ -270,6 +357,30 @@ pub(super) fn launch_input(input: &Value) -> Result<Value, FacadeError> {
     // `lane_knobs` records it as `lanes.brief_preamble` from the launch layer.
     if let Some(value) = input.get("preamble_file").filter(|value| !value.is_null()) {
         attempt["preamble_file"] = value.clone();
+    }
+    // The launch flags are launch-layer settings. Carry them on the attempt so
+    // `lane_knobs` seals them with Layer::Launch for every consumer: policy,
+    // destination, sharing and read source. Explicit flags applied by the CLI
+    // after `--isolated` win, and a per-attempt setting wins over the bundle.
+    let flags = LaunchFlags::from_input(&input);
+    if flags.isolated {
+        if attempt.get("lane_access").is_none() {
+            attempt["lane_access"] = json!("isolated");
+        }
+        if attempt.get("sandbox").is_none()
+            && let Some(sandbox) = input.get("sandbox").filter(|value| !value.is_null())
+        {
+            attempt["sandbox"] = sandbox.clone();
+        }
+    }
+    if let Some(mode) = &flags.checks_mode {
+        attempt["checks_mode"] = json!(mode);
+    }
+    if let Some(destination) = &flags.destination {
+        attempt["destination"] = json!(destination);
+    }
+    if let Some(sharing) = &flags.worktree_sharing {
+        attempt["worktree_sharing"] = json!(sharing);
     }
     // Retain provenance when these run controls are merged onto a template.
     for field in ["token_budget", "on_budget", "budget_grace", "lane_access"] {
@@ -1041,7 +1152,7 @@ impl Factory {
         reason = "warn operator when policy is unavailable and defaults are used"
     )]
     pub(super) fn graph_input_warnings(&self, value: &Value) -> Result<Vec<String>, FacadeError> {
-        let policy =
+        let mut policy =
             match provenant_cli::config_reads::read_for(&self.context.roots, "run admission") {
                 Ok(config) => config.domains.policy.resolve_with_knobs(
                     &self.context.identity.project.to_string(),
@@ -1069,6 +1180,14 @@ impl Factory {
                     )
                 }
             };
+        let flags = LaunchFlags::from_input(value);
+        if let Some(mode) = flags
+            .checks_mode
+            .as_deref()
+            .and_then(provenant_records::policy::ChecksMode::from_checks)
+        {
+            policy.apply_checks(mode);
+        }
         Ok(
             provenant_fabric_runtime::graph::refusal::input_warnings(value, &policy)
                 .into_iter()
@@ -2114,6 +2233,16 @@ impl Factory {
             }
             input["set"] = Value::Object(typed);
         }
+        // `--isolated` pins the read source to this HEAD at the launch layer.
+        // Resolve it once here, before admission reads the source choice, so
+        // the sealed subject carries the Launch provenance too.
+        if LaunchFlags::from_input(&input).isolated
+            && input.get("source").is_none_or(Value::is_null)
+            && let Some(head) = provenant_os::git::git_executable()
+                .and_then(|git| provenant_run::resolve_git_base(&git, &self.cwd, "HEAD").ok())
+        {
+            input["source"] = json!(head);
+        }
         let input = &input;
         let source_choice = input.get("source").filter(|value| !value.is_null());
         if let Some(choice) = source_choice
@@ -2154,7 +2283,7 @@ impl Factory {
             read,
             warnings: subject_warnings,
             review_warning,
-            read_source,
+            read_source: mut read_source,
             writer_base_setting,
             read_pin,
             writer_warnings,
@@ -2166,6 +2295,16 @@ impl Factory {
             cancel,
         )?;
         input_warnings.extend(subject_warnings);
+        let flags = LaunchFlags::from_input(input);
+        if flags.isolated {
+            // `--isolated` pins the read source to the admitted HEAD at the
+            // launch layer, without re-reading a ref after admission.
+            if let Some(head) = subject.as_ref().map(|subject| subject.head.to_string()) {
+                read_source.source = provenant_cli::run::ReadSource::Ref(head);
+            }
+            read_source.layer = Layer::Launch;
+            read_source.origin = Some("--isolated".into());
+        }
         let review_pin = subject
             .as_ref()
             .filter(|_| review_launch)
@@ -2808,6 +2947,7 @@ impl Factory {
                         config.origins.get("domains.fabric.batch.max_parallel").map(|origin| json!(origin)).unwrap_or(json!("default"))
                     }
                 },
+                "launch_settings": launch_settings_report(&flags, &read_source),
             }));
         }
         let mut result = match self.launch_submission(
@@ -2842,6 +2982,7 @@ impl Factory {
             &writer_base_setting,
             writer_base_source,
         );
+        result["launch_settings"] = launch_settings_report(&flags, &read_source);
         result["named"] = json!({
             "requested": requested, "graph": id, "replayed": replayed, "superseded": taken,
         });
