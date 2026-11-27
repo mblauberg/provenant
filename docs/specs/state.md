@@ -89,8 +89,11 @@ status with its graph ID and typed reason, and landing review reports unreadable
 graph sources by graph ID while keeping valid settlements. The first tick read of
 a corrupt checkpoint records its file digest and reason in a quarantine marker;
 identical bytes are skipped on later ticks, changed bytes are reported again and
-`provenant stop -- NAME` retires the record. Pending-index recovery never uses
-unverified lifecycle fields to classify a corrupt record as settled.
+`provenant stop -- NAME` retires the record. A readable checkpoint whose active
+expansion pause disagrees with the graph pause is quarantined on the same byte
+key and reported once with the same retire step, so a bad pause pair cannot
+repeat every tick. Pending-index recovery never uses unverified lifecycle fields
+to classify a corrupt record as settled.
 - Why: stored text must verify on reload, and one damaged graph must not hide
   another's review evidence or flood every tick with an unresolvable retry.
 - Owner: `crates/fabric-runtime/src/graph/journal.rs`, `src/pr/landing/adapters.rs`

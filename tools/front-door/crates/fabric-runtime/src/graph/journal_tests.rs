@@ -1651,6 +1651,75 @@ fn tick_reports_corrupt_checkpoints_once_until_bytes_change_or_retired() {
     std::fs::write(&path, b"{} ").unwrap();
     assert!(FileJournal::read_checkpoint_for_tick(&root, project, "g-test").is_err());
 }
+
+// Spec: docs/specs/state.md#graph-checkpoints-cover-persisted-text
+#[test]
+fn tick_quarantines_a_disagreeing_expansion_pause_with_a_retire_step() {
+    let temp = crate::test_support::tempdir().unwrap();
+    std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let base = std::fs::canonicalize(temp.path()).unwrap();
+    let inputs = provenant_test_support::root_inputs(&base).unwrap();
+    let root = StateRoot::resolve(&inputs, &SystemPathResolver).unwrap();
+    let project = ProjectId::from_bytes([1; 16]);
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let budget = WaitBudget::cli(clock.mono_now(), 5).unwrap();
+    let mut fixture: StoredCheckpoint = stored_fixture();
+    // The shape from #4106: a refused expansion owns an InvalidPlanExpansion
+    // pause, while a later structural pause took over the graph pause.
+    fixture.checkpoint.nodes[0].expansion_pause = Some("fragment invalid".into());
+    fixture.checkpoint.nodes[0].expansion_cause = Some(NodeDecisionCause::PlanExpansionPaused {
+        active: true,
+        fallback: false,
+        structural_limit: None,
+        fragment_error: None,
+    });
+    fixture
+        .checkpoint
+        .set_pause(PauseCause::StructuralLimit, "limits.nodes");
+    assert!(!fixture.checkpoint.expansion_pause_owns_graph_pause());
+    let mut journal = FileJournal::open(&root, project, "g-test", budget, &cancel, &clock).unwrap();
+    journal.bind(fixture.execution).unwrap();
+    journal.save(&fixture.checkpoint).unwrap();
+    drop(journal);
+    let path = root
+        .as_path()
+        .join("fabric/graphs")
+        .join(project.to_string())
+        .join("graph-g-test.json");
+    let first = FileJournal::read_checkpoint_for_tick(&root, project, "g-test").unwrap_err();
+    assert!(
+        first.to_string().contains("invalid_expansion_pause"),
+        "{first}"
+    );
+    assert!(
+        first.to_string().contains("provenant stop -- g-test"),
+        "{first}"
+    );
+    let marker = path.with_file_name("graph-g-test.unreadable");
+    assert!(marker.is_file());
+    assert_eq!(
+        std::fs::read_to_string(&marker).unwrap().lines().nth(1),
+        Some("invalid_expansion_pause")
+    );
+    // The same bytes are quarantined: the next tick skips them instead of
+    // repeating the validation error forever.
+    assert!(
+        FileJournal::read_checkpoint_for_tick(&root, project, "g-test")
+            .unwrap()
+            .is_none()
+    );
+    // `provenant stop -- g-test` retires the quarantined record.
+    assert!(
+        FileJournal::retire_unreadable(&root, project, "g-test", budget, &cancel, &clock, |_| Ok(
+            ()
+        ))
+        .unwrap()
+    );
+    assert!(!path.exists());
+    assert!(!marker.exists());
+}
+
 #[test]
 fn tick_reports_undecodable_undelivered_pr_with_skipped_node() {
     let temp = crate::test_support::tempdir().unwrap();
