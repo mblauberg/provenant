@@ -997,6 +997,19 @@ impl<F: Forge, C: Clock> Observer<F, C> {
             .and_then(Value::as_str)
             .map(str::to_owned);
         let mergeable = merge_state(&pull);
+        // A moved head cannot produce a verdict for the expected commit. Keep
+        // the observed identity even if checks for that old commit are gone.
+        if pr_head != Some(expected) {
+            let mut reading = HeadReading::pending(
+                expected,
+                format!("pull head {pr_head:?} is not the expected {expected}"),
+            );
+            reading.pr_head = pr_head;
+            reading.branch_ref = branch_ref;
+            reading.mergeable = mergeable;
+            reading.observed_at = self.clock.now();
+            return reading;
+        }
         let base = pull
             .pointer("/base/ref")
             .and_then(Value::as_str)

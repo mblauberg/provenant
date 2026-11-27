@@ -1365,10 +1365,20 @@ fn an_attempt_keyed_to_another_graph_is_refused_not_adopted()
         "owner",
     )?
     .ok_or("owner")?;
-    assert_eq!(
-        serde_json::to_value(&after.nodes[0])?,
-        serde_json::to_value(&before.nodes[0])?
-    );
+    // Tick fills in sourced retry metadata even when the foreign attempt is
+    // refused. All identity and settlement fields must remain unchanged.
+    let mut after_node = serde_json::to_value(&after.nodes[0])?;
+    let mut before_node = serde_json::to_value(&before.nodes[0])?;
+    assert_eq!(after_node["retry"]["retries"], 2);
+    assert_eq!(after_node["retry"]["origin"], "shipped_default");
+    assert_eq!(after_node["launch_retry"]["policy"]["limit"], 3);
+    assert!(after_node["launch_retry"]["deadline"].is_string());
+    for field in ["retry", "launch_retry"] {
+        assert!(after_node.get(field).is_some(), "missing {field}");
+        after_node.as_object_mut().ok_or("node")?.remove(field);
+        before_node.as_object_mut().ok_or("node")?.remove(field);
+    }
+    assert_eq!(after_node, before_node);
     assert!(fixture.worktree.exists());
     Ok(())
 }

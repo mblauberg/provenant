@@ -677,7 +677,11 @@ pub fn render_within<T: Serialize>(
     let mut next = result.next.clone();
     if let Some(error) = &error {
         let mut combined = error.next.clone();
-        combined.append(&mut next);
+        for step in next {
+            if !combined.contains(&step) {
+                combined.push(step);
+            }
+        }
         next = combined;
     }
     let mut result = CommandResult {
@@ -760,7 +764,11 @@ pub fn render_within<T: Serialize>(
                             RenderMode::Json => {}
                         }
                     }
-                    text.push_str(&next_steps_text(&result.next, &CommandPrefix::default()));
+                    for line in next_steps_text(&result.next, &CommandPrefix::default()).lines() {
+                        text.push_str("  ");
+                        text.push_str(line);
+                        text.push('\n');
+                    }
                     text
                 }
                 None => {
@@ -1559,8 +1567,10 @@ mod tests {
         assert!(text.contains(
             "  setting: domains.fabric.project_projection = locate (project .provenant/config.toml:12)\n"
         ), "{text}");
-        assert!(
-            text.contains("  next: provenant run task --brief b\n"),
+        assert_eq!(
+            text.matches("  next: provenant run task --brief b\n")
+                .count(),
+            1,
             "{text}"
         );
         Ok(())
@@ -1830,7 +1840,7 @@ mod overflow_tests {
         )?;
         assert_eq!(status, Outcome::Refused);
         assert_eq!(String::from_utf8(output)?, receipt);
-        assert!(String::from_utf8(errors)?.contains("REFUSED: both lanes refused"));
+        assert!(String::from_utf8(errors)?.contains("error [REFUSED]: both lanes refused"));
 
         // An oversized receipt must publish the complete result without writing
         // either the receipt or diagnostic as a partial two-stream result.

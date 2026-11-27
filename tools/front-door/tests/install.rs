@@ -1734,7 +1734,10 @@ chmod +x "$2/bin/provenant"
         String::from_utf8_lossy(&built.stderr.bytes)
     );
     let target = fs::read_to_string(record)?;
-    assert_eq!(built.stdout.bytes, b"SOURCE_COMPLETE\n");
+    assert_eq!(
+        built.stdout.bytes,
+        b"Warning: This checkout has no bundled app archive; the app is left as-is and may be behind the CLI.\nSOURCE_COMPLETE\n"
+    );
     assert!(
         !Path::new(target.trim())
             .parent()
@@ -2026,7 +2029,7 @@ fn upgrade_retries_a_dropped_release_checksum() -> Result {
 fn upgrade_rejects_release_checksum_mismatch_and_keeps_the_installed_release() -> Result {
     let mut rig = UpgradeRig::new()?;
     rig.set_env("PROVENANT_TEST_CHECKSUM", &"0".repeat(64));
-    let (outcome, value) = rig.upgrade(&["--hosts", "all"])?;
+    let (outcome, value) = rig.upgrade(&["--host", "all"])?;
     assert_ne!(code(&outcome), 0, "{value}");
     assert_eq!(value["data"]["hosts"][0]["success"], false, "{value}");
     assert!(rig.receipt_is_first_release()?);
@@ -2134,7 +2137,7 @@ fn upgrade_peer_preflight_refusal_changes_nothing() -> Result {
     let mut rig = UpgradeRig::new()?;
     rig.set_env("PROVENANT_TEST_PEER_REFUSE", "1");
     let before = snapshot(&rig.rig.state)?;
-    let (outcome, value) = rig.upgrade(&["--hosts", "all"])?;
+    let (outcome, value) = rig.upgrade(&["--host", "all"])?;
     assert_eq!(value["data"]["hosts"][0]["host"], "worker", "{value}");
     assert_eq!(value["data"]["hosts"][0]["success"], false, "{value}");
     assert_ne!(code(&outcome), 0);
@@ -2147,7 +2150,7 @@ fn upgrade_peer_preflight_refusal_changes_nothing() -> Result {
 #[test]
 fn upgrade_pins_one_release_replays_settings_and_reports_peer_failure() -> Result {
     let rig = UpgradeRig::new()?;
-    let (outcome, value) = rig.upgrade(&["--hosts", "all"])?;
+    let (outcome, value) = rig.upgrade(&["--host", "all"])?;
     assert_eq!(value["data"]["hosts"][0]["host"], "local", "{value}");
     assert_eq!(value["data"]["hosts"][0]["success"], true, "{value}");
     assert_eq!(value["data"]["hosts"][1]["host"], "worker", "{value}");

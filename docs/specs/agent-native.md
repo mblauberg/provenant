@@ -187,7 +187,7 @@ pub struct CommandError { pub code, pub message, pub cause: Option<String>, pub 
 - **`repair` is deleted** from both `CommandError` and `Warning`, and `next` replaces it.
   - The signature of `CommandError::new(code, message, cause, repair)` is kept, so the 49 call sites do not change. Its `repair` string becomes `NextStep::from_text`: argv when it parses as a `provenant …` command, otherwise a condition.
   - `Warning::repair()` stays as a builder that pushes to `next`.
-- **`CommandResult.next`** is the one list rendered. On error it holds `error.next` followed by the command's own steps.
+- **`CommandResult.next`** is the one list rendered. On error it holds `error.next` followed by the command's own distinct steps; an identical step appears once.
 - **Builders.** `CommandError::with_subject`, `with_setting` and `with_class` are added. `class` defaults to `Operation`.
 - **Tests.** A catalogue test requires `setting` for every `Configured` error and every `none`-row warning, and requires a non-empty `next` on every error.
 - **Root cause.**
@@ -303,6 +303,7 @@ Verify already has unique graph names, home-relative scratch and per-binding cle
 
 **One CI reader.**
 - `pr::observer::observe_head(repo, pr, expected) -> HeadReading` returns `{expected_head, branch_ref, pr_head, mergeable, required: Vec<Check>, observed_at, complete: bool, pending_reason?, retry_at?}`.
+- A moved or missing pull head stays pending and retains the observed head and branch without requiring checks for the expected commit.
 - It is `complete` only when all of these hold:
   - every page has been read;
   - every read saw the same `pr_head`;

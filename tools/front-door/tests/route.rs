@@ -770,7 +770,7 @@ fn pacing_profile_account_labels_resolve_and_unknown_names_fail() -> Result {
         let result = call(&rig, &["route", "list"], 2)?;
         assert_eq!(result["error"]["code"], "UNKNOWN_ACCOUNT");
         assert!(
-            result["error"]["next"]
+            result["error"]["next"][0]["why"]
                 .as_str()
                 .unwrap()
                 .contains("provenant accounts list")
@@ -796,7 +796,7 @@ fn pacing_profile_account_labels_resolve_and_unknown_names_fail() -> Result {
     let duplicate = call(&rig, &["route", "list"], 2)?;
     assert_eq!(duplicate["error"]["code"], "DUPLICATE_PACING_PROFILE");
     assert!(
-        duplicate["error"]["next"]
+        duplicate["error"]["next"][0]["why"]
             .as_str()
             .unwrap()
             .contains("duplicate")

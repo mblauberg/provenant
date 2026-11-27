@@ -1315,6 +1315,8 @@ printf '%s\n' '{"status":200,"headers":{},"body":"{\"full_name\":\"owner/repo\"}
         let reading = read_head(&shared, dir.path(), &|| None);
         assert!(!reading.complete);
         assert_eq!(reading.pr_head, Some(GitOid::parse(OTHER).expect("head")));
+        assert_eq!(reading.branch_ref.as_deref(), Some("work"));
+        assert!(reading.required.is_empty());
         assert!(
             reading
                 .pending_reason

@@ -102,7 +102,7 @@ fn cli_safe_local_facts_are_bounded_and_escape_controls() {
         );
         assert!(detail.len() <= MAX_DIAGNOSTIC_BYTES);
         assert!(!detail.chars().any(char::is_control));
-        assert!(wire["error"]["next"].is_string());
+        assert!(wire["error"]["next"].is_array());
         let mut human = Vec::new();
         crate::render::render(
             &reply.result,
@@ -160,8 +160,8 @@ fn cli_recorded_remedies_preserve_typed_causes() {
         )));
         let reply = super::reply("run", Err(failure));
         let wire = serde_json::to_value(&reply.result).unwrap();
-        assert_eq!(wire["error"]["next"], projection.next.unwrap());
-        let action = wire["error"]["next"].as_str().unwrap();
+        let action = wire["error"]["next"][0]["why"].as_str().unwrap();
+        assert_eq!(action, projection.next.unwrap());
         assert!(action.contains(condition), "{wire}");
         if condition == "dispatch-17" {
             assert!(action.contains("inspect") && action.contains("same operation ID"));
