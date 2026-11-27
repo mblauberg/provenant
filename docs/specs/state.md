@@ -88,8 +88,9 @@ published record. Every corrupt checkpoint stays visible as unreadable through
 status with its graph ID and typed reason, and landing review reports unreadable
 graph sources by graph ID while keeping valid settlements. A checkpoint that
 decodes but fails the semantic validation an advance applies — for example a
-writer failure written over a node its own `when` skips or an expansion pause
-that disagrees with the graph pause — is unloadable in the
+writer failure written over a node its own `when` skips, an expansion pause
+that disagrees with the graph pause, or a plan that cannot be reconstructed
+or validated for replay — is unloadable in the
 same way. The first tick read of either kind records the file digest, the plan
 digest and the typed reason in a quarantine marker; identical bytes under the
 same plan are skipped on later ticks, changed bytes or a changed plan are

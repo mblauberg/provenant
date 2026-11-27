@@ -2286,6 +2286,12 @@ fn quarantine_unreadable_once(
 fn semantic_validation_error(
     stored: &StoredCheckpoint,
 ) -> Option<GraphError<JournalError, JournalError>> {
+    validate_stored_checkpoint(stored).err()
+}
+
+fn validate_stored_checkpoint(
+    stored: &StoredCheckpoint,
+) -> Result<(), GraphError<JournalError, JournalError>> {
     let document = &stored.execution.document;
     let limits = replay_limits();
     let expanded = plans::expand(
@@ -2294,17 +2300,17 @@ fn semantic_validation_error(
         &stored.checkpoint.expansions,
         &limits,
     )
-    .ok()?;
-    let (plan, _) = validate_flat_plan(&expanded, &limits).ok()?;
-    let (base, _) = validate_replay_plan(document, &limits).ok()?;
-    let digest = plan_digest(&base).ok()?.to_string();
-    let view = match checkpoint_validation_view(&stored.checkpoint) {
-        Ok(view) => view,
-        Err((node, invariant)) => {
-            return Some(GraphError::BadCheckpoint { node, invariant });
-        }
-    };
-    validate_checkpoint::<JournalError, JournalError>(document, &view, &plan, &digest).err()
+    .map_err(GraphError::Invalid)?;
+    let (plan, _) = validate_flat_plan(&expanded, &limits)
+        .map_err(|error| GraphError::Invalid(error.to_string()))?;
+    let (base, _) = validate_replay_plan(document, &limits)
+        .map_err(|error| GraphError::Invalid(error.to_string()))?;
+    let digest = plan_digest(&base)
+        .map_err(GraphError::Canonical)?
+        .to_string();
+    let view = checkpoint_validation_view(&stored.checkpoint)
+        .map_err(|(node, invariant)| GraphError::BadCheckpoint { node, invariant })?;
+    validate_checkpoint::<JournalError, JournalError>(document, &view, &plan, &digest)
 }
 
 /// Load a checkpoint for a host tick read. Unreadable records are quarantined

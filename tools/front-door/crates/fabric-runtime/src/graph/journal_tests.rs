@@ -1756,6 +1756,68 @@ fn tick_reports_a_validation_failure_once_until_bytes_or_plan_change_or_retired(
 }
 // Spec: docs/specs/state.md#graph-checkpoints-cover-persisted-text
 #[test]
+fn unreconstructable_plans_are_reported_once_and_retired() {
+    for duplicate_node in [false, true] {
+        let temp = crate::test_support::tempdir().unwrap();
+        std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let base = std::fs::canonicalize(temp.path()).unwrap();
+        let inputs = provenant_test_support::root_inputs(&base).unwrap();
+        let root = StateRoot::resolve(&inputs, &SystemPathResolver).unwrap();
+        let project = ProjectId::from_bytes([1; 16]);
+        let clock = SystemClock::new();
+        let cancel = CancelToken::new();
+        let budget = WaitBudget::cli(clock.mono_now(), 5).unwrap();
+        let mut fixture = stored_fixture();
+        let nodes = if duplicate_node {
+            vec![fixture.execution.document.nodes[0].clone()]
+        } else {
+            Vec::new()
+        };
+        fixture.checkpoint.expansions.push(
+            serde_json::from_value(serde_json::json!({"source": "reader", "nodes": nodes}))
+                .unwrap(),
+        );
+        let mut journal =
+            FileJournal::open(&root, project, "g-test", budget, &cancel, &clock).unwrap();
+        journal.bind(fixture.execution).unwrap();
+        journal.save(&fixture.checkpoint).unwrap();
+        drop(journal);
+
+        // The persisted topology decodes, but expansion or flat-plan validation fails.
+        assert!(FileJournal::read_checkpoint(&root, project, "g-test").is_ok());
+        let notice = FileJournal::read_checkpoint_for_tick(&root, project, "g-test").unwrap_err();
+        assert!(notice.to_string().contains("invalid_graph"), "{notice}");
+        assert!(
+            notice.to_string().contains("provenant stop -- g-test"),
+            "{notice}"
+        );
+        assert!(
+            FileJournal::read_checkpoint_for_tick(&root, project, "g-test")
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            FileJournal::retire_unreadable(
+                &root,
+                project,
+                "g-test",
+                budget,
+                &cancel,
+                &clock,
+                |_| Ok(())
+            )
+            .unwrap()
+        );
+        assert!(
+            FileJournal::read_checkpoint(&root, project, "g-test")
+                .unwrap()
+                .is_none()
+        );
+    }
+}
+
+// Spec: docs/specs/state.md#graph-checkpoints-cover-persisted-text
+#[test]
 fn tick_quarantines_a_disagreeing_expansion_pause_with_a_retire_step() {
     let temp = crate::test_support::tempdir().unwrap();
     std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();

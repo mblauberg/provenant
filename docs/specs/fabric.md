@@ -693,7 +693,7 @@ supplied plan digest. An active expansion pause and the graph pause must agree:
 a structural or stop pause yields any active expansion pause, a settled fallback
 refreshes the pause it consumed, and a disagreeing pair is quarantined once by
 the tick rather than saved again. Reporting and quarantine of checkpoints that are corrupt
-or that fail semantic validation are in
+or that fail plan reconstruction or semantic validation are in
 [state](state.md#graph-checkpoints-cover-persisted-text). Landing skips unusable
 review sources, keeps their graph identities in report warnings, and refuses only
 when no independent approval remains.
