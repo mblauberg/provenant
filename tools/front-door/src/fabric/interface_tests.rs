@@ -5403,3 +5403,103 @@ fn explain_uses_the_declared_adapter_for_an_uncanonicalised_model() -> Result {
     assert_eq!(rows[0]["sources"]["adapter"], "node field");
     Ok(())
 }
+
+#[test]
+// Spec: docs/specs/agent-native.md#34-consistent-verbs-and-flags
+fn launch_flags_reach_the_host_as_launch_layer_settings() -> Result {
+    let rig = crate::worktree_tests::repository()?;
+    let factory = factory(&rig)?;
+    let cancel = CancelToken::new();
+    let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
+    let launch = |extra: Value| -> Result<Value> {
+        let mut input = json!({
+            "op":"run", "template":"task", "brief":"Inspect the tree", "explain":true
+        });
+        input
+            .as_object_mut()
+            .ok_or("input object")?
+            .extend(extra.as_object().ok_or("flags object")?.clone());
+        Ok(factory.graph_document(input, budget, &cancel)?)
+    };
+    let layer = |receipt: &Value, key: &str| -> String {
+        receipt["launch_settings"][key]["source"]["layer"]
+            .as_str()
+            .unwrap_or("missing")
+            .to_owned()
+    };
+
+    let strict = launch(json!({"checks_mode":"strict"}))?;
+    assert_eq!(layer(&strict, "policy.default"), "launch", "{strict}");
+    assert_eq!(
+        strict["launch_settings"]["policy.default"]["value"],
+        "refuse"
+    );
+
+    let checks_off = launch(json!({"checks_mode":"off"}))?;
+    assert_eq!(
+        layer(&checks_off, "policy.default"),
+        "launch",
+        "{checks_off}"
+    );
+    assert_eq!(
+        checks_off["launch_settings"]["policy.default"]["value"],
+        "off"
+    );
+
+    let destination = launch(json!({"destination":"parent"}))?;
+    assert_eq!(
+        layer(&destination, "lanes.destination.write"),
+        "launch",
+        "{destination}"
+    );
+    assert_eq!(
+        destination["launch_settings"]["lanes.destination.write"]["value"],
+        "parent"
+    );
+
+    let sharing = launch(json!({"worktree_sharing":"refuse"}))?;
+    assert_eq!(
+        layer(&sharing, "lanes.worktree.sharing"),
+        "launch",
+        "{sharing}"
+    );
+    assert_eq!(
+        sharing["launch_settings"]["lanes.worktree.sharing"]["value"],
+        "refuse"
+    );
+
+    let isolated = launch(json!({"isolated":true, "sandbox":"on"}))?;
+    for key in [
+        "lanes.access",
+        "lanes.sandbox",
+        "policy.default",
+        "lanes.read_source",
+        "lanes.destination.write",
+        "lanes.worktree.sharing",
+    ] {
+        assert_eq!(layer(&isolated, key), "launch", "{key}: {isolated}");
+    }
+    assert_eq!(
+        isolated["launch_settings"]["lanes.access"]["value"],
+        "isolated"
+    );
+    assert_eq!(isolated["launch_settings"]["lanes.sandbox"]["value"], "on");
+    assert_eq!(
+        isolated["launch_settings"]["policy.default"]["value"],
+        "refuse"
+    );
+    assert_eq!(
+        isolated["launch_settings"]["lanes.destination.write"]["value"],
+        "new"
+    );
+    assert_eq!(
+        isolated["launch_settings"]["lanes.worktree.sharing"]["value"],
+        "refuse"
+    );
+    // `read_source` is pinned to the admitted HEAD, not re-read after admission.
+    assert_eq!(
+        isolated["launch_settings"]["lanes.read_source"]["value"],
+        isolated["read_source"]["commit"],
+    );
+    Ok(())
+}

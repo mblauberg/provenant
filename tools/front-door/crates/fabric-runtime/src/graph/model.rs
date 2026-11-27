@@ -583,6 +583,22 @@ pub struct AttemptSpec {
     /// Omitted inherits the run's and the host's `lanes.pr` setting.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pr: Option<String>,
+    /// Read source pinned by `--isolated`, carried as `lanes.read_source` so
+    /// the sealed profile records it at the launch layer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read_source: Option<String>,
+    /// Writer destination from `--destination`, carried as
+    /// `lanes.destination.write` at the launch layer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub destination: Option<String>,
+    /// Worktree sharing from `--worktree-sharing`, carried as
+    /// `lanes.worktree.sharing` at the launch layer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree_sharing: Option<String>,
+    /// Check mode from `--checks`/`--strict`, carried as `policy.default` at
+    /// the launch layer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checks_mode: Option<String>,
     /// The launch layer of the layered brief preamble: a file path carried as
     /// the `lanes.brief_preamble` knob for this node, recorded with its source.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -634,6 +650,17 @@ pub struct AttemptSpec {
 /// The `light` preset: no private source view and no delivery receipt.
 pub const LIGHT_PRESET: &str = "light";
 
+/// The policy.default strength a launch check mode selects. `on` leaves the
+/// layered configuration alone, so it produces no override.
+fn checks_default(mode: &str) -> Option<&'static str> {
+    match provenant_records::policy::ChecksMode::from_checks(mode) {
+        Some(provenant_records::policy::ChecksMode::Warn) => Some("warn"),
+        Some(provenant_records::policy::ChecksMode::Strict) => Some("refuse"),
+        Some(provenant_records::policy::ChecksMode::Off) => Some("off"),
+        Some(provenant_records::policy::ChecksMode::On) | None => None,
+    }
+}
+
 impl AttemptSpec {
     /// The attempt as it may cross a host boundary.
     ///
@@ -664,6 +691,10 @@ impl AttemptSpec {
             build_heavy: self.build_heavy,
             ci_scope: self.ci_scope.clone(),
             pr: self.pr.clone(),
+            read_source: self.read_source.clone(),
+            destination: self.destination.clone(),
+            worktree_sharing: self.worktree_sharing.clone(),
+            checks_mode: self.checks_mode.clone(),
             preamble_file: self.preamble_file.clone(),
             preset: self.preset.clone(),
             isolation: self.isolation.clone(),
@@ -740,6 +771,18 @@ impl AttemptSpec {
         if let Some(policy) = &self.pr {
             knobs.push(format!("lanes.pr={policy}"));
         }
+        if let Some(source) = &self.read_source {
+            knobs.push(format!("lanes.read_source={source}"));
+        }
+        if let Some(destination) = &self.destination {
+            knobs.push(format!("lanes.destination.write={destination}"));
+        }
+        if let Some(sharing) = &self.worktree_sharing {
+            knobs.push(format!("lanes.worktree.sharing={sharing}"));
+        }
+        if let Some(strength) = self.checks_mode.as_deref().and_then(checks_default) {
+            knobs.push(format!("policy.default={strength}"));
+        }
         // The launch layer of the layered brief preamble. Carried as an
         // attempt input so it travels with the sealed graph and is recorded
         // with its source like any other launch knob.
@@ -775,6 +818,10 @@ impl AttemptSpec {
             && self.policy_overrides.is_empty()
             && self.ci_scope.is_none()
             && self.pr.is_none()
+            && self.read_source.is_none()
+            && self.destination.is_none()
+            && self.worktree_sharing.is_none()
+            && self.checks_mode.is_none()
             && self.preamble_file.is_none()
             && self.preset.is_none()
             && self.isolation.is_none()
