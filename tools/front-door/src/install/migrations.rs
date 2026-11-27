@@ -937,8 +937,8 @@ fn rewrite_toml_sources(table: &mut dyn toml_edit::TableLike) -> bool {
 }
 
 /// The batch 1 config transform. `lanes.isolation` becomes `lanes.read_source`
-/// (`shared` pins a checkout, `private` is dropped because destination rules
-/// replace it); `lanes.pr = never` set by the owner is deliberately kept.
+/// (`shared` becomes the live spelling, `private` is dropped because destination
+/// rules replace it); `lanes.pr = never` set by the owner is deliberately kept.
 fn rewrite_config_knobs(document: &mut toml_edit::DocumentMut) -> bool {
     let mut changed = false;
     if let Some(lanes) = document
@@ -952,7 +952,10 @@ fn rewrite_config_knobs(document: &mut toml_edit::DocumentMut) -> bool {
         match isolation.as_deref() {
             Some("shared") => {
                 lanes.remove("isolation");
-                lanes.insert("read_source", toml_edit::value("checkout"));
+                lanes.insert(
+                    "read_source",
+                    toml_edit::value(provenant_cli::run::ReadSource::Live.to_string()),
+                );
                 changed = true;
             }
             Some("private") => {
@@ -1309,6 +1312,48 @@ mod tests {
             }));
         }
         assert!(step.apply(root.path()).unwrap().changed.is_empty());
+    }
+
+    /// Batch 1 rewrites both base-format stores to the one live spelling and
+    /// the production reader accepts it; the catalogue default is that spelling.
+    #[test]
+    fn batch_one_read_source_rewrites_parse_as_live() {
+        use provenant_cli::run::ReadSource;
+
+        let live = ReadSource::Live.to_string();
+
+        // Base-format config carrying the sealed `lanes.isolation` knob.
+        let root = tempfile::tempdir().unwrap();
+        let config = root.path().join("config.toml");
+        std::fs::write(&config, "[lanes]\nisolation = \"shared\"\n").unwrap();
+        ConfigKnobRewrite.apply(root.path()).unwrap();
+        let text = std::fs::read_to_string(&config).unwrap();
+        let document: toml_edit::DocumentMut = text.parse().unwrap();
+        let rewritten = document["lanes"]["read_source"].as_str().unwrap();
+        assert_eq!(rewritten, live.as_str());
+        assert_eq!(ReadSource::parse(rewritten).unwrap(), ReadSource::Live);
+
+        // A v3 checkpoint with a sealed `lanes.isolation`, from the shared
+        // stored-checkpoint fixture.
+        let mut record: Value = serde_json::from_str(include_str!(
+            "../../crates/fabric-runtime/src/fixtures/graph-checkpoint.json"
+        ))
+        .unwrap();
+        record["schema_version"] = json!(3);
+        record["execution"]["lanes.isolation"] = json!("shared");
+        let migrated = provenant_fabric_runtime::graph::migrate(3, 4, record).unwrap();
+        let sealed = migrated["execution"]["lanes.read_source"].as_str().unwrap();
+        assert_eq!(sealed, live.as_str());
+        assert_eq!(ReadSource::parse(sealed).unwrap(), ReadSource::Live);
+
+        // The knob catalogue default round-trips through the same reader.
+        let catalogue: Value =
+            serde_json::from_str(include_str!("../../../../config/harness-knobs.json")).unwrap();
+        let default = catalogue["knobs"]["lanes.read_source"]["default"]
+            .as_str()
+            .unwrap();
+        assert_eq!(default, live.as_str());
+        assert_eq!(ReadSource::parse(default).unwrap(), ReadSource::Live);
     }
 
     /// A merge that keeps only one side's migration silently drops the other's
@@ -2010,9 +2055,10 @@ leaf_source = "dispatch"
         let document: toml_edit::DocumentMut = text.parse().expect("parse config");
         let lanes = document["lanes"].as_table_like().expect("lanes table");
         assert!(!lanes.contains_key("isolation"), "{text}");
+        let live = provenant_cli::run::ReadSource::Live.to_string();
         assert_eq!(
             lanes.get("read_source").and_then(toml_edit::Item::as_str),
-            Some("checkout")
+            Some(live.as_str())
         );
         assert_eq!(
             lanes.get("pr").and_then(toml_edit::Item::as_str),

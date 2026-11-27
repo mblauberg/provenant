@@ -8,9 +8,9 @@ use serde_json::{Value, json};
 use std::path::Path;
 
 /// The `--source` flag is the launch layer of `lanes.read_source`. A host or
-/// project knob supplies the value and the fetch-first flag; `auto` (including
-/// the compiled default) keeps the advisory pin of a checkout behind its
-/// fetched upstream.
+/// project knob supplies the value and the fetch-first flag; the resolver
+/// starts from the `live` default and `auto` keeps the advisory pin of a
+/// checkout behind its fetched upstream.
 pub(super) fn read_source_choice(
     input: &Value,
     config: &provenant_config::ResolvedConfig<provenant_cli::domains::Domains>,
@@ -50,7 +50,7 @@ pub(super) fn read_source_choice(
             ReadSource::Auto
         }
     };
-    let mut choice = ReadSourceChoice::automatic();
+    let mut choice = ReadSourceChoice::default();
     if let Some(knob) = config.knobs.get(ReadSourceChoice::KNOB) {
         let value = knob.value.as_str().unwrap_or_default();
         let origin = format!("config.toml#{}", ReadSourceChoice::KNOB);

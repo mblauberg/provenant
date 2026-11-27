@@ -2540,7 +2540,10 @@ pub fn migrate(
                 }
                 if let Some(isolation) = object.remove("lanes.isolation") {
                     if isolation.as_str() == Some("shared") {
-                        object.insert("lanes.read_source".into(), "checkout".into());
+                        object.insert(
+                            "lanes.read_source".into(),
+                            provenant_config::READ_SOURCE_LIVE.into(),
+                        );
                     } else if isolation.as_str() != Some("private") {
                         object.insert("lanes.isolation".into(), isolation);
                     }

@@ -300,9 +300,10 @@ fn command_error(fail: &Fail) -> CommandError {
     error
 }
 
-/// The pinned commit a read-only lane reads. Under the compiled default this is
-/// the fetched upstream head when the checkout is behind it, and the observed
-/// checkout HEAD otherwise. `checkout_head` is kept so a launch can name both the tree
+/// The pinned commit a read-only lane reads. The `live` default keeps the tree
+/// unpinned locally (and pins HEAD on a peer); under `auto` this is the fetched
+/// upstream head when the checkout is behind it, and the observed checkout HEAD
+/// otherwise. `checkout_head` is kept so a launch can name both the tree
 /// the checkout held at admission and the one the lane reads.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReadSourcePin {
@@ -343,7 +344,7 @@ impl std::fmt::Display for ReadSource {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Auto => f.write_str("auto"),
-            Self::Live => f.write_str("live"),
+            Self::Live => f.write_str(provenant_config::READ_SOURCE_LIVE),
             Self::DefaultBranch => f.write_str("default_branch"),
             Self::Ref(value) => f.write_str(value),
         }
@@ -362,7 +363,7 @@ pub struct ReadSourceChoice {
 impl Default for ReadSourceChoice {
     fn default() -> Self {
         Self {
-            source: ReadSource::Auto,
+            source: ReadSource::Live,
             fetch_first: false,
             layer: provenant_records::Layer::Default,
             origin: None,
@@ -371,10 +372,15 @@ impl Default for ReadSourceChoice {
 }
 
 impl ReadSourceChoice {
-    /// The compiled default: pin the fetched upstream when the checkout is
-    /// behind it, otherwise pin the checkout HEAD observed at admission.
+    /// The explicit auto policy: pin the fetched upstream when the checkout is
+    /// behind it, otherwise pin the checkout HEAD observed at admission. The
+    /// resolver's configured default is `live`; callers that need the advisory
+    /// pin ask for it by name here.
     pub fn automatic() -> Self {
-        Self::default()
+        Self {
+            source: ReadSource::Auto,
+            ..Self::default()
+        }
     }
 
     /// The knob named whenever this choice is reported.
@@ -398,9 +404,10 @@ impl ReadSourceChoice {
 }
 
 /// Resolve the source of a read-only launch through the one resolver. The
-/// compiled default pins the upstream when the checkout is behind it, and the
-/// checkout HEAD otherwise; an explicit choice pins its own commit. Missing Git
-/// evidence is advisory, never a refusal.
+/// configured default is `live`, which keeps the tree; under `auto` the upstream
+/// is pinned when the checkout is behind it, and the checkout HEAD otherwise.
+/// An explicit choice pins its own commit. Missing Git evidence is advisory,
+/// never a refusal.
 pub fn resolve_read_source(
     state: &Path,
     source: &Path,
@@ -453,8 +460,9 @@ pub fn read_only_source_warning(
 }
 
 /// The warning for a read-only launch that keeps the local checkout. Under the
-/// compiled default the observed HEAD itself is the pin, so a later commit
-/// cannot move it; the fetched upstream is only the reason it was stale.
+/// `auto` policy the observed HEAD itself is the pin, so a later commit cannot
+/// move it; the fetched upstream is only the reason it was stale. The `live`
+/// default keeps the tree and reports its commit on a peer.
 pub fn read_only_local_checkout_warning(source: &Path, selected: &ReadSourcePin) -> String {
     format!(
         "{} is {} commit{} behind {} ({}); read-only lane will read the local checkout ({}) because no upstream source was pinned",
@@ -2585,5 +2593,22 @@ mod read_source_spelling_tests {
         for value in ["", "checkout", "local", "upstream"] {
             assert!(ReadSource::parse(value).is_err());
         }
+    }
+
+    /// The catalogue default and the spelling shared by every writer are the
+    /// same live policy, and the reader accepts it.
+    #[test]
+    fn catalogue_default_and_writer_spelling_round_trip() {
+        assert_eq!(
+            ReadSource::Live.to_string(),
+            provenant_config::READ_SOURCE_LIVE
+        );
+        let catalogue: serde_json::Value =
+            serde_json::from_str(include_str!("../../../../../config/harness-knobs.json"))
+                .expect("knob catalogue");
+        let default = catalogue["knobs"]["lanes.read_source"]["default"]
+            .as_str()
+            .expect("read_source default");
+        assert_eq!(ReadSource::parse(default).unwrap(), ReadSource::Live);
     }
 }
