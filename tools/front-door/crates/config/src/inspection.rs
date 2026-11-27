@@ -595,7 +595,7 @@ mod explanation_tests {
         assert!(
             warnings
                 .iter()
-                .any(|warning| warning.code.as_str() == "SETTING_LAYER_IGNORED")
+                .any(|warning| warning.code == "SETTING_LAYER_IGNORED")
         );
         let winner = explained.winner.expect("host authority setting resolves");
         assert_eq!(winner.layer, Layer::Host);

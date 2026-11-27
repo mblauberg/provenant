@@ -2294,7 +2294,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let project = temp.path().join("project");
         fs::create_dir(&project).unwrap();
-        let run = |args: &[&str], cwd: &Path| {
+        let run = |args: &[&str], cwd: &std::path::Path| {
             let output = provenant_os::fixture::git_command_at(&git)
                 .current_dir(cwd)
                 .env("GIT_CONFIG_GLOBAL", "/dev/null")
@@ -2331,7 +2331,7 @@ mod tests {
         Some((temp, project, lane))
     }
 
-    fn stub_repo(project: &Path) -> VerifiedRepo {
+    fn stub_repo(project: &std::path::Path) -> VerifiedRepo {
         VerifiedRepo::open(project, |_| {
             Ok::<_, RepoError>(RepoProbeData::without_includes(
                 RepoObjectFormat::Sha1,

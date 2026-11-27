@@ -1468,6 +1468,7 @@ mod build_tests {
 #[cfg(test)]
 mod disk_limit_tests {
     use super::*;
+    use provenant_records::diagnostic::Layer;
     #[test]
     fn disk_levels_follow_the_declared_thresholds_and_keep_their_sources() -> std::io::Result<()> {
         let temp = tempfile::tempdir()?;

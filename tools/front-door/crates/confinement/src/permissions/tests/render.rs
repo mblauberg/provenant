@@ -7,7 +7,6 @@ use provenant_core::CancelToken;
 use provenant_os::exec::SystemExecutor;
 #[cfg(target_os = "macos")]
 use provenant_os::exec::{ExecOutcome, Executor, Termination};
-use provenant_records::Layer;
 #[cfg(any(target_os = "macos", feature = "snapshot"))]
 use provenant_records::policy::Policy;
 use provenant_records::{Layer, Source};
