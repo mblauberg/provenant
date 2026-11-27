@@ -5409,6 +5409,13 @@ impl BoundGraphOwner<'_> {
                     .state
                     .stop()
                     .map(|stop| stop.cause())
+                    // A model unavailability keeps its own fallback scope even
+                    // when a preparation failure was also recorded: the graph
+                    // outcome folds the two, so read the sealed projection.
+                    .or_else(|| {
+                        provenant_records::settlement::project::model_unavailable(&attempt.state)
+                            .then_some(provenant_records::StopCause::ModelUnavailable)
+                    })
                     .or_else(|| {
                         attempt.preparation_failure.map(|failure| match failure {
                             provenant_records::run::PreparationFailure::AuthRequired => {

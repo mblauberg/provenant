@@ -87,3 +87,44 @@ pub fn graph_outcome(record: &AttemptRecord) -> Option<GraphAttemptOutcome> {
         _ => GraphAttemptOutcome::OtherFailure,
     })
 }
+
+/// Whether a terminal record's real outcome is a model unavailability.
+///
+/// The graph outcome deliberately folds model and adapter unavailability into
+/// one code, so a consumer that needs the precise fallback cause reads this
+/// projection of the sealed record instead of guessing from that code. A
+/// model-unavailable stop gets its own `routing.pin` scope; an adapter stop
+/// does not.
+pub fn model_unavailable(state: &AttemptState) -> bool {
+    let AttemptState::Terminal { outcome, .. } = state else {
+        return false;
+    };
+    *outcome == Outcome::ModelUnavailable
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn terminal(outcome: Outcome) -> AttemptState {
+        AttemptState::Terminal {
+            extra: Default::default(),
+            cause: None,
+            terminal_note: None,
+            stop: None,
+            outcome,
+            exit_code: None,
+            finished_at: provenant_core::WallTime::from_micros(1).unwrap(),
+            reason: None,
+        }
+    }
+
+    #[test]
+    fn model_unavailable_is_read_from_the_sealed_outcome() {
+        assert!(model_unavailable(&terminal(Outcome::ModelUnavailable)));
+        assert!(!model_unavailable(&terminal(Outcome::Failed)));
+        assert!(!model_unavailable(&AttemptState::Queued {
+            extra: Default::default(),
+        }));
+    }
+}

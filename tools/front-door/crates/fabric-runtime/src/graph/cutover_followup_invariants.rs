@@ -295,6 +295,7 @@ fn depletion_keeps_the_pinned_account_and_refuses_a_higher_tier_candidate() {
             intent: Default::default(),
             confidential: false,
             now: provenant_core::WallTime::from_unix_seconds(100).unwrap(),
+            pin: provenant_routing::RoutePin::default(),
         };
         let eligible = |facts: &next_step::DepletionFacts| {
             provenant_routing::next_after_depletion(&provenant_routing::DepletionInput {

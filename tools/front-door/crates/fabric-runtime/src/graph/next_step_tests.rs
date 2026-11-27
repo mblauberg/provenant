@@ -491,6 +491,138 @@ fn a_depleted_writer_moves_to_a_new_route_at_once_in_its_worktree() {
     }
 }
 
+/// A model-unavailable stop falls back within `routing.pin` and records the
+/// `fallback{from,to,cause}` fact beside the ladder choice.
+#[test]
+fn model_unavailable_falls_back_and_records() {
+    use provenant_routing::{Readiness, ReadinessFact, RoutePin, Stopped};
+    let document = document("worktree_write", serde_json::Value::Null);
+    let plan = validate_flat_plan(&document, &Default::default())
+        .unwrap()
+        .0;
+    let node = &plan.nodes[0];
+    let model = "claude/claude-sonnet-5-5";
+    let progress: NodeProgress = serde_json::from_value(json!({
+        "id": "work",
+        "state": "failed",
+        "attempts": [{
+            "launched": true,
+            "key": {"graph_id":"g-pin","node_id":"work","attempt":1,"route_index":0},
+            "route": {"adapter":"claude","model":model,"tier":"senior"},
+            "state": "terminal",
+            "attempt_ref": "a/1",
+            "outcome": "adapter_unavailable",
+            "stop": "model_unavailable",
+            "launch_actor": "chair"
+        }]
+    }))
+    .unwrap();
+    let facts = DepletionFacts {
+        catalogue: provenant_routing::Catalogue::bundled().unwrap(),
+        config: Default::default(),
+        stopped: Stopped {
+            model: provenant_routing::ModelId::parse(model).unwrap(),
+            account: Some("spent".into()),
+            effort: None,
+            tier: Some("senior".into()),
+            family: Some("anthropic".into()),
+        },
+        readiness: vec![ReadinessFact {
+            model: provenant_routing::ModelId::parse(model).unwrap(),
+            account: Some("spare".into()),
+            state: Readiness::Ready,
+        }],
+        tried: Vec::new(),
+        host_native: Vec::new(),
+        exclusions: Vec::new(),
+        intent: Default::default(),
+        confidential: false,
+        now: provenant_core::WallTime::from_micros(1_000_000).unwrap(),
+        pin: RoutePin::Family,
+    };
+    let successor = next_step::depletion_successor(
+        node,
+        &progress,
+        StopCause::ModelUnavailable,
+        &mut move |_| -> Result<Option<DepletionFacts>, String> { Ok(Some(facts.clone())) },
+    );
+    let fallback = successor
+        .choice
+        .as_ref()
+        .and_then(|choice| choice.fallback.as_ref())
+        .expect("a model-unavailable hand-off records a fallback fact");
+    assert_eq!(fallback.from, model);
+    assert_eq!(fallback.to, format!("{model} (spare)"));
+    assert_eq!(fallback.cause, "model_unavailable");
+    assert!(
+        successor
+            .routes
+            .iter()
+            .any(|route| route.account.as_deref() == Some("spare")),
+        "the recorded hand-off is also the first launched route"
+    );
+}
+
+/// An `exact` pin refuses a model-unavailable fallback: the node fails with a
+/// stable code and a note naming `routing.pin`, and no fallback route launches.
+#[test]
+fn exact_pin_refusal_names_routing_pin() {
+    use provenant_routing::{Readiness, ReadinessFact, RoutePin, Stopped};
+    let document = document("worktree_write", serde_json::Value::Null);
+    let model = "claude/claude-sonnet-5-5";
+    let facts = DepletionFacts {
+        catalogue: provenant_routing::Catalogue::bundled().unwrap(),
+        config: Default::default(),
+        stopped: Stopped {
+            model: provenant_routing::ModelId::parse(model).unwrap(),
+            account: Some("spent".into()),
+            effort: None,
+            tier: Some("senior".into()),
+            family: Some("anthropic".into()),
+        },
+        readiness: vec![ReadinessFact {
+            model: provenant_routing::ModelId::parse(model).unwrap(),
+            account: Some("spare".into()),
+            state: Readiness::Ready,
+        }],
+        tried: Vec::new(),
+        host_native: Vec::new(),
+        exclusions: Vec::new(),
+        intent: Default::default(),
+        confidential: false,
+        now: provenant_core::WallTime::from_micros(1_000_000).unwrap(),
+        pin: RoutePin::Exact,
+    };
+    let mut owner = Owner {
+        observations: [terminal(
+            "a/1",
+            GraphAttemptOutcome::OtherFailure,
+            Some(StopCause::ModelUnavailable),
+            None,
+        )]
+        .into(),
+        facts: Some(facts),
+        ..Default::default()
+    };
+    let mut journal = journal(&document);
+    let run = advance(&document, &mut owner, &mut journal).unwrap();
+    let progress = &run.checkpoint.nodes[0];
+    assert_eq!(progress.state, NodeState::Failed);
+    assert_eq!(progress.advance_code.as_deref(), Some("routing_pin_exact"));
+    assert!(
+        progress
+            .advance_note
+            .as_deref()
+            .is_some_and(|note| note.contains("routing.pin")),
+        "{:?}",
+        progress.advance_note
+    );
+    assert!(
+        owner.routes.len() <= 1,
+        "an exact pin must not launch a fallback route"
+    );
+}
+
 #[test]
 fn a_writer_that_lost_its_lane_token_continues_from_its_handoff_on_a_new_route() {
     let document = document("worktree_write", serde_json::Value::Null);
@@ -672,6 +804,7 @@ fn ladder_facts() -> DepletionFacts {
         intent: Default::default(),
         confidential: false,
         now: provenant_core::WallTime::from_micros(1_000_000).unwrap(),
+        pin: provenant_routing::RoutePin::default(),
     }
 }
 
