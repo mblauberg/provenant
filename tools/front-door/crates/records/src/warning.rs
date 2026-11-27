@@ -437,6 +437,11 @@ pub const ADAPTER_CAPABILITIES_OVERLAY: WarningCode = WarningCode("ADAPTER_CAPAB
 /// A declaration succeeded but its journal is nearly full. The claim still
 /// succeeds; the named setting is the one to raise.
 pub const DECLARATION_JOURNAL_NEAR_FULL: WarningCode = WarningCode("DECLARATION_JOURNAL_NEAR_FULL");
+/// The install target already matched the recorded receipt, so no files were
+/// written and the caller proceeded straight to verification.
+pub const UPGRADE_ALREADY_INSTALLED: WarningCode = WarningCode("UPGRADE_ALREADY_INSTALLED");
+/// A verification scratch graph and worktree were kept under `upgrade --keep`.
+pub const SMOKE_GRAPH_RETAINED: WarningCode = WarningCode("SMOKE_GRAPH_RETAINED");
 
 /// Source label for an observed event whose producer has no narrower provenance.
 pub fn detected_source(code: WarningCode) -> Source {

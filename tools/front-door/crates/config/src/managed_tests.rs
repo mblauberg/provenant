@@ -4740,3 +4740,58 @@ fn install_leaves_codex_config_alone() {
     assert!(!f.home.join(".codex/config.toml").exists());
     assert!(f.link().is_symlink());
 }
+
+#[test]
+fn unchanged_install_target_is_detected_from_the_receipt() {
+    use provenant_records::{AbsolutePath, FileDigest, InstallReceipt, SourceDigest};
+
+    let target = InstallReceipt {
+        extra: Default::default(),
+        schema_version: provenant_records::INSTALL_RECEIPT_SCHEMA_VERSION,
+        state_format_version: provenant_records::STATE_FORMAT_VERSION,
+        live_record_format: None,
+        source_digest: SourceDigest::from_bytes([1; 32]),
+        manifest_digest: FileDigest::from_bytes([2; 32]),
+        asset_digest: SourceDigest::from_bytes([3; 32]),
+        target: "fixture".into(),
+        toolchain: "fixture".into(),
+        bin_dir: AbsolutePath::new(&PathBuf::from("/bin")).unwrap(),
+        harnesses: Vec::new(),
+        harness_targets: Vec::new(),
+        entries: Vec::new(),
+        migrations: Vec::new(),
+    };
+    let mut same = target.clone();
+    same.migrations.push("later-step".into());
+    assert!(
+        super::same_install_target(&target, &same),
+        "a different migration log does not change the installed target"
+    );
+    let mut moved_head = target.clone();
+    moved_head.source_digest = SourceDigest::from_bytes([9; 32]);
+    assert!(!super::same_install_target(&target, &moved_head));
+    let mut moved_asset = target.clone();
+    moved_asset.asset_digest = SourceDigest::from_bytes([8; 32]);
+    assert!(!super::same_install_target(&target, &moved_asset));
+}
+
+#[test]
+fn install_lock_holder_is_published_and_removed_with_the_lock() {
+    let temp = tempfile::tempdir().unwrap();
+    let install = temp.path().join("install");
+    fs::create_dir(&install).unwrap();
+    let guard = super::publish_install_lock_holder(&install);
+    let detail = super::install_lock_holder_detail(&install);
+    assert!(
+        detail.contains(&format!("pid {}", std::process::id())),
+        "{detail}"
+    );
+    assert!(detail.contains("started "), "{detail}");
+    assert!(detail.contains("version "), "{detail}");
+    drop(guard);
+    assert!(!super::install_lock_holder_path(&install).exists());
+    assert_eq!(
+        super::install_lock_holder_detail(&install),
+        "holder details unavailable"
+    );
+}
