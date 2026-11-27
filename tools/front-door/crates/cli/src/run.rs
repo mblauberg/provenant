@@ -2001,7 +2001,6 @@ fn safe_cause(error: &run::RunError) -> Option<String> {
             | E::AttemptReservationRetained
             | E::Validation(_)
             | E::InvalidTaskTitle(_)
-            | E::WriterLineage(_)
             | E::WriterHeadNotLaneBranch
             | E::WriterSourceMismatch { .. }
             | E::ReviewAcceptanceRequired

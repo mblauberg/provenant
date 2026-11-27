@@ -1010,7 +1010,6 @@ impl From<&RunError> for ErrorKind {
             RunError::Validation(_)
             | RunError::InvalidSealedRemote(_)
             | RunError::Handoff(_)
-            | RunError::WriterLineage(_)
             | RunError::WriterHeadNotLaneBranch
             | RunError::WriterSourceMismatch { .. }
             | RunError::ReviewAcceptanceRequired

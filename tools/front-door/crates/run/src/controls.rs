@@ -3624,6 +3624,11 @@ impl RunStore {
     }
     /// Called after writer custody is acquired. Graph retries are separate runs,
     /// so their sealed predecessor must be checked independently of `retry_of`.
+    ///
+    /// Custody is a lease: a terminal predecessor's lease lapses and any lane
+    /// may continue it, while a live predecessor is admitted by the shared
+    /// writer rule. A head that moved on from the pin re-pins with a warning;
+    /// only an unreadable or foreign lineage is a typed operation error.
     pub(crate) fn check_launch_writer_lineage(
         &self,
         record: &AttemptRecord,
@@ -3639,9 +3644,9 @@ impl RunStore {
                 != record.retry_of
         {
             // Manual continuations without a graph predecessor follow the
-            // immediate run's owner chain. Graph continuations also recheck
-            // their sealed source and head below.
-            return self.check_writer_lineage(record, tree, call).map(|_| ());
+            // immediate run's owner chain.
+            self.check_writer_lineage(record, tree, call)?;
+            return Ok(());
         }
         let Some(context) = task.context.as_ref() else {
             return Ok(());
@@ -3649,34 +3654,12 @@ impl RunStore {
         let Some(prior) = context.writer_predecessor else {
             return Ok(());
         };
+        // An unreadable predecessor record is a typed operation error, never
+        // an authority refusal.
         let previous = self.record(prior, call)?;
-        if !matches!(previous.state, AttemptState::Terminal { .. })
-            || !self.custody_released(&previous, call)?
-        {
-            return Err(RunError::Nonterminal);
-        }
-        let previous_context = previous.context.as_ref();
-        let same_node = context.graph_id.is_some()
-            && context.node_id.is_some()
-            && previous_context.is_some_and(|previous| {
-                previous.graph_id == context.graph_id && previous.node_id == context.node_id
-            });
-        // A new graph can adopt a retained writer worktree whose lane owner
-        // belongs to a finished attempt in an earlier graph. It inherits the
-        // worktree and the writer's own commits, not the earlier graph's source
-        // and head pins: those describe the old graph, not the adopted tree.
-        // Writer identity, terminal custody and the lane-owner chain below stay
-        // authoritative; ordinary same-node retries keep their pin check.
-        let adopted_prior_graph = context.graph_id.is_some()
-            && context.node_id.is_some()
-            && previous_context.is_some_and(|previous| {
-                previous.graph_id.is_some()
-                    && previous.node_id.is_some()
-                    && previous.graph_id != context.graph_id
-            });
-        if !same_node && !adopted_prior_graph {
-            return Err(RunError::WriterLineage("graph predecessor context"));
-        }
+        // Take the lease for the launching attempt, not the predecessor: the
+        // handover fact is sealed in the successor's record.
+        let owner = self.check_writer_lineage(record, tree, call)?;
         let request = self.request(previous.attempt_id, call)?;
         let previous_task = request.task;
         let source = previous_task
@@ -3687,48 +3670,151 @@ impl RunStore {
             .head
             .map(|head| head.to_string())
             .or_else(|| previous_task.head.clone());
-        let owner = self.check_writer_lineage(&previous, tree, call)?;
         if !task
             .writer
             .as_ref()
             .zip(previous_task.writer.as_ref())
             .is_some_and(|(writer, previous)| equivalent_writer(previous, writer))
-            || (!adopted_prior_graph
-                && (task.source_head.is_none()
-                    || task.source_head.as_ref() != source
-                    || task.head.is_none()))
         {
-            return Err(RunError::WriterLineage(
-                "graph predecessor writer or source",
-            ));
+            return Err(RunError::Validation("graph predecessor writer or source"));
         }
-        // A retained writer may commit after its predecessor was sealed. The
-        // continuation re-pins to that descendant under the verified custody of
-        // the same lane-owned writer; a moved head from anywhere else still
-        // fails this check. An adopted prior graph inherits the writer's own
-        // commits, not the earlier graph's pins, so it keeps its inherited head.
-        let head_matches = adopted_prior_graph
-            || task.head == head
-            || owner.is_some_and(|owner| {
-                owner.origin == provenant_confinement::worktrees::WorktreeOrigin::Lane
-            }) && head
+        // A new graph can adopt a retained writer worktree whose lane owner
+        // belongs to a finished attempt in an earlier graph. It inherits the
+        // worktree and the writer's own commits, not the earlier graph's source
+        // and head pins: those describe the old graph, not the adopted tree.
+        let adopted_prior_graph = context.graph_id.is_some()
+            && context.node_id.is_some()
+            && previous.context.as_ref().is_some_and(|previous| {
+                previous.graph_id.is_some()
+                    && previous.node_id.is_some()
+                    && previous.graph_id != context.graph_id
+            });
+        if adopted_prior_graph {
+            return Ok(());
+        }
+        if task.source_head.is_none()
+            || source.is_some_and(|source| task.source_head.as_deref() != Some(source.as_str()))
+        {
+            return Err(RunError::Validation("graph predecessor writer or source"));
+        }
+        let (Some(pinned), Some(current)) = (
+            head.as_deref()
+                .and_then(|head| provenant_core::GitOid::parse(head).ok()),
+            task.head
                 .as_deref()
-                .and_then(|pinned| provenant_core::GitOid::parse(pinned).ok())
-                .zip(
-                    task.head
-                        .as_deref()
-                        .and_then(|current| provenant_core::GitOid::parse(current).ok()),
-                )
-                .is_some_and(|(pinned, current)| {
-                    Self::repinned_head_descends(tree, pinned, current)
-                });
-        if !head_matches {
-            return Err(RunError::WriterLineage(
-                "graph predecessor writer or source",
-            ));
+                .and_then(|head| provenant_core::GitOid::parse(head).ok()),
+        ) else {
+            return Err(RunError::Validation("graph predecessor writer or source"));
+        };
+        if current == pinned {
+            return Ok(());
         }
+        // A head that moved on from the pin is not destruction: the successor
+        // re-pins to the current head and reports WRITER_HEAD_MOVED. Only a
+        // foreign lineage stays a typed operation error.
+        let lane_owned = owner.is_some_and(|owner| {
+            owner.origin == provenant_confinement::worktrees::WorktreeOrigin::Lane
+        });
+        if !lane_owned || !Self::repinned_head_descends(tree, pinned, current) {
+            return Err(RunError::Validation("graph predecessor writer or source"));
+        }
+        Self::warn_head_moved(&previous, pinned, current);
         Ok(())
     }
+    /// A lease holder's attempt state, named for the handover and sharing
+    /// notices. A terminal holder has a lapsed lease; every other state is live.
+    fn lease_holder_state(state: &AttemptState) -> String {
+        match state {
+            AttemptState::Terminal { outcome, .. } => format!("terminal ({outcome:?})"),
+            AttemptState::Queued { .. } => "queued".to_owned(),
+            AttemptState::Starting { .. } => "starting".to_owned(),
+            AttemptState::Running { .. } => "running".to_owned(),
+            AttemptState::Settling { .. } => "settling".to_owned(),
+        }
+    }
+
+    /// Build a typed warning for a lease event. The code is one of the declared
+    /// custody codes and the subject names the lane whose lease changed.
+    fn lease_warning(code: &'static str, message: String, holder: AttemptId) -> Warning {
+        Warning::new(
+            provenant_records::warning::WarningCode(code),
+            message,
+            provenant_records::Source {
+                layer: provenant_records::Layer::Default,
+                origin: Some("run store writer lease".to_owned()),
+            },
+        )
+        .subject(holder.to_string())
+    }
+
+    /// Report `WRITER_HEAD_MOVED` for a continuation whose predecessor head
+    /// moved forward. The re-pin itself keeps the original source pin; only the
+    /// head pin is advanced to the current descendant.
+    fn warn_head_moved(previous: &AttemptRecord, pinned: GitOid, current: GitOid) {
+        warning::warn(Self::lease_warning(
+            provenant_records::policy::WRITER_HEAD_MOVED,
+            format!(
+                "WRITER_HEAD_MOVED: predecessor {} moved from {pinned} to {current}; re-pinned to the current head",
+                previous.attempt_id
+            ),
+            previous.attempt_id,
+        ));
+    }
+
+    /// Take a lapsed lease. The prior lane's uncommitted files stay in place,
+    /// are named in the notice and are sealed as a durable `Handover` fact in
+    /// the successor's attempt directory. Replay is idempotent: one fact per
+    /// successor, so a re-check never duplicates the notice.
+    fn take_lapsed_lease(
+        &self,
+        record: &AttemptRecord,
+        holder: &AttemptRecord,
+        tree: &provenant_confinement::VerifiedWorktree,
+        call: &Request<'_>,
+    ) -> Result<()> {
+        let attempt = self.attempt_dir(record.attempt_id, false)?;
+        if crate::writer::read_handover(&attempt)?.is_some() {
+            return Ok(());
+        }
+        let head = holder.head.or_else(|| {
+            self.request(holder.attempt_id, call)
+                .ok()
+                .and_then(|request| request.task.head.clone())
+                .and_then(|head| provenant_core::GitOid::parse(&head).ok())
+        });
+        let uncommitted = crate::writer::uncommitted_worktree_paths(tree)?;
+        let handover = provenant_records::custody::Handover {
+            from: holder.attempt_id,
+            to: record.attempt_id,
+            at: call.clock.wall_now()?,
+            head,
+            uncommitted: uncommitted.clone(),
+        };
+        crate::writer::seal_handover(&attempt, &handover)?;
+        let files = if uncommitted.is_empty() {
+            "none".to_owned()
+        } else {
+            uncommitted.join(", ")
+        };
+        warning::warn(Self::lease_warning(
+            provenant_records::policy::WRITER_HANDOVER,
+            format!(
+                "WRITER_HANDOVER: lane {} ({}) left {} with head {}; uncommitted files kept in place: {files}",
+                holder.attempt_id,
+                Self::lease_holder_state(&holder.state),
+                tree.repo().root_path().display(),
+                head.map_or_else(|| "unknown".to_owned(), |head| head.to_string()),
+            ),
+            holder.attempt_id,
+        ));
+        Ok(())
+    }
+
+    /// Check that a continuation can take a worktree's lease. Custody is a
+    /// lease derived from the holder's attempt state: a terminal holder's
+    /// lease lapses and any lane may continue it with `WRITER_HANDOVER`; a live
+    /// holder is admitted by the shared-writer rule. Ownership alone never
+    /// refuses, and a lapsed holder's uncommitted files are kept in place.
     pub(crate) fn check_writer_lineage(
         &self,
         record: &AttemptRecord,
@@ -3737,82 +3823,80 @@ impl RunStore {
     ) -> Result<Option<provenant_confinement::worktrees::WorktreeOwner>> {
         use provenant_confinement::worktrees::{WorktreeOrigin, load_owner};
         let owner = load_owner(tree)?;
-        let lane = owner
+        let Some(lane) = owner
             .as_ref()
-            .filter(|owner| owner.origin == WorktreeOrigin::Lane);
+            .filter(|owner| owner.origin == WorktreeOrigin::Lane)
+            .cloned()
+        else {
+            // Explicit and adopted trees retain their existing lifecycle:
+            // there is no lane lease to hand over.
+            return Ok(owner);
+        };
+        // Walk the retry chain to find which attempt owns this tree. An
+        // unreadable record is a typed operation error, not an authority
+        // refusal.
         let mut current = record.clone();
         let mut seen = std::collections::HashSet::new();
-        let mut was_owned = false;
-        let mut initial_owner = None;
+        let mut holder = None;
         loop {
             if !seen.insert(current.attempt_id) || seen.len() > 128 {
-                return Err(RunError::WriterLineage("continuation parent chain"));
+                return Err(RunError::Validation("writer continuation chain is cyclic"));
             }
-            if lane.is_some_and(|owner| {
-                owner.attempt_id == Some(current.attempt_id)
-                    || self
-                        .attempt_operation(current.attempt_id, call)
-                        .is_ok_and(|operation| {
-                            owner.operation_id.as_ref() == Some(&operation.operation_id)
-                        })
-            }) {
-                let owner_id =
-                    lane.and_then(|owner| owner.attempt_id)
-                        .ok_or(RunError::WriterLineage(
-                            "continuation owner attempt missing",
-                        ))?;
-                if owner_id != record.attempt_id && !self.writer_owner_terminal(owner_id, call)? {
-                    return Err(RunError::Nonterminal);
-                }
-                return Ok(owner);
-            }
-            let directory = self.attempt_dir(current.attempt_id, false)?;
-            if let Some(raw) = read_sealed(&directory, "writer-owned.json", crate::RECORD_LIMIT)? {
-                // Recorded under custody before launch. A later owner removal or
-                // adoption cannot turn an owned lane into an explicit tree.
-                let ownership = crate::db::decode::<crate::writer::WriterOwnership>(&raw)?;
-                was_owned |= ownership.lane_owned;
-                if ownership.lane_owned
-                    && ownership
-                        .owner
-                        .as_ref()
-                        .is_some_and(|saved| Some(saved) == lane)
-                {
-                    let owner_id =
-                        lane.and_then(|owner| owner.attempt_id)
-                            .ok_or(RunError::WriterLineage(
-                                "continuation owner attempt missing",
-                            ))?;
-                    if !self.writer_owner_terminal(owner_id, call)? {
-                        return Err(RunError::Nonterminal);
-                    }
-                    return Ok(owner);
-                }
-                let snapshot = ownership;
-                was_owned |= snapshot.lane_owned;
-                if current.retry_of.is_none() {
-                    initial_owner = snapshot.owner;
-                }
+            if lane.attempt_id == Some(current.attempt_id)
+                || self
+                    .attempt_operation(current.attempt_id, call)
+                    .is_ok_and(|operation| {
+                        lane.operation_id.as_ref() == Some(&operation.operation_id)
+                    })
+            {
+                holder = Some(current);
+                break;
             }
             let Some(parent) = current.retry_of else {
                 break;
             };
             current = self.record(parent, call)?;
         }
-        if lane.is_some() && owner == initial_owner {
+        let Some(holder) = holder else {
+            // A different lane's lease on this tree. Live sharing is admitted
+            // at the worktree layer; ownership alone refuses nothing.
+            return Ok(owner);
+        };
+        if holder.attempt_id == record.attempt_id {
+            // Re-claiming one's own lease needs no handover.
             return Ok(owner);
         }
-        if lane.is_some() {
-            return Err(RunError::WriterLineage(
-                "continuation worktree belongs to another lane",
-            ));
+        if !matches!(holder.state, AttemptState::Terminal { .. }) {
+            let observation = provenant_records::custody::LeaseObservation {
+                lease: provenant_records::custody::WorktreeLease {
+                    holder: holder.attempt_id,
+                    since: holder.queued_at,
+                    sharing: provenant_records::custody::Sharing::Inherit,
+                },
+                state: provenant_records::custody::LeaseState::Live {
+                    attempt_state: Self::lease_holder_state(&holder.state),
+                },
+            };
+            let subject = provenant_records::custody::Subject::new(
+                provenant_records::custody::SubjectKind::Worktree,
+                tree.repo().root_path().display().to_string(),
+            );
+            if let provenant_records::custody::Admit::Proceed {
+                warning: Some(message),
+            } = provenant_records::custody::admit_writer(
+                &subject,
+                Some(&observation),
+                provenant_records::custody::Sharing::Warn,
+            ) {
+                warning::warn(Self::lease_warning(
+                    provenant_records::policy::WORKTREE_SHARED,
+                    message,
+                    holder.attempt_id,
+                ));
+            }
+            return Ok(owner);
         }
-        if was_owned {
-            return Err(RunError::WriterLineage(
-                "continuation worktree has no lane owner",
-            ));
-        }
-        // Explicit unowned and adopted trees retain their existing lifecycle.
+        self.take_lapsed_lease(record, &holder, tree, call)?;
         Ok(owner)
     }
     fn resume_mode(
