@@ -713,7 +713,7 @@ impl FileJournal {
     /// Archive a graph and its durable sidecars under the graph lock. The
     /// caller's finalizer parks queue ownership and releases external leases
     /// after the archive is durable but before the live checkpoint is cleared.
-    /// If finalization fails, the live graph remains byte-for-byte intact.
+    /// If finalisation fails, the live graph remains byte-for-byte intact.
     pub fn retire(
         root: &StateRoot,
         project: ProjectId,

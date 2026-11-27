@@ -176,7 +176,7 @@ fn json_value(item: &toml_edit::Item) -> Option<serde_json::Value> {
         toml_edit::Value::Float(value) => {
             serde_json::Number::from_f64(*value.value()).map(serde_json::Value::Number)
         }
-        toml_edit::Value::String(value) => Some(serde_json::Value::from(value.value())),
+        toml_edit::Value::String(value) => Some(serde_json::Value::from(value.value().as_str())),
         toml_edit::Value::Array(items) => items
             .iter()
             .map(|item| json_value(&toml_edit::Item::Value(item.clone())))
@@ -248,7 +248,7 @@ fn host_text(roots: &Roots) -> Result<Option<String>, ConfigError> {
 /// Read an optional project file through the no-follow boundary. An unreadable
 /// or absent policy file has no candidates; it never stops an explanation.
 fn project_text(project: Option<&Path>, name: &str) -> Option<String> {
-    let dir = provenant_os::fs::Directory::open_anchor(project?.join(".provenant")).ok()?;
+    let dir = provenant_os::fs::Directory::open_anchor(&project?.join(".provenant")).ok()?;
     let file = dir.open_read(std::ffi::OsStr::new(name)).ok()?;
     let mut bytes = Vec::new();
     file.take(1024 * 1024 + 1).read_to_end(&mut bytes).ok()?;
@@ -618,5 +618,39 @@ mod explanation_tests {
             }
             other => panic!("expected an unknown knob, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn string_knob_from_host_config_is_explained() {
+        let temp = tempfile::tempdir().unwrap();
+        let roots = roots(temp.path());
+        write_config(
+            temp.path(),
+            "schema_version = 1\nprofile = 'balanced'\n[knobs]\nredaction = 'secrets'\n",
+        );
+        let explained = explain("redaction", &roots, None).unwrap();
+        let winner = explained.winner.expect("a declared knob always resolves");
+        assert_eq!(winner.value, serde_json::json!("secrets"));
+        assert_eq!(winner.layer, Layer::Host);
+        assert_eq!(
+            winner.origin.as_deref(),
+            Some("config.toml#knobs.redaction")
+        );
+    }
+
+    #[test]
+    fn project_text_reads_policy_through_the_no_follow_anchor() {
+        let temp = tempfile::tempdir().unwrap();
+        let project = temp.path().join("project");
+        std::fs::create_dir(&project).unwrap();
+        std::fs::create_dir(project.join(".provenant")).unwrap();
+        let text = "[policy]\nPR_ATTEMPT_STATE = 'warn'\n";
+        std::fs::write(project.join(".provenant/policy.toml"), text).unwrap();
+        assert_eq!(
+            project_text(Some(&project), "policy.toml").as_deref(),
+            Some(text)
+        );
+        assert_eq!(project_text(Some(&project), "missing.toml"), None);
+        assert_eq!(project_text(None, "policy.toml"), None);
     }
 }

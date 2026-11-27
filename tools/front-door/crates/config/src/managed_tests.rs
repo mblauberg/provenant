@@ -4795,3 +4795,21 @@ fn install_lock_holder_is_published_and_removed_with_the_lock() {
         "holder details unavailable"
     );
 }
+
+#[test]
+fn unchanged_install_target_is_a_no_op_under_the_lock() {
+    let f = Fixture::new();
+    let plan = f.plan();
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let ctx = context(&clock, &cancel);
+    let first = install(&plan, &ctx, &mut Reporter::default(), &Smoke, false).unwrap();
+    assert!(!first.already_installed);
+    assert!(!first.actions.is_empty());
+    let second = install(&plan, &ctx, &mut Reporter::default(), &Smoke, false).unwrap();
+    assert!(
+        second.already_installed,
+        "an unchanged receipt under the install lock is a no-op"
+    );
+    assert!(second.actions.is_empty());
+}

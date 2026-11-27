@@ -84,7 +84,7 @@ fn stored_fixture() -> StoredCheckpoint {
 }
 
 #[test]
-fn graph_retirement_archives_prompt_blobs_before_finalization_and_clearing()
+fn graph_retirement_archives_prompt_blobs_before_finalisation_and_clearing()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
     let temp = crate::test_support::tempdir()?;
     std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700))?;

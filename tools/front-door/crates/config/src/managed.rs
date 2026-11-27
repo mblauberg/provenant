@@ -2137,7 +2137,6 @@ impl InstallFinding {
         self.rule == crate::NATIVE_CAPABILITY_UNAVAILABLE
     }
 }
-#[cfg(test)]
 pub(crate) fn read_receipt(targets: &Targets) -> Result<Option<InstallReceipt>, InstallError> {
     Ok(read_receipt_inspected(targets, None)?.map(|decoded| decoded.receipt))
 }
