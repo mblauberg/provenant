@@ -14,6 +14,19 @@ slow-timeout = { period = "10s", terminate-after = 3 }
 filter = 'package(=provenant) & binary(=graph_provider) & test(=graph_writer_restarts_fresh)'
 slow-timeout = { period = "30s", terminate-after = 4 }
 
+# A quota redraw launches two providers and can spend 30 seconds in its graph
+# wait after setup. Let the fixture reach its assertions before the watchdog.
+[[profile.default.overrides]]
+filter = 'package(=provenant) & binary(=graph_provider) & (test(=named_route_writer_retries_quota_with_partial_work) | test(=named_route_read_only_retries_quota_with_partial_output))'
+slow-timeout = { period = "30s", terminate-after = 4 }
+
+# These multi-launch fixtures already generate concurrent process load. Reserve
+# the CI pool while they run, including the restart's three concurrent cases.
+[[profile.ci.overrides]]
+filter = 'package(=provenant) & binary(=graph_provider) & (test(=graph_writer_restarts_fresh) | test(=named_route_writer_retries_quota_with_partial_work) | test(=named_route_read_only_retries_quota_with_partial_output))'
+threads-required = "num-test-threads"
+slow-timeout = { period = "30s", terminate-after = 4 }
+
 [profile.ci.junit]
 path = "junit.xml"
 
