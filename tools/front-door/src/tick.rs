@@ -850,9 +850,9 @@ fn tick(
         let value = knob(&format!("domains.tick.tasks.{task}.budget_seconds"))
             .and_then(|value| value.as_u64())
             .unwrap_or(seconds);
-        DurationMicros::from_seconds(value).unwrap_or_else(|_| {
-            DurationMicros::from_seconds(seconds).expect("a valid default budget")
-        })
+        DurationMicros::from_seconds(value).unwrap_or(DurationMicros::from_micros(
+            seconds.saturating_mul(1_000_000),
+        ))
     };
     let concurrency = knob("domains.tick.concurrency")
         .and_then(|value| value.as_u64())
@@ -897,7 +897,15 @@ fn tick(
                 };
                 let error = (!report.errors.is_empty()).then(|| report.errors.join("; "));
                 let warnings = report.warnings.len();
-                *graphs_out.lock().unwrap() = report;
+                match graphs_out.lock() {
+                    Ok(mut output) => *output = report,
+                    Err(_) => {
+                        return result_from_task(
+                            Task::failed("graphs", "graph output lock poisoned".into()),
+                            ctx.wall,
+                        );
+                    }
+                }
                 let mut result = result_from_task(Task::reported("graphs", state, None), ctx.wall);
                 result.error = error;
                 if warnings > 0 {
@@ -997,7 +1005,7 @@ fn tick(
         &clock,
         now,
         &holder,
-    );
+    )?;
     let task_rows: Vec<Task> = outcomes
         .into_iter()
         .map(|outcome| Task {
@@ -1007,7 +1015,7 @@ fn tick(
             diagnostic: outcome.result.diagnostic,
         })
         .collect();
-    let graphs = std::mem::take(&mut *graphs.lock().expect("the graph output lock is intact"));
+    let graphs = std::mem::take(&mut *graphs.lock().map_err(|_| "graph output lock poisoned")?);
     Ok(Tick {
         graphs,
         tasks: task_rows,

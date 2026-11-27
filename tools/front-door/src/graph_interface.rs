@@ -958,7 +958,7 @@ pub(crate) fn run(
                 total,
                 provenant_cli::bounded_text(&brief, provenant_cli::limits::SUMMARY_ROW_BYTES)
             );
-            let _ = std::io::stdout().lock().write_all(header.as_bytes());
+            let _ = crate::output::write_header(&header);
             let input = match catalogue.as_ref() {
                 Ok(cat) => run_input(one, cat, globals),
                 Err(error) => Err(error.clone()),
@@ -1206,9 +1206,9 @@ fn run_input(
         for (field, value) in [
             (
                 "host",
-                request.common.host.first().and_then(|host| match host {
-                    provenant_cli::HostArg::All => Some("all".to_owned()),
-                    provenant_cli::HostArg::Named(name) => Some(name.clone()),
+                request.common.host.first().map(|host| match host {
+                    provenant_cli::HostArg::All => "all".to_owned(),
+                    provenant_cli::HostArg::Named(name) => name.clone(),
                 }),
             ),
             ("model", model),

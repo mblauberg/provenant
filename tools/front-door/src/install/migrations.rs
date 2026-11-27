@@ -846,13 +846,12 @@ fn held_store_locks(state_root: &Path) -> Vec<String> {
     let queue_lock = crate::fabric::queue_registry::registry_lock_path(state_root);
     if let (Some(parent), Some(name)) = (queue_lock.parent(), queue_lock.file_name())
         && let Ok(directory) = Directory::open_anchor(parent)
-    {
-        if matches!(
+        && matches!(
             directory.try_flock_foreign(name, LockMode::Exclusive),
             Ok(ForeignLock::Held)
-        ) {
-            held.push("queue registry.lock".to_owned());
-        }
+        )
+    {
+        held.push("queue registry.lock".to_owned());
     }
     if let Ok(attempts) = std::fs::read_dir(state_root.join("attempts")) {
         for attempt in attempts.flatten() {
@@ -921,11 +920,8 @@ fn rewrite_toml_sources(table: &mut dyn toml_edit::TableLike) -> bool {
         };
         let is_source = name == "source" || name.ends_with("_source");
         if let Some(value) = item.as_value_mut() {
-            if is_source && value.as_str().and_then(old_source_replacement).is_some() {
-                let replacement = value
-                    .as_str()
-                    .and_then(old_source_replacement)
-                    .expect("checked above");
+            if is_source && let Some(replacement) = value.as_str().and_then(old_source_replacement)
+            {
                 *value = toml_edit::Value::from(replacement);
                 changed = true;
             }

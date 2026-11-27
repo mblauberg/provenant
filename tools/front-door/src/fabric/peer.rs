@@ -68,7 +68,19 @@ fn peer_read_only(action: &PeerAction) -> bool {
         | PeerAction::ConsoleInbox { .. }
         | PeerAction::Doctor { .. }
         | PeerAction::Receipt { .. } => true,
-        PeerAction::Gc { .. } => false,
+        PeerAction::HostRead {
+            input:
+                provenant_fabric_runtime::hosts::HostReadInput::Events {
+                    consumer: Some(_), ..
+                },
+            ..
+        }
+        | PeerAction::HostRead {
+            input: provenant_fabric_runtime::hosts::HostReadInput::EventsAck { .. },
+            ..
+        }
+        | PeerAction::Gc { .. } => false,
+        PeerAction::HostRead { .. } => true,
         PeerAction::CancelSubmission { stop, .. } => !stop,
         PeerAction::Inbox {
             input:
@@ -1381,9 +1393,13 @@ pub fn peer(
                 pressure,
                 free_floor,
                 idle,
+                finished_branch,
+                full,
+                detailed,
+                timeout_seconds,
                 ..
             } => peer_result(
-                (|| -> Result<serde_json::Value, FacadeError> {
+                {
                     let command = provenant_cli::Gc {
                         common: provenant_cli::CommonArgs::default(),
                         scheduled: *scheduled,
@@ -1391,28 +1407,56 @@ pub fn peer(
                         free_floor: *free_floor,
                         dry_run: *dry_run,
                         apply: *apply,
-                        finished_branch: None,
+                        finished_branch: finished_branch.clone(),
                         idle: *idle,
                     };
                     let globals = provenant_cli::Globals {
-                        json: true,
-                        full: false,
+                        json: *detailed,
+                        full: *full,
                         state_dir: Some(peer_factory.context.roots.state.as_path().to_owned()),
                         project: Some(cwd.clone()),
                     };
-                    crate::worktrees::gc_for_peer(&command, &globals, workers).map_err(|reason| {
-                        FacadeError::DispatchRefused {
-                            reason,
-                            disk: None,
-                            fact: None,
-                        }
-                    })
-                })(),
-                |data| PeerResult::Gc {
-                    data,
+                    crate::worktrees::gc_for_peer(
+                        &command,
+                        &globals,
+                        workers,
+                        Some(*timeout_seconds),
+                    )
+                    .map_err(|reason| FacadeError::io(format!("serialize gc result: {reason}")))
+                },
+                |result| PeerResult::Gc {
+                    result: Box::new(result),
                     extra: Default::default(),
                 },
             ),
+            PeerAction::HostRead { input, .. } => {
+                let full = match input {
+                    provenant_fabric_runtime::hosts::HostReadInput::Status { full, .. }
+                    | provenant_fabric_runtime::hosts::HostReadInput::Output { full, .. }
+                    | provenant_fabric_runtime::hosts::HostReadInput::Result { full, .. } => *full,
+                    provenant_fabric_runtime::hosts::HostReadInput::Events { .. }
+                    | provenant_fabric_runtime::hosts::HostReadInput::EventsAck { .. } => false,
+                };
+                let globals = provenant_cli::Globals {
+                    json: true,
+                    full,
+                    state_dir: Some(peer_factory.context.roots.state.as_path().to_owned()),
+                    project: Some(cwd.clone()),
+                };
+                match super::host_read::execute(input, &globals, workers) {
+                    Ok(result) => PeerResult::HostRead {
+                        result: Box::new(result),
+                        extra: Default::default(),
+                    },
+                    Err(error) => PeerResult::Error {
+                        data: provenant_fabric_runtime::hosts::PeerResultError {
+                            extra: Default::default(),
+                            error: FacadeError::io(format!("read host data: {error}")),
+                        },
+                        extra: Default::default(),
+                    },
+                }
+            }
             PeerAction::Coordination {
                 input,
                 operation_id,
@@ -2347,6 +2391,80 @@ pub(super) fn peer_retained_receipt(
     .transpose()
 }
 
+/// One selected destination for a host-scoped read. `host: None` is this
+/// process; peer destinations carry their fixed host identity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostTarget {
+    pub name: String,
+    pub host: Option<provenant_core::HostId>,
+}
+
+/// Resolve the repeatable common host selection once for every read verb.
+/// Aliases that name the same peer collapse to one host, and `all` includes
+/// the caller before every configured peer.
+pub fn selected_hosts(
+    local: provenant_core::HostId,
+    peers: &provenant_fabric_runtime::config::FabricConfig,
+    selection: &provenant_cli::HostSelection,
+) -> Result<Vec<HostTarget>, String> {
+    let mut hosts = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+    let mut add = |name: String, host: Option<provenant_core::HostId>| {
+        let key = host.unwrap_or(local);
+        if seen.insert(key) {
+            hosts.push(HostTarget { name, host });
+        }
+    };
+    match selection {
+        provenant_cli::HostSelection::Local => add(local.to_string(), None),
+        provenant_cli::HostSelection::Named(name) => {
+            resolve_host(name, local, peers, &mut add)?;
+        }
+        provenant_cli::HostSelection::Many(names) => {
+            for name in names {
+                resolve_host(name, local, peers, &mut add)?;
+            }
+        }
+        provenant_cli::HostSelection::All => {
+            add(local.to_string(), None);
+            for (name, peer) in &peers.peers {
+                add(name.clone(), Some(peer.host));
+            }
+        }
+    }
+    hosts.sort_by(|left, right| {
+        (left.host.is_some(), &left.name).cmp(&(right.host.is_some(), &right.name))
+    });
+    Ok(hosts)
+}
+
+fn resolve_host(
+    name: &str,
+    local: provenant_core::HostId,
+    peers: &provenant_fabric_runtime::config::FabricConfig,
+    add: &mut impl FnMut(String, Option<provenant_core::HostId>),
+) -> Result<(), String> {
+    if name == "local" || name == local.to_string() {
+        add(local.to_string(), None);
+        return Ok(());
+    }
+    let host = peers
+        .peers
+        .get(name)
+        .map(|peer| peer.host)
+        .or_else(|| {
+            let parsed = name.parse::<provenant_core::HostId>().ok()?;
+            peers
+                .peers
+                .values()
+                .any(|peer| peer.host == parsed)
+                .then_some(parsed)
+        })
+        .ok_or_else(|| format!("unknown peer host {name}"))?;
+    add(name.to_owned(), Some(host));
+    Ok(())
+}
+
 /// One host's contribution to a `--host all` fan-out.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct HostReading {
@@ -2367,51 +2485,132 @@ pub struct HostAggregate {
 }
 
 /// One host's request outcome before it is folded into the envelope.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum HostResult {
     Ok(serde_json::Value),
+    /// A peer answered with the command's own typed outcome.
+    Command {
+        status: provenant_records::Outcome,
+        data: serde_json::Value,
+        error: Option<String>,
+        warnings: Vec<provenant_records::warning::Warning>,
+        next: Vec<provenant_records::command_result::NextStep>,
+    },
     Unreachable,
+    /// This host delivered earlier pages before a later page became unreachable.
+    PartialUnreachable {
+        data: serde_json::Value,
+        error: String,
+    },
     Failed(String),
 }
 
 /// Classify a transport failure. Only a refusal or a malformed frame is a
 /// host error; every "could not reach the peer" cause is unreachability.
-pub fn host_result_from_peer(result: Result<serde_json::Value, PeerError>) -> HostResult {
+pub fn host_result_from_peer(
+    result: Result<serde_json::Value, provenant_cli::fabric::PeerFailure>,
+) -> HostResult {
     match result {
         Ok(value) => HostResult::Ok(value),
-        Err(error) => match error {
-            PeerError::Unavailable
-            | PeerError::Failed(_)
-            | PeerError::Deadline
-            | PeerError::Version
-            | PeerError::ProtocolMismatch { .. }
-            | PeerError::SourceHost => HostResult::Unreachable,
-            PeerError::Refused { error } => HostResult::Failed(error.to_string()),
-            other => HostResult::Failed(other.to_string()),
-        },
+        Err(failure) => {
+            use provenant_fabric_runtime::coordination::facade::FacadeError;
+            match failure.error.as_ref() {
+                FacadeError::HomeUnavailable
+                | FacadeError::PeerVersion
+                | FacadeError::PeerProtocolMismatch { .. }
+                | FacadeError::Timeout => HostResult::Unreachable,
+                error => HostResult::Command {
+                    status: host_status_from_facade(error),
+                    data: serde_json::Value::Null,
+                    error: Some(failure.detail.unwrap_or_else(|| error.to_string())),
+                    warnings: Vec::new(),
+                    next: Vec::new(),
+                },
+            }
+        }
+    }
+}
+
+pub fn host_result_from_facade(
+    error: provenant_fabric_runtime::coordination::facade::FacadeError,
+) -> HostResult {
+    let status = host_status_from_facade(&error);
+    HostResult::Command {
+        status,
+        data: serde_json::Value::Null,
+        error: Some(error.to_string()),
+        warnings: Vec::new(),
+        next: Vec::new(),
+    }
+}
+
+fn host_status_from_facade(
+    error: &provenant_fabric_runtime::coordination::facade::FacadeError,
+) -> provenant_records::Outcome {
+    use provenant_fabric_runtime::coordination::facade::FacadeError;
+    match error {
+        FacadeError::InvalidInput { .. } | FacadeError::GraphRelayRefused { .. } => {
+            provenant_records::Outcome::Invalid
+        }
+        FacadeError::DispatchRefused { .. }
+        | FacadeError::ConfinementRefused { .. }
+        | FacadeError::LaneCoordinationRefused
+        | FacadeError::CredentialRoot { .. }
+        | FacadeError::UpgradeRefused => provenant_records::Outcome::Refused,
+        FacadeError::Timeout => provenant_records::Outcome::Timeout,
+        FacadeError::Cancelled => provenant_records::Outcome::Cancelled,
+        FacadeError::HomeUnavailable
+        | FacadeError::PeerVersion
+        | FacadeError::PeerProtocolMismatch { .. }
+        | FacadeError::Busy => provenant_records::Outcome::Unavailable,
+        _ => provenant_records::Outcome::Error,
     }
 }
 
 /// Compose one result per host into a single envelope. An unreachable peer
 /// adds `PEER_UNREACHABLE` and `partial: true` only when another host answered;
 /// an all-down fan-out stays a plain failure. The process status is the worst
-/// of the reachable readings, so a failing host still fails the command.
+/// of every per-host reading, so an unreachable host still exits unavailable.
 pub fn aggregate_host_readings(
     command: &str,
     readings: Vec<(String, HostResult)>,
 ) -> provenant_records::CommandResult<HostAggregate> {
     let mut hosts = Vec::with_capacity(readings.len());
     let mut unreachable = Vec::new();
-    let mut succeeded = false;
+    let mut answered = false;
+    let mut warnings = Vec::new();
+    let mut next = Vec::new();
     for (host, reading) in readings {
         match reading {
             HostResult::Ok(data) => {
-                succeeded = true;
+                answered = true;
                 hosts.push(HostReading {
                     host,
                     status: provenant_records::Outcome::Ok,
                     data: Some(data),
                     error: None,
+                });
+            }
+            HostResult::Command {
+                status,
+                data,
+                error,
+                warnings: mut host_warnings,
+                next: host_next,
+            } => {
+                answered = true;
+                for warning in &mut host_warnings {
+                    if warning.subject.is_none() {
+                        warning.subject = Some(host.clone());
+                    }
+                }
+                warnings.extend(host_warnings);
+                next.extend(host_next);
+                hosts.push(HostReading {
+                    host,
+                    status,
+                    data: Some(data),
+                    error,
                 });
             }
             HostResult::Unreachable => {
@@ -2423,29 +2622,33 @@ pub fn aggregate_host_readings(
                     error: Some(PEER_UNREACHABLE.as_str().to_owned()),
                 });
             }
-            HostResult::Failed(reason) => hosts.push(HostReading {
-                host,
-                status: provenant_records::Outcome::Error,
-                data: None,
-                error: Some(reason),
-            }),
+            HostResult::PartialUnreachable { data, error } => {
+                answered = true;
+                unreachable.push(host.clone());
+                hosts.push(HostReading {
+                    host,
+                    status: provenant_records::Outcome::Unavailable,
+                    data: Some(data),
+                    error: Some(error),
+                });
+            }
+            HostResult::Failed(reason) => {
+                answered = true;
+                hosts.push(HostReading {
+                    host,
+                    status: provenant_records::Outcome::Error,
+                    data: None,
+                    error: Some(reason),
+                });
+            }
         }
     }
-    let partial = succeeded && !unreachable.is_empty();
-    let status = if partial {
-        hosts
-            .iter()
-            .filter(|reading| reading.status != provenant_records::Outcome::Unavailable)
-            .map(|reading| reading.status)
-            .max_by_key(|status| status.exit_code())
-            .unwrap_or(provenant_records::Outcome::Unavailable)
-    } else {
-        hosts
-            .iter()
-            .map(|reading| reading.status)
-            .max_by_key(|status| status.exit_code())
-            .unwrap_or(provenant_records::Outcome::Ok)
-    };
+    let partial = answered && !unreachable.is_empty();
+    let status = hosts
+        .iter()
+        .map(|reading| reading.status)
+        .max_by_key(|status| status.exit_code())
+        .unwrap_or(provenant_records::Outcome::Ok);
     let mut result =
         provenant_records::CommandResult::new(command, status, HostAggregate { hosts, partial });
     if partial {
@@ -2460,6 +2663,8 @@ pub fn aggregate_host_readings(
                 provenant_records::warning::detected_source(PEER_UNREACHABLE),
             ));
     }
+    result.warnings.extend(warnings);
+    result.next.extend(next);
     result
 }
 
@@ -2491,6 +2696,42 @@ pub fn emit_host_aggregate(
     let result = aggregate_host_readings(command, readings);
     let human = host_sections(&result.data);
     crate::emit(&result, globals, &human, true)
+}
+
+/// Emit a host aggregate and say whether its complete envelope reached stdout.
+/// Event pages request full human details so every acknowledged item is visible
+/// even when the caller did not pass `--full`.
+pub fn emit_host_aggregate_with_delivery(
+    command: &str,
+    readings: Vec<(String, HostResult)>,
+    globals: &provenant_cli::Globals,
+    full_human_details: bool,
+) -> (u8, bool) {
+    let result = aggregate_host_readings(command, readings);
+    let human = if full_human_details {
+        host_full_sections(&result.data)
+    } else {
+        host_sections(&result.data)
+    };
+    crate::output::emit_with_delivery(&result, globals, &human, true, full_human_details)
+}
+
+fn host_full_sections(aggregate: &HostAggregate) -> String {
+    aggregate
+        .hosts
+        .iter()
+        .map(|reading| {
+            let body = match (&reading.data, &reading.error) {
+                (Some(data), _) => {
+                    serde_json::to_string_pretty(data).unwrap_or_else(|_| data.to_string())
+                }
+                (None, Some(error)) => error.clone(),
+                (None, None) => String::new(),
+            };
+            format!("{}: {:?}\n{}", reading.host, reading.status, body)
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 #[cfg(test)]

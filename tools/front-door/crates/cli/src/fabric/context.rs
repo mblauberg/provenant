@@ -1232,20 +1232,32 @@ impl From<FacadeError> for PeerFailure {
 /// Read-only peer actions may be served from a mirrored snapshot. Everything
 /// that mutates state needs a locatable project on the peer.
 fn is_reader_action(action: &PeerAction) -> bool {
-    matches!(
-        action,
+    use provenant_fabric_runtime::hosts::HostReadInput;
+    match action {
+        PeerAction::HostRead {
+            input: HostReadInput::Events {
+                consumer: Some(_), ..
+            },
+            ..
+        } => false,
+        PeerAction::HostRead {
+            input: HostReadInput::EventsAck { .. },
+            ..
+        } => false,
+        PeerAction::HostRead { .. } => true,
         PeerAction::Health { .. }
-            | PeerAction::Doctor { .. }
-            | PeerAction::ConsoleBoard { .. }
-            | PeerAction::ConsoleTree { .. }
-            | PeerAction::ConsoleDetail { .. }
-            | PeerAction::ConsoleInbox { .. }
-            | PeerAction::RunStatuses { .. }
-            | PeerAction::Output { .. }
-            | PeerAction::RunEvents { .. }
-            | PeerAction::Lanes { .. }
-            | PeerAction::LaneWaits { .. }
-    )
+        | PeerAction::Doctor { .. }
+        | PeerAction::ConsoleBoard { .. }
+        | PeerAction::ConsoleTree { .. }
+        | PeerAction::ConsoleDetail { .. }
+        | PeerAction::ConsoleInbox { .. }
+        | PeerAction::RunStatuses { .. }
+        | PeerAction::Output { .. }
+        | PeerAction::RunEvents { .. }
+        | PeerAction::Lanes { .. }
+        | PeerAction::LaneWaits { .. } => true,
+        _ => false,
+    }
 }
 
 fn setting_ref(projection: &Sourced<ProjectionMode>) -> SettingRef {

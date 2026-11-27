@@ -362,6 +362,20 @@ fn return_warnings(warnings: Vec<Warning>) {
     }
 }
 
+/// Write a streaming human header at the binary output edge.
+pub(crate) fn write_header(header: &str) -> io::Result<()> {
+    io::stdout().lock().write_all(header.as_bytes())
+}
+
+/// Write and flush one JSON line from a streaming owner at the binary output edge.
+pub(crate) fn write_json_line_and_flush<T: Serialize>(value: &T) -> io::Result<()> {
+    let stdout = io::stdout();
+    let mut output = stdout.lock();
+    serde_json::to_writer(&mut output, value).map_err(io::Error::other)?;
+    output.write_all(b"\n")?;
+    output.flush()
+}
+
 pub(crate) fn emit<T: Serialize>(
     result: &CommandResult<T>,
     globals: &provenant_cli::Globals,
@@ -388,7 +402,64 @@ pub(crate) fn emit_summarised<T: Serialize>(
         read_only,
         summary,
         io::stdout().is_terminal(),
+        false,
     )
+    .0
+}
+
+/// Emit a complete record and report whether the complete result reached
+/// stdout. Stream consumers use this to acknowledge data only after delivery.
+pub(crate) fn emit_with_delivery<T: Serialize>(
+    result: &CommandResult<T>,
+    globals: &provenant_cli::Globals,
+    human: &str,
+    read_only: bool,
+    full_human: bool,
+) -> (u8, bool) {
+    let stdout = io::stdout();
+    let mut stdout = DeliveryWriter {
+        inner: stdout.lock(),
+        failed: false,
+    };
+    let (status, renderable) = emit_with_writers_and_tty(
+        result,
+        globals,
+        &mut stdout,
+        &mut io::stderr().lock(),
+        human,
+        read_only,
+        None,
+        false,
+        full_human,
+    );
+    (status, renderable && !stdout.failed)
+}
+
+struct DeliveryWriter<W> {
+    inner: W,
+    failed: bool,
+}
+
+impl<W: Write> Write for DeliveryWriter<W> {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        match self.inner.write(bytes) {
+            Ok(written) => Ok(written),
+            Err(error) => {
+                self.failed = true;
+                Err(error)
+            }
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        match self.inner.flush() {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                self.failed = true;
+                Err(error)
+            }
+        }
+    }
 }
 
 /// Human text with terminal escape sequences removed. A pipe or a file is not
@@ -468,8 +539,9 @@ pub(crate) fn emit_with_writers<T: Serialize, Wout: Write, Werr: Write>(
     summary: Option<&Summary>,
 ) -> u8 {
     emit_with_writers_and_tty(
-        result, globals, stdout, stderr, human, read_only, summary, false,
+        result, globals, stdout, stderr, human, read_only, summary, false, false,
     )
+    .0
 }
 
 /// `emit_with_writers` with the caller's terminal decision. The binary edge
@@ -484,7 +556,8 @@ fn emit_with_writers_and_tty<T: Serialize, Wout: Write, Werr: Write>(
     read_only: bool,
     summary: Option<&Summary>,
     tty: bool,
-) -> u8 {
+    full_human: bool,
+) -> (u8, bool) {
     let human = if tty {
         Cow::Borrowed(human)
     } else {
@@ -558,7 +631,13 @@ fn emit_with_writers_and_tty<T: Serialize, Wout: Write, Werr: Write>(
                 }
             }
         });
-    let mode = if !globals.json && matches!(result.command.as_str(), "help" | "version") {
+    let mode = if !globals.json && full_human {
+        RenderMode::Human {
+            text: human.as_ref(),
+            read_only,
+            summary: summary.as_ref(),
+        }
+    } else if !globals.json && matches!(result.command.as_str(), "help" | "version") {
         RenderMode::Human {
             text: human.as_ref(),
             read_only,
@@ -580,6 +659,8 @@ fn emit_with_writers_and_tty<T: Serialize, Wout: Write, Werr: Write>(
         warnings: warnings.clone(),
         next: steps.to_vec(),
     };
+    let mut preview = Vec::new();
+    let complete_render = provenant_cli::render(&resolved, mode, &mut preview).is_ok();
     // JSON prints nothing to stderr: the sink held every warning, and this is
     // the only place they reach the consumer. Serialising `T` to a Value lets
     // an owner keep its own data type while the envelope gains one field.
@@ -601,7 +682,7 @@ fn emit_with_writers_and_tty<T: Serialize, Wout: Write, Werr: Write>(
             if globals.json {
                 remember_warnings(&warnings);
             }
-            provenant_cli::exit_status(&status)
+            (provenant_cli::exit_status(&status), complete_render)
         }
         Err(_) => {
             // Under JSON no envelope was written, so the guard still owns the
@@ -611,7 +692,7 @@ fn emit_with_writers_and_tty<T: Serialize, Wout: Write, Werr: Write>(
                 return_warnings(warnings);
             }
             let _ = io::stderr().write_all(b"provenant: IO: cannot write command result\n");
-            3
+            (3, false)
         }
     }
 }

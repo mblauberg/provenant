@@ -1484,31 +1484,43 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
         leaf: inv.leaf.as_str(),
         process,
     };
+    if let Some(status) =
+        fabric::host_read::route_if_selected(&invocation.command, |command, selection| {
+            fabric::host_read::route(command, selection, globals, process.workers())
+        })
+    {
+        return status;
+    }
     // One resolution of the shared `--timeout` and `--host` flags. Verbs that
     // flatten CommonArgs must read both here instead of accepting and ignoring
-    // them. `status` aggregates `--host all`; every other verb warns and serves
-    // the local host. Spec: docs/specs/agent-native.md#consistent-verbs-and-flags.
+    // them. The peer-served reads and gc route selected hosts; unsupported
+    // verbs retain the explicit warning and local behavior.
     if let Some(common) = invocation
         .command
         .resolve_common(Duration::from_secs(verb_default_timeout(&inv.leaf)))
+        && matches!(&common.target, provenant_cli::HostSelection::All)
+        && !matches!(
+            &invocation.command,
+            Command::Status(_)
+                | Command::Output(_)
+                | Command::Result { .. }
+                | Command::Events { .. }
+                | Command::Gc(_)
+        )
     {
-        if matches!(&common.target, provenant_cli::HostSelection::All)
-            && !inv.leaf.starts_with("status")
-        {
-            provenant_records::warning::warn(
-                provenant_records::warning::Warning::new(
+        provenant_records::warning::warn(
+            provenant_records::warning::Warning::new(
+                provenant_records::warning::HOST_ALL_UNSUPPORTED,
+                format!(
+                    "--host all is not supported by {}; serving the local host",
+                    inv.leaf
+                ),
+                provenant_records::warning::detected_source(
                     provenant_records::warning::HOST_ALL_UNSUPPORTED,
-                    format!(
-                        "--host all is not supported by {}; serving the local host",
-                        inv.leaf
-                    ),
-                    provenant_records::warning::detected_source(
-                        provenant_records::warning::HOST_ALL_UNSUPPORTED,
-                    ),
-                )
-                .once_per_change(),
-            );
-        }
+                ),
+            )
+            .once_per_change(),
+        );
     }
     match (verb.run)(&invocation) {
         Ok(outcome) => provenant_cli::exit_status(&outcome),

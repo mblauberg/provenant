@@ -699,137 +699,65 @@ pub fn command(globals: &Globals, subject: Subject, release: bool) -> u8 {
     }
 }
 // The bounded read-only store boundary uses a real I/O deadline.
-#[allow(clippy::disallowed_methods)]
 pub fn status(args: &Status, globals: &Globals) -> u8 {
-    let read = || -> Result<(serde_json::Value, String), Error> {
-        let resolved = roots::resolve(
-            globals,
-            roots::Workspace::Checkout,
-            roots::Product::Required,
-        )?;
-        let context = context(&resolved, true)?;
-        let mut chair = provenant_cli::fabric::current_chair(&context)?;
-        if let Some(session) = &args.custody_session {
-            chair.session = Some(session.clone());
-        }
-        let clock = SystemClock::new();
-        let cancel = CancelToken::new();
-        let call = Request {
-            clock: &clock,
-            cancel: &cancel,
-        };
-        let ledger = HostStore::open_read_only(
-            &resolved.roots.state,
-            Instant::now() + Duration::from_secs(2),
-        )?;
-        let query = CustodyQuery {
-            project: globals.project.as_ref().map(|_| context.identity.project),
-            state: Some(StateKind::Active),
-            after: args.cursor.unwrap_or(0),
-            limit: args.limit.min(100),
-            ..Default::default()
-        };
-        let (records, next) = match ledger {
-            Some(ledger) => ledger.custody_with_cursors(&query, &call)?,
-            None => (Vec::new(), None),
-        };
-        let mut stdout = std::io::stdout().lock();
-        if args.custody_stream {
-            writeln!(stdout, "{}", json!({"total": records.len(), "next": next}))?;
-            stdout.flush()?;
-        }
-        let mut census = None;
-        let mut items = Vec::new();
-        let mut lines = Vec::new();
-        for (cursor, record) in records {
-            if matches!(&record.holder, Holder::Attempt { .. }) && census.is_none() {
-                census = Some(
-                    provenant_supervisor::census::ProcessObserver::census(
-                        &provenant_supervisor::census::SystemProcessObserver,
-                        provenant_supervisor::census::MAX_CENSUS_ENTRIES,
-                    )
-                    .ok(),
-                );
-            }
-            let presence = presence_with_census(
-                &record,
-                &resolved.roots,
-                chair.host,
-                chair.actor,
-                census.as_ref().and_then(Option::as_ref),
-            );
-            let mine = record.holder.belongs_to(&chair);
-            let include = if args.adoptable {
-                presence == HolderPresence::Unattended
-            } else {
-                mine || presence == HolderPresence::Unattended
+    if args.custody_stream {
+        return status_custody_stream(args, globals);
+    }
+    match status_data(args, globals, None) {
+        Ok(result) => {
+            let status: CustodyStatus = match serde_json::from_value(result.data.clone()) {
+                Ok(status) => status,
+                Err(error) => {
+                    return fail(
+                        "status",
+                        Outcome::Error,
+                        "CUSTODY",
+                        &error.to_string(),
+                        "resolve the reported custody condition, then rerun `provenant status`",
+                        globals,
+                    );
+                }
             };
-            if args.custody_stream {
-                let item = include.then(|| {
-                    json!({
-                        "subject": record.subject.to_string(),
-                        "project": record.project.to_string(),
-                        "presence": presence,
-                        "mine": mine,
-                    })
-                });
-                writeln!(stdout, "{}", json!({"cursor": cursor, "item": item}))?;
-                stdout.flush()?;
-            }
-            if !include {
-                continue;
-            }
-            lines.push(if globals.full {
-                format!(
-                    "{} project={} {:?} {:?}",
-                    record.subject, record.project, presence, record.holder
-                )
-            } else {
-                format!(
-                    "{} {}",
-                    record.subject,
-                    match presence {
-                        HolderPresence::Live => "active",
-                        HolderPresence::Unattended => "unattended",
-                        HolderPresence::Unknown => "unknown",
+            let mut lines = status
+                .items
+                .iter()
+                .map(|item| {
+                    if globals.full {
+                        format!(
+                            "{} project={} {:?} {:?}",
+                            item.record.subject,
+                            item.record.project,
+                            item.presence,
+                            item.record.holder
+                        )
+                    } else {
+                        format!(
+                            "{} {}",
+                            item.record.subject,
+                            match item.presence {
+                                HolderPresence::Live => "active",
+                                HolderPresence::Unattended => "unattended",
+                                HolderPresence::Unknown => "unknown",
+                            }
+                        )
                     }
-                )
-            });
-            items.push(CustodyView {
-                record,
-                presence,
-                mine,
-            });
+                })
+                .collect::<Vec<_>>();
+            if let Some(cursor) = status.next {
+                lines.push(format!(
+                    "more: provenant {}",
+                    custody_page_command(args.custody_session.as_deref(), Some(cursor))
+                ));
+            }
+            if lines.is_empty() {
+                lines.push(if args.adoptable {
+                    "no adoptable custody".into()
+                } else {
+                    "no active custody".into()
+                });
+            }
+            emit(&result, globals, &format!("{}\n", lines.join("\n")), true)
         }
-        if let Some(cursor) = next {
-            lines.push(format!(
-                "more: provenant {}",
-                custody_page_command(args.custody_session.as_deref(), Some(cursor))
-            ));
-        }
-        if lines.is_empty() {
-            lines.push(if args.adoptable {
-                "no adoptable custody".into()
-            } else {
-                "no active custody".into()
-            });
-        }
-        if args.custody_stream {
-            return Ok((serde_json::Value::Null, String::new()));
-        }
-        Ok((
-            serde_json::to_value(CustodyStatus { items, next })?,
-            format!("{}\n", lines.join("\n")),
-        ))
-    };
-    match read() {
-        Ok(_) if args.custody_stream => 0,
-        Ok((data, human)) => emit(
-            &CommandResult::new("status", Outcome::Ok, data),
-            globals,
-            &human,
-            true,
-        ),
         Err(error) => fail(
             "status",
             Outcome::Error,
@@ -839,6 +767,141 @@ pub fn status(args: &Status, globals: &Globals) -> u8 {
             globals,
         ),
     }
+}
+
+fn status_custody_stream(args: &Status, globals: &Globals) -> u8 {
+    let mut emit = |value: &serde_json::Value| -> Result<(), Box<dyn std::error::Error>> {
+        crate::output::write_json_line_and_flush(value)?;
+        Ok(())
+    };
+    let result = status_data_with_stream(args, globals, None, Some(&mut emit));
+    match result {
+        Ok(_) => 0,
+        Err(error) => fail(
+            "status",
+            Outcome::Error,
+            "CUSTODY",
+            &error.to_string(),
+            "resolve the reported custody condition, then rerun `provenant status`",
+            globals,
+        ),
+    }
+}
+
+pub(crate) fn status_data(
+    args: &Status,
+    globals: &Globals,
+    chair: Option<provenant_records::custody::Chair>,
+) -> Result<CommandResult<serde_json::Value>, Box<dyn std::error::Error>> {
+    status_data_with_stream(args, globals, chair, None)
+}
+
+fn status_data_with_stream(
+    args: &Status,
+    globals: &Globals,
+    chair: Option<provenant_records::custody::Chair>,
+    mut stream: Option<
+        &mut dyn FnMut(&serde_json::Value) -> Result<(), Box<dyn std::error::Error>>,
+    >,
+) -> Result<CommandResult<serde_json::Value>, Box<dyn std::error::Error>> {
+    let resolved = roots::resolve(
+        globals,
+        roots::Workspace::Checkout,
+        roots::Product::Required,
+    )?;
+    let context = context(&resolved, true)?;
+    let mut chair = match chair {
+        Some(chair) => chair,
+        None => provenant_cli::fabric::current_chair(&context)?,
+    };
+    if let Some(session) = &args.custody_session {
+        chair.session = Some(session.clone());
+    }
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let call = Request {
+        clock: &clock,
+        cancel: &cancel,
+    };
+    let ledger = HostStore::open_read_only(
+        &resolved.roots.state,
+        Instant::now() + Duration::from_secs(2),
+    )?;
+    let query = CustodyQuery {
+        project: globals.project.as_ref().map(|_| context.identity.project),
+        state: Some(StateKind::Active),
+        after: args.cursor.unwrap_or(0),
+        limit: args.limit.min(100),
+        ..Default::default()
+    };
+    let (records, next) = match ledger {
+        Some(ledger) => ledger.custody_with_cursors(&query, &call)?,
+        None => (Vec::new(), None),
+    };
+    let header = json!({"total": records.len(), "next": next});
+    if args.custody_stream
+        && let Some(emit) = stream.as_mut()
+    {
+        (*emit)(&header)?;
+    }
+    let mut census = None;
+    let mut items = Vec::new();
+    let mut stream_items = Vec::new();
+    for (cursor, record) in &records {
+        if matches!(&record.holder, Holder::Attempt { .. }) && census.is_none() {
+            census = Some(
+                provenant_supervisor::census::ProcessObserver::census(
+                    &provenant_supervisor::census::SystemProcessObserver,
+                    provenant_supervisor::census::MAX_CENSUS_ENTRIES,
+                )
+                .ok(),
+            );
+        }
+        let presence = presence_with_census(
+            record,
+            &resolved.roots,
+            context.identity.inbox.host,
+            context.identity.inbox.actor,
+            census.as_ref().and_then(Option::as_ref),
+        );
+        let mine = record.holder.belongs_to(&chair);
+        let include = if args.adoptable {
+            presence == HolderPresence::Unattended
+        } else {
+            mine || presence == HolderPresence::Unattended
+        };
+        if args.custody_stream {
+            let item = include.then(|| {
+                json!({
+                    "subject": record.subject.to_string(),
+                    "project": record.project.to_string(),
+                    "presence": presence,
+                    "mine": mine,
+                })
+            });
+            let stream_item = json!({"cursor": cursor, "item": item});
+            if let Some(emit) = stream.as_mut() {
+                (*emit)(&stream_item)?;
+            }
+            stream_items.push(stream_item);
+        }
+        if include {
+            items.push(CustodyView {
+                record: record.clone(),
+                presence,
+                mine,
+            });
+        }
+    }
+    let data = if args.custody_stream {
+        json!({
+            "header": header,
+            "items": stream_items,
+        })
+    } else {
+        serde_json::to_value(CustodyStatus { items, next })?
+    };
+    Ok(CommandResult::new("status", Outcome::Ok, data))
 }
 
 /// Settlement releases the attempt, retaining unlanded writer artefacts for adoption.

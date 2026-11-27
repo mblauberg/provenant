@@ -90,8 +90,8 @@ pub(crate) struct PatchError {
     pub message: String,
     pub cause: Option<String>,
     pub class: ErrorClass,
-    pub setting: Option<SettingRef>,
-    pub subject: Option<ErrorSubject>,
+    pub setting: Option<Box<SettingRef>>,
+    pub subject: Option<Box<ErrorSubject>>,
     pub next: Vec<NextStep>,
 }
 
@@ -137,13 +137,13 @@ impl PatchError {
             message,
             cause: None,
             class: ErrorClass::Configured,
-            setting: Some(SettingRef {
+            setting: Some(Box::new(SettingRef {
                 key: GENERATED_PATCH_KEY.to_owned(),
                 value: "apply".to_owned(),
                 layer: Layer::Default,
                 origin: "harness-knobs.json".to_owned(),
-            }),
-            subject: Some(subject),
+            })),
+            subject: Some(Box::new(subject)),
             next: vec![NextStep::new(
                 Vec::new(),
                 "check out the manifest head or rerun ci patch without --apply",
@@ -157,8 +157,8 @@ impl PatchError {
             message: error.message,
             cause: error.cause,
             class: error.class,
-            setting: error.setting,
-            subject: error.subject,
+            setting: error.setting.map(Box::new),
+            subject: error.subject.map(Box::new),
             next: error.next,
         }
     }
@@ -184,10 +184,10 @@ impl PatchError {
         .with_class(class);
         error.next = next;
         if let Some(setting) = setting {
-            error = error.with_setting(setting);
+            error = error.with_setting(*setting);
         }
         if let Some(subject) = subject {
-            error = error.with_subject(subject);
+            error = error.with_subject(*subject);
         }
         error
     }
@@ -279,10 +279,8 @@ pub(crate) fn patch_paths(patch: &[u8]) -> Result<Vec<String>, String> {
             if pending_old_path.is_some() {
                 return Err("patch has an unmatched old file header".to_owned());
             }
-            if !section_has_file_headers {
-                if let Some(header) = section {
-                    add_paths(&mut paths, parse_diff_header_paths(header)?)?;
-                }
+            if !section_has_file_headers && let Some(header) = section {
+                add_paths(&mut paths, parse_diff_header_paths(header)?)?;
             }
             section = Some(header);
             section_has_file_headers = false;
@@ -316,10 +314,11 @@ pub(crate) fn patch_paths(patch: &[u8]) -> Result<Vec<String>, String> {
             };
             let new_path = parse_file_header_path(header, b"b/")?;
             section_has_file_headers = true;
-            let candidates = old_path
-                .is_empty()
-                .then_some(Vec::new())
-                .unwrap_or_else(|| vec![old_path]);
+            let candidates = if old_path.is_empty() {
+                Vec::new()
+            } else {
+                vec![old_path]
+            };
             add_paths(&mut paths, candidates)?;
             if let Some(path) = new_path {
                 add_paths(&mut paths, [path])?;
@@ -332,10 +331,8 @@ pub(crate) fn patch_paths(patch: &[u8]) -> Result<Vec<String>, String> {
     if hunk_remaining.is_some_and(|(old, new)| old != 0 || new != 0) {
         return Err("patch ends before a hunk is complete".to_owned());
     }
-    if !section_has_file_headers {
-        if let Some(header) = section {
-            add_paths(&mut paths, parse_diff_header_paths(header)?)?;
-        }
+    if !section_has_file_headers && let Some(header) = section {
+        add_paths(&mut paths, parse_diff_header_paths(header)?)?;
     }
     if paths.is_empty() && !patch.is_empty() {
         return Err("patch contains no unambiguous file paths".to_owned());
@@ -1038,7 +1035,8 @@ fn emit_error(error: PatchError, globals: &Globals) -> u8 {
 /// under `--apply` and only after the destruction guard, `git apply --check`
 /// and the head re-check all pass.
 pub(crate) fn run(command: provenant_cli::ci::Patch, globals: &Globals) -> u8 {
-    let fetched = (|| -> Result<(GeneratedManifest, Vec<u8>, RunIdentity, PathBuf, PathBuf), Box<dyn std::error::Error>> {
+    type FetchedPatch = (GeneratedManifest, Vec<u8>, RunIdentity, PathBuf, PathBuf);
+    let fetched = (|| -> Result<FetchedPatch, Box<dyn std::error::Error>> {
         let project = crate::roots::selected_project(globals.project.as_deref(), true)?;
         let resolved = crate::roots::resolve(
             globals,

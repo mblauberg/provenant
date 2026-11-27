@@ -21,6 +21,91 @@ pub(crate) fn run(from: i64, follow: bool, consumer: Option<&str>, globals: &Glo
     }
 }
 
+/// One bounded observation page and the cursor a consumer may acknowledge
+/// after the caller has delivered the aggregate to its output sink.
+pub(crate) struct EventPage {
+    pub data: serde_json::Value,
+    pub ack_cursor: Option<i64>,
+}
+
+pub(crate) fn read_page(
+    from: Option<i64>,
+    limit: usize,
+    consumer: Option<&str>,
+    globals: &Globals,
+) -> Result<EventPage, Box<dyn std::error::Error>> {
+    let resolved = crate::roots::resolve(
+        globals,
+        crate::roots::Workspace::Project,
+        crate::roots::Product::Required,
+    )?;
+    let context = provenant_cli::fabric::Context::open_inspection(
+        resolved.roots.clone(),
+        &resolved.home,
+        &resolved.project,
+    )?;
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let request = Request {
+        clock: &clock,
+        cancel: &cancel,
+    };
+    let store = Store::open(&resolved.roots.state, &request)?;
+    let consumer_id = consumer.map(consumer_id).transpose()?;
+    let cursor = match (from, consumer_id) {
+        (Some(cursor), _) => cursor,
+        (None, Some(consumer)) => {
+            store.event_cursor(context.identity.project, consumer, &request)?
+        }
+        (None, None) => 0,
+    };
+    let limit = u64::try_from(limit)?;
+    let page = store.observations(context.identity.project, cursor, limit, &request)?;
+    let next_cursor = page.items.last().map_or(cursor, |event| event.cursor.seq);
+    let ack_cursor = consumer_id.and(page.items.last().map(|event| event.cursor.seq));
+    let items = serde_json::to_value(&page.items)?;
+    let truncated = page.truncated || page.items.len() == usize::try_from(limit)?;
+    Ok(EventPage {
+        data: serde_json::json!({
+            "items": items,
+            "next_cursor": next_cursor,
+            "truncated": truncated,
+        }),
+        ack_cursor,
+    })
+}
+
+/// Acknowledge a delivered page on the host that owns the consumer cursor.
+pub(crate) fn acknowledge_page(
+    consumer: &str,
+    through_cursor: i64,
+    globals: &Globals,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let resolved = crate::roots::resolve(
+        globals,
+        crate::roots::Workspace::Project,
+        crate::roots::Product::Required,
+    )?;
+    let context = provenant_cli::fabric::Context::open_inspection(
+        resolved.roots.clone(),
+        &resolved.home,
+        &resolved.project,
+    )?;
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let request = Request {
+        clock: &clock,
+        cancel: &cancel,
+    };
+    Store::open(&resolved.roots.state, &request)?.mark_events_read(
+        context.identity.project,
+        consumer_id(consumer)?,
+        through_cursor,
+        &request,
+    )?;
+    Ok(())
+}
+
 #[allow(
     clippy::disallowed_methods,
     reason = "streams event records to stdout as the command's output"

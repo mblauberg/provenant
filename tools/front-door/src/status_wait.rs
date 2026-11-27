@@ -825,29 +825,29 @@ fn read(
             // read-class advance: the host owns custody and grants no resume,
             // retry or landing authority. Without a bound item the read stays
             // a pure snapshot.
-            if !provenant_cli::fabric::in_lane() {
-                if let Ok(context) = provenant_cli::fabric::Context::open_read_only(
+            if !provenant_cli::fabric::in_lane()
+                && let Ok(context) = provenant_cli::fabric::Context::open_read_only(
                     edge.roots.clone(),
                     edge.home,
                     edge.cwd,
-                ) {
-                    use provenant_core::Clock as _;
-                    let now = provenant_os::clock::SystemClock::new().mono_now();
-                    let left = deadline.saturating_duration_since(Instant::now());
-                    let micros = left.as_micros().min(u64::MAX as u128) as u64;
-                    let wake_deadline = provenant_core::Deadline::at(
-                        now.checked_add(provenant_core::DurationMicros::from_micros(micros))
-                            .unwrap_or(now),
-                    );
-                    let _ = crate::fabric::unified::wake_pr_item(
-                        edge,
-                        context.identity.project,
-                        *number,
-                        wake_deadline,
-                        cancel,
-                        workers,
-                    );
-                }
+                )
+            {
+                use provenant_core::Clock as _;
+                let now = provenant_os::clock::SystemClock::new().mono_now();
+                let left = deadline.saturating_duration_since(Instant::now());
+                let micros = left.as_micros().min(u64::MAX as u128) as u64;
+                let wake_deadline = provenant_core::Deadline::at(
+                    now.checked_add(provenant_core::DurationMicros::from_micros(micros))
+                        .unwrap_or(now),
+                );
+                let _ = crate::fabric::unified::wake_pr_item(
+                    edge,
+                    context.identity.project,
+                    *number,
+                    wake_deadline,
+                    cancel,
+                    workers,
+                );
             }
             // A one-off read has no state to carry forward; the polling worker
             // owns the persistent subject for the wait loop.

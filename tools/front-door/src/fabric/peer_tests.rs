@@ -18,7 +18,7 @@ mod host_aggregate_tests {
                 ("laptop".into(), HostResult::Unreachable),
             ],
         );
-        assert_eq!(result.status, Outcome::Ok);
+        assert_eq!(result.status, Outcome::Unavailable);
         assert!(result.data.partial);
         assert_eq!(result.data.hosts.len(), 2);
         assert_eq!(result.data.hosts[0].host, "workshop");
@@ -32,12 +32,12 @@ mod host_aggregate_tests {
     }
 
     #[test]
-    fn all_hosts_unreachable_is_a_plain_failure() {
+    fn all_hosts_unreachable_is_unavailable_without_partial() {
         let result = aggregate_host_readings(
             "gc",
             vec![
                 ("workshop".into(), HostResult::Unreachable),
-                ("laptop".into(), HostResult::Failed("refused".into())),
+                ("laptop".into(), HostResult::Unreachable),
             ],
         );
         assert_eq!(result.status, Outcome::Unavailable);
@@ -46,7 +46,7 @@ mod host_aggregate_tests {
     }
 
     #[test]
-    fn a_failing_reachable_host_wins_over_unreachable() {
+    fn unreachable_status_is_worst_even_when_a_reachable_host_failed() {
         let result = aggregate_host_readings(
             "gc",
             vec![
@@ -55,7 +55,7 @@ mod host_aggregate_tests {
                 ("desk".into(), HostResult::Unreachable),
             ],
         );
-        assert_eq!(result.status, Outcome::Error);
+        assert_eq!(result.status, Outcome::Unavailable);
         assert!(result.data.partial);
         assert_eq!(result.warnings.len(), 1);
     }
@@ -63,12 +63,27 @@ mod host_aggregate_tests {
     #[test]
     fn transport_failures_are_unreachable_but_refusals_are_host_errors() {
         assert!(matches!(
-            host_result_from_peer(Err::<serde_json::Value, _>(PeerError::Unavailable)),
+            host_result_from_peer(Err::<serde_json::Value, _>(
+                provenant_cli::fabric::PeerFailure {
+                    error: Box::new(provenant_fabric_runtime::coordination::facade::FacadeError::HomeUnavailable),
+                    detail: Some("peer is unavailable".into()),
+                }
+            )),
             HostResult::Unreachable
         ));
         assert!(matches!(
-            host_result_from_peer(Err::<serde_json::Value, _>(PeerError::Failed("x".into()))),
-            HostResult::Unreachable
+            host_result_from_peer(Err::<serde_json::Value, _>(
+                provenant_cli::fabric::PeerFailure {
+                    error: Box::new(provenant_fabric_runtime::coordination::facade::FacadeError::DispatchRefused {
+                        reason: "refused".into(), disk: None, fact: None,
+                    }),
+                    detail: None,
+                }
+            )),
+            HostResult::Command {
+                status: Outcome::Refused,
+                ..
+            }
         ));
         assert!(matches!(
             host_result_from_peer(Ok(json!({"ok": true}))),

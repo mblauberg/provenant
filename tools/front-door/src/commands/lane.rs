@@ -147,7 +147,7 @@ fn share(inv: &Call, mode: &str) -> Result<Outcome, CommandError> {
         .ok()
         .and_then(|value| value.parse().ok());
     let since = provenant_core::Clock::wall_now(&provenant_os::clock::SystemClock::new())
-        .unwrap_or_else(|_| provenant_core::WallTime::MAX);
+        .unwrap_or(provenant_core::WallTime::MAX);
     // Preserve holder and start time from an existing lease in their wire
     // form; only the owning lane's sharing decision is changed here.
     let lease: WorktreeLease = slot

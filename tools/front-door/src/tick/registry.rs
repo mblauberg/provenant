@@ -165,10 +165,11 @@ pub(super) fn run_tasks<V: TickTask + 'static>(
     clock: &impl Clock,
     wall: WallTime,
     holder: &str,
-) -> Vec<TaskOutcome> {
+) -> Result<Vec<TaskOutcome>, String> {
     let count = tasks.len();
     let queue = Arc::new(Mutex::new(tasks.into_iter().enumerate()));
     let outcomes = Arc::new(Mutex::new(Vec::with_capacity(count)));
+    let lock_failed = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let slots = concurrency.max(1).min(count.max(1));
     let active = Arc::new(AtomicUsize::new(0));
     std::thread::scope(|scope| {
@@ -176,9 +177,16 @@ pub(super) fn run_tasks<V: TickTask + 'static>(
             let queue = Arc::clone(&queue);
             let outcomes = Arc::clone(&outcomes);
             let active = Arc::clone(&active);
+            let lock_failed = Arc::clone(&lock_failed);
             scope.spawn(move || {
                 loop {
-                    let Some((index, task)) = queue.lock().unwrap().next() else {
+                    let Ok(mut queue) = queue.lock() else {
+                        lock_failed.store(true, Ordering::SeqCst);
+                        break;
+                    };
+                    let next = queue.next();
+                    drop(queue);
+                    let Some((index, task)) = next else {
                         break;
                     };
                     let name = task.name();
@@ -225,21 +233,26 @@ pub(super) fn run_tasks<V: TickTask + 'static>(
                             }
                         }
                     };
-                    outcomes
-                        .lock()
-                        .unwrap()
-                        .push((index, TaskOutcome { name, result }));
+                    match outcomes.lock() {
+                        Ok(mut outcomes) => outcomes.push((index, TaskOutcome { name, result })),
+                        Err(_) => {
+                            lock_failed.store(true, Ordering::SeqCst);
+                            break;
+                        }
+                    }
                 }
             });
         }
     });
+    if lock_failed.load(Ordering::SeqCst) {
+        return Err("tick dispatch lock poisoned".into());
+    }
     let mut outcomes = Arc::try_unwrap(outcomes)
-        .ok()
-        .expect("all dispatchers joined")
+        .map_err(|_| "tick dispatchers still hold outcomes")?
         .into_inner()
-        .expect("outcomes lock intact");
+        .map_err(|_| "tick outcomes lock poisoned")?;
     outcomes.sort_by_key(|(index, _)| *index);
-    outcomes.into_iter().map(|(_, outcome)| outcome).collect()
+    Ok(outcomes.into_iter().map(|(_, outcome)| outcome).collect())
 }
 
 #[cfg(test)]
@@ -274,7 +287,8 @@ mod tests {
             &clock,
             crate::tick::test_wall(),
             "first",
-        );
+        )
+        .unwrap();
         started_rx.recv().unwrap();
         assert_eq!(outcomes[0].result.state, "over_budget");
         let second = TaskDef::new("graphs", true, DurationMicros::from_micros(50_000), |_| {
@@ -287,7 +301,8 @@ mod tests {
             &clock,
             crate::tick::test_wall(),
             "second",
-        );
+        )
+        .unwrap();
         assert_eq!(outcomes[0].result.state, "busy");
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         release_tx.send(()).unwrap();
@@ -320,6 +335,7 @@ mod tests {
                 crate::tick::test_wall(),
                 "first",
             )
+            .unwrap()
         });
         started_rx.recv().unwrap();
         let task = TaskDef::new(
@@ -335,7 +351,8 @@ mod tests {
             &provenant_os::clock::SystemClock,
             crate::tick::test_wall(),
             "second",
-        );
+        )
+        .unwrap();
         assert_eq!(second[0].result.state, "busy");
         release_tx.send(()).unwrap();
         assert_eq!(first.join().unwrap()[0].result.state, "observed");
@@ -362,7 +379,7 @@ mod tests {
         let rows: Vec<super::super::Task> = names
             .iter()
             .map(|name| super::super::Task {
-                task: *name,
+                task: name,
                 state: "observed".into(),
                 error: None,
                 diagnostic: None,

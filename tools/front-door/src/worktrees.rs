@@ -1208,6 +1208,87 @@ fn gc_result(data: &GcData, detailed: bool) -> CommandResult<GcOutput<'_>> {
     }
 }
 
+struct GcCacheFailureData {
+    error: Box<provenant_confinement::cache::CacheGcError>,
+    unobserved_projects: Vec<PathBuf>,
+    skipped_transient: Vec<PathBuf>,
+    provider_state: Box<provenant_run::ProviderStateGc>,
+    worktree_cleanup: Vec<worktrees::WorktreeGcReport>,
+    alerts: Vec<String>,
+}
+
+fn gc_cache_failure_result(
+    command: &Gc,
+    failure: GcCacheFailureData,
+    detailed: bool,
+) -> Result<provenant_records::CommandResult<serde_json::Value>, String> {
+    let error = *failure.error;
+    let message = error.to_string();
+    let data = GcData {
+        report: *error.report,
+        idle_seconds: command.idle.unwrap_or(6 * 3600),
+        sweep_budget_seconds: 0,
+        sweep_budget_source: "unavailable".into(),
+        sweep_cursor: None,
+        sweep_warning: None,
+        sweep_stopped: false,
+        unobserved_projects: failure.unobserved_projects,
+        skipped_transient: failure.skipped_transient,
+        provider_state: *failure.provider_state,
+        chair_logs: Default::default(),
+        build_dirs: Default::default(),
+        graph_checkpoints_removed: 0,
+        stale_graphs: Vec::new(),
+        graph_bytes: None,
+        port_receipts: Default::default(),
+        retention_errors: Vec::new(),
+        failed_classes: Vec::new(),
+        retention_observations: Vec::new(),
+        discard_archives: Default::default(),
+        staging_busy: Vec::new(),
+        worktree_cleanup: failure.worktree_cleanup,
+        alerts: failure.alerts,
+        notice: None,
+        ..Default::default()
+    };
+    let result = gc_failure(&data, &message, detailed);
+    Ok(provenant_records::CommandResult {
+        schema_version: result.schema_version,
+        command: result.command,
+        status: result.status,
+        data: serde_json::to_value(result.data).map_err(|error| error.to_string())?,
+        error: result.error,
+        warnings: result.warnings,
+        next: result.next,
+    })
+}
+
+fn gc_result_value(
+    result: CommandResult<GcOutput<'_>>,
+) -> Result<CommandResult<serde_json::Value>, String> {
+    Ok(provenant_records::CommandResult {
+        schema_version: result.schema_version,
+        command: result.command,
+        status: result.status,
+        data: serde_json::to_value(result.data).map_err(|error| error.to_string())?,
+        error: result.error,
+        warnings: result.warnings,
+        next: result.next,
+    })
+}
+
+fn gc_peer_failure(
+    status: Outcome,
+    message: impl Into<String>,
+) -> CommandResult<serde_json::Value> {
+    let message = message.into();
+    let mut result = CommandResult::new("gc", status, serde_json::Value::Null);
+    result.error = Some(provenant_records::CommandError::new(
+        "GC", message, None, GC_REPAIR,
+    ));
+    result
+}
+
 /// How a scheduled collection that raised no error ended.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum GcCompletion {
@@ -1234,7 +1315,7 @@ pub(crate) fn scheduled_gc(
         idle: Some(idle_seconds),
         finished_branch: None,
     };
-    let data = gc(&command, globals, workers, home).map_err(|error| error.local_message())?;
+    let data = gc(&command, globals, workers, home, None).map_err(|error| error.local_message())?;
     if !data.provider_state.errors.is_empty()
         || !data.chair_logs.errors.is_empty()
         || !data.discard_archives.errors.is_empty()
@@ -1272,6 +1353,10 @@ pub(crate) fn scheduled_gc(
 /// `provenant gc`: remove orphaned and idle legacy lane caches, sparing any
 /// whose worktree has a live or unobservable writer.
 pub fn run_gc(command: Gc, globals: &Globals, workers: &dyn WorkerObserver) -> u8 {
+    let selection = command.common.target();
+    if !matches!(selection, provenant_cli::HostSelection::Local) {
+        return run_gc_hosts(command, selection, globals, workers);
+    }
     // Keep per-PID EPERM census detail behind the global --full flag; the
     // default prints one aggregate warning with a count.
     worktrees::set_unreadable_census_detail(globals.full);
@@ -1288,7 +1373,7 @@ pub fn run_gc(command: Gc, globals: &Globals, workers: &dyn WorkerObserver) -> u
         }
         return crate::provider_retention::run_branch_scratch(globals, branch);
     }
-    match gc(&command, globals, workers, None) {
+    match gc(&command, globals, workers, None, None) {
         Ok(data) => {
             let human = gc_compact_summary(&data, globals.full);
             let result = gc_result(&data, globals.json);
@@ -1302,37 +1387,23 @@ pub fn run_gc(command: Gc, globals: &Globals, workers: &dyn WorkerObserver) -> u
             worktree_cleanup,
             alerts,
         )) => {
-            let error = *error;
-            let failure = error.to_string();
-            let data = GcData {
-                report: *error.report,
-                idle_seconds: command.idle.unwrap_or(6 * 3600),
-                sweep_budget_seconds: 0,
-                sweep_budget_source: "unavailable".into(),
-                sweep_cursor: None,
-                sweep_warning: None,
-                sweep_stopped: false,
-                unobserved_projects,
-                skipped_transient,
-                provider_state: *provider_state,
-                chair_logs: Default::default(),
-                build_dirs: Default::default(),
-                graph_checkpoints_removed: 0,
-                stale_graphs: Vec::new(),
-                graph_bytes: None,
-                port_receipts: Default::default(),
-                retention_errors: Vec::new(),
-                failed_classes: Vec::new(),
-                retention_observations: Vec::new(),
-                discard_archives: Default::default(),
-                staging_busy: Vec::new(),
-                worktree_cleanup,
-                alerts,
-                notice: None,
-                ..Default::default()
-            };
-            let result = gc_failure(&data, &failure, globals.json);
-            emit(&result, globals, "", command.dry_run)
+            match gc_cache_failure_result(
+                &command,
+                GcCacheFailureData {
+                    error,
+                    unobserved_projects,
+                    skipped_transient,
+                    provider_state,
+                    worktree_cleanup,
+                    alerts,
+                },
+                globals.json,
+            ) {
+                Ok(result) => emit(&result, globals, "", command.dry_run),
+                Err(error) => {
+                    crate::fail_with_repair("gc", Outcome::Error, "GC", &error, GC_REPAIR, globals)
+                }
+            }
         }
         Err(error) => crate::fail_with_repair(
             "gc",
@@ -1345,6 +1416,182 @@ pub fn run_gc(command: Gc, globals: &Globals, workers: &dyn WorkerObserver) -> u
     }
 }
 
+fn run_gc_hosts(
+    command: Gc,
+    selection: provenant_cli::HostSelection,
+    globals: &Globals,
+    workers: &dyn WorkerObserver,
+) -> u8 {
+    let workspace = if command.scheduled {
+        crate::roots::Workspace::Home
+    } else {
+        crate::roots::Workspace::Checkout
+    };
+    let resolved = match crate::roots::resolve(globals, workspace, crate::roots::Product::Required)
+    {
+        Ok(resolved) => resolved,
+        Err(crate::roots::RootError::Checkout) if !command.scheduled => {
+            match crate::roots::resolve(
+                globals,
+                crate::roots::Workspace::Project,
+                crate::roots::Product::Required,
+            ) {
+                Ok(resolved) => resolved,
+                Err(error) => {
+                    return crate::fail(
+                        "gc",
+                        Outcome::Error,
+                        "GC",
+                        &error.to_string(),
+                        GC_REPAIR,
+                        globals,
+                    );
+                }
+            }
+        }
+        Err(error) => {
+            return crate::fail(
+                "gc",
+                Outcome::Error,
+                "GC",
+                &error.to_string(),
+                GC_REPAIR,
+                globals,
+            );
+        }
+    };
+    let context = match provenant_cli::fabric::Context::open_read_only(
+        resolved.roots,
+        &resolved.home,
+        &resolved.project,
+    ) {
+        Ok(context) => context,
+        Err(error) => {
+            return crate::fail(
+                "gc",
+                Outcome::Error,
+                "GC",
+                &error.to_string(),
+                GC_REPAIR,
+                globals,
+            );
+        }
+    };
+    let hosts = match crate::fabric::peer::selected_hosts(
+        context.identity.host,
+        &context.config,
+        &selection,
+    ) {
+        Ok(hosts) => hosts,
+        Err(error) => {
+            return crate::fail(
+                "gc",
+                Outcome::Invalid,
+                "HOST",
+                &error,
+                "check the configured peer host name",
+                globals,
+            );
+        }
+    };
+    let clock = provenant_os::clock::SystemClock::new();
+    let seconds =
+        crate::fabric::host_read::bounded_timeout_seconds(&context.roots, &command.common, 300);
+    let budget = match provenant_core::WaitBudget::cli(clock.mono_now(), seconds) {
+        Ok(budget) => budget,
+        Err(error) => {
+            return crate::fail(
+                "gc",
+                Outcome::Invalid,
+                "TIMEOUT",
+                &error.to_string(),
+                "pass a shorter --timeout",
+                globals,
+            );
+        }
+    };
+    let executor = match provenant_os::exec::SystemExecutor::new(8) {
+        Ok(executor) => executor,
+        Err(error) => {
+            return crate::fail(
+                "gc",
+                Outcome::Error,
+                "PEER",
+                &error.to_string(),
+                GC_REPAIR,
+                globals,
+            );
+        }
+    };
+    let cancel = CancelToken::new();
+    let mut readings = Vec::with_capacity(hosts.len());
+    for host in hosts {
+        let result = if let Some(peer) = host.host {
+            context.peer_with(
+                &executor,
+                &clock,
+                peer,
+                provenant_fabric_runtime::hosts::PeerAction::Gc {
+                    extra: Default::default(),
+                    dry_run: command.dry_run,
+                    apply: command.apply,
+                    scheduled: command.scheduled,
+                    pressure: command.pressure,
+                    free_floor: command.free_floor,
+                    idle: command.idle,
+                    finished_branch: command.finished_branch.clone(),
+                    full: globals.full,
+                    detailed: globals.json,
+                    timeout_seconds: seconds,
+                },
+                budget,
+                &cancel,
+            )
+        } else {
+            let value = gc_for_peer(&command, globals, workers, Some(seconds));
+            match value {
+                Ok(result) => {
+                    readings.push((
+                        host.name,
+                        crate::fabric::peer::HostResult::Command {
+                            status: result.status,
+                            data: result.data,
+                            error: result.error.map(|error| error.message),
+                            warnings: result.warnings,
+                            next: result.next,
+                        },
+                    ));
+                    continue;
+                }
+                Err(reason) => {
+                    readings.push((host.name, crate::fabric::peer::HostResult::Failed(reason)));
+                    continue;
+                }
+            }
+        };
+        let reading = match result {
+            Ok(provenant_fabric_runtime::hosts::PeerResult::Gc { result, .. }) => {
+                crate::fabric::peer::HostResult::Command {
+                    status: result.status,
+                    data: result.data,
+                    error: result.error.map(|error| error.message),
+                    warnings: result.warnings,
+                    next: result.next,
+                }
+            }
+            Ok(provenant_fabric_runtime::hosts::PeerResult::Error { data, .. }) => {
+                crate::fabric::peer::host_result_from_facade(data.error)
+            }
+            Ok(_) => crate::fabric::peer::HostResult::Failed(
+                "peer returned an unexpected gc result".into(),
+            ),
+            Err(failure) => crate::fabric::peer::host_result_from_peer(Err(failure)),
+        };
+        readings.push((host.name, reading));
+    }
+    crate::fabric::peer::emit_host_aggregate("gc", readings, globals)
+}
+
 /// Run one bounded sweep for a peer `gc` request and return its aggregates.
 /// Unlike `run_gc` this writes no process envelope: the peer wraps the value
 /// in a `PeerResult::Gc` and the calling host renders the fan-out.
@@ -1352,10 +1599,51 @@ pub(crate) fn gc_for_peer(
     command: &Gc,
     globals: &provenant_cli::Globals,
     workers: &dyn WorkerObserver,
-) -> Result<serde_json::Value, String> {
+    timeout_seconds: Option<u64>,
+) -> Result<provenant_records::CommandResult<serde_json::Value>, String> {
     worktrees::set_unreadable_census_detail(globals.full);
-    let data = gc(command, globals, workers, None).map_err(|error| error.local_message())?;
-    serde_json::to_value(&data).map_err(|error| error.to_string())
+    if let Some(branch) = &command.finished_branch {
+        if command.dry_run || !command.apply {
+            return Ok(gc_peer_failure(
+                Outcome::Refused,
+                "targeted scratch collection requires --apply and excludes --dry-run",
+            ));
+        }
+        return Ok(
+            match crate::provider_retention::collect_branch_scratch(globals, branch) {
+                Ok(data) => CommandResult::new("gc", Outcome::Ok, data),
+                Err(error) => gc_peer_failure(Outcome::Error, error.to_string()),
+            },
+        );
+    }
+    let data = match gc(command, globals, workers, None, timeout_seconds) {
+        Ok(data) => data,
+        Err(Error::CacheGc(
+            error,
+            unobserved_projects,
+            skipped_transient,
+            provider_state,
+            worktree_cleanup,
+            alerts,
+        )) => {
+            return gc_cache_failure_result(
+                command,
+                GcCacheFailureData {
+                    error,
+                    unobserved_projects,
+                    skipped_transient,
+                    provider_state,
+                    worktree_cleanup,
+                    alerts,
+                },
+                globals.json,
+            );
+        }
+        Err(error) => {
+            return Ok(gc_peer_failure(error.outcome(), error.local_message()));
+        }
+    };
+    gc_result_value(gc_result(&data, globals.json))
 }
 
 /// The compact view stays under 32 KiB; `--full` carries the per-candidate
@@ -2716,6 +3004,7 @@ fn gc(
     globals: &Globals,
     workers: &dyn WorkerObserver,
     home_override: Option<&Path>,
+    timeout_cap: Option<u64>,
 ) -> Result<GcData, Error> {
     use provenant_confinement::cache::CacheGcPolicy;
 
@@ -2746,16 +3035,25 @@ fn gc(
     let mut unobserved_projects = Vec::new();
     let mut skipped_transient = Vec::new();
     let config = provenant_cli::config_reads::read_for(&roots, "gc")?;
-    let sweep_budget_seconds = config
+    let requested_timeout = timeout_cap
+        .or_else(|| command.common.timeout_seconds())
+        .unwrap_or(300);
+    let timeout_cap = crate::fabric::host_read::bounded_timeout_request(&roots, requested_timeout);
+    let configured_sweep_budget = config
         .gc
         .sweep_budget_seconds()
         .map_err(|_| Error::GcObservation("invalid gc.sweep_budget"))?;
+    let sweep_budget_seconds = configured_sweep_budget.min(timeout_cap);
     let sweep_budget = Duration::from_secs(sweep_budget_seconds);
-    let sweep_budget_source = config
-        .origins
-        .get("gc.sweep_budget")
-        .map(gc_origin_source)
-        .unwrap_or_else(|| "compiled default".into());
+    let sweep_budget_source = if sweep_budget_seconds < configured_sweep_budget {
+        "command --timeout (bounded)".to_owned()
+    } else {
+        config
+            .origins
+            .get("gc.sweep_budget")
+            .map(gc_origin_source)
+            .unwrap_or_else(|| "compiled default".into())
+    };
     // One resolution of the floor and its source for admission, pressure and
     // reporting. An explicit `--free-floor` override names itself as the source.
     let (free_floor, free_floor_source) = match command.free_floor {
@@ -2793,15 +3091,20 @@ fn gc(
         .get("gc.scratch_grace")
         .map(gc_origin_source)
         .unwrap_or_else(|| "compiled default".into());
-    let preview_budget_seconds = config
+    let configured_preview_budget = config
         .gc
         .preview_budget_seconds()
         .map_err(|_| Error::GcObservation("invalid gc.preview_budget"))?;
-    let preview_budget_source = config
-        .origins
-        .get("gc.preview_budget")
-        .map(gc_origin_source)
-        .unwrap_or_else(|| "compiled default".into());
+    let preview_budget_seconds = configured_preview_budget.min(timeout_cap);
+    let preview_budget_source = if preview_budget_seconds < configured_preview_budget {
+        "command --timeout (bounded)".to_owned()
+    } else {
+        config
+            .origins
+            .get("gc.preview_budget")
+            .map(gc_origin_source)
+            .unwrap_or_else(|| "compiled default".into())
+    };
     let scratch_warning_share = config.gc.scratch_warning_share_value();
     let scratch_warning_share_source = config
         .origins

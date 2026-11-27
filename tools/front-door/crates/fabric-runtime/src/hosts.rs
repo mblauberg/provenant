@@ -359,6 +359,52 @@ pub enum OutputAudience {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "verb", rename_all = "snake_case")]
+pub enum HostReadInput {
+    Status {
+        targets: Vec<String>,
+        all: bool,
+        limit: u64,
+        cursor: Option<u64>,
+        full: bool,
+        mine: bool,
+        adoptable: bool,
+        custody_session: Option<String>,
+        session_stream: bool,
+        custody_stream: bool,
+        chair: Option<provenant_records::custody::Chair>,
+    },
+    Output {
+        target: String,
+        part: String,
+        offset: u64,
+        tail: Option<u64>,
+        tail_lines: Option<u64>,
+        max_bytes: u64,
+        path: bool,
+        final_result: bool,
+        to: Option<String>,
+        full: bool,
+    },
+    Result {
+        target: String,
+        full: bool,
+    },
+    Events {
+        from: Option<i64>,
+        follow: bool,
+        consumer: Option<String>,
+        /// Internal page bound for aggregation; the public events verb has no
+        /// row limit and drains these pages before returning.
+        limit: u64,
+    },
+    EventsAck {
+        consumer: String,
+        through_cursor: i64,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum PeerAction {
     SmokeFixture {
@@ -486,6 +532,13 @@ pub enum PeerAction {
         /// The source's wait, so the peer finishes inside it.
         budget_seconds: u64,
     },
+    /// Read command data from this host for a multi-host envelope. Each
+    /// variant carries the verb's actual options, never a shell command.
+    HostRead {
+        #[serde(flatten)]
+        extra: provenant_records::ExtraFields,
+        input: HostReadInput,
+    },
     /// Collect this host's lane caches and worktrees. `gc --host` sends this
     /// to a peer; the peer applies the same flags it would apply locally.
     Gc {
@@ -499,6 +552,13 @@ pub enum PeerAction {
         free_floor: Option<u64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         idle: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        finished_branch: Option<String>,
+        #[serde(default)]
+        full: bool,
+        #[serde(default)]
+        detailed: bool,
+        timeout_seconds: u64,
     },
 }
 
@@ -570,10 +630,17 @@ peer_feature_protocols! {
             extra: Default::default(), state: crate::inbox::InboxFilter::Open, limit: 50,
         }),
     ],
-    GC_PROTOCOL = 15 => [
+    GC_PROTOCOL = 20 => [
         (Gc, "gc", PeerAction::Gc {
             extra: Default::default(), dry_run: true, apply: false,
             scheduled: false, pressure: true, free_floor: None, idle: None,
+            finished_branch: None, full: false, detailed: false, timeout_seconds: 300,
+        }),
+    ],
+    HOST_READ_PROTOCOL = 18 => [
+        (HostRead, "host_read", PeerAction::HostRead {
+            extra: Default::default(),
+            input: HostReadInput::Events { from: Some(0), consumer: None, follow: false, limit: 1 },
         }),
     ],
 }
@@ -858,9 +925,15 @@ pub enum PeerResult {
         #[serde(flatten)]
         extra: provenant_records::ExtraFields,
     },
+    /// One typed host read, retaining the command's own outcome and data.
+    HostRead {
+        result: Box<provenant_records::CommandResult<serde_json::Value>>,
+        #[serde(flatten)]
+        extra: provenant_records::ExtraFields,
+    },
     /// The bounded per-class aggregates of a peer `gc` sweep.
     Gc {
-        data: serde_json::Value,
+        result: Box<provenant_records::CommandResult<serde_json::Value>>,
         #[serde(flatten)]
         extra: provenant_records::ExtraFields,
     },
@@ -1380,6 +1453,20 @@ pub fn encode_peer_response(
                 }
             }
         },
+        PeerResult::HostRead { result, .. } => {
+            let mut value = serde_json::to_value(result.as_ref()).map_err(|_| PeerError::Frame)?;
+            provenant_confinement::publication::CrossHostTransport::new(projector)
+                .json(&mut value)
+                .map_err(|_| PeerError::Frame)?;
+            **result = serde_json::from_value(value).map_err(|_| PeerError::Frame)?;
+        }
+        PeerResult::Gc { result, .. } => {
+            let mut value = serde_json::to_value(result.as_ref()).map_err(|_| PeerError::Frame)?;
+            provenant_confinement::publication::CrossHostTransport::new(projector)
+                .json(&mut value)
+                .map_err(|_| PeerError::Frame)?;
+            **result = serde_json::from_value(value).map_err(|_| PeerError::Frame)?;
+        }
         PeerResult::Error { data, .. } => match &mut data.error {
             facade::FacadeError::RecordedRefusal { diagnostic, .. } => {
                 texts.extend(diagnostic.detail.iter_mut());
@@ -1486,8 +1573,7 @@ pub fn encode_peer_response(
         | PeerResult::Health { .. }
         | PeerResult::Submitted { .. }
         | PeerResult::SubmissionCancelled { .. }
-        | PeerResult::LaneWaits { .. }
-        | PeerResult::Gc { .. } => {}
+        | PeerResult::LaneWaits { .. } => {}
     }
     for (_, handoff) in &mut stops {
         handoff_texts(handoff, &mut texts);

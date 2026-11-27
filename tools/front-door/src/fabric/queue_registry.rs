@@ -256,7 +256,7 @@ pub(super) struct QueueRegistry {
 impl QueueRegistry {
     pub(super) fn open(state: &Path) -> Result<Self, String> {
         let lock = registry_lock_path(state);
-        let path = lock.parent().expect("registry lock has a parent");
+        let path = lock.parent().ok_or("registry lock has no parent")?;
         let directory = provenant_config::private_directory(path, true)
             .map_err(|error| format!("delivery queue state unavailable: {error}"))?;
         Ok(Self { directory })

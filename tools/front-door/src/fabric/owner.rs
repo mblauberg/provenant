@@ -69,7 +69,7 @@ pub(crate) fn resolve_child_launch(
     sharing: &provenant_records::Sourced<Sharing>,
     lease: Option<&LeaseObservation>,
     live_claims: &[LiveClaim],
-) -> Result<ChildPlacement, provenant_records::CommandError> {
+) -> Result<ChildPlacement, Box<provenant_records::CommandError>> {
     use provenant_records::policy::PATH_CLAIM_OVERLAP;
 
     let admission = admit_writer(tree, lease, sharing);
@@ -82,7 +82,7 @@ pub(crate) fn resolve_child_launch(
         DestinationChoice::New => ChildPlacement::ManagedWorktree,
         DestinationChoice::Parent => {
             if let Some(error) = refusal {
-                return Err(error);
+                return Err(Box::new(error));
             }
             ChildPlacement::ParentWorktree
         }

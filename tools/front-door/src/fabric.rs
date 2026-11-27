@@ -2,6 +2,8 @@
 mod graph_human;
 mod graph_inputs;
 mod graph_status;
+pub(crate) mod host_events;
+pub(crate) mod host_read;
 pub(crate) use graph_status::node_digests;
 mod interface;
 #[cfg(test)]
@@ -21,7 +23,7 @@ pub(crate) mod git_facts;
 mod graph_auto_settle;
 mod graph_document;
 pub(crate) mod owner;
-mod peer;
+pub(crate) mod peer;
 mod peer_source_binding;
 pub(crate) mod progress;
 mod queue_adoption;

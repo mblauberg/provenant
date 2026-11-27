@@ -595,13 +595,15 @@ fn follow_up(
             } else {
                 steps.push(delete_branch(
                     git,
-                    git.host_state(),
-                    cleanup_project,
-                    branch,
-                    base,
-                    &upstream,
-                    tip,
-                    branch_gone,
+                    DeleteBranch {
+                        host_state: git.host_state(),
+                        project: cleanup_project,
+                        branch,
+                        base,
+                        upstream: &upstream,
+                        tip,
+                        already_gone: branch_gone,
+                    },
                 )?);
             }
         }
@@ -916,16 +918,26 @@ fn fast_forward(
 /// Delete the merged local branch, but only while it is still at `tip`, the
 /// head the cleanup check verified: `git update-ref -d` compares and deletes in
 /// one locked ref transaction, so a branch moved since the check is kept.
-fn delete_branch(
-    git: &Git,
-    host_state: &Path,
-    project: &Path,
-    branch: &str,
-    base: &str,
-    upstream: &str,
+struct DeleteBranch<'a> {
+    host_state: &'a Path,
+    project: &'a Path,
+    branch: &'a str,
+    base: &'a str,
+    upstream: &'a str,
     tip: GitOid,
     already_gone: bool,
-) -> Result<Step> {
+}
+
+fn delete_branch(git: &Git, params: DeleteBranch<'_>) -> Result<Step> {
+    let DeleteBranch {
+        host_state,
+        project,
+        branch,
+        base,
+        upstream,
+        tip,
+        already_gone,
+    } = params;
     if already_gone {
         return Ok(Step::new(
             "branch",
@@ -1456,7 +1468,16 @@ pub(crate) fn delete_after_check(
         }
     }
     let step = delete_branch(
-        &git, host_state, project, "feat", "main", upstream, tip, false,
+        &git,
+        DeleteBranch {
+            host_state,
+            project,
+            branch: "feat",
+            base: "main",
+            upstream,
+            tip,
+            already_gone: false,
+        },
     )?;
     let status = serde_json::to_value(step.status)?
         .as_str()

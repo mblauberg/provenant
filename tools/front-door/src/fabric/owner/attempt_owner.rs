@@ -886,9 +886,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
         let tree = CustodySubject::new(SubjectKind::Worktree, path.to_owned());
         resolve_child_launch(&tree, &request, choice, &sharing, None, &[]).map_err(|error| {
             let diagnostic = provenant_run::RunError::Writer(
-                provenant_confinement::worktrees::WorktreeError::CustodyCommand(Box::new(
-                    error.clone(),
-                )),
+                provenant_confinement::worktrees::WorktreeError::CustodyCommand(error.clone()),
             )
             .diagnostic(provenant_records::diagnostic::Destination::Local);
             FacadeError::RecordedRefusal {

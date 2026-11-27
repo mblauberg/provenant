@@ -1855,6 +1855,55 @@ pub(crate) fn unified_graph_command(
         GraphCommand::Stop { .. } => "stop",
         GraphCommand::Retry { .. } => "retry",
     };
+    let result = graph_command_read(targets, command, globals, workers);
+    match result {
+        Ok((data, human, next_steps, superseded_next)) => {
+            let summary = if name == "status" {
+                let rows: Vec<Value> =
+                    if let Some(targets) = data.get("targets").and_then(Value::as_array) {
+                        targets
+                            .iter()
+                            .filter_map(|t| t.get("rows").and_then(Value::as_array))
+                            .flatten()
+                            .cloned()
+                            .collect()
+                    } else {
+                        data.get("rows")
+                            .and_then(Value::as_array)
+                            .cloned()
+                            .unwrap_or_default()
+                    };
+                Some(status_summary(&rows))
+            } else {
+                None
+            };
+            // A superseded name points at the newer handle, not at the older
+            // graph's own next step.
+            let steps = superseded_next.map_or(next_steps, |step| vec![step]);
+            crate::emit_summarised(
+                &provenant_records::CommandResult::new(name, provenant_records::Outcome::Ok, data)
+                    .with_next(steps),
+                globals,
+                &human,
+                false,
+                summary.as_ref().filter(|_| !globals.full),
+            )
+        }
+        Err(error) => command_fail(name, error.as_ref(), globals),
+    }
+}
+
+fn graph_command_read(
+    targets: &[provenant_cli::Target],
+    command: GraphCommand<'_>,
+    globals: &provenant_cli::Globals,
+    workers: &'static dyn WorkerObserver,
+) -> Result<GraphCommandReply, Box<dyn std::error::Error>> {
+    let name = match command {
+        GraphCommand::Status => "status",
+        GraphCommand::Stop { .. } => "stop",
+        GraphCommand::Retry { .. } => "retry",
+    };
     let result = (|| -> Result<GraphCommandReply, Box<dyn std::error::Error>> {
         // A lane reads through the host, which holds the configuration.
         let lane_read = matches!(command, GraphCommand::Status) && provenant_cli::fabric::in_lane();
@@ -2118,41 +2167,17 @@ pub(crate) fn unified_graph_command(
         };
         Ok((data, human, next_steps, superseded_next))
     })();
-    match result {
-        Ok((data, human, next_steps, superseded_next)) => {
-            let summary = if matches!(command, GraphCommand::Status) {
-                let rows: Vec<Value> =
-                    if let Some(targets) = data.get("targets").and_then(Value::as_array) {
-                        targets
-                            .iter()
-                            .filter_map(|t| t.get("rows").and_then(Value::as_array))
-                            .flatten()
-                            .cloned()
-                            .collect()
-                    } else {
-                        data.get("rows")
-                            .and_then(Value::as_array)
-                            .cloned()
-                            .unwrap_or_default()
-                    };
-                Some(status_summary(&rows))
-            } else {
-                None
-            };
-            // A superseded name points at the newer handle, not at the older
-            // graph's own next step.
-            let steps = superseded_next.map_or(next_steps, |step| vec![step]);
-            crate::emit_summarised(
-                &provenant_records::CommandResult::new(name, provenant_records::Outcome::Ok, data)
-                    .with_next(steps),
-                globals,
-                &human,
-                false,
-                summary.as_ref().filter(|_| !globals.full),
-            )
-        }
-        Err(error) => command_fail(name, error.as_ref(), globals),
-    }
+    result
+}
+
+/// Read status data without rendering or writing to the process output streams.
+/// The same target resolution, wake and evidence path serves local and peer reads.
+pub(crate) fn graph_status_data(
+    targets: &[provenant_cli::Target],
+    globals: &provenant_cli::Globals,
+    workers: &'static dyn WorkerObserver,
+) -> Result<Value, Box<dyn std::error::Error>> {
+    graph_command_read(targets, GraphCommand::Status, globals, workers).map(|(data, _, _, _)| data)
 }
 
 /// Outcomes of one `steer` command. Settled targets are handled by the sourced
@@ -2958,11 +2983,11 @@ pub(crate) fn select_listing(
 
 /// `provenant status` with no target: every active graph, then recent
 /// settled ones, with a count of what the page leaves out.
-pub(crate) fn graph_listing(
+fn collect_graph_listing(
     command: &provenant_cli::Status,
     globals: &provenant_cli::Globals,
     workers: &'static dyn WorkerObserver,
-) -> u8 {
+) -> Result<Listing, Box<dyn std::error::Error>> {
     let result = (|| -> Result<Listing, Box<dyn std::error::Error>> {
         let factory = match read_factory(globals, workers) {
             Ok(factory) => factory,
@@ -3095,6 +3120,15 @@ pub(crate) fn graph_listing(
         }
         Ok(finished)
     })();
+    result
+}
+
+pub(crate) fn graph_listing(
+    command: &provenant_cli::Status,
+    globals: &provenant_cli::Globals,
+    workers: &'static dyn WorkerObserver,
+) -> u8 {
+    let result = collect_graph_listing(command, globals, workers);
     match result {
         Ok(listing) => {
             let now = SystemClock::new()
@@ -3265,6 +3299,57 @@ pub(crate) fn graph_listing(
         }
         Err(error) => command_fail("status", error.as_ref(), globals),
     }
+}
+
+/// Read status using the same dispatch boundary as the `status` command.
+pub(crate) fn host_status_data(
+    command: &provenant_cli::Status,
+    globals: &provenant_cli::Globals,
+    workers: &'static dyn WorkerObserver,
+) -> Result<Value, Box<dyn std::error::Error>> {
+    if command.targets.is_empty() && !provenant_cli::fabric::in_lane() {
+        graph_listing_data(command, globals, workers)
+    } else {
+        graph_status_data(&command.targets, globals, workers)
+    }
+}
+
+/// Read the no-target status page as data for a host aggregation response.
+pub(crate) fn graph_listing_data(
+    command: &provenant_cli::Status,
+    globals: &provenant_cli::Globals,
+    workers: &'static dyn WorkerObserver,
+) -> Result<Value, Box<dyn std::error::Error>> {
+    let listing = collect_graph_listing(command, globals, workers)?;
+    let live = live_lanes(&listing);
+    let rows: Vec<_> = listing
+        .rows
+        .iter()
+        .map(|graph| {
+            json!({
+                "name":graph.name,"state":graph.state,"template":graph.template,
+                "nodes":graph.nodes,"created_micros":graph.created_micros,
+                "changed_micros":graph.changed_micros,"reason":graph.reason,
+                "digests":graph.digests,"open_asks":graph.open_asks,
+            })
+        })
+        .collect();
+    let mut data = json!({
+        "graphs": rows,
+        "omitted": listing.omitted,
+        "next_cursor": listing.next,
+        "live_lanes": live,
+    });
+    if !listing.admission_holders.is_empty() || !listing.admission_waiters.is_empty() {
+        data["admission"] = json!({
+            "holders": listing.admission_holders,
+            "waiters": listing.admission_waiters,
+        });
+    }
+    if !listing.stranded_work.is_empty() {
+        data["stranded_work"] = json!(listing.stranded_work);
+    }
+    Ok(data)
 }
 
 /// The `admission:` section of a status listing: the waiters, each with the
