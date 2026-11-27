@@ -32,21 +32,14 @@ pub(super) fn delivery_matches(
     {
         return false;
     }
-    // The sealed flag maps to the acceptance threshold exactly as the store
-    // migration does: true -> blocking, false -> off. An open blocking-class
-    // finding still blocks acceptance at every threshold.
-    let threshold = if policy.accept_inconclusive_without_blocking {
-        AcceptBelow::Blocking
-    } else {
-        AcceptBelow::Off
-    };
+    let threshold = policy.accept_below;
     let agrees = match outputs
         .verdict
         .as_deref()
         .and_then(ReviewVerdict::from_token)
     {
         Some(ReviewVerdict::Approve) => true,
-        Some(ReviewVerdict::Inconclusive) => policy.accept_inconclusive_without_blocking,
+        Some(ReviewVerdict::Inconclusive) => policy.accept_below != AcceptBelow::Off,
         _ => false,
     };
     agrees
@@ -978,9 +971,9 @@ mod delivery_tests {
             ..Default::default()
         };
         assert!(delivery_matches(&policy, &outputs, "VERDICT: PASS"));
-        policy.accept_inconclusive_without_blocking = false;
+        policy.accept_below = AcceptBelow::Off;
         assert!(!delivery_matches(&policy, &outputs, "VERDICT: PASS"));
-        policy.accept_inconclusive_without_blocking = true;
+        policy.accept_below = AcceptBelow::Blocking;
         outputs.findings_available = None;
         assert!(!delivery_matches(&policy, &outputs, "VERDICT: PASS"));
         outputs.findings_available = Some(true);

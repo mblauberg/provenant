@@ -2999,6 +2999,8 @@ fn v2_checkpoint_migrates_and_is_published_under_the_journal_lock() {
     value["digest"] = digest.to_string().into();
     std::fs::write(&path, CanonicalV1::bytes(&value).unwrap().as_bytes()).unwrap();
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    assert!(decode_checkpoint(&std::fs::read(&path).unwrap(), "g-test").is_err());
+    migrate_store(root.as_path()).unwrap();
     let journal = FileJournal::open(&root, project, "g-test", budget, &cancel, &clock).unwrap();
     let stored = load_checkpoint(&journal.directory, "g-test")
         .unwrap()
@@ -3046,7 +3048,30 @@ fn v3_checkpoint_cut_over_types_warnings_and_renames_sealed_settings() {
     value["execution"]["accept_inconclusive_without_blocking"] = true.into();
     value["execution"]["lanes.isolation"] = "shared".into();
     value["execution"]["source"] = "builtin".into();
-    std::fs::write(&path, CanonicalV1::bytes(&value).unwrap().as_bytes()).unwrap();
+    value["digest"] = CanonicalV1::record_digest(
+        "fabric-graph-checkpoint",
+        2,
+        &(&value["checkpoint"], &value["execution"]),
+    )
+    .unwrap()
+    .to_string()
+    .into();
+    let valid = CanonicalV1::bytes(&value).unwrap().as_bytes().to_vec();
+    assert!(decode_checkpoint(&valid, "g-test").is_err());
+    value["digest"] = "sha256:corrupt".into();
+    let corrupt = CanonicalV1::bytes(&value).unwrap().as_bytes().to_vec();
+    std::fs::write(&path, &corrupt).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    assert!(migrate_store(root.as_path()).is_err());
+    assert_eq!(std::fs::read(&path).unwrap(), corrupt);
+    assert!(
+        !root
+            .as_path()
+            .join("fabric/graphs")
+            .join(format!("migrating-{CHECKPOINT_SCHEMA_VERSION}"))
+            .exists()
+    );
+    std::fs::write(&path, valid).unwrap();
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
 
     let changed = migrate_store(root.as_path()).unwrap();

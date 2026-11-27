@@ -28,7 +28,7 @@ mod queue_adoption;
 mod queue_controls;
 mod queue_delivery;
 mod queue_dispatch;
-mod queue_registry;
+pub(crate) mod queue_registry;
 mod queue_scheduler;
 mod queue_snapshot;
 pub(crate) mod run_owner;

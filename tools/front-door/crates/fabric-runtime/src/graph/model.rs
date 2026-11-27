@@ -166,14 +166,14 @@ impl EscalateSpec {
 #[serde(default, deny_unknown_fields)]
 pub struct DeliveryReviewSpec {
     pub shape: provenant_records::graph::ReviewShape,
-    pub accept_inconclusive_without_blocking: bool,
+    pub accept_below: AcceptBelow,
 }
 
 impl Default for DeliveryReviewSpec {
     fn default() -> Self {
         Self {
             shape: Default::default(),
-            accept_inconclusive_without_blocking: true,
+            accept_below: AcceptBelow::Blocking,
         }
     }
 }

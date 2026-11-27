@@ -2376,7 +2376,7 @@ fn delivery_contracts_round_trip_and_admit_execution() {
                 "depends_on":["writer"], "condition":{"type":"budget"}}
         ], "until":"done", "max_rounds":2},
         "escalate":{"ladder":["junior","principal"],"max_ci_rounds":3},
-        "delivery_review":{"shape":"panel","accept_inconclusive_without_blocking":false}});
+        "delivery_review":{"shape":"panel","accept_below":"off"}});
     let compiled = Compiler::new(&library()).compile(&raw).unwrap();
     let wire = serde_json::to_value(&compiled).unwrap();
     assert_eq!(wire["escalate"], raw["escalate"]);
@@ -2489,7 +2489,7 @@ fn compiler_lowers_and_admits_a_queue_delivery_composite() {
                             ]}},
                     {"id":"review", "kind":"composite", "access":"read_only",
                         "depends_on":["repair","publish"], "source":{"type":"head", "node":"publish"},
-                        "delivery_review":{"shape":"single", "accept_inconclusive_without_blocking":false},
+                        "delivery_review":{"shape":"single", "accept_below":"off"},
                         "composite":{"nodes":[
                             {"id":"lens", "access":"read_only", "prompt":"review the published head",
                                 "route":{"alias":"senior"}, "require_findings":true,
@@ -2736,5 +2736,8 @@ fn delivery_settings_require_v2_and_validate_overrides() {
         DeliveryReviewSpec::default().shape,
         provenant_records::graph::ReviewShape::Single
     );
-    assert!(DeliveryReviewSpec::default().accept_inconclusive_without_blocking);
+    assert_eq!(
+        DeliveryReviewSpec::default().accept_below,
+        AcceptBelow::Blocking
+    );
 }

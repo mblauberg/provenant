@@ -575,7 +575,7 @@ fn base_fourteen_migration_preserves_local_delivery_receipts() -> TestResult {
             )
             .is_err()
     );
-    assert_eq!(provenant_sqlite::stored_version(&store.db)?, 16);
+    assert_eq!(provenant_sqlite::stored_version(&store.db)?, 17);
     drop(store);
     let reopened = RunStore::open(&context, &call)?;
     assert_eq!(base_twelve_record(&reopened, remote_id)?, remote);
@@ -645,6 +645,44 @@ fn legacy_route(
         .ok_or("sandbox object")?
         .remove("constraint");
     Ok(route)
+}
+
+#[test]
+fn base_sixteen_cutover_preserves_decodable_resource_facts() -> TestResult {
+    let (_temp, context, store, input, _attempt) = seeded()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    withdraw(&store, &input, &call)?;
+    let mut legacy = base_twelve_record(&store, input.attempt_id)?;
+    legacy["skipped_routes"] = serde_json::json!([
+        {"route":"a","kind":"unavailable","detail":"fixture",
+         "guard_resource":{"kind":"pacing_reserve","percent":25,"setting":"account",
+                           "origin":"configuration","account":"acct",
+                           "window":"window","setting_path":"path"}},
+        {"route":"b","kind":"unavailable","detail":"fixture",
+         "guard_resource":{"kind":"lane_ports","blocks":4,"origin":"shipped_default"}}
+    ]);
+    seal_base_thirteen_row(&store, input.attempt_id, &legacy)?;
+    store.db.execute_batch("PRAGMA user_version=16")?;
+    drop(store);
+    crate::lease_migrate::migrate_database(context.state_root.as_path())?;
+    let store = RunStore::open(&context, &call)?;
+    let record = store.record(input.attempt_id, &call)?;
+    assert!(matches!(
+        record.skipped_routes[0].guard_resource.as_ref(),
+        Some(provenant_records::diagnostic::ResourceFact::PacingReserve {
+            origin: Layer::Host,
+            ..
+        })
+    ));
+    assert!(matches!(
+        record.skipped_routes[1].guard_resource.as_ref(),
+        Some(provenant_records::diagnostic::ResourceFact::LanePorts {
+            origin: Layer::Default,
+            ..
+        })
+    ));
+    Ok(())
 }
 
 #[test]

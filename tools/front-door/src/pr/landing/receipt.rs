@@ -336,6 +336,88 @@ pub fn pending(
     Ok(found)
 }
 
+/// Convert the old nested policy provenance while holding the publication lock.
+/// Validate the complete record before publishing it so interrupted landings
+/// are never replaced by a record the production reader cannot resume.
+pub(crate) fn migrate_pending(state: &Path) -> Result<Vec<String>, LandingError> {
+    let path = pending_dir(state);
+    let entries = match std::fs::read_dir(&path) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(failed("read pending directory", error)),
+    };
+    let _lock = lock(state)?;
+    let mut changed = Vec::new();
+    for entry in entries {
+        let path = entry
+            .map_err(|error| failed("read pending entry", error))?
+            .path();
+        if path.extension().is_none_or(|ext| ext != "json") {
+            continue;
+        }
+        let bytes = std::fs::read(&path).map_err(|error| failed("read pending record", error))?;
+        let mut value: serde_json::Value =
+            provenant_records::decode(bytes.as_slice(), provenant_records::Limits::default())
+                .map_err(|error| failed("decode pending record", error))?;
+        let mut rewritten = false;
+        for pointer in ["/policy", "/settled/record/policy"] {
+            let Some(policy) = value.pointer_mut(pointer) else {
+                continue;
+            };
+            for map in ["fields", "budget_rate_micros_per_minute"] {
+                let Some(fields) = policy
+                    .get_mut(map)
+                    .and_then(serde_json::Value::as_object_mut)
+                else {
+                    continue;
+                };
+                for field in fields.values_mut() {
+                    let Some(object) = field.as_object_mut() else {
+                        continue;
+                    };
+                    if object.contains_key("layer") {
+                        continue;
+                    }
+                    let Some(source) = object.remove("source") else {
+                        continue;
+                    };
+                    let source = source.as_object().ok_or_else(|| {
+                        LandingError::Failed("invalid pending policy source".into())
+                    })?;
+                    let layer = source.get("layer").cloned().ok_or_else(|| {
+                        LandingError::Failed("missing pending policy layer".into())
+                    })?;
+                    let key = source
+                        .get("key")
+                        .and_then(serde_json::Value::as_str)
+                        .ok_or_else(|| LandingError::Failed("missing pending policy key".into()))?;
+                    let origin = match source.get("path").filter(|path| !path.is_null()) {
+                        Some(path) => format!(
+                            "{}#{key}",
+                            path.as_str()
+                                .map(str::to_owned)
+                                .unwrap_or_else(|| path.to_string())
+                        ),
+                        None => key.to_owned(),
+                    };
+                    object.insert("layer".into(), layer);
+                    object.insert("origin".into(), origin.into());
+                    rewritten = true;
+                }
+            }
+        }
+        let _: PendingAttempt = serde_json::from_value(value.clone())
+            .map_err(|error| failed("validate pending record", error))?;
+        if rewritten {
+            let bytes = serde_json::to_vec_pretty(&value)
+                .map_err(|error| failed("encode pending record", error))?;
+            write_publication(&path, &bytes)?;
+            changed.push(path.display().to_string());
+        }
+    }
+    Ok(changed)
+}
+
 /// Remove the durable pending marker only after its receipt is settled.
 pub fn clear_pending(
     state: &Path,
@@ -433,6 +515,31 @@ pub(crate) mod tests {
         clear_pending(dir.path(), "fake-repository", &candidate("c1"))?;
         assert!(pending(dir.path(), "fake-repository", "main")?.is_empty());
         assert_eq!(pending(dir.path(), "fake-repository", "other")?.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn old_pending_policy_is_migrated_before_production_read() -> Result<(), LandingError> {
+        let dir = tempfile::tempdir().map_err(|e| failed("tmp", e))?;
+        let attempt = attempt("main", "c1");
+        let path = pending_path(dir.path(), &attempt.repository, &attempt.candidate)?;
+        let mut value = serde_json::to_value(&attempt).map_err(|e| failed("encode", e))?;
+        value["policy"]["fields"]["legacy"] = serde_json::json!({
+            "value": true, "source": {"layer": "host", "path": "/host/config.toml", "key": "domains.pr.land.legacy", "rule": null}
+        });
+        std::fs::create_dir_all(path.parent().unwrap()).map_err(|e| failed("mkdir", e))?;
+        std::fs::write(&path, serde_json::to_vec(&value).unwrap())
+            .map_err(|e| failed("write", e))?;
+        assert!(pending(dir.path(), "fake-repository", "main").is_err());
+        assert_eq!(migrate_pending(dir.path())?.len(), 1);
+        let loaded = pending(dir.path(), "fake-repository", "main")?;
+        let source = &loaded[0].policy.fields["legacy"].source;
+        assert_eq!(source.layer, provenant_records::Layer::Host);
+        assert_eq!(
+            source.origin.as_deref(),
+            Some("/host/config.toml#domains.pr.land.legacy")
+        );
+        assert!(migrate_pending(dir.path())?.is_empty());
         Ok(())
     }
 

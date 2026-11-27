@@ -55,7 +55,6 @@ const STEPS: &[&dyn Migration] = &[
     &ReadSourceLiveSpelling,
     &UsageLedgerV4,
     &ProjectGrantKeys,
-    &StoreCutover,
 ];
 
 /// `builtin` was the old spelling of the compiled-default layer. The shared
@@ -844,9 +843,12 @@ fn held_store_locks(state_root: &Path) -> Vec<String> {
             }
         }
     }
-    if let Ok(directory) = Directory::open_anchor(state_root.join("queue")) {
+    let queue_lock = crate::fabric::queue_registry::registry_lock_path(state_root);
+    if let (Some(parent), Some(name)) = (queue_lock.parent(), queue_lock.file_name())
+        && let Ok(directory) = Directory::open_anchor(parent)
+    {
         if matches!(
-            directory.try_flock_foreign(OsStr::new("registry.lock"), LockMode::Exclusive),
+            directory.try_flock_foreign(name, LockMode::Exclusive),
             Ok(ForeignLock::Held)
         ) {
             held.push("queue registry.lock".to_owned());
@@ -1071,6 +1073,8 @@ impl Migration for StoreCutover {
         let graph = provenant_fabric_runtime::graph::migrate_store(state_root)
             .map_err(|error| MigrationError::new(format!("graph store cut-over: {error}")))?;
         report.changed.extend(graph);
+        provenant_run::lease_migrate::migrate_database(state_root)
+            .map_err(|error| MigrationError::new(format!("run database cut-over: {error}")))?;
         let run = provenant_run::lease_migrate::migrate_store(state_root)
             .map_err(|error| MigrationError::new(format!("run store cut-over: {error}")))?;
         report.changed.extend(run);
@@ -1079,14 +1083,52 @@ impl Migration for StoreCutover {
         let config = ConfigKnobRewrite.apply(state_root)?;
         report.changed.extend(config.changed);
         report.warnings.extend(config.warnings);
+        if !report.warnings.is_empty() {
+            return Err(MigrationError::new(
+                "config cut-over left records unmigrated",
+            ));
+        }
+        report.changed.extend(
+            crate::pr::landing::receipt::migrate_pending(state_root).map_err(|error| {
+                MigrationError::new(format!("pending landing cut-over: {error}"))
+            })?,
+        );
         report.changed.sort();
         Ok(report)
     }
 }
 
 /// Run every pending step against the state root and return every recorded id.
-pub(super) fn run(state_root: &Path) -> Vec<String> {
-    run_steps(state_root, STEPS)
+pub(super) fn cutover_pending(state_root: &Path) -> Result<bool, String> {
+    Ok(!read_receipt(state_root)?
+        .is_some_and(|receipt| receipt.migrations.iter().any(|id| id == StoreCutover.id())))
+}
+
+pub(super) fn run(state_root: &Path) -> Result<Vec<String>, (&'static str, String)> {
+    if cutover_pending(state_root).map_err(|error| ("UPGRADE_MIGRATION_FAILED", error))? {
+        StoreCutover.apply(state_root).map_err(|error| {
+            let message = error.to_string();
+            let code = if message.contains("UPGRADE_NOT_QUIESCENT") {
+                "UPGRADE_NOT_QUIESCENT"
+            } else {
+                "UPGRADE_MIGRATION_FAILED"
+            };
+            (code, message)
+        })?;
+        let mut applied = read_receipt(state_root)
+            .map_err(|error| ("UPGRADE_MIGRATION_FAILED", error))?
+            .map(|receipt| receipt.migrations)
+            .unwrap_or_default();
+        applied.push(StoreCutover.id().to_owned());
+        persist(state_root, &applied).map_err(|error| ("UPGRADE_MIGRATION_FAILED", error))?;
+        let mut remaining = run_steps(state_root, STEPS);
+        if !remaining.iter().any(|id| id == StoreCutover.id()) {
+            remaining.push(StoreCutover.id().to_owned());
+        }
+        Ok(remaining)
+    } else {
+        Ok(run_steps(state_root, STEPS))
+    }
 }
 
 /// Record ids on the receipt install just published, for a step that ran
@@ -2052,17 +2094,17 @@ leaf_source = "dispatch"
             "[lanes]\nisolation = \"shared\"\n[domains.install]\nquiesce_seconds = 0\n",
         )
         .expect("write config");
-        let id = provenant_core::AttemptId::from_bytes([4; 16]);
-        let attempt = path.join("attempts").join(id.to_string());
-        std::fs::create_dir_all(&attempt).expect("attempt dir");
-        let directory = Directory::open_anchor(&attempt).expect("attempt anchor");
+        let original = std::fs::read(&config).expect("read original config");
+        let queue_lock = crate::fabric::queue_registry::registry_lock_path(path);
+        std::fs::create_dir_all(queue_lock.parent().unwrap()).expect("queue dir");
+        let directory = Directory::open_anchor(queue_lock.parent().unwrap()).expect("queue anchor");
         let _holder = directory
-            .try_lock(OsStr::new("writer.lock"), LockMode::Exclusive)
-            .expect("hold writer lock");
+            .try_lock(queue_lock.file_name().unwrap(), LockMode::Exclusive)
+            .expect("hold queue lock");
         assert!(
             held_store_locks(path)
                 .iter()
-                .any(|name| name.contains("writer.lock")),
+                .any(|name| name.contains("registry.lock")),
             "the held lock is visible to the gate"
         );
 
@@ -2071,11 +2113,7 @@ leaf_source = "dispatch"
             error.to_string().contains("UPGRADE_NOT_QUIESCENT"),
             "{error}"
         );
-        let text = std::fs::read_to_string(&config).expect("read config");
-        assert!(
-            text.contains("isolation"),
-            "no config was rewritten: {text}"
-        );
+        assert_eq!(std::fs::read(&config).expect("read config"), original);
         assert!(!path.join("migrating-4").exists(), "no marker was written");
     }
 }

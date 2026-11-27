@@ -243,6 +243,11 @@ pub(super) fn bounded_wait_deadlines(
     ))
 }
 
+/// Directory and lock used for every delivery queue registry operation.
+pub(crate) fn registry_lock_path(state: &Path) -> std::path::PathBuf {
+    state.join("fabric/delivery-queue").join(REGISTRY_LOCK)
+}
+
 /// Serialises all queue ownership decisions in the host state domain.
 pub(super) struct QueueRegistry {
     directory: Directory,
@@ -250,8 +255,9 @@ pub(super) struct QueueRegistry {
 
 impl QueueRegistry {
     pub(super) fn open(state: &Path) -> Result<Self, String> {
-        let path = state.join("fabric/delivery-queue");
-        let directory = provenant_config::private_directory(&path, true)
+        let lock = registry_lock_path(state);
+        let path = lock.parent().expect("registry lock has a parent");
+        let directory = provenant_config::private_directory(path, true)
             .map_err(|error| format!("delivery queue state unavailable: {error}"))?;
         Ok(Self { directory })
     }

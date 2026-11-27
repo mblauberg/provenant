@@ -53,6 +53,18 @@ pub(crate) fn migrate(
     }))
 }
 
+/// Bring an existing run database to the current schema during cut-over.
+pub fn migrate_database(state_root: &Path) -> Result<(), MigrationError> {
+    let path = state_root.join("run.sqlite3");
+    if !path.exists() {
+        return Ok(());
+    }
+    let db = provenant_sqlite::open_connection(&path, false)
+        .map_err(|error| MigrationError::new(error.to_string()))?;
+    provenant_sqlite::ensure_schema(&db, crate::db::SCHEMA)
+        .map_err(|error| MigrationError::new(error.to_string()))
+}
+
 /// One cut-over for the run store. Every attempt's sealed ownership record is
 /// rewritten under that attempt's writer lock. A `migrating-<to>` marker makes
 /// an interrupted pass resumable, and records already converted are skipped.
@@ -150,6 +162,43 @@ mod tests {
         let bytes = crate::db::bytes(&record).expect("encode ownership");
         crate::artifacts::seal(directory, "writer-owned.json", &bytes, crate::RECORD_LIMIT)
             .expect("seal ownership");
+    }
+
+    #[test]
+    fn schema_16_resource_origins_are_migrated() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let path = root.path().join("run.sqlite3");
+        let db = rusqlite::Connection::open(&path).expect("create database");
+        db.execute_batch(include_str!("fixtures/schema-16.sql"))
+            .expect("base schema");
+        let record = serde_json::json!({"skipped_routes": [
+            {"guard_resource": {"kind": "pacing_reserve", "origin": "configuration"}},
+            {"guard_resource": {"kind": "lane_ports", "origin": "shipped_default"}},
+            {"guard_resource": {"kind": "other", "origin": "configuration"}}
+        ]});
+        db.execute("INSERT INTO attempts (id,project,graph,node,attempt,digest,actor,operation,number,operation_record,revision,terminal,record) VALUES ('a','p','g','n',1,'d','actor','op',1,x'7b7d',1,1,?1)", [serde_json::to_vec(&record).unwrap()]).expect("insert legacy record");
+        drop(db);
+        migrate_database(root.path()).expect("migrate database");
+        let db = provenant_sqlite::open_connection(&path, true).expect("open migrated database");
+        assert_eq!(provenant_sqlite::stored_version(&db).unwrap(), 17);
+        let bytes: Vec<u8> = db
+            .query_row("SELECT record FROM attempts WHERE id='a'", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        let migrated: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            migrated["skipped_routes"][0]["guard_resource"]["origin"],
+            "host"
+        );
+        assert_eq!(
+            migrated["skipped_routes"][1]["guard_resource"]["origin"],
+            "default"
+        );
+        assert_eq!(
+            migrated["skipped_routes"][2]["guard_resource"]["origin"],
+            "configuration"
+        );
     }
 
     #[test]

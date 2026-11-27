@@ -125,7 +125,7 @@ nodes = [
   } },
   # One reviewer for `single`, one panel for `panel`; `delivery_review` carries
   # the shape and the inconclusive disposition through the shared type.
-  { id = "review", use = "${review_template}", after = ["ci"], source = { type = "head", node = "implement" }, delivery_review = { shape = "${review_shape}", accept_inconclusive_without_blocking = true }, with = { brief = "${brief}" } },
+  { id = "review", use = "${review_template}", after = ["ci"], source = { type = "head", node = "implement" }, delivery_review = { shape = "${review_shape}", accept_below = "blocking" }, with = { brief = "${brief}" } },
   # Join the initial approval with the recovery path. Recovery must check the
   # continued head through CI and review before the join can allow landing.
   { id = "outcome", kind = "composite", access = "read_only", after = ["review", "ci", "implement"], composite = {
@@ -138,7 +138,7 @@ nodes = [
         nodes = [
           { id = "repair", use = "review-repair", with = { writer = "implement", worktree = "${worktree}", write_scope = "${write_scope}", max_repair_cycles = "${max_ci_rounds}", lenses = "${lenses}" } },
           { id = "ci", kind = "gate", access = "read_only", after = ["repair"], condition = { type = "ci", target = { node = "implement" }, failed_checks_max_bytes = 4096, max_failed_checks = 8 } },
-          { id = "fresh-review", use = "${review_template}", after = ["ci"], source = { type = "head", node = "implement" }, delivery_review = { shape = "${review_shape}", accept_inconclusive_without_blocking = true }, with = { brief = "${brief}" } },
+          { id = "fresh-review", use = "${review_template}", after = ["ci"], source = { type = "head", node = "implement" }, delivery_review = { shape = "${review_shape}", accept_below = "blocking" }, with = { brief = "${brief}" } },
           { id = "accepted", kind = "gate", access = "read_only", after = ["fresh-review"], condition = { type = "verdict", expected = "VERDICT: PASS", threshold = "all" }, inputs = [{ node = "fresh-review", outputs = ["verdict"] }] },
         ]
       } },

@@ -1521,7 +1521,28 @@ fn apply_install(
     // now targets its published name. Agent bytes already name that destination.
     // Non-SQLite state migrates once here, after the live-attempt advisory and
     // before any release is swapped in.
-    let migrated = migrations::run(environment.roots.state.as_path());
+    let state_root = environment.roots.state.as_path();
+    let home = batches
+        .last()
+        .ok_or(InstallError::InvalidConfig("no prepared install batches"))?
+        .home
+        .clone();
+    let cutover_pending = migrations::cutover_pending(state_root)
+        .map_err(|error| Refused::Fail(Outcome::Error, "UPGRADE_MIGRATION_FAILED", error))?;
+    if cutover_pending {
+        let stopped = super::tick_agent::stop(&home).map_err(|error| {
+            Refused::Fail(
+                Outcome::Error,
+                "UPGRADE_MIGRATION_FAILED",
+                format!("disable tick before migration: {error}"),
+            )
+        })?;
+        if stopped {
+            reporter.stopped_agents.insert("dev.provenant.tick");
+        }
+    }
+    let migrated = migrations::run(state_root)
+        .map_err(|(code, message)| Refused::Fail(Outcome::Error, code, message))?;
     for batch in &mut batches {
         batch.roots = environment.roots.clone();
     }

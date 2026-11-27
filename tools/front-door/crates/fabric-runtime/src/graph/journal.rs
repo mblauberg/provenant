@@ -656,7 +656,7 @@ impl FileJournal {
                 cancel,
                 clock,
             )?;
-            let stored = migrate_checkpoint_locked(&graphs_dir, graph_id)?;
+            let stored = load_checkpoint(&graphs_dir, graph_id)?;
             let (extra, execution) = stored.map_or_else(
                 || (Default::default(), None),
                 |stored| (stored.extra, Some(stored.execution)),
@@ -692,7 +692,7 @@ impl FileJournal {
             let graphs_dir = open_or_create(&graphs_dir, OsStr::new(&project.to_string()))?;
             let lock_name = format!("graph-{graph_id}.lock");
             let lock = graphs_dir.try_lock(OsStr::new(&lock_name), LockMode::Exclusive)?;
-            let stored = migrate_checkpoint_locked(&graphs_dir, graph_id)?;
+            let stored = load_checkpoint(&graphs_dir, graph_id)?;
             let (extra, execution) = stored.map_or_else(
                 || (Default::default(), None),
                 |stored| (stored.extra, Some(stored.execution)),
@@ -2380,11 +2380,10 @@ pub(super) fn decode_checkpoint_in(
     graph_id: &str,
 ) -> Result<StoredCheckpoint, JournalError> {
     let bytes = prompt_store::rehydrate(directory, graph_id, bytes)?;
-    let bytes = migrate_checkpoint_bytes(&bytes)?;
     decode_checkpoint_limited(&bytes, graph_id, bytes.len() as u64)
 }
 
-// The sole reader of older checkpoint envelopes. A v2 record is digest-checked
+// The sole reader of older checkpoint envelopes. Every old record is digest-checked
 // before its keys move; each step is idempotent, so a record already at the
 // current version is returned untouched and a resumed cut-over changes nothing.
 fn migrate_checkpoint_bytes(bytes: &[u8]) -> Result<Vec<u8>, JournalError> {
@@ -2405,7 +2404,7 @@ fn migrate_checkpoint_bytes(bytes: &[u8]) -> Result<Vec<u8>, JournalError> {
         return Ok(bytes.to_vec());
     }
     let mut value = value;
-    if version == Some(2) {
+    {
         let checkpoint = value.get("checkpoint").ok_or(JournalError::BadEnvelope)?;
         let execution = value.get("execution").ok_or(JournalError::BadEnvelope)?;
         let digest =
@@ -2415,6 +2414,8 @@ fn migrate_checkpoint_bytes(bytes: &[u8]) -> Result<Vec<u8>, JournalError> {
         {
             return Err(JournalError::BadDigest);
         }
+    }
+    if version == Some(2) {
         value = migrate_checkpoint_2_3(value)?;
     }
     if value
@@ -2587,92 +2588,73 @@ pub fn migrate_store(state_root: &std::path::Path) -> Result<Vec<String>, Journa
         Err(error) => return Err(error.into()),
     };
     let marker = graphs.join(format!("migrating-{CHECKPOINT_SCHEMA_VERSION}"));
-    std::fs::write(&marker, b"")?;
-    let result = (|| -> Result<(), JournalError> {
-        for project in entries {
-            let project = project?;
-            if !project.file_type()?.is_dir() {
-                continue;
-            }
-            let Some(project_name) = project.file_name().to_str().map(str::to_owned) else {
+    let mut prepared = Vec::new();
+    for project in entries {
+        let project = project?;
+        if !project.file_type()?.is_dir() {
+            continue;
+        }
+        let Some(project_name) = project.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        let directory = Directory::open_anchor(project.path())?;
+        let names: Vec<OsString> = directory.entries().collect::<Result<Vec<_>, _>>()?;
+        for name in names {
+            let Some(text) = name.to_str() else {
                 continue;
             };
-            let directory = Directory::open_anchor(project.path())?;
-            let names: Vec<OsString> = directory.entries().collect::<Result<Vec<_>, _>>()?;
-            for name in names {
-                let Some(text) = name.to_str() else { continue };
-                let Some(id) = text
-                    .strip_prefix("graph-")
-                    .and_then(|rest| rest.strip_suffix(".json"))
-                else {
-                    continue;
-                };
-                let lock_name = format!("graph-{id}.lock");
-                let _lock = directory.try_lock(OsStr::new(&lock_name), LockMode::Exclusive)?;
-                let Some(bytes) = read_checkpoint_bytes(&directory, id)? else {
-                    continue;
-                };
-                let inline = prompt_store::rehydrate(&directory, id, &bytes)?;
-                let migrated = migrate_checkpoint_bytes(&inline)?;
-                if migrated.as_slice() == &*inline {
-                    continue;
-                }
-                let mut value: serde_json::Value =
-                    serde_json::from_slice(&migrated).map_err(|_| JournalError::BadEnvelope)?;
-                prompt_store::externalise(&directory, id, &mut value)?;
-                let compact = CanonicalV1::bytes(&value)?;
-                if compact.as_bytes().len() as u64 > MAX_CHECKPOINT_BYTES {
-                    return Err(JournalError::TooLarge);
-                }
-                directory
-                    .atomic_write(
-                        &checkpoint_file_name(id),
-                        ".graph-migrate.",
-                        compact.as_bytes(),
-                        PublishMode::Replace,
-                    )?
-                    .require_durable()
-                    .map_err(JournalError::DurabilityUnconfirmed)?;
-                changed.push(format!("{project_name}/{text}"));
+            let Some(id) = text
+                .strip_prefix("graph-")
+                .and_then(|rest| rest.strip_suffix(".json"))
+            else {
+                continue;
+            };
+            let lock_name = format!("graph-{id}.lock");
+            let guard = directory.try_lock(OsStr::new(&lock_name), LockMode::Exclusive)?;
+            let Some(bytes) = read_checkpoint_bytes(&directory, id)? else {
+                continue;
+            };
+            let inline = prompt_store::rehydrate(&directory, id, &bytes)?;
+            let migrated = migrate_checkpoint_bytes(&inline)?;
+            if migrated.as_slice() != &*inline {
+                prepared.push((
+                    project.path(),
+                    project_name.clone(),
+                    text.to_owned(),
+                    id.to_owned(),
+                    guard,
+                    migrated,
+                ));
             }
+        }
+    }
+    std::fs::write(&marker, b"")?;
+    let result = (|| -> Result<(), JournalError> {
+        for (path, project_name, text, id, _guard, migrated) in prepared {
+            let directory = Directory::open_anchor(path)?;
+            let mut value: serde_json::Value =
+                serde_json::from_slice(&migrated).map_err(|_| JournalError::BadEnvelope)?;
+            prompt_store::externalise(&directory, &id, &mut value)?;
+            let compact = CanonicalV1::bytes(&value)?;
+            if compact.as_bytes().len() as u64 > MAX_CHECKPOINT_BYTES {
+                return Err(JournalError::TooLarge);
+            }
+            directory
+                .atomic_write(
+                    &checkpoint_file_name(&id),
+                    ".graph-migrate.",
+                    compact.as_bytes(),
+                    PublishMode::Replace,
+                )?
+                .require_durable()
+                .map_err(JournalError::DurabilityUnconfirmed)?;
+            changed.push(format!("{project_name}/{text}"));
         }
         Ok(())
     })();
     result?;
     std::fs::remove_file(&marker)?;
     Ok(changed)
-}
-
-// Called only after acquiring the graph writer lock.
-fn migrate_checkpoint_locked(
-    directory: &Directory,
-    graph_id: &str,
-) -> Result<Option<StoredCheckpoint>, JournalError> {
-    let Some(bytes) = read_checkpoint_bytes(directory, graph_id)? else {
-        return Ok(None);
-    };
-    let inline = prompt_store::rehydrate(directory, graph_id, &bytes)?;
-    let migrated = migrate_checkpoint_bytes(&inline)?;
-    let stored = decode_checkpoint_limited(&migrated, graph_id, migrated.len() as u64)?;
-    if migrated.as_slice() != &*inline {
-        let mut value: serde_json::Value =
-            serde_json::from_slice(&migrated).map_err(|_| JournalError::BadEnvelope)?;
-        prompt_store::externalise(directory, graph_id, &mut value)?;
-        let compact = CanonicalV1::bytes(&value)?;
-        if compact.as_bytes().len() as u64 > MAX_CHECKPOINT_BYTES {
-            return Err(JournalError::TooLarge);
-        }
-        directory
-            .atomic_write(
-                &checkpoint_file_name(graph_id),
-                ".graph-checkpoint.",
-                compact.as_bytes(),
-                PublishMode::Replace,
-            )?
-            .require_durable()
-            .map_err(JournalError::DurabilityUnconfirmed)?;
-    }
-    Ok(Some(stored))
 }
 
 pub(super) fn read_checkpoint_bytes(
