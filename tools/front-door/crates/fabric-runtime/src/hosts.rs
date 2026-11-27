@@ -481,6 +481,20 @@ pub enum PeerAction {
         /// The source's wait, so the peer finishes inside it.
         budget_seconds: u64,
     },
+    /// Collect this host's lane caches and worktrees. `gc --host` sends this
+    /// to a peer; the peer applies the same flags it would apply locally.
+    Gc {
+        #[serde(flatten)]
+        extra: provenant_records::ExtraFields,
+        dry_run: bool,
+        apply: bool,
+        scheduled: bool,
+        pressure: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        free_floor: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        idle: Option<u64>,
+    },
 }
 
 peer_feature_protocols! {
@@ -526,6 +540,12 @@ peer_feature_protocols! {
     CONSOLE_INBOX_PROTOCOL = 11 => [
         (ConsoleInbox, "console_inbox", PeerAction::ConsoleInbox {
             extra: Default::default(), state: crate::inbox::InboxFilter::Open, limit: 50,
+        }),
+    ],
+    GC_PROTOCOL = 15 => [
+        (Gc, "gc", PeerAction::Gc {
+            extra: Default::default(), dry_run: true, apply: false,
+            scheduled: false, pressure: true, free_floor: None, idle: None,
         }),
     ],
 }
@@ -802,6 +822,12 @@ pub enum PeerResult {
     },
     SessionHandoff {
         data: crate::handoff::HandoffReceipt,
+        #[serde(flatten)]
+        extra: provenant_records::ExtraFields,
+    },
+    /// The bounded per-class aggregates of a peer `gc` sweep.
+    Gc {
+        data: serde_json::Value,
         #[serde(flatten)]
         extra: provenant_records::ExtraFields,
     },
@@ -1408,7 +1434,8 @@ pub fn encode_peer_response(
         | PeerResult::Health { .. }
         | PeerResult::Submitted { .. }
         | PeerResult::SubmissionCancelled { .. }
-        | PeerResult::LaneWaits { .. } => {}
+        | PeerResult::LaneWaits { .. }
+        | PeerResult::Gc { .. } => {}
     }
     for (_, handoff) in &mut stops {
         handoff_texts(handoff, &mut texts);

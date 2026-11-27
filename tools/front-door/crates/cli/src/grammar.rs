@@ -43,6 +43,61 @@ fn host_arg(value: &str) -> Result<HostArg, String> {
     host_alias(value).map(HostArg::Named).map_err(str::to_owned)
 }
 
+/// The hosts a peer-servable verb acts on, resolved once from `CommonArgs`.
+/// Readers and `gc` use this to decide between a local read, a single peer and
+/// an aggregated fan-out; `run` validates that it never exceeds `Named`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum HostSelection {
+    /// No `--host`: the caller acts locally, preserving its existing path.
+    Local,
+    /// Exactly one named peer serves the command.
+    Named(String),
+    /// Several named peers: fan out and aggregate.
+    Many(Vec<String>),
+    /// `--host all`: fan out to the local host and every registered peer.
+    All,
+}
+
+impl HostSelection {
+    /// Whether this selection needs the multi-host aggregation envelope.
+    pub fn is_aggregate(&self) -> bool {
+        matches!(self, Self::Many(_) | Self::All)
+    }
+}
+
+impl CommonArgs {
+    /// Resolve the repeatable `--host` into one routing decision. `all` wins
+    /// over named hosts, repeated names collapse, and no flag stays local.
+    pub fn selection(&self) -> HostSelection {
+        if self.host.is_empty() {
+            return HostSelection::Local;
+        }
+        if self.host.iter().any(|host| matches!(host, HostArg::All)) {
+            return HostSelection::All;
+        }
+        let mut named: Vec<String> = self
+            .host
+            .iter()
+            .filter_map(|host| match host {
+                HostArg::Named(name) => Some(name.clone()),
+                HostArg::All => None,
+            })
+            .collect();
+        named.sort();
+        named.dedup();
+        match named.len() {
+            0 => HostSelection::Local,
+            1 => HostSelection::Named(named.remove(0)),
+            _ => HostSelection::Many(named),
+        }
+    }
+
+    /// The bounded invocation deadline, in seconds, when `--timeout` was set.
+    pub fn timeout_seconds(&self) -> Option<u64> {
+        self.timeout.map(DurationArg::seconds)
+    }
+}
+
 #[derive(Debug, Parser)]
 #[command(name = "provenant", disable_help_subcommand = true)]
 pub(crate) struct RawInvocation {
@@ -1759,4 +1814,92 @@ fn edit_graph_name(value: &str) -> Result<String, String> {
         );
     }
     Ok(target.name)
+}
+
+#[cfg(test)]
+mod common_args_tests {
+    use super::*;
+    use clap::CommandFactory;
+
+    fn has_common(command: &clap::Command) -> bool {
+        let mut host = false;
+        let mut timeout = false;
+        for arg in command.get_arguments() {
+            match arg.get_id() {
+                "host" => host = true,
+                "timeout" => timeout = true,
+                _ => {}
+            }
+        }
+        host && timeout
+    }
+
+    /// Spec: docs/specs/agent-native.md#consistent-verbs-and-flags. The
+    /// exemption list is part of the contract: these verbs keep their own
+    /// option surface and must never inherit `--host` or `--timeout`.
+    #[test]
+    fn common_args_everywhere() {
+        let model = RawInvocation::command();
+        for verb in [
+            "status", "output", "result", "wait", "events", "gc", "run", "upgrade", "retire",
+            "queue",
+        ] {
+            let command = model
+                .find_subcommand(verb)
+                .unwrap_or_else(|| panic!("missing {verb} verb"));
+            assert!(has_common(command), "{verb} must flatten CommonArgs");
+        }
+        let ci = model.find_subcommand("ci").expect("ci verb");
+        for verb in ["failures", "patch"] {
+            let command = ci
+                .find_subcommand(verb)
+                .unwrap_or_else(|| panic!("missing ci {verb}"));
+            assert!(has_common(command), "ci {verb} must flatten CommonArgs");
+        }
+        for verb in ["help", "hook", "internal", "declare", "notes", "config"] {
+            let command = model
+                .find_subcommand(verb)
+                .unwrap_or_else(|| panic!("missing {verb} verb"));
+            assert!(
+                !command.get_arguments().any(|arg| arg.get_id() == "host"),
+                "{verb} is exempt from CommonArgs"
+            );
+        }
+    }
+
+    #[test]
+    fn common_args_resolve_host_selection() {
+        let common = CommonArgs::default();
+        assert_eq!(common.selection(), HostSelection::Local);
+        assert_eq!(common.timeout_seconds(), None);
+
+        let one = CommonArgs {
+            host: vec![HostArg::Named("workshop".into())],
+            timeout: Some(DurationArg(90)),
+        };
+        assert_eq!(one.selection(), HostSelection::Named("workshop".into()));
+        assert_eq!(one.timeout_seconds(), Some(90));
+        assert!(!one.selection().is_aggregate());
+
+        let many = CommonArgs {
+            host: vec![
+                HostArg::Named("workshop".into()),
+                HostArg::Named("laptop".into()),
+                HostArg::Named("workshop".into()),
+            ],
+            timeout: None,
+        };
+        assert_eq!(
+            many.selection(),
+            HostSelection::Many(vec!["laptop".into(), "workshop".into()])
+        );
+        assert!(many.selection().is_aggregate());
+
+        let all = CommonArgs {
+            host: vec![HostArg::Named("workshop".into()), HostArg::All],
+            timeout: None,
+        };
+        assert_eq!(all.selection(), HostSelection::All);
+        assert!(all.selection().is_aggregate());
+    }
 }

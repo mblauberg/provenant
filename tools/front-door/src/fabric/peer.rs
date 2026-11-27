@@ -1,5 +1,6 @@
 use super::*;
 use provenant_fabric_runtime::runs::SubmissionReceipt;
+use provenant_records::warning::PEER_UNREACHABLE;
 use std::{collections::HashSet, path::Path};
 
 fn console_tree_command(
@@ -64,6 +65,7 @@ fn peer_read_only(action: &PeerAction) -> bool {
         | PeerAction::ConsoleInbox { .. }
         | PeerAction::Doctor { .. }
         | PeerAction::Receipt { .. } => true,
+        PeerAction::Gc { .. } => false,
         PeerAction::CancelSubmission { stop, .. } => !stop,
         PeerAction::Inbox {
             input:
@@ -1276,6 +1278,45 @@ pub fn peer(
                 })(),
                 |result| result,
             ),
+            PeerAction::Gc {
+                dry_run,
+                apply,
+                scheduled,
+                pressure,
+                free_floor,
+                idle,
+                ..
+            } => peer_result(
+                (|| -> Result<serde_json::Value, FacadeError> {
+                    let command = provenant_cli::Gc {
+                        common: provenant_cli::CommonArgs::default(),
+                        scheduled: *scheduled,
+                        pressure: *pressure,
+                        free_floor: *free_floor,
+                        dry_run: *dry_run,
+                        apply: *apply,
+                        finished_branch: None,
+                        idle: *idle,
+                    };
+                    let globals = provenant_cli::Globals {
+                        json: true,
+                        full: false,
+                        state_dir: Some(peer_factory.context.roots.state.clone()),
+                        project: Some(cwd.clone()),
+                    };
+                    crate::worktrees::gc_for_peer(&command, &globals, workers).map_err(|reason| {
+                        FacadeError::DispatchRefused {
+                            reason,
+                            disk: None,
+                            fact: None,
+                        }
+                    })
+                })(),
+                |data| PeerResult::Gc {
+                    data,
+                    extra: Default::default(),
+                },
+            ),
             PeerAction::Coordination {
                 input,
                 operation_id,
@@ -2235,6 +2276,226 @@ pub(super) fn peer_retained_receipt(
     .map_err(graph_journal_error)?
     .map(|checkpoint| peer_graph_receipt(factory, operation_id.clone(), &graph, &checkpoint))
     .transpose()
+}
+
+/// One host's contribution to a `--host all` fan-out.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct HostReading {
+    pub host: String,
+    pub status: provenant_records::Outcome,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// The `data` envelope of an aggregated command: one section per host.
+#[derive(Debug, serde::Serialize)]
+pub struct HostAggregate {
+    pub hosts: Vec<HostReading>,
+    /// An unreachable peer accompanied at least one successful host.
+    pub partial: bool,
+}
+
+/// One host's request outcome before it is folded into the envelope.
+#[derive(Debug)]
+pub enum HostResult {
+    Ok(serde_json::Value),
+    Unreachable,
+    Failed(String),
+}
+
+/// Classify a transport failure. Only a refusal or a malformed frame is a
+/// host error; every "could not reach the peer" cause is unreachability.
+pub fn host_result_from_peer(result: Result<serde_json::Value, PeerError>) -> HostResult {
+    match result {
+        Ok(value) => HostResult::Ok(value),
+        Err(error) => match error {
+            PeerError::Unavailable
+            | PeerError::Failed(_)
+            | PeerError::Deadline
+            | PeerError::Version
+            | PeerError::ProtocolMismatch { .. }
+            | PeerError::SourceHost => HostResult::Unreachable,
+            PeerError::Refused { error } => HostResult::Failed(error.to_string()),
+            other => HostResult::Failed(other.to_string()),
+        },
+    }
+}
+
+/// Compose one result per host into a single envelope. An unreachable peer
+/// adds `PEER_UNREACHABLE` and `partial: true` only when another host answered;
+/// an all-down fan-out stays a plain failure. The process status is the worst
+/// of the reachable readings, so a failing host still fails the command.
+pub fn aggregate_host_readings(
+    command: &str,
+    readings: Vec<(String, HostResult)>,
+) -> provenant_records::CommandResult<HostAggregate> {
+    let mut hosts = Vec::with_capacity(readings.len());
+    let mut unreachable = Vec::new();
+    let mut succeeded = false;
+    for (host, reading) in readings {
+        match reading {
+            HostResult::Ok(data) => {
+                succeeded = true;
+                hosts.push(HostReading {
+                    host,
+                    status: provenant_records::Outcome::Ok,
+                    data: Some(data),
+                    error: None,
+                });
+            }
+            HostResult::Unreachable => {
+                unreachable.push(host.clone());
+                hosts.push(HostReading {
+                    host,
+                    status: provenant_records::Outcome::Unavailable,
+                    data: None,
+                    error: Some(PEER_UNREACHABLE.as_str().to_owned()),
+                });
+            }
+            HostResult::Failed(reason) => hosts.push(HostReading {
+                host,
+                status: provenant_records::Outcome::Error,
+                data: None,
+                error: Some(reason),
+            }),
+        }
+    }
+    let partial = succeeded && !unreachable.is_empty();
+    let status = if partial {
+        hosts
+            .iter()
+            .filter(|reading| reading.status != provenant_records::Outcome::Unavailable)
+            .map(|reading| reading.status)
+            .max_by_key(|status| status.exit_code())
+            .unwrap_or(provenant_records::Outcome::Unavailable)
+    } else {
+        hosts
+            .iter()
+            .map(|reading| reading.status)
+            .max_by_key(|status| status.exit_code())
+            .unwrap_or(provenant_records::Outcome::Ok)
+    };
+    let mut result =
+        provenant_records::CommandResult::new(command, status, HostAggregate { hosts, partial });
+    if partial {
+        result
+            .warnings
+            .push(provenant_records::warning::Warning::new(
+                PEER_UNREACHABLE,
+                format!(
+                    "{} did not answer; showing the hosts that did",
+                    unreachable.join(", ")
+                ),
+                provenant_records::warning::detected_source(PEER_UNREACHABLE),
+            ));
+    }
+    result
+}
+
+/// One human section per host. Compact output keeps the per-host status line
+/// and its body; `--full` is handled by the renderer around this envelope.
+pub fn host_sections(aggregate: &HostAggregate) -> String {
+    aggregate
+        .hosts
+        .iter()
+        .map(|reading| {
+            let body = match (&reading.data, &reading.error) {
+                (Some(data), _) => provenant_cli::terse(data).trim_end().to_owned(),
+                (None, Some(error)) => error.clone(),
+                (None, None) => String::new(),
+            };
+            format!("{}: {:?} {}", reading.host, reading.status, body)
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Emit a fan-out through the one envelope path, so JSON and human output
+/// share the host sections, warning and exit code.
+pub fn emit_host_aggregate(
+    command: &str,
+    readings: Vec<(String, HostResult)>,
+    globals: &provenant_cli::Globals,
+) -> u8 {
+    let result = aggregate_host_readings(command, readings);
+    let human = host_sections(&result.data);
+    crate::emit(&result, globals, &human, true)
+}
+
+#[cfg(test)]
+mod host_aggregate_tests {
+    use super::*;
+    use provenant_records::Outcome;
+    use serde_json::json;
+
+    #[test]
+    fn host_all_aggregates_and_marks_unreachable_partial() {
+        let result = aggregate_host_readings(
+            "status",
+            vec![
+                ("workshop".into(), HostResult::Ok(json!({"count": 3}))),
+                ("laptop".into(), HostResult::Unreachable),
+            ],
+        );
+        assert_eq!(result.status, Outcome::Ok);
+        assert!(result.data.partial);
+        assert_eq!(result.data.hosts.len(), 2);
+        assert_eq!(result.data.hosts[0].host, "workshop");
+        assert_eq!(result.data.hosts[1].status, Outcome::Unavailable);
+        assert_eq!(result.warnings.len(), 1);
+        assert_eq!(result.warnings[0].code.as_ref(), PEER_UNREACHABLE.as_str());
+        assert_eq!(
+            host_sections(&result.data),
+            "workshop: Ok count=3\nlaptop: Unavailable PEER_UNREACHABLE"
+        );
+    }
+
+    #[test]
+    fn all_hosts_unreachable_is_a_plain_failure() {
+        let result = aggregate_host_readings(
+            "gc",
+            vec![
+                ("workshop".into(), HostResult::Unreachable),
+                ("laptop".into(), HostResult::Failed("refused".into())),
+            ],
+        );
+        assert_eq!(result.status, Outcome::Unavailable);
+        assert!(!result.data.partial);
+        assert!(result.warnings.is_empty());
+    }
+
+    #[test]
+    fn a_failing_reachable_host_wins_over_unreachable() {
+        let result = aggregate_host_readings(
+            "gc",
+            vec![
+                ("workshop".into(), HostResult::Ok(json!({"ok": true}))),
+                ("laptop".into(), HostResult::Failed("no space".into())),
+                ("desk".into(), HostResult::Unreachable),
+            ],
+        );
+        assert_eq!(result.status, Outcome::Error);
+        assert!(result.data.partial);
+        assert_eq!(result.warnings.len(), 1);
+    }
+
+    #[test]
+    fn transport_failures_are_unreachable_but_refusals_are_host_errors() {
+        assert!(matches!(
+            host_result_from_peer(Err::<serde_json::Value, _>(PeerError::Unavailable)),
+            HostResult::Unreachable
+        ));
+        assert!(matches!(
+            host_result_from_peer(Err::<serde_json::Value, _>(PeerError::Failed("x".into()))),
+            HostResult::Unreachable
+        ));
+        assert!(matches!(
+            host_result_from_peer(Ok(json!({"ok": true}))),
+            HostResult::Ok(_)
+        ));
+    }
 }
 
 #[cfg(test)]
