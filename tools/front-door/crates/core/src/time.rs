@@ -280,7 +280,7 @@ impl WaitBudget {
         self.deadline
     }
     pub fn remaining(self, now: MonoTime) -> DurationMicros {
-        DurationMicros(self.deadline.0.0.saturating_sub(now.0))
+        self.deadline.remaining(now)
     }
 }
 
@@ -411,6 +411,26 @@ mod tests {
                 .deadline()
                 .as_mono_time(),
             later
+        );
+    }
+    #[test]
+    fn wait_budget_reports_its_deadlines_remaining_budget() {
+        let start = MonoTime::from_micros(1_000_000);
+        let budget = WaitBudget::relay(start, 5).unwrap();
+        for sample in [
+            start,
+            MonoTime::from_micros(1_250_000),
+            MonoTime::from_micros(6_000_000),
+        ] {
+            assert_eq!(
+                budget.remaining(sample),
+                budget.deadline().remaining(sample),
+                "budget and deadline disagree at {sample:?}"
+            );
+        }
+        assert_eq!(
+            budget.remaining(MonoTime::from_micros(6_000_000)),
+            DurationMicros::ZERO
         );
     }
     #[test]
