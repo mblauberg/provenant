@@ -82,7 +82,10 @@ fn forge_quota_error(reset: jiff::Timestamp, pr: Option<u64>, cause: Option<&str
         "FORGE_QUOTA_EXHAUSTED",
         format!("forge rate limit; retry after {reset}"),
         cause,
-        format!("wait until {reset}, then retry the head observation"),
+        format!(
+            "wait until Unix timestamp {} ({reset}), then retry the head observation",
+            reset.as_second()
+        ),
     );
     error = error
         .with_class(ErrorClass::Transient {
