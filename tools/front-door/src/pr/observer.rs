@@ -43,6 +43,12 @@ const REPOSITORY_CONTEXT_PATH: &str = "repos/{owner}/{repo}";
 const RECENT_CACHE_LIMIT: usize = 64;
 const RUN_HISTORY_LIMIT: usize = 512;
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RequiredCheck {
+    pub name: String,
+    pub app: Option<u64>,
+}
+
 /// One reported check run or the latest state of one status context.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Check {
@@ -149,12 +155,16 @@ pub(crate) struct PrCause {
 
 /// One immutable, head-bound reading for queue and landing decisions.
 #[derive(Clone, Debug, PartialEq, Eq)]
-#[allow(dead_code)]
-pub(crate) struct HeadReading {
+pub struct HeadReading {
     pub expected_head: GitOid,
     pub branch_ref: Option<String>,
     pub pr_head: Option<GitOid>,
     pub mergeable: MergeState,
+    /// Required identities from the branch protection or ruleset.
+    pub required_policy: Vec<RequiredCheck>,
+    /// The checks observed for the expected commit, including optional checks.
+    pub observed: Vec<Check>,
+    /// Observed checks matching the required identities.
     pub required: Vec<Check>,
     pub observed_at: jiff::Timestamp,
     pub complete: bool,
@@ -175,6 +185,8 @@ impl HeadReading {
             branch_ref: None,
             pr_head: None,
             mergeable: MergeState::Unknown,
+            required_policy: Vec::new(),
+            observed: Vec::new(),
             required: Vec::new(),
             observed_at: WallClock.now(),
             complete: false,
@@ -203,7 +215,6 @@ impl HeadReading {
     /// The error contract for a quota-bound reading: a transient condition
     /// carrying the forge's reset, never a CI verdict and never bad input.
     /// Spec: docs/specs/agent-native.md#33-error-and-warning-contract-3777
-    #[allow(dead_code, reason = "wired by the queue CI effect in batch 2")]
     pub(crate) fn quota_error(&self) -> Option<CommandError> {
         let retry_at = self.retry_at?;
         let mut error = forge_quota_error(retry_at, None, self.pending_reason.as_deref());
@@ -265,7 +276,6 @@ impl Clock for WallClock {
 }
 
 /// Resolve the selected repository through the selected observation transport context.
-#[allow(clippy::disallowed_methods, reason = "forge transport timing boundary")]
 pub(crate) fn repository_for_project(
     state: &Path,
     project: &Path,
@@ -275,29 +285,44 @@ pub(crate) fn repository_for_project(
         return Err(ObserveError::Expired);
     }
     let mut forge = port::select_transport(state, project, request)?;
-    let response = port::get(&mut forge, REPOSITORY_CONTEXT_PATH, None).map_err(|error| {
-        ObserveError::Unavailable(format!("cannot identify repository: {error}"))
-    })?;
-    if let Some(reset) = rate_limit_reset(&response, jiff::Timestamp::now().as_second()) {
-        return Err(ObserveError::RateLimited {
-            reset: timestamp(reset),
-        });
+    loop {
+        if request.is_cancelled() {
+            return Err(ObserveError::Expired);
+        }
+        if request.remaining().is_zero() {
+            return Err(ObserveError::Expired);
+        }
+        let response = port::get(&mut forge, REPOSITORY_CONTEXT_PATH, None).map_err(|error| {
+            ObserveError::Unavailable(format!("cannot identify repository: {error}"))
+        })?;
+        let now = WallClock.now();
+        if let Some(reset) = rate_limit_reset(&response, now.as_second()) {
+            let reset = reset.max(now.as_second().saturating_add(1));
+            let reset_at = timestamp(reset);
+            let delay = Duration::try_from(reset_at.duration_since(now)).unwrap_or_default();
+            if delay >= request.remaining() {
+                return Err(ObserveError::RateLimited { reset: reset_at });
+            }
+            WallClock.sleep(delay);
+            continue;
+        }
+        if !(200..=299).contains(&response.status) {
+            return Err(ObserveError::Unavailable(format!(
+                "cannot identify repository: HTTP {}",
+                response.status
+            )));
+        }
+        let value: Value = serde_json::from_slice(&response.body).map_err(|error| {
+            ObserveError::Unavailable(format!("invalid repository response: {error}"))
+        })?;
+        return value
+            .get("full_name")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .ok_or_else(|| {
+                ObserveError::Unavailable("repository response has no canonical name".into())
+            });
     }
-    if !(200..=299).contains(&response.status) {
-        return Err(ObserveError::Unavailable(format!(
-            "cannot identify repository: HTTP {}",
-            response.status
-        )));
-    }
-    let value: Value = serde_json::from_slice(&response.body).map_err(|error| {
-        ObserveError::Unavailable(format!("invalid repository response: {error}"))
-    })?;
-    value["full_name"]
-        .as_str()
-        .map(str::to_owned)
-        .ok_or_else(|| {
-            ObserveError::Unavailable("repository response has no canonical name".into())
-        })
 }
 
 /// The production entry to the one head-bound reader. `repo` names the host's
@@ -305,7 +330,6 @@ pub(crate) fn repository_for_project(
 /// exact commit the caller will act on. The batched GraphQL row is consulted
 /// only when a REST read is quota-bound, and only its head is used here: a
 /// transport that names another commit cannot confirm this observation.
-#[allow(dead_code, reason = "the queue CI effect becomes its first caller")]
 pub(crate) fn observe_head(
     state: &Path,
     project: &Path,
@@ -314,18 +338,48 @@ pub(crate) fn observe_head(
     expected: GitOid,
     request: &Request,
 ) -> HeadReading {
-    let Ok(mut reader) = Observer::open(state, project, repo, request) else {
-        return HeadReading::pending(expected, "cannot open the CI observer");
-    };
-    reader.observe_head(pr, expected, request, HEAD_MAX_AGE, &|| {
-        match crate::pr::status::batch::single(state, project, pr) {
-            crate::pr::status::batch::Batch::Entries(entries) => entries
-                .first()
-                .and_then(|entry| GitOid::parse(&entry.head).ok())
-                .map(|head| head.to_string()),
-            _ => None,
+    observe_head_with_required_names(state, project, repo, pr, expected, request, &[])
+}
+
+/// Production entry for a PR observation with an explicit graph gate check set.
+/// An empty set preserves branch-protection and ruleset policy lookup.
+pub(crate) fn observe_head_with_required_names(
+    state: &Path,
+    project: &Path,
+    repo: &str,
+    pr: u64,
+    expected: GitOid,
+    request: &Request,
+    required_names: &[String],
+) -> HeadReading {
+    let mut reader = match Observer::open(state, project, repo, request) {
+        Ok(reader) => reader,
+        Err(ObserveError::RateLimited { reset }) => {
+            return HeadReading::limited(expected, reset, "forge rate limit; observer setup held");
         }
-    })
+        Err(error) => return HeadReading::pending(expected, error.to_string()),
+    };
+    let graphql_head = || match crate::pr::status::batch::single_for_repository_with_request(
+        state, project, repo, pr, request,
+    ) {
+        crate::pr::status::batch::Batch::Entries(entries) => entries
+            .first()
+            .and_then(|entry| GitOid::parse(&entry.head).ok())
+            .map(|head| head.to_string()),
+        _ => None,
+    };
+    if required_names.is_empty() {
+        reader.observe_head(pr, expected, request, HEAD_MAX_AGE, &graphql_head)
+    } else {
+        reader.observe_head_with_required_names(
+            pr,
+            expected,
+            request,
+            HEAD_MAX_AGE,
+            Some(required_names),
+            &graphql_head,
+        )
+    }
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -555,6 +609,8 @@ pub(crate) struct Observer<F, C> {
     retry: retry::Retry,
     history: Vec<RunDuration>,
     next_poll_interval: Duration,
+    latest_observed_at: Option<jiff::Timestamp>,
+    review_gate_contexts: Vec<String>,
 }
 
 impl Observer<ForgePort, WallClock> {
@@ -572,7 +628,9 @@ impl Observer<ForgePort, WallClock> {
         let (settings, _) = provenant_cli::wait::Settings::resolve(&roots).map_err(|error| {
             ObserveError::Unavailable(format!("cannot read CI cadence configuration: {error}"))
         })?;
-        Self::with_settings(state, repository, transport, WallClock, settings)
+        let mut observer = Self::with_settings(state, repository, transport, WallClock, settings)?;
+        observer.review_gate_contexts = crate::pr::status::gate_contexts(project, state);
+        Ok(observer)
     }
 }
 
@@ -593,10 +651,6 @@ impl<F: Forge, C: Clock> Observer<F, C> {
         )
     }
 
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "optional cadence-history warning"
-    )]
     fn with_settings(
         state: &Path,
         repository: &str,
@@ -637,6 +691,8 @@ impl<F: Forge, C: Clock> Observer<F, C> {
             retry: retry::Retry::default(),
             history,
             next_poll_interval,
+            latest_observed_at: None,
+            review_gate_contexts: Vec::new(),
         })
     }
 
@@ -668,62 +724,73 @@ impl<F: Forge, C: Clock> Observer<F, C> {
             "resource-{}.json",
             provenant_records::CanonicalV1::file_digest(path.as_bytes())
         );
-        let now = self.clock.now();
-        let cached: Option<ResourcePage> = self
-            .dir
-            .read_bounded(OsStr::new(&name), CACHE_LIMIT)
-            .ok()
-            .and_then(|bytes| serde_json::from_slice(&bytes).ok());
-        if let Some(entry) = cached.as_ref() {
-            let age = now.as_millisecond().saturating_sub(entry.fetched_at);
-            if (0..i64::try_from(max_age.as_millis()).unwrap_or(i64::MAX)).contains(&age) {
-                return Ok(entry.page.body.clone());
-            }
-        }
-        if let Some(reset) = self.rate_limited(now) {
-            return Err(ObserveError::RateLimited {
-                reset: timestamp(reset),
-            });
-        }
-        if request.remaining().is_zero() {
-            return Err(ObserveError::Expired);
-        }
-        self.forge.bind(request);
-        let (previous, extra) = cached
-            .map(|entry| (Some(entry.page), entry.extra))
-            .unwrap_or_default();
-        let fetched =
-            self.page(&path, previous.as_ref(), identity)
-                .map_err(|fetch| match fetch {
-                    Fetch::Limited(reset) => {
-                        let reset = self.record_reset(reset.max(now.as_second().saturating_add(1)));
-                        ObserveError::RateLimited {
-                            reset: timestamp(reset),
-                        }
-                    }
-                    Fetch::Transient(message) | Fetch::Failed(message) => {
-                        ObserveError::Unavailable(message)
-                    }
-                })?;
-        let entry = ResourcePage {
-            page: fetched,
-            fetched_at: self.clock.now().as_millisecond(),
-            extra,
-        };
-        let bytes = serde_json::to_vec(&entry).map_err(|error| {
-            ObserveError::Unavailable(format!("cannot encode repository resource: {error}"))
-        })?;
-        self.dir
-            .atomic_write(
-                OsStr::new(&name),
-                ".resource-",
-                &bytes,
-                PublishMode::Replace,
+        let start = self.clock.now();
+        let deadline = start
+            .checked_add(
+                jiff::SignedDuration::try_from(request.remaining())
+                    .unwrap_or(jiff::SignedDuration::MAX),
             )
-            .map_err(|error| {
-                ObserveError::Unavailable(format!("cannot record repository resource: {error}"))
+            .unwrap_or(jiff::Timestamp::MAX);
+        loop {
+            let now = self.clock.now();
+            if request.is_cancelled() {
+                return Err(ObserveError::Expired);
+            }
+            if now >= deadline {
+                return Err(ObserveError::Expired);
+            }
+            let cached: Option<ResourcePage> = self
+                .dir
+                .read_bounded(OsStr::new(&name), CACHE_LIMIT)
+                .ok()
+                .and_then(|bytes| serde_json::from_slice(&bytes).ok());
+            if let Some(entry) = cached.as_ref() {
+                let age = now.as_millisecond().saturating_sub(entry.fetched_at);
+                if (0..i64::try_from(max_age.as_millis()).unwrap_or(i64::MAX)).contains(&age) {
+                    self.mark_observed_at(entry.fetched_at);
+                    return Ok(entry.page.body.clone());
+                }
+            }
+            if let Some(reset) = self.rate_limited(now) {
+                self.pause_for_reset(reset, deadline, request)?;
+                continue;
+            }
+            self.forge.bind(request);
+            let (previous, extra) = cached
+                .map(|entry| (Some(entry.page), entry.extra))
+                .unwrap_or_default();
+            let fetched = match self.page(&path, previous.as_ref(), identity) {
+                Ok(fetched) => fetched,
+                Err(Fetch::Limited(reset)) => {
+                    let reset = self.record_reset(reset.max(now.as_second().saturating_add(1)));
+                    self.pause_for_reset(reset, deadline, request)?;
+                    continue;
+                }
+                Err(Fetch::Transient(message) | Fetch::Failed(message)) => {
+                    return Err(ObserveError::Unavailable(message));
+                }
+            };
+            let entry = ResourcePage {
+                page: fetched,
+                fetched_at: self.clock.now().as_millisecond(),
+                extra,
+            };
+            self.mark_observed_at(entry.fetched_at);
+            let bytes = serde_json::to_vec(&entry).map_err(|error| {
+                ObserveError::Unavailable(format!("cannot encode repository resource: {error}"))
             })?;
-        Ok(entry.page.body)
+            self.dir
+                .atomic_write(
+                    OsStr::new(&name),
+                    ".resource-",
+                    &bytes,
+                    PublishMode::Replace,
+                )
+                .map_err(|error| {
+                    ObserveError::Unavailable(format!("cannot record repository resource: {error}"))
+                })?;
+            return Ok(entry.page.body);
+        }
     }
 
     /// Observe every Actions run for this exact head through the shared cache.
@@ -797,8 +864,8 @@ impl<F: Forge, C: Clock> Observer<F, C> {
 
     /// Every check reported for `commit`. A zero `max_age` forces a fresh read;
     /// any nonzero value enables the configured adaptive cadence. Transient
-    /// failures are retried within `request`'s remaining time, and every page
-    /// read shares its deadline and cancellation; a rate limit returns at once.
+    /// failures and quota holds are retried within `request`'s remaining time,
+    /// and every page read shares its deadline and cancellation.
     pub(crate) fn checks(
         &mut self,
         commit: &str,
@@ -824,11 +891,9 @@ impl<F: Forge, C: Clock> Observer<F, C> {
                 return Err(ObserveError::Expired);
             }
             let now = self.clock.now();
-            // A recorded limit skips this read; the caller's next poll retries.
             if let Some(reset) = self.rate_limited(now) {
-                return Err(ObserveError::RateLimited {
-                    reset: timestamp(reset),
-                });
+                self.pause_for_reset(reset, deadline, request)?;
+                continue;
             }
             let left = Duration::try_from(deadline.duration_since(now)).unwrap_or_default();
             if left.is_zero() {
@@ -903,9 +968,9 @@ impl<F: Forge, C: Clock> Observer<F, C> {
                         // recorded reset is never replaced by an earlier one.
                         let reset = self.record_reset(reset.max(now.as_second().saturating_add(1)));
                         drop(guard);
-                        return Err(ObserveError::RateLimited {
-                            reset: timestamp(reset),
-                        });
+                        self.pause_for_reset(reset, deadline, request)?;
+                        retries = retries.saturating_add(1);
+                        continue;
                     }
                     Err(Fetch::Transient(message)) => {
                         drop(guard);
@@ -927,6 +992,7 @@ impl<F: Forge, C: Clock> Observer<F, C> {
                     Err(Fetch::Failed(message)) => return Err(ObserveError::Unavailable(message)),
                 }
             };
+            self.mark_observed_at(cached.fetched_at);
             self.next_poll_interval = adaptive_interval(
                 &cached,
                 &self.history,
@@ -950,7 +1016,56 @@ impl<F: Forge, C: Clock> Observer<F, C> {
     /// rate-limited read only when it names the very same head.
     ///
     /// Spec: docs/specs/agent-native.md#39-delivery-queue-absorbs-the-fleet-3972-residue-3510
-    #[allow(dead_code, reason = "consumers move to it with the queue CI effect")]
+    /// Resolve the PR's current head through this observer, then bind checks
+    /// and a final head read to the resolved identity.
+    pub(crate) fn observe_current_head(
+        &mut self,
+        number: u64,
+        request: &Request,
+        max_age: Duration,
+        required_names: Option<&[String]>,
+        graphql_head: &dyn Fn() -> Option<String>,
+    ) -> Result<HeadReading, ObserveError> {
+        let pull = match self.resource(&format!("pulls/{number}"), max_age, request) {
+            Ok(pull) => pull,
+            Err(ObserveError::RateLimited { reset }) => {
+                let Some(head) = graphql_head().and_then(|head| GitOid::parse(&head).ok()) else {
+                    return Err(ObserveError::RateLimited { reset });
+                };
+                let reading = match required_names {
+                    Some(names) => self.observe_head_with_required_names(
+                        number,
+                        head,
+                        request,
+                        max_age,
+                        Some(names),
+                        graphql_head,
+                    ),
+                    None => self.observe_head(number, head, request, max_age, graphql_head),
+                };
+                return Ok(reading);
+            }
+            Err(error) => return Err(error),
+        };
+        let expected = pull
+            .pointer("/head/sha")
+            .and_then(Value::as_str)
+            .and_then(|sha| GitOid::parse(sha).ok())
+            .ok_or_else(|| ObserveError::Unavailable("pull request has no valid head".into()))?;
+        let reading = match required_names {
+            Some(names) => self.observe_head_with_required_names(
+                number,
+                expected,
+                request,
+                max_age,
+                Some(names),
+                graphql_head,
+            ),
+            None => self.observe_head(number, expected, request, max_age, graphql_head),
+        };
+        Ok(reading)
+    }
+
     pub(crate) fn observe_head(
         &mut self,
         number: u64,
@@ -959,9 +1074,78 @@ impl<F: Forge, C: Clock> Observer<F, C> {
         max_age: Duration,
         graphql_head: &dyn Fn() -> Option<String>,
     ) -> HeadReading {
+        self.observe_head_with_required_names(
+            number,
+            expected,
+            request,
+            max_age,
+            None,
+            graphql_head,
+        )
+    }
+
+    /// Observe a PR head against either its declared branch policy or an
+    /// explicit graph gate check set. Both paths share the same head, cache,
+    /// page reads and quota hold.
+    pub(crate) fn observe_head_with_required_names(
+        &mut self,
+        number: u64,
+        expected: GitOid,
+        request: &Request,
+        max_age: Duration,
+        required_names: Option<&[String]>,
+        graphql_head: &dyn Fn() -> Option<String>,
+    ) -> HeadReading {
+        let start = self.clock.now();
+        let deadline = start
+            .checked_add(
+                jiff::SignedDuration::try_from(request.remaining())
+                    .unwrap_or(jiff::SignedDuration::MAX),
+            )
+            .unwrap_or(jiff::Timestamp::MAX);
+        loop {
+            if request.is_cancelled() {
+                return HeadReading::pending(expected, "CI wait cancelled");
+            }
+            let now = self.clock.now();
+            if now >= deadline {
+                return HeadReading::pending(expected, "CI wait deadline expired");
+            }
+            self.latest_observed_at = None;
+            let reading = self.observe_head_once(
+                number,
+                expected,
+                request,
+                max_age,
+                required_names,
+                graphql_head,
+            );
+            let Some(reset) = reading.retry_at else {
+                return reading;
+            };
+            let reset = reset.as_second();
+            if self.pause_for_reset(reset, deadline, request).is_err() {
+                return reading;
+            }
+        }
+    }
+
+    fn observe_head_once(
+        &mut self,
+        number: u64,
+        expected: GitOid,
+        request: &Request,
+        max_age: Duration,
+        required_names: Option<&[String]>,
+        graphql_head: &dyn Fn() -> Option<String>,
+    ) -> HeadReading {
         // No observation older than the batch's freshness bound can settle a
         // verdict, however long a caller is willing to wait for one.
-        let max_age = max_age.min(HEAD_MAX_AGE);
+        let freshness = if max_age.is_zero() {
+            HEAD_MAX_AGE
+        } else {
+            max_age.min(HEAD_MAX_AGE)
+        };
         let pull = match self.resource(&format!("pulls/{number}"), max_age, request) {
             Ok(pull) => pull,
             Err(ObserveError::RateLimited { reset }) => {
@@ -1014,7 +1198,29 @@ impl<F: Forge, C: Clock> Observer<F, C> {
             .pointer("/base/ref")
             .and_then(Value::as_str)
             .unwrap_or_default();
-        let required_names = self.required_head_checks(base, request, max_age);
+        let required_policy = required_names
+            .map(|names| {
+                names
+                    .iter()
+                    .map(|name| RequiredCheck {
+                        name: name.clone(),
+                        app: None,
+                    })
+                    .collect()
+            })
+            .map(Ok)
+            .unwrap_or_else(|| self.required_head_checks(base, request, max_age));
+        let required_policy = match required_policy {
+            Ok(required) => required,
+            Err(ObserveError::RateLimited { reset }) => {
+                return HeadReading::limited(
+                    expected,
+                    reset,
+                    "forge rate limit; required policy held",
+                );
+            }
+            Err(error) => return HeadReading::pending(expected, error.to_string()),
+        };
         let observed = match self.checks(&expected.to_string(), max_age, request) {
             Ok(checks) => checks,
             Err(ObserveError::RateLimited { reset }) => {
@@ -1022,27 +1228,75 @@ impl<F: Forge, C: Clock> Observer<F, C> {
             }
             Err(error) => return HeadReading::pending(expected, error.to_string()),
         };
-        let required: Vec<Check> = observed
-            .into_iter()
-            .filter(|check| required_names.contains(&check.name))
+        let is_review_gate = |name: &str| self.review_gate_contexts.iter().any(|gate| gate == name);
+        let ci_required: Vec<_> = required_policy
+            .iter()
+            .filter(|need| !is_review_gate(&need.name))
             .collect();
-        let observed_at = self.clock.now();
-        let head_agrees = pr_head == Some(expected);
-        let covered = !required_names.is_empty()
-            && required_names
+        let required_observed: Vec<Check> = observed
+            .iter()
+            .filter(|check| {
+                ci_required.iter().any(|need| {
+                    check.name == need.name && need.app.is_none_or(|app| check.app == Some(app))
+                })
+            })
+            .cloned()
+            .collect();
+        let review_only_policy = !required_policy.is_empty() && ci_required.is_empty();
+        let completion_checks: Vec<&Check> = if review_only_policy {
+            observed
                 .iter()
-                .all(|name| required.iter().any(|check| &check.name == name));
-        let settled = !required
+                .filter(|check| !is_review_gate(&check.name))
+                .collect()
+        } else {
+            required_observed.iter().collect()
+        };
+        // Re-read the PR after every check page. If its head moved during the
+        // observation, the earlier checks cannot settle a verdict.
+        let current_pull = match self.resource(&format!("pulls/{number}"), Duration::ZERO, request)
+        {
+            Ok(pull) => pull,
+            Err(ObserveError::RateLimited { reset }) => {
+                return HeadReading::limited(
+                    expected,
+                    reset,
+                    "forge rate limit; final head read held",
+                );
+            }
+            Err(error) => return HeadReading::pending(expected, error.to_string()),
+        };
+        let current_head = current_pull
+            .pointer("/head/sha")
+            .and_then(Value::as_str)
+            .and_then(|sha| GitOid::parse(sha).ok());
+        let current_branch = current_pull
+            .pointer("/head/ref")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        let current_mergeable = merge_state(&current_pull);
+        let observed_at = self.latest_observed_at.unwrap_or_else(|| self.clock.now());
+        let sampled_at = self.clock.now();
+        let head_agrees = pr_head == Some(expected) && current_head == Some(expected);
+        let covered = (!ci_required.is_empty()
+            && ci_required.iter().all(|need| {
+                observed.iter().any(|check| {
+                    check.name == need.name && need.app.is_none_or(|app| check.app == Some(app))
+                })
+            }))
+            || (review_only_policy && !completion_checks.is_empty());
+        let settled = !completion_checks
             .iter()
             .any(|check| matches!(check.bucket.as_str(), "pending" | "queued" | "in_progress"));
         let complete = head_agrees && covered && settled;
         let pending_reason = if complete {
             None
         } else if !head_agrees {
-            Some(format!(
-                "pull head {pr_head:?} is not the expected {expected}"
-            ))
-        } else if required_names.is_empty() {
+            Some(if pr_head != current_head {
+                format!("pull head moved during observation: {pr_head:?} -> {current_head:?}")
+            } else {
+                format!("pull head {current_head:?} is not the expected {expected}")
+            })
+        } else if required_policy.is_empty() {
             Some("no required checks from branch protection or a ruleset".into())
         } else if !covered {
             Some("a required check has no observation for this head".into())
@@ -1051,10 +1305,16 @@ impl<F: Forge, C: Clock> Observer<F, C> {
         };
         let mut reading = HeadReading {
             expected_head: expected,
-            branch_ref,
-            pr_head,
-            mergeable,
-            required,
+            branch_ref: if current_head == pr_head {
+                branch_ref
+            } else {
+                current_branch
+            },
+            pr_head: current_head,
+            mergeable: current_mergeable,
+            required_policy,
+            observed,
+            required: required_observed,
             observed_at,
             complete,
             pending_reason,
@@ -1062,57 +1322,131 @@ impl<F: Forge, C: Clock> Observer<F, C> {
         };
         // A reading that has already aged past the bound cannot settle a
         // verdict, even when every other condition held when it was sampled.
-        if reading.complete && !reading.fresh_at(observed_at, max_age) {
+        if reading.complete && !reading.fresh_at(sampled_at, freshness) {
             reading.complete = false;
-            reading.pending_reason = Some(format!("observation older than {max_age:?}"));
+            reading.pending_reason = Some(format!("observation older than {freshness:?}"));
         }
         reading
     }
 
-    /// The required check names declared by branch protection or a ruleset.
-    /// Both are one observer resource read, so a rate limit recorded here holds
-    /// off the check pages read that follows.
+    /// Wait for the shared quota reset only when it fits inside the caller's
+    /// deadline. A caller with a shorter budget receives the quota reading and
+    /// can report its retry time without extending that budget.
+    fn pause_for_reset(
+        &self,
+        reset: i64,
+        deadline: jiff::Timestamp,
+        request: &Request,
+    ) -> Result<(), ObserveError> {
+        let reset_at = timestamp(reset);
+        let now = self.clock.now();
+        let delay = Duration::try_from(reset_at.duration_since(now)).unwrap_or_default();
+        let left = Duration::try_from(deadline.duration_since(now)).unwrap_or_default();
+        if delay >= left {
+            return Err(ObserveError::RateLimited { reset: reset_at });
+        }
+        self.pause(delay, request);
+        if request.is_cancelled() {
+            return Err(ObserveError::Expired);
+        }
+        if self.clock.now() < reset_at {
+            return Err(ObserveError::RateLimited { reset: reset_at });
+        }
+        Ok(())
+    }
+
+    /// The required check identities declared by branch protection or a
+    /// ruleset. A pinned GitHub App remains part of the identity, so another
+    /// app's same-named check cannot satisfy it.
     fn required_head_checks(
         &mut self,
         base: &str,
         request: &Request,
         max_age: Duration,
-    ) -> Vec<String> {
-        let mut names = Vec::new();
+    ) -> Result<Vec<RequiredCheck>, ObserveError> {
+        let mut required = Vec::new();
         if base.is_empty() {
-            return names;
+            return Ok(required);
         }
-        if let Ok(protection) =
-            self.resource(&format!("branches/{base}/protection"), max_age, request)
-            && let Some(contexts) = protection
-                .pointer("/required_status_checks/contexts")
-                .and_then(Value::as_array)
-        {
-            names.extend(contexts.iter().filter_map(Value::as_str).map(str::to_owned));
+        let mut add = |name: &Value, app: Option<u64>| {
+            if let Some(name) = name.as_str() {
+                required.push(RequiredCheck {
+                    name: name.to_owned(),
+                    app,
+                });
+            }
+        };
+        match self.resource(&format!("branches/{base}/protection"), max_age, request) {
+            Ok(protection) => {
+                if let Some(checks) = protection
+                    .pointer("/required_status_checks/checks")
+                    .and_then(Value::as_array)
+                {
+                    for check in checks {
+                        add(
+                            &check["context"],
+                            check["app_id"]
+                                .as_i64()
+                                .and_then(|id| u64::try_from(id).ok()),
+                        );
+                    }
+                }
+                if let Some(contexts) = protection
+                    .pointer("/required_status_checks/contexts")
+                    .and_then(Value::as_array)
+                {
+                    for context in contexts {
+                        add(context, None);
+                    }
+                }
+            }
+            Err(ObserveError::Unavailable(message)) if message.contains("HTTP 404") => {}
+            Err(error) => return Err(error),
         }
-        if let Ok(rules) = self.resource(
+        match self.resource(
             &format!("rules/branches/{base}?per_page=100"),
             max_age,
             request,
-        ) && let Some(rows) = rules.get("rules").and_then(Value::as_array)
-        {
-            for rule in rows {
-                if let Some(checks) = rule
-                    .pointer("/parameters/required_status_checks")
-                    .and_then(Value::as_array)
-                {
-                    names.extend(
-                        checks
-                            .iter()
-                            .filter_map(|check| check.pointer("/name").and_then(Value::as_str))
-                            .map(str::to_owned),
-                    );
+        ) {
+            Ok(rules) => {
+                if let Some(rows) = rules.get("rules").and_then(Value::as_array) {
+                    for rule in rows {
+                        if let Some(checks) = rule
+                            .pointer("/parameters/required_status_checks")
+                            .and_then(Value::as_array)
+                        {
+                            for check in checks {
+                                add(
+                                    &check["context"],
+                                    check["integration_id"]
+                                        .as_i64()
+                                        .and_then(|id| u64::try_from(id).ok()),
+                                );
+                            }
+                        }
+                    }
                 }
             }
+            Err(error) => return Err(error),
         }
-        names.sort();
-        names.dedup();
-        names
+        required.sort_by(|left, right| (&left.name, left.app).cmp(&(&right.name, right.app)));
+        required.dedup();
+        let pinned: std::collections::BTreeSet<String> = required
+            .iter()
+            .filter(|check| check.app.is_some())
+            .map(|check| check.name.clone())
+            .collect();
+        required.retain(|check| check.app.is_some() || !pinned.contains(&check.name));
+        Ok(required)
+    }
+
+    fn mark_observed_at(&mut self, fetched_at: i64) {
+        let Some(sample) = jiff::Timestamp::from_millisecond(fetched_at).ok() else {
+            return;
+        };
+        if self.latest_observed_at.is_none_or(|known| sample < known) {
+            self.latest_observed_at = Some(sample);
+        }
     }
 
     /// Pause between retries on the observer's clock, ending early when the
@@ -1126,12 +1460,6 @@ impl<F: Forge, C: Clock> Observer<F, C> {
             self.clock.sleep(slice);
             left = left.saturating_sub(slice);
         }
-    }
-
-    /// The one sourced retry family every CI reader shares.
-    #[allow(dead_code, reason = "callers report the cadence they observed")]
-    pub(crate) fn retry(&self) -> &retry::Retry {
-        &self.retry
     }
 
     /// Record a rate limit's reset, keeping the later of it and any already
@@ -1267,58 +1595,6 @@ impl<F: Forge, C: Clock> Observer<F, C> {
                 "cannot read CI for the commit: HTTP {status}"
             ))),
         }
-    }
-}
-
-/// One reading from a CI waiter. `Skipped` is a rate-limited read whose caller
-/// has already warned: pause on the observer's cadence and try again.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Observation {
-    Settled,
-    Pending(Duration),
-    Skipped(Duration),
-}
-
-impl Observation {
-    fn interval(self) -> Option<Duration> {
-        match self {
-            Self::Settled => None,
-            Self::Pending(interval) | Self::Skipped(interval) => Some(interval),
-        }
-    }
-}
-
-/// How a bounded wait ended.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum AwaitOutcome {
-    Settled,
-    /// The bound was reached after this much waiting; the caller decides how
-    /// to report and whether a later submission resumes.
-    TimedOut(Duration),
-}
-
-/// The one wait driver every CI reader uses. The caller supplies the reading
-/// (through the observer or the journal) and the pause; this function owns the
-/// cadence and the bound, so no waiter keeps a private sleep loop.
-///
-/// Spec: docs/specs/cli.md#ci-observations
-pub(crate) fn await_ci<E>(
-    mut observe: impl FnMut() -> Result<Observation, E>,
-    patience: Duration,
-    pause: &dyn Fn(Duration),
-) -> Result<AwaitOutcome, E> {
-    let mut waited = Duration::ZERO;
-    loop {
-        let Some(interval) = observe()?.interval() else {
-            return Ok(AwaitOutcome::Settled);
-        };
-        let remaining = patience.saturating_sub(waited);
-        if remaining.is_zero() {
-            return Ok(AwaitOutcome::TimedOut(waited));
-        }
-        let slice = interval.min(remaining);
-        pause(slice);
-        waited = waited.saturating_add(slice);
     }
 }
 

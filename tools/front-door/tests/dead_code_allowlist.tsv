@@ -50,11 +50,6 @@ src/pr/land.rs	#[allow(unused_imports, dead_code)]	The custom worktree driver co
 src/pr/landing/mod.rs	#![cfg_attr( test, allow( dead_code, reason = "the custom worktree harness includes tests without running them" ) )]	the custom worktree harness includes tests without running them
 src/pr/observer/retry.rs	#[allow(dead_code, reason = "available to every waiter that reports a pause")]	available to every waiter that reports a pause
 src/pr/observer/retry.rs	#[allow(dead_code)]	The worktree driver includes the library without a test harness.
-src/pr/observer.rs	#[allow(dead_code)]	removed by W4
-src/pr/observer.rs	#[allow(dead_code, reason = "wired by the queue CI effect in batch 2")]	removed by W4
-src/pr/observer.rs	#[allow(dead_code, reason = "the queue CI effect becomes its first caller")]	removed by W4
-src/pr/observer.rs	#[allow(dead_code, reason = "consumers move to it with the queue CI effect")]	removed by W4
-src/pr/observer.rs	#[allow(dead_code, reason = "callers report the cadence they observed")]	removed by W4
 src/pr/status/batch.rs	#[allow(dead_code, reason = "diagnostic retained for fallback failures")]	diagnostic retained for fallback failures
 src/pr/status/batch.rs	#[allow(dead_code, reason = "reset retained for fallback failures")]	reset retained for fallback failures
 src/pr/status/batch.rs	#[allow( dead_code, reason = "worktree driver includes this module without libtest" )]	worktree driver includes this module without libtest

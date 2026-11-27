@@ -74,6 +74,33 @@ impl ProjectIncarnation {
 /// persistently unreadable one is not re-probed on every tick.
 pub const PROJECT_RETRY_SECONDS: u64 = 60;
 
+const PROJECT_RETRY_RECORD: &str = "project-retry.json";
+const PROJECT_RETRY_RECORD_LIMIT: u64 = 4096;
+const PROJECT_RETRY_ERROR_BYTES: usize = 512;
+
+#[derive(Serialize, Deserialize)]
+struct ProjectRetryRecord {
+    schema_version: u64,
+    device: u64,
+    inode: u64,
+    registered_ns: i128,
+    retry_at_micros: i64,
+    error: String,
+}
+
+impl ProjectRetryRecord {
+    fn matches(&self, incarnation: ProjectIncarnation) -> bool {
+        self.schema_version == 1
+            && self.device == incarnation.device
+            && self.inode == incarnation.inode
+            && self.registered_ns == incarnation.registered_ns
+    }
+
+    fn retry_at(&self) -> Result<WallTime, ConfigError> {
+        WallTime::from_micros(self.retry_at_micros).map_err(|_| ConfigError::InvalidProjectBinding)
+    }
+}
+
 /// The single presence classification settlement, forge and graph scheduling
 /// read for a registered project.
 ///
@@ -86,22 +113,145 @@ pub fn project_presence(
     now: WallTime,
     retry_after: DurationMicros,
 ) -> Result<(ProjectPresence, ProjectIncarnation), ConfigError> {
+    project_presence_with_probe(roots, binding, now, retry_after, |path| {
+        std::fs::metadata(path)
+    })
+}
+
+fn project_presence_with_probe(
+    roots: &Roots,
+    binding: &ProjectBinding,
+    now: WallTime,
+    retry_after: DurationMicros,
+    probe: impl FnOnce(&Path) -> std::io::Result<std::fs::Metadata>,
+) -> Result<(ProjectPresence, ProjectIncarnation), ConfigError> {
     let state = Directory::open_anchor(roots.state.as_path())?;
     let projects = state.open_verified_directory(OsStr::new(PROJECTS_DIR))?;
     let name = OsString::from(binding.project_id().to_string());
     let directory = projects.open_verified_directory(&name)?;
+    let clock = provenant_os::clock::SystemClock::new();
+    let budget =
+        WaitBudget::cli(clock.mono_now(), 5).map_err(|_| ConfigError::InvalidProjectBinding)?;
+    let _lock = directory.lock(
+        OsStr::new(BINDING_LOCK),
+        LockMode::Exclusive,
+        budget,
+        &provenant_core::CancelToken::new(),
+        &clock,
+    )?;
     let registration = directory.metadata_at(OsStr::new(RECORD), false)?;
     let incarnation = ProjectIncarnation {
         device: registration.device,
         inode: registration.inode,
         registered_ns: registration.modified_ns,
     };
+
+    if let Some(retry) = read_project_retry_record(&directory)? {
+        if retry.matches(incarnation) {
+            let retry_at = retry.retry_at()?;
+            if now < retry_at {
+                return Ok((
+                    ProjectPresence::Unreachable {
+                        error: retry.error,
+                        retry_at,
+                    },
+                    incarnation,
+                ));
+            }
+        }
+    }
+
     let presence = classify_project_presence(
-        std::fs::metadata(binding.common_dir()),
+        probe(binding.common_dir()),
         now,
         now.checked_add(retry_after).unwrap_or(WallTime::MAX),
     );
+    match &presence {
+        ProjectPresence::Unreachable { error, retry_at } => {
+            write_project_retry_record(&directory, incarnation, *retry_at, error)?;
+        }
+        ProjectPresence::Present | ProjectPresence::Absent { .. } => {
+            clear_project_retry_record(&directory)?;
+        }
+    }
     Ok((presence, incarnation))
+}
+
+fn read_project_retry_record(
+    directory: &Directory,
+) -> Result<Option<ProjectRetryRecord>, ConfigError> {
+    let private =
+        |metadata: &Metadata| metadata.uid == effective_uid() && metadata.mode & 0o077 == 0;
+    let Some(bytes) = read_record(
+        directory,
+        OsStr::new(PROJECT_RETRY_RECORD),
+        PROJECT_RETRY_RECORD_LIMIT,
+        private,
+    )?
+    else {
+        return Ok(None);
+    };
+    let record: ProjectRetryRecord = provenant_records::decode(
+        &bytes,
+        provenant_records::Limits {
+            max_bytes: PROJECT_RETRY_RECORD_LIMIT as usize,
+            ..provenant_records::Limits::CONFIG
+        },
+    )
+    .map_err(|_| ConfigError::InvalidProjectBinding)?;
+    if record.schema_version != 1 || record.error.len() > PROJECT_RETRY_ERROR_BYTES {
+        return Err(ConfigError::InvalidProjectBinding);
+    }
+    Ok(Some(record))
+}
+
+fn write_project_retry_record(
+    directory: &Directory,
+    incarnation: ProjectIncarnation,
+    retry_at: WallTime,
+    error: &str,
+) -> Result<(), ConfigError> {
+    let record = ProjectRetryRecord {
+        schema_version: 1,
+        device: incarnation.device,
+        inode: incarnation.inode,
+        registered_ns: incarnation.registered_ns,
+        retry_at_micros: retry_at.as_micros(),
+        error: bounded_project_retry_error(error),
+    };
+    let bytes =
+        provenant_records::encode(&record).map_err(|_| ConfigError::InvalidProjectBinding)?;
+    directory
+        .atomic_write_with_permissions(
+            OsStr::new(PROJECT_RETRY_RECORD),
+            ".project-retry-",
+            &bytes,
+            0o600,
+            PublishMode::Replace,
+        )?
+        .require_durable()
+        .map_err(|_| ConfigError::InvalidProjectBinding)?;
+    directory.sync()?;
+    Ok(())
+}
+
+fn bounded_project_retry_error(error: &str) -> String {
+    let mut bounded = String::new();
+    for character in error.chars() {
+        if bounded.len() + character.len_utf8() > PROJECT_RETRY_ERROR_BYTES {
+            break;
+        }
+        bounded.push(character);
+    }
+    bounded
+}
+
+fn clear_project_retry_record(directory: &Directory) -> Result<(), ConfigError> {
+    match directory.unlink(OsStr::new(PROJECT_RETRY_RECORD)) {
+        Ok(()) => directory.sync().map_err(Into::into),
+        Err(error) if error.is_not_found() => Ok(()),
+        Err(error) => Err(error.into()),
+    }
 }
 
 pub(crate) const PROJECTS_DIR: &str = "projects";

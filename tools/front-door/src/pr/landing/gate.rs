@@ -1,6 +1,6 @@
 //! Gate evidence: validation, command execution and pull-request CI waiting.
 use super::{LandingError, model::*, ports::Forge};
-use crate::pr::observer::{self, AwaitOutcome, Observation};
+use crate::pr::observer::{Clock, WallClock};
 use crate::pr::status::{CiCheck, CiCompletion, Required, ci_completion};
 use provenant_cli::domains::{GateKind, PrCiMode, PrCiSettings};
 use std::time::{Duration, Instant};
@@ -478,6 +478,7 @@ fn ci_outstanding(
     pr: &EligiblePr,
     policy: &PrCiSettings,
     required_names: &[String],
+    timeout: Duration,
 ) -> Result<bool, LandingError> {
     let wait = match policy.mode {
         PrCiMode::None => return Ok(false),
@@ -490,75 +491,17 @@ fn ci_outstanding(
     if !wait {
         return Ok(false);
     }
-    let runs = forge.checks(&pr.head)?;
-    if runs.is_empty() {
-        return Ok(policy.mode == PrCiMode::Always);
+    let reading = forge.observe_head(pr, required_names, timeout)?;
+    if let Some(error) = reading.quota_error() {
+        return Err(LandingError::RateLimited(error.to_string()));
     }
-    if runs.iter().any(|run| run.commit != pr.head) {
-        return Ok(true);
+    if policy.mode == PrCiMode::Affected
+        && reading.observed.is_empty()
+        && reading.required_policy.is_empty()
+    {
+        return Ok(false);
     }
-    let checks: Vec<_> = runs
-        .iter()
-        .flat_map(|run| {
-            if run.checks.is_empty() {
-                vec![CiCheck {
-                    head: run.commit.clone(),
-                    name: String::new(),
-                    bucket: match &run.result {
-                        GateResult::Passed => "pass",
-                        GateResult::Failed => "fail",
-                        GateResult::Pending | GateResult::Missing => "pending",
-                        GateResult::Skipped | GateResult::Neutral => "skipping",
-                    }
-                    .into(),
-                    app: None,
-                }]
-            } else {
-                run.checks
-                    .iter()
-                    .map(|check| CiCheck {
-                        head: run.commit.clone(),
-                        name: check.name.clone(),
-                        bucket: match &check.result {
-                            GateResult::Passed => "pass",
-                            GateResult::Failed => "fail",
-                            GateResult::Pending | GateResult::Missing => "pending",
-                            GateResult::Skipped | GateResult::Neutral => "skipping",
-                        }
-                        .into(),
-                        app: None,
-                    })
-                    .collect()
-            }
-        })
-        .collect();
-    let required: Vec<_> = required_names
-        .iter()
-        .map(|name| Required {
-            name: name.clone(),
-            app: None,
-        })
-        .collect();
-    // The same completion definition wait and status use decides the gate. A
-    // terminal PR settles before a pending check, and contexts the project
-    // declares as a review gate are not CI.
-    let state = match forge.pull_request(pr.number)?.state {
-        super::ports::PullRequestState::Open => "OPEN",
-        super::ports::PullRequestState::Merged => "MERGED",
-        super::ports::PullRequestState::Closed => "CLOSED",
-    };
-    let pending = ci_completion(
-        state,
-        &pr.head,
-        &checks,
-        &required,
-        forge.review_gate_contexts(),
-    ) == CiCompletion::Pending;
-    // `always` waits for a run to appear; `affected` waits only for runs that exist.
-    Ok(
-        pending
-            || (policy.mode == PrCiMode::Always && runs.iter().all(|run| run.checks.is_empty())),
-    )
+    Ok(!reading.complete)
 }
 
 /// Require the saved check policy to pass on the PR's current head itself.
@@ -568,50 +511,46 @@ pub(super) fn require_delivery_queue_ci(
     forge: &mut dyn Forge,
     pr: &EligiblePr,
 ) -> Result<(), LandingError> {
-    let required = match forge.required_ci_policy(&pr.base_branch) {
-        Ok(Some(required)) => required,
-        Ok(None) => {
-            return Err(LandingError::Pending(format!(
-                "required CI policy is unavailable for base {}",
-                pr.base_branch
-            )));
-        }
-        Err(error) => {
-            return Err(LandingError::Pending(format!(
-                "could not read required CI policy for base {}: {error}",
-                pr.base_branch
-            )));
-        }
-    };
-    let observations = forge.checks(&pr.head).map_err(|error| {
-        LandingError::Pending(format!(
-            "could not observe CI for current pull request head {}: {error}",
+    let reading = forge.observe_head(pr, &[], Duration::from_secs(60))?;
+    if let Some(error) = reading.quota_error() {
+        return Err(LandingError::RateLimited(error.to_string()));
+    }
+    if reading
+        .pr_head
+        .is_some_and(|head| head.to_string() != pr.head)
+    {
+        return Err(LandingError::PullRequestChanged(pr.number));
+    }
+    if reading.pr_head.is_none()
+        || !reading.fresh_at(WallClock.now(), crate::pr::observer::HEAD_MAX_AGE)
+    {
+        return Err(LandingError::Pending(format!(
+            "pull request head moved or CI observation is stale for {}",
             pr.head
-        ))
-    })?;
-    let checks: Vec<_> = observations
+        )));
+    }
+    if !reading.complete {
+        return Err(LandingError::Pending(format!(
+            "required CI is absent, stale or inconclusive on current pull request head {}",
+            pr.head
+        )));
+    }
+    let checks: Vec<_> = reading
+        .observed
         .iter()
-        .flat_map(|observation| {
-            observation.checks.iter().map(|check| CiCheck {
-                head: observation.commit.clone(),
-                name: check.name.clone(),
-                bucket: match &check.result {
-                    GateResult::Passed => "pass",
-                    GateResult::Failed => "fail",
-                    GateResult::Pending => "pending",
-                    GateResult::Skipped | GateResult::Neutral => "skipping",
-                    GateResult::Missing => "missing",
-                }
-                .into(),
-                app: check.app_id,
-            })
+        .map(|check| CiCheck {
+            head: check.head.clone(),
+            name: check.name.clone(),
+            bucket: check.bucket.clone(),
+            app: check.app,
         })
         .collect();
-    let required: Vec<_> = required
-        .into_iter()
+    let required: Vec<_> = reading
+        .required_policy
+        .iter()
         .map(|check| Required {
-            name: check.name,
-            app: check.app_id,
+            name: check.name.clone(),
+            app: check.app,
         })
         .collect();
     match ci_completion(
@@ -639,7 +578,8 @@ pub(super) fn require_delivery_queue_ci(
 /// by the forge and by the candidate gate, so skipping an optional wait loses nothing.
 /// The wait ends at `patience_seconds`, the configured gate bound, as
 /// [`LandingError::Pending`]: the landing owner records the member as pending
-/// and a later submission resumes it. A rate-limited read skips one poll.
+/// and a later submission resumes it. A rate-limited read waits for its reset
+/// only when it fits inside that bound.
 pub fn await_pr_ci(
     forge: &mut dyn Forge,
     prs: &[EligiblePr],
@@ -665,7 +605,7 @@ fn await_pr_ci_with(
     forge: &mut dyn Forge,
     prs: &[EligiblePr],
     policy: &PrCiSettings,
-    required_names: &[String],
+    _required_names: &[String],
     (poll_seconds, patience_seconds): (u64, u64),
     pause: &dyn Fn(Duration),
     progress: &dyn Fn(u64) -> ProgressReporter,
@@ -677,40 +617,36 @@ fn await_pr_ci_with(
             break;
         }
         let _progress = progress(pr.number);
-        // The observer owns the cadence and the bound; this gate only decides
-        // when a PR's required CI is outstanding and how a timeout is reported.
-        let outcome = observer::await_ci(
-            || {
-                let interval = forge.observation_interval().unwrap_or(poll);
-                match ci_outstanding(forge, pr, policy, required_names) {
-                    Ok(true) => Ok(Observation::Pending(interval)),
-                    Ok(false) => Ok(Observation::Settled),
-                    Err(LandingError::RateLimited(message)) => {
-                        provenant_records::warning::warn(
-                            provenant_records::warning::Warning::new(
-                                provenant_records::warning::GH_RATE_LIMITED,
-                                format!("pull request #{} CI read skipped: {message}", pr.number),
-                                provenant_records::warning::detected_source(
-                                    provenant_records::warning::GH_RATE_LIMITED,
-                                ),
-                            )
-                            .subject(format!("#{}", pr.number))
-                            .once_per_change(),
-                        );
-                        Ok(Observation::Skipped(interval))
-                    }
-                    Err(error) => Err(error),
-                }
-            },
-            patience,
-            pause,
-        )?;
-        if let AwaitOutcome::TimedOut(waited) = outcome {
-            return Err(LandingError::Pending(format!(
-                "warning: pull request #{} CI is still running after {}s; resubmit to resume",
-                pr.number,
-                waited.as_secs()
-            )));
+        let mut waited = Duration::ZERO;
+        loop {
+            let remaining = patience.saturating_sub(waited);
+            if remaining.is_zero() {
+                return Err(LandingError::Pending(format!(
+                    "warning: pull request #{} CI is still running after {}s; resubmit to resume",
+                    pr.number,
+                    waited.as_secs()
+                )));
+            }
+            let before = WallClock.now();
+            let outstanding = ci_outstanding(forge, pr, policy, _required_names, remaining)?;
+            let elapsed =
+                Duration::try_from(WallClock.now().duration_since(before)).unwrap_or_default();
+            waited = waited.saturating_add(elapsed);
+            if !outstanding {
+                break;
+            }
+            let remaining = patience.saturating_sub(waited);
+            if remaining.is_zero() {
+                return Err(LandingError::Pending(format!(
+                    "warning: pull request #{} CI is still running after {}s; resubmit to resume",
+                    pr.number,
+                    waited.as_secs()
+                )));
+            }
+            let interval = forge.observation_interval().unwrap_or(poll);
+            let slice = interval.min(remaining);
+            pause(slice);
+            waited = waited.saturating_add(slice);
         }
     }
     Ok(())
@@ -723,6 +659,8 @@ mod tests {
     use crate::pr::landing::ports::{Mergeability, PullRequestInfo, PullRequestState};
     use crate::pr::landing::test_support::LandingFixture;
     use std::cell::Cell;
+
+    const HEAD: &str = "1111111111111111111111111111111111111111";
 
     fn open_info(number: u64, head: &str) -> PullRequestInfo {
         PullRequestInfo {
@@ -854,10 +792,10 @@ mod tests {
     }
     fn pending_forge() -> FakeForge {
         let mut forge = FakeForge::default();
-        forge.pull_requests.insert(1, open_info(1, "h1"));
+        forge.pull_requests.insert(1, open_info(1, HEAD));
         forge
             .check_runs
-            .insert("h1".into(), vec![evidence(GateResult::Pending, None)]);
+            .insert(HEAD.into(), vec![evidence(GateResult::Pending, None)]);
         forge
     }
     #[test]
@@ -865,7 +803,7 @@ mod tests {
         use crate::pr::landing::ports::RequiredCiCheck;
 
         let mut forge = FakeForge::default();
-        forge.pull_requests.insert(1, open_info(1, "h1"));
+        forge.pull_requests.insert(1, open_info(1, HEAD));
         forge.required_ci_policies.insert(
             "main".into(),
             Some(vec![RequiredCiCheck {
@@ -875,16 +813,49 @@ mod tests {
         );
         forge.review_gate_contexts = vec!["verdict".into()];
         let mut build = evidence(GateResult::Passed, None);
-        build.commit = "h1".into();
+        build.commit = HEAD.into();
         build.checks[0].name = "build".into();
         let mut verdict = evidence(GateResult::Pending, None);
-        verdict.commit = "h1".into();
+        verdict.commit = HEAD.into();
         verdict.checks[0].name = "verdict".into();
-        forge.check_runs.insert("h1".into(), vec![build, verdict]);
+        forge.check_runs.insert(HEAD.into(), vec![build, verdict]);
 
-        let result = require_delivery_queue_ci(&mut forge, &pr(1, "h1"));
+        let result = require_delivery_queue_ci(&mut forge, &pr(1, HEAD));
 
         assert!(result.is_ok(), "a review gate listed as required is not CI");
+    }
+
+    #[test]
+    fn queue_ci_requires_the_pinned_app_and_a_passing_required_check() {
+        use crate::pr::landing::ports::RequiredCiCheck;
+
+        for (app, result, expected_green) in [
+            (Some(15368), GateResult::Passed, true),
+            (Some(15368), GateResult::Skipped, false),
+            (Some(2), GateResult::Passed, false),
+        ] {
+            let mut forge = FakeForge::default();
+            forge.pull_requests.insert(1, open_info(1, HEAD));
+            forge.required_ci_policies.insert(
+                "main".into(),
+                Some(vec![RequiredCiCheck {
+                    name: "build".into(),
+                    app_id: Some(15368),
+                }]),
+            );
+            let mut build = evidence(result, None);
+            build.commit = HEAD.into();
+            build.checks[0].name = "build".into();
+            build.checks[0].app_id = app;
+            forge.check_runs.insert(HEAD.into(), vec![build]);
+
+            let outcome = require_delivery_queue_ci(&mut forge, &pr(1, HEAD));
+            if expected_green {
+                assert!(outcome.is_ok());
+            } else {
+                assert!(matches!(outcome, Err(LandingError::Pending(_))));
+            }
+        }
     }
     // Spec: docs/specs/cli.md#landing-adds-no-merge-authority
     #[test]
@@ -906,7 +877,7 @@ mod tests {
         let first = Cell::new(true);
         let result = await_pr_ci_with(
             &mut forge,
-            &[pr(1, "h1")],
+            &[pr(1, HEAD)],
             &PrCiSettings {
                 mode: PrCiMode::Always,
                 label: None,
@@ -939,7 +910,7 @@ mod tests {
         // The run never resolves, so the wait ends only at the limit.
         let result = await_pr_ci_with(
             &mut forge,
-            &[pr(1, "h1")],
+            &[pr(1, HEAD)],
             &policy,
             &[],
             (3600, 7200),
@@ -977,7 +948,7 @@ mod tests {
         let pauses = std::cell::RefCell::new(Vec::new());
         let result = await_pr_ci_with(
             &mut forge,
-            &[pr(1, "h1")],
+            &[pr(1, HEAD)],
             &PrCiSettings {
                 mode: PrCiMode::Always,
                 label: None,
@@ -996,13 +967,13 @@ mod tests {
     #[test]
     fn configured_check_that_has_not_reported_keeps_land_waiting() {
         let mut forge = FakeForge::default();
-        forge.pull_requests.insert(1, open_info(1, "h1"));
+        forge.pull_requests.insert(1, open_info(1, HEAD));
         let mut passing_other_check = evidence(GateResult::Passed, None);
-        passing_other_check.commit = "h1".into();
+        passing_other_check.commit = HEAD.into();
         passing_other_check.checks[0].name = "optional".into();
         forge
             .check_runs
-            .insert("h1".into(), vec![passing_other_check]);
+            .insert(HEAD.into(), vec![passing_other_check]);
         let policy = PrCiSettings {
             mode: PrCiMode::Always,
             label: None,
@@ -1011,7 +982,7 @@ mod tests {
         let slept = Cell::new(0_u32);
         let result = await_pr_ci_with(
             &mut forge,
-            &[pr(1, "h1")],
+            &[pr(1, HEAD)],
             &policy,
             &required,
             (3600, 7200),

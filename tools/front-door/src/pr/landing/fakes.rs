@@ -159,6 +159,130 @@ impl Forge for FakeForge {
         }
         Ok(observations)
     }
+    fn observe_head(
+        &mut self,
+        pr: &EligiblePr,
+        required_names: &[String],
+        _timeout: std::time::Duration,
+    ) -> Result<crate::pr::observer::HeadReading, LandingError> {
+        use crate::pr::observer::{
+            Check, Clock, HeadReading, MergeState, RequiredCheck, WallClock,
+        };
+        let expected = provenant_core::GitOid::parse(&pr.head)
+            .map_err(|error| LandingError::Failed(format!("invalid PR head: {error}")))?;
+        let policy = if required_names.is_empty() {
+            self.required_ci_policy(&pr.base_branch)?
+                .unwrap_or_default()
+        } else {
+            required_names
+                .iter()
+                .map(|name| RequiredCiCheck {
+                    name: name.clone(),
+                    app_id: None,
+                })
+                .collect()
+        };
+        let observations = self.checks(&pr.head)?;
+        let current = self.pull_request(pr.number)?;
+        let pr_head = provenant_core::GitOid::parse(&current.head).ok();
+        let branch_ref = None;
+        let mergeable = match current.mergeability {
+            Mergeability::Clean => MergeState::Mergeable,
+            Mergeability::Conflicting => MergeState::Conflicting,
+            Mergeability::Unclean | Mergeability::Unknown => MergeState::Unknown,
+        };
+        let observed: Vec<_> = observations
+            .iter()
+            .filter(|observation| observation.commit == pr.head)
+            .flat_map(|observation| &observation.checks)
+            .map(|check| Check {
+                head: pr.head.clone(),
+                name: check.name.clone(),
+                job_id: None,
+                bucket: match &check.result {
+                    GateResult::Passed => "pass",
+                    GateResult::Failed => "fail",
+                    GateResult::Pending | GateResult::Missing => "pending",
+                    GateResult::Skipped | GateResult::Neutral => "skipping",
+                }
+                .into(),
+                app: check.app_id,
+                app_slug: check.issuer.clone(),
+                conclusion: None,
+                registered: None,
+                url: None,
+                excerpt: String::new(),
+            })
+            .collect();
+        let required_policy: Vec<_> = policy
+            .iter()
+            .map(|requirement| RequiredCheck {
+                name: requirement.name.clone(),
+                app: requirement.app_id,
+            })
+            .collect();
+        let ci_required: Vec<_> = required_policy
+            .iter()
+            .filter(|requirement| !self.review_gate_contexts.contains(&requirement.name))
+            .collect();
+        let required: Vec<_> = required_policy
+            .iter()
+            .filter(|requirement| !self.review_gate_contexts.contains(&requirement.name))
+            .flat_map(|requirement| {
+                observed
+                    .iter()
+                    .filter(|check| {
+                        check.name == requirement.name
+                            && requirement.app.is_none_or(|app| check.app == Some(app))
+                    })
+                    .cloned()
+            })
+            .collect();
+        let head_agrees = pr_head == Some(expected);
+        let review_only = !required_policy.is_empty() && ci_required.is_empty();
+        let completion_checks: Vec<_> = if review_only {
+            observed
+                .iter()
+                .filter(|check| !self.review_gate_contexts.contains(&check.name))
+                .collect()
+        } else {
+            required.iter().collect()
+        };
+        let covered = (!ci_required.is_empty()
+            && ci_required.iter().all(|requirement| {
+                observed.iter().any(|check| {
+                    check.name == requirement.name
+                        && requirement.app.is_none_or(|app| check.app == Some(app))
+                })
+            }))
+            || (review_only && !completion_checks.is_empty());
+        let complete = head_agrees
+            && covered
+            && !completion_checks
+                .iter()
+                .any(|check| check.bucket == "pending");
+        Ok(HeadReading {
+            expected_head: expected,
+            branch_ref,
+            pr_head,
+            mergeable,
+            required_policy,
+            observed,
+            required,
+            observed_at: WallClock.now(),
+            complete,
+            pending_reason: if complete {
+                None
+            } else if !head_agrees {
+                Some("pull head moved".into())
+            } else if !covered {
+                Some("required CI policy is unavailable".into())
+            } else {
+                Some("a required check is queued or in progress".into())
+            },
+            retry_at: None,
+        })
+    }
     fn required_ci_policy(
         &mut self,
         base_branch: &str,

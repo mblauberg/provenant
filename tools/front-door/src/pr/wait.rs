@@ -104,26 +104,31 @@ impl Reader<'_> {
                 return Ok(output);
             }
             if limited {
-                // A rate limit skips this read rather than sleeping to the
-                // reset: the caller resubmits once the quota returns.
-                let (_, reset) = rate_delay(&headers, Duration::from_secs(60));
+                let (delay, reset) = rate_delay(&headers, Duration::from_secs(60));
+                let delay = delay.max(Duration::from_secs(1));
                 provenant_records::warning::warn(
                     provenant_records::warning::Warning::new(
                         provenant_records::warning::GH_RATE_LIMITED,
-                        format!("GitHub rate limit; skipped this read; reset {reset}"),
+                        format!("GitHub rate limit; waiting for reset {reset}"),
                         provenant_records::warning::detected_source(
                             provenant_records::warning::GH_RATE_LIMITED,
                         ),
                     )
                     .once_per_change(),
                 );
-                return Err(failure(
-                    "RATE_LIMITED",
-                    format!(
-                        "GitHub rate limit; reset {reset}; next: {}",
-                        self.retry_command
-                    ),
-                ));
+                let left = self.deadline.saturating_duration_since(Instant::now());
+                if delay >= left {
+                    return Err(failure(
+                        "RATE_LIMITED",
+                        format!(
+                            "GitHub rate limit; reset {reset}; next: {}",
+                            self.retry_command
+                        ),
+                    ));
+                }
+                std::thread::sleep(delay);
+                retries = retries.saturating_add(1);
+                continue;
             }
             let left = self.deadline.saturating_duration_since(Instant::now());
             std::thread::sleep(backoff.delay(retries).max(Duration::from_secs(1)).min(left));

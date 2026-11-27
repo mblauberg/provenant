@@ -250,20 +250,33 @@ fn git(
         })
 }
 
+/// Inputs for capturing a project's working tree as a read-only peer snapshot.
+pub struct MirrorRequest<'a> {
+    pub git_executable: &'a Path,
+    pub worktree: &'a Path,
+    pub scratch: &'a Path,
+    pub state: &'a Path,
+    pub origin_host: &'a str,
+    pub project_id: &'a str,
+    pub cancel: &'a CancelToken,
+}
+
 /// Capture the working tree into a deterministic snapshot commit and bundle
 /// exactly that ref into the mirror state. The live index and refs are never
 /// modified: all Git writes use a private scratch index.
-#[allow(clippy::too_many_arguments)]
 pub fn mirror_snapshot(
     executor: &dyn Executor,
-    git_executable: &Path,
-    worktree: &Path,
-    scratch: &Path,
-    state: &Path,
-    origin_host: &str,
-    project_id: &str,
-    cancel: &CancelToken,
+    request: MirrorRequest<'_>,
 ) -> Result<MirrorSnapshot, MirrorError> {
+    let MirrorRequest {
+        git_executable,
+        worktree,
+        scratch,
+        state,
+        origin_host,
+        project_id,
+        cancel,
+    } = request;
     if !git_executable.is_absolute() {
         return Err(MirrorError::GitUnavailable);
     }
@@ -451,15 +464,18 @@ mod tests {
             commit: "commit-oid".to_owned(),
             calls: std::sync::Mutex::new(Vec::new()),
         };
+        let cancel = CancelToken::new();
         let snapshot = mirror_snapshot(
             &executor,
-            Path::new("/usr/bin/git"),
-            &worktree,
-            &root.join("scratch"),
-            &state,
-            "host-a",
-            "project-b",
-            &CancelToken::new(),
+            MirrorRequest {
+                git_executable: Path::new("/usr/bin/git"),
+                worktree: &worktree,
+                scratch: &root.join("scratch"),
+                state: &state,
+                origin_host: "host-a",
+                project_id: "project-b",
+                cancel: &cancel,
+            },
         )
         .expect("snapshot is bundled and verified");
         assert_eq!(snapshot.commit, "commit-oid");
