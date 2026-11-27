@@ -42,6 +42,7 @@ case "$1 $2" in
   'run task') [ "${FAIL_RUN:-0}" = 0 ] || exit 9; printf '{"data":{}}\n' ;;
   'wait '*) printf '{"data":{}}\n' ;;
   'telemetry cost') printf '{"data":null}\n' ;;
+  'telemetry stats') printf '{"data":{"totals":{"usage":{"uncached_input":{"known":100,"missing":0},"cache_read":{"known":20,"missing":0},"cache_write":{"known":0,"missing":0},"output_excluding_reasoning":{"known":50,"missing":0},"reasoning":{"known":0,"missing":0}}}}}\n' ;;
   *) printf 'unexpected mock command: %s\n' "$*" >&2; exit 64 ;;
 esac
 EOF
@@ -53,4 +54,6 @@ printf '%s\n' 'diff --git a/file b/file' '--- a/file' '+++ b/file' '@@ -1 +1 @@'
 python3 -c 'import hashlib,sys; h=hashlib.sha256(); [(h.update(open(p,"rb").read()),h.update(b"\0")) for p in sys.argv[1:]]; print(h.hexdigest())' "$tmp/repo/bench/tasks/task.toml" "$tmp/repo/bench/tasks/task.patch" > "$tmp/repo/bench/tasks/task.toml.verified"
 (cd "$tmp/repo" && "$scripts/bench" run --route fixture)
 python3 -c 'import json,sys; rows=[json.loads(x) for x in open(sys.argv[1])]; assert [r["reason"] for r in rows] == ["run or wait failed (exit 9)", "hidden patch failed to apply", None]; assert [r["pass"] for r in rows] == [None, None, True]' "$tmp/state/bench.jsonl"
+(cd "$tmp/repo" && "$scripts/bench" run --route fixture --repeats 2)
+python3 -c 'import json,sys; rows=[json.loads(x) for x in open(sys.argv[1])]; tail=rows[-2:]; assert [r["repeat"] for r in tail] == [1,2]; assert [r["repeats"] for r in tail] == [2,2]; assert all(r["tokens"]=={"input":100,"cache_read":20,"cache_write":0,"output":50,"reasoning":0} for r in tail)' "$tmp/state/bench.jsonl"
 echo 'cleanup signal fixtures passed'
