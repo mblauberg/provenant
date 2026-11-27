@@ -547,8 +547,11 @@ impl WriterLaunch {
         Ok(())
     }
 
-    /// Bind a graph writer continuation to its predecessor head, verifying that
-    /// the predecessor head descends from the original lineage source commit.
+    /// Bind a graph writer continuation to its predecessor head. The
+    /// predecessor must descend from the original lineage source; a head that
+    /// moved forward on the writer's own branch re-pins with `WRITER_HEAD_MOVED`
+    /// instead of refusing, because a moved head is not destruction. A head
+    /// that does not descend is a typed operation error naming both ids.
     pub fn require_continuation_source(
         &self,
         git: &Path,
@@ -556,45 +559,44 @@ impl WriterLaunch {
         predecessor: GitOid,
         policy: &provenant_records::policy::Policy,
     ) -> Result<()> {
-        if self.base != predecessor {
-            return Err(policy.boundary_error(
-                "WRITER_WRITERLAUNCH_REQUIRE_CONTINUATION_SOURCE_GIT_ISOLATION",
-                provenant_records::policy::Facts::violation(
-                    "prepared writer base does not match the pinned predecessor head",
-                ),
-                RunError::WriterSourceMismatch {
-                    expected: predecessor,
-                    actual: self.base,
-                },
-            ));
-        }
         let repo = self.worktree.repo();
-        let descends = crate::objects::command(
-            git,
-            repo.common_git_dir(),
-            repo.root_path(),
-            &[
-                "merge-base".into(),
-                "--is-ancestor".into(),
-                source.to_string().into(),
-                predecessor.to_string().into(),
-            ],
-            None,
-        )
-        .is_ok();
-        if !descends {
-            return Err(policy.boundary_error(
-                "WRITER_WRITERLAUNCH_REQUIRE_CONTINUATION_SOURCE_GIT_ISOLATION",
-                provenant_records::policy::Facts::violation(
-                    "pinned predecessor head does not descend from the writer source",
-                ),
-                RunError::WriterSourceMismatch {
-                    expected: source,
-                    actual: self.base,
-                },
+        let is_ancestor = |older: GitOid, newer: GitOid| -> bool {
+            crate::objects::command(
+                git,
+                repo.common_git_dir(),
+                repo.root_path(),
+                &[
+                    "merge-base".into(),
+                    "--is-ancestor".into(),
+                    older.to_string().into(),
+                    newer.to_string().into(),
+                ],
+                None,
+            )
+            .is_ok()
+        };
+        if !is_ancestor(source, predecessor) {
+            return Err(RunError::Validation(
+                "pinned predecessor head does not descend from the writer source",
             ));
         }
-        Ok(())
+        if self.base == predecessor {
+            return Ok(());
+        }
+        if is_ancestor(predecessor, self.base) {
+            policy.warn_or(
+                provenant_records::policy::WRITER_HEAD_MOVED,
+                provenant_records::policy::Facts::violation(format!(
+                    "writer head moved from {predecessor} to {}",
+                    self.base
+                )),
+                |_| RunError::Validation("WRITER_HEAD_MOVED was configured to stop"),
+            )?;
+            return Ok(());
+        }
+        Err(RunError::Validation(
+            "prepared writer base does not descend from the pinned predecessor head",
+        ))
     }
 
     /// Commit the worktree's retained edits locally as WIP before a plan node
@@ -706,6 +708,29 @@ impl WriterLaunch {
         let repo = self.worktree.repo();
         let output = crate::objects::command(
             git,
+            repo.private_git_dir(),
+            repo.root_path(),
+            &[
+                "--work-tree".into(),
+                repo.root_path().into(),
+                "status".into(),
+                "--porcelain".into(),
+                "-z".into(),
+            ],
+            None,
+        )?;
+        status_paths(&output)
+    }
+
+    /// List uncommitted paths in a verified worktree directly, for a lease
+    /// handover where there is no prepared writer for the prior attempt.
+    pub(crate) fn uncommitted_worktree_paths(
+        tree: &provenant_confinement::VerifiedWorktree,
+    ) -> Result<Vec<String>> {
+        let git = provenant_os::git::git_executable().ok_or(RunError::GitUnavailable)?;
+        let repo = tree.repo();
+        let output = crate::objects::command(
+            &git,
             repo.private_git_dir(),
             repo.root_path(),
             &[
@@ -4173,6 +4198,31 @@ pub(crate) fn settle_launch_staging(attempt: &Directory) -> Result<()> {
         attempt.sync()?;
     }
     Ok(())
+}
+
+/// Seal the durable fact that this attempt continued a lapsed lease. Listed
+/// paths are retained in place; recording the fact never resets them.
+pub(crate) fn seal_handover(
+    attempt: &Directory,
+    handover: &provenant_records::custody::Handover,
+) -> Result<()> {
+    crate::artifacts::seal(
+        attempt,
+        "handover.json",
+        &crate::db::bytes(handover)?,
+        crate::RECORD_LIMIT,
+    )
+}
+
+/// Read the handover fact sealed for a lease successor, if any.
+pub(crate) fn read_handover(
+    attempt: &Directory,
+) -> Result<Option<provenant_records::custody::Handover>> {
+    let Some(raw) = crate::artifacts::read_sealed(attempt, "handover.json", crate::RECORD_LIMIT)?
+    else {
+        return Ok(None);
+    };
+    crate::db::decode(&raw).map(Some)
 }
 
 /// Preserve sealed current launch ownership evidence on replay.

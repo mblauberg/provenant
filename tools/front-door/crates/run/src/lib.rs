@@ -674,8 +674,6 @@ pub enum RunError {
     InvalidSealedRemote(String),
     #[error(transparent)]
     Handoff(#[from] provenant_records::handoff::HandoffError),
-    #[error("invalid run record: {0}")]
-    WriterLineage(&'static str),
     #[error("invalid run record: writer HEAD is not the lane branch")]
     WriterHeadNotLaneBranch,
     #[error(
@@ -914,7 +912,6 @@ impl RunError {
         use provenant_records::policy::Boundary as B;
         match self {
             Self::WriterHeadNotLaneBranch | Self::WriterSourceMismatch { .. } => B::OtherWork,
-            Self::WriterLineage(_) => B::Authority,
             Self::DeliveryPrepare {
                 refusal: Some(DeliveryPrepareRefusal::CredentialHelper(safety)),
                 ..

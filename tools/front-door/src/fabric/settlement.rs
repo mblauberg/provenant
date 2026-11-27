@@ -255,7 +255,6 @@ fn steer_refusal_cause(
         provenant_run::RunError::SteerSessionMismatch => Some(SteeringCause::SessionMismatch),
         provenant_run::RunError::ContinuationRefused { .. }
         | provenant_run::RunError::RecordedRefusal(_)
-        | provenant_run::RunError::WriterLineage(_)
         | provenant_run::RunError::WriterSourceMismatch { .. }
         | provenant_run::RunError::WriterHeadNotLaneBranch
         | provenant_run::RunError::AttemptReservationRetained => {

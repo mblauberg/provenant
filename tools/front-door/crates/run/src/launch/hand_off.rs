@@ -92,23 +92,20 @@ fn typed_preparation(
     }
 }
 
-/// Classify a writer-lineage check under launch custody. A lineage mismatch is
-/// a local preparation step that the operator can repair; recording it as a
-/// corrupt run record or a handoff failure hides the repair behind a generic
-/// `provenant reconcile` instruction (#3987). An unfinished predecessor still
-/// keeps its authority boundary, because no successor may take its worktree.
+/// Classify a writer-lineage check under launch custody. Custody is a lease:
+/// an unreadable predecessor or a foreign lineage is a typed preparation step
+/// the operator can repair, never an authority boundary. A lapsed or shared
+/// lease proceeds with a warning instead of reaching this classifier.
 fn launch_lineage_refusal(policy: &provenant_records::policy::Policy, error: &RunError) -> HandOff {
     match error {
-        RunError::Nonterminal => boundary_handoff(
-            policy,
-            "CONTROLS_RUNSTORE_CHECK_WRITER_LINEAGE_AUTHORITY",
-            format!("writer lineage: {error}"),
-            provenant_records::policy::Boundary::Authority,
-        ),
-        RunError::WriterLineage(detail) => HandOff::TypedLocal {
-            message: format!("writer lineage mismatch: {detail}"),
-            cause: CauseKind::PreparationRefused,
-        },
+        // An unreadable predecessor or a foreign lineage is a typed operation
+        // error: the operator repairs the input, not an authority boundary.
+        RunError::Validation(_) | RunError::NotFound | RunError::WriterSourceMismatch { .. } => {
+            HandOff::TypedLocal {
+                message: format!("writer lineage: {error}"),
+                cause: CauseKind::PreparationRefused,
+            }
+        }
         _ => typed_local(policy, "writer lineage", error),
     }
 }
@@ -904,7 +901,7 @@ mod tests {
     fn writer_lineage_is_a_typed_preparation_refusal() {
         let refusal = super::launch_lineage_refusal(
             &test_policy(),
-            &RunError::WriterLineage("graph predecessor writer or source"),
+            &RunError::Validation("graph predecessor writer or source"),
         );
         let HandOff::TypedLocal { cause, message } = refusal else {
             panic!("writer lineage was not a typed local preparation refusal");
@@ -912,7 +909,7 @@ mod tests {
         assert_eq!(cause, CauseKind::PreparationRefused);
         assert_eq!(
             message,
-            "writer lineage mismatch: graph predecessor writer or source"
+            "writer lineage: invalid run record: graph predecessor writer or source"
         );
         let (failure, note) = crate::launch::handoff_preparation(
             &HandOff::TypedLocal {
@@ -929,8 +926,9 @@ mod tests {
         assert!(note.contains("retained writer worktree"), "{note}");
         assert!(!note.contains("provenant reconcile"), "{note}");
 
-        // An unfinished predecessor still refuses at the authority boundary.
-        assert!(matches!(
+        // A live lease is shared, not seized: the lineage classifier never
+        // turns it into an authority boundary.
+        assert!(!matches!(
             super::launch_lineage_refusal(&test_policy(), &RunError::Nonterminal),
             HandOff::Boundary { .. }
         ));

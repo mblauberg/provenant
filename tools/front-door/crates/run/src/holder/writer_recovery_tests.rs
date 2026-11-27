@@ -1425,11 +1425,6 @@ fn stopped_writer_preserves_work_and_arbitrates_steer_continuation()
                 assert_eq!(store.record(id, &call)?.superseded_by, Some(child));
                 continue;
             }
-            if marker == DeliveredSteerAdopted {
-                assert!(matches!(child, Err(RunError::WriterLineage(_))));
-                assert_eq!(store.record(id, &call)?.superseded_by, None);
-                continue;
-            }
             let child = child?;
             if explicit {
                 assert_eq!(
@@ -1446,7 +1441,7 @@ fn stopped_writer_preserves_work_and_arbitrates_steer_continuation()
                 let current: provenant_core::GitOid =
                     crate::delivery_tests::worktree_git(&fixture, &git, &["rev-parse", "HEAD"])?
                         .parse()?;
-                if marker == DeliveredSteerDescendant {
+                if matches!(marker, DeliveredSteerDescendant | DeliveredSteerAdopted) {
                     let sealed = shared_head.ok_or("sealed head")?;
                     assert_ne!(current, sealed);
                     assert_eq!(task.head, Some(current.to_string()));
