@@ -1,0 +1,134 @@
+#!/usr/bin/env python3
+"""Tests for scripts/check-generated and the generated-artefact CI job."""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+import tempfile
+
+ROOT = Path(__file__).resolve().parents[1]
+CHECK = ROOT / "scripts" / "check-generated"
+
+
+def git(root: Path, *args: str) -> str:
+    return subprocess.check_output(["git", "-C", str(root), *args], text=True)
+
+
+def make_generator(root: Path, name: str, body: str) -> list[str]:
+    path = root / name
+    path.write_text("#!/usr/bin/env python3\n" + body)
+    return ["python3", name]
+
+
+def failed_generator_does_not_stop_others() -> None:
+    with tempfile.TemporaryDirectory(prefix="provenant-check-generated-") as tmp:
+        root = Path(tmp)
+        subprocess.run(["git", "init", "-q", str(root)], check=True)
+        git(root, "config", "user.email", "test@example.invalid")
+        git(root, "config", "user.name", "Test")
+        (root / "out").mkdir()
+        (root / "out" / "modified.json").write_text('{"v": 1}\n')
+        (root / "out" / "removed.json").write_text('{"v": 1}\n')
+        git(root, "add", "-A")
+        git(root, "commit", "-qm", "fixtures")
+
+        drift = make_generator(
+            root,
+            "gen_drift.py",
+            "from pathlib import Path\n"
+            "out = Path('out')\n"
+            "(out / 'added.json').write_text('{\"v\": 2}\\n')\n"
+            "(out / 'modified.json').write_text('{\"v\": 3}\\n')\n"
+            "(out / 'removed.json').unlink()\n",
+        )
+        late = make_generator(
+            root,
+            "gen_late.py",
+            "from pathlib import Path\n"
+            "Path('out/late.json').write_text('{\"v\": 4}\\n')\n",
+        )
+        untracked = make_generator(
+            root,
+            "gen_reference.py",
+            "from pathlib import Path\n"
+            "Path('reference-marker').write_text('rendered')\n",
+        )
+        registry = {
+            "generated": [
+                {
+                    "name": "failing",
+                    "generate": ["python3", "-c", "import sys; sys.exit('boom')"],
+                    "cwd": ".",
+                    "outputs": [],
+                    "tracked": True,
+                },
+                {"name": "drift", "generate": drift, "cwd": ".", "outputs": ["out/*.json"], "tracked": True},
+                {"name": "late", "generate": late, "cwd": ".", "outputs": ["out/*.json"], "tracked": True},
+                {
+                    "name": "reference",
+                    "generate": untracked,
+                    "cwd": ".",
+                    "outputs": ["docs/reference/**"],
+                    "tracked": False,
+                },
+            ]
+        }
+        (root / "config").mkdir()
+        (root / "config" / "ports.json").write_text(json.dumps(registry))
+
+        result = subprocess.run(
+            [str(CHECK), "--root", str(root), "--ports", str(root / "config/ports.json"),
+             "--out", str(root / "artifacts")],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        assert result.returncode == 1, result.stderr
+
+        combined = result.stdout + result.stderr
+        for expected in ("added out/added.json", "modified out/modified.json", "removed out/removed.json"):
+            assert expected in combined, f"{expected} missing from:\n{combined}"
+
+        manifest = json.loads((root / "artifacts" / "manifest.json").read_text())
+        statuses = {item["name"]: item["status"] for item in manifest["generators"]}
+        assert statuses == {
+            "failing": "failed",
+            "drift": "drift",
+            "late": "drift",
+        }, statuses
+        assert "boom" in combined, combined
+        assert not (root / "reference-marker").exists(), "untracked generator must not run"
+        assert git(root, "diff", "--cached", "--name-only") == "", "real index must stay clean"
+
+        patch = (root / "artifacts" / "patch").read_text()
+        for expected in ("added.json", "modified.json", "removed.json", "late.json"):
+            assert expected in patch, f"{expected} missing from patch:\n{patch}"
+        assert len(manifest["patch_sha256"]) == 64
+
+
+def reference_render_job_unchanged() -> None:
+    workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text()
+    assert "\n  generated-reference:\n" in workflow
+    assert "scripts/generate-reference --strict" in workflow
+    assert "name: contract-reference" in workflow
+    assert "\n  generated:\n" in workflow
+    assert "generated-${{ github.sha }}" in workflow
+    assert "scripts/check-generated" in workflow
+    assert "check-swift-fixtures" not in workflow
+    status = workflow.split("\n  ci-status:\n", 1)[1]
+    assert "\n      - generated\n" in status, "aggregate gate must depend on generated"
+
+
+def main() -> int:
+    failed_generator_does_not_stop_others()
+    reference_render_job_unchanged()
+    print("check-generated: ok")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

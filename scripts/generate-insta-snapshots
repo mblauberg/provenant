@@ -1,0 +1,35 @@
+#!/usr/bin/env python3
+"""Regenerate the front-door insta snapshots declared in the ports registry.
+
+The accepted bytes are tracked, so `scripts/check-generated` stages them in a
+scratch index and reports drift. There are no checked-in snapshots yet; when
+one is added this runs the workspace tests with INSTA_UPDATE=always so the
+generator writes the accepted bytes in place. The early exit means the
+registry stays truthful without paying for a build when there is nothing to
+regenerate.
+"""
+
+from __future__ import annotations
+
+import os
+from pathlib import Path
+import subprocess
+import sys
+
+ROOT = Path(__file__).resolve().parents[1]
+WORKSPACE = ROOT / "tools/front-door"
+
+
+def main() -> int:
+    if not any(WORKSPACE.rglob("*.snap")):
+        return 0
+    env = dict(os.environ, INSTA_UPDATE="always")
+    return subprocess.call(
+        ["cargo", "test", "--locked", "--workspace"],
+        cwd=str(WORKSPACE),
+        env=env,
+    )
+
+
+if __name__ == "__main__":
+    sys.exit(main())

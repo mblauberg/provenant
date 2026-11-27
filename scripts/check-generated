@@ -1,0 +1,195 @@
+#!/usr/bin/env python3
+"""Run the tracked generated-artefact generators and capture their drift.
+
+The registry lives in ``config/ports.json`` under ``generated``. Each tracked
+entry declares an argv, a working directory and the output globs it owns. Every
+generator runs, even after one fails. Afterwards all declared outputs are
+staged in a *single scratch* index (GIT_INDEX_FILE) seeded from HEAD and diffed
+against HEAD once. The diff therefore includes additions, modifications and
+removals, never duplicates a change, and never touches the repository index.
+
+A failed generator is recorded as ``failed``; the patch and a manifest are
+written so CI can upload both even when the check fails.
+
+Usage:
+    scripts/check-generated [--root DIR] [--ports FILE] [--out DIR]
+"""
+
+from __future__ import annotations
+
+import argparse
+import fnmatch
+import hashlib
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def git(root: Path, *args: str, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["git", "-C", str(root), *args],
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+
+
+def run_generator(root: Path, entry: dict) -> tuple[bool, str]:
+    """Run one generator; return (succeeded, combined output)."""
+    cwd = root / str(entry.get("cwd", "."))
+    result = subprocess.run(
+        list(entry["generate"]),
+        cwd=str(cwd),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    return result.returncode == 0, result.stdout.strip()
+
+
+def stage_outputs(root: Path, outputs: list[str], index: Path) -> str | None:
+    """Stage every declared output in a scratch index. Return an error or None."""
+    env = dict(os.environ, GIT_INDEX_FILE=str(index))
+    seeded = git(root, "read-tree", "HEAD", env=env)
+    if seeded.returncode != 0:
+        return f"cannot seed scratch index: {seeded.stderr.strip()}"
+
+    for pattern in outputs:
+        # `:(glob)` makes `**` recursive and keeps the pathspec rooted at the
+        # repository root even when a generator declares a subdirectory.
+        spec = ":(glob)" + str(pattern)
+        added = git(root, "add", "-A", "--", spec, env=env)
+        if added.returncode != 0:
+            # A pattern that matches nothing (an insta registry with no
+            # snapshots yet, say) is clean, not a generator failure.
+            if "did not match any file" in added.stderr:
+                continue
+            return f"cannot stage {pattern}: {added.stderr.strip()}"
+    return None
+
+
+def capture_drift(
+    root: Path, index: Path
+) -> tuple[str, list[tuple[str, str]], str | None]:
+    """Return (patch, [(status word, path)], error) for the staged outputs."""
+    env = dict(os.environ, GIT_INDEX_FILE=str(index))
+    patch = git(root, "diff", "--cached", "--binary", "HEAD", env=env)
+    if patch.returncode != 0:
+        return "", [], f"cannot diff scratch index: {patch.stderr.strip()}"
+
+    names = git(root, "diff", "--cached", "--name-status", "HEAD", env=env)
+    if names.returncode != 0:
+        return "", [], f"cannot list drifted files: {names.stderr.strip()}"
+
+    rows: list[tuple[str, str]] = []
+    for line in names.stdout.splitlines():
+        fields = line.split("\t")
+        if len(fields) < 2:
+            continue
+        status = fields[0][:1]
+        word = {
+            "A": "added",
+            "M": "modified",
+            "D": "removed",
+            "T": "modified",
+            "R": "renamed",
+            "C": "added",
+        }.get(status, "modified")
+        rows.append((word, fields[-1]))
+    return patch.stdout, rows, None
+
+
+def owns(patterns: list[str], path: str) -> bool:
+    return any(fnmatch.fnmatchcase(path, pattern) for pattern in patterns)
+
+
+def head_sha(root: Path) -> str:
+    result = git(root, "rev-parse", "HEAD")
+    return result.stdout.strip() if result.returncode == 0 else "0" * 40
+
+
+def parse_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--root", type=Path, default=ROOT, help="repository root")
+    parser.add_argument("--ports", type=Path, help="ports registry (default <root>/config/ports.json)")
+    parser.add_argument("--out", type=Path, help="directory for patch and manifest.json")
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(sys.argv[1:] if argv is None else argv)
+    root = args.root.resolve()
+    ports = (args.ports or root / "config" / "ports.json").resolve()
+
+    try:
+        document = json.loads(ports.read_text())
+    except (OSError, ValueError) as error:
+        print(f"cannot read ports registry {ports}: {error}", file=sys.stderr)
+        return 2
+
+    tracked = []
+    generators: list[dict] = []
+    failed = False
+    # Render-only generators keep their own CI job and never contribute.
+    for entry in document.get("generated", []):
+        if not entry.get("tracked", False):
+            continue
+        tracked.append(entry)
+        name = str(entry.get("name", "unnamed"))
+        ok, output = run_generator(root, entry)
+        if not ok:
+            failed = True
+            generators.append({"name": name, "status": "failed", "files": []})
+            print(f"{name}: failed{': ' + output if output else ''}", file=sys.stderr)
+        else:
+            generators.append({"name": name, "status": "clean", "files": []})
+            if output:
+                print(f"{name}: generator output: {output}", file=sys.stderr)
+
+    with tempfile.TemporaryDirectory(prefix="provenant-generated-") as scratch_name:
+        index = Path(scratch_name) / "index"
+        outputs = [str(pattern) for entry in tracked for pattern in entry.get("outputs", [])]
+        problem = stage_outputs(root, outputs, index)
+        if problem is not None:
+            print(f"generated: failed: {problem}", file=sys.stderr)
+            return 2
+        patch, rows, problem = capture_drift(root, index)
+        if problem is not None:
+            print(f"generated: failed: {problem}", file=sys.stderr)
+            return 2
+
+    for word, path in rows:
+        owners = [item for entry, item in zip(tracked, generators) if owns(list(entry.get("outputs", [])), path)]
+        for item in owners:
+            item["status"] = "drift"
+            item["files"].append(path)
+        print(f"{', '.join(item['name'] for item in owners) or 'unowned'}: {word} {path}", file=sys.stderr)
+
+    manifest = {
+        "repo": os.environ.get("GITHUB_REPOSITORY", "local/ports"),
+        "workflow": os.environ.get("GENERATED_WORKFLOW", "ci.yml"),
+        "run_id": int(os.environ.get("GITHUB_RUN_ID", "0")),
+        "run_attempt": int(os.environ.get("GITHUB_RUN_ATTEMPT", "1")),
+        "head_sha": os.environ.get("GITHUB_SHA", head_sha(root)),
+        "generators": generators,
+        "patch_sha256": hashlib.sha256(patch.encode()).hexdigest(),
+    }
+
+    if args.out is not None:
+        out = args.out.resolve()
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "patch").write_text(patch)
+        (out / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+
+    drifted = any(item["status"] == "drift" for item in generators)
+    return 1 if failed or drifted else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
