@@ -508,24 +508,9 @@ pub(super) fn composite_review(
 pub(super) const FINDING_SEVERITY_UNKNOWN: provenant_records::warning::WarningCode =
     provenant_records::warning::WarningCode("FINDING_SEVERITY_UNKNOWN");
 
-/// Decode one reviewer severity word to the normalised acceptance severity.
-/// An unknown word decodes to `High` and is flagged for the caller to warn.
-pub(super) fn decode_severity(word: &str) -> (Severity, bool) {
-    let word = word.trim().to_ascii_lowercase();
-    let severity = match word.as_str() {
-        "critical" | "blocker" | "blocking" => Severity::Blocking,
-        "major" | "high" => Severity::High,
-        "medium" | "moderate" => Severity::Medium,
-        "minor" | "low" => Severity::Low,
-        "nit" | "info" | "style" => Severity::Nit,
-        _ => return (Severity::High, true),
-    };
-    (severity, false)
-}
-
 /// Decode a finding's severity and flag an unknown source word.
 pub(super) fn finding_severity(finding: &Finding) -> (Severity, bool) {
-    decode_severity(&finding.severity)
+    model::decode_severity(&finding.severity)
 }
 
 /// A finding stays open until it is resolved, dispositioned or falsified with
@@ -582,7 +567,7 @@ pub(super) fn acceptance_decision(
         );
     };
     for finding in findings.iter().filter(|finding| is_open(finding)) {
-        if repair::blocks_acceptance(finding) {
+        if finding.has_blocking_class() {
             return Acceptance::Reject(format!(
                 "finding {} has an open blocking class",
                 finding.id
@@ -747,21 +732,57 @@ pub(super) fn split_needs_adjudicator(
         .is_some_and(|first| verdicts.iter().any(|verdict| verdict != first))
 }
 
+/// Conflicting judgements about the same blocking finding require adjudication.
+pub(super) fn contradictory_blocking_findings(findings: &[Finding]) -> bool {
+    findings.iter().enumerate().any(|(index, left)| {
+        findings[index + 1..].iter().any(|right| {
+            let same = left.file == right.file
+                && left.line == right.line
+                && left.summary == right.summary
+                && left.named_invariant().is_some()
+                && left.named_invariant() == right.named_invariant();
+            let upheld = |finding: &Finding| {
+                finding.has_blocking_class()
+                    && finding
+                        .triage
+                        .as_ref()
+                        .is_some_and(|triage| triage.decision == "confirmed")
+            };
+            let rejected = |finding: &Finding| {
+                finding.falsified_with_evidence()
+                    || finding
+                        .triage
+                        .as_ref()
+                        .is_some_and(|triage| triage.decision == "rejected")
+            };
+            same && ((upheld(left) && rejected(right)) || (upheld(right) && rejected(left)))
+        })
+    })
+}
+
 /// Rebuild the ledger from reviewer rows already in the checkpoint. Each round
 /// reads the same facts under the journal lock, so a replay carries the same
 /// open findings and coverage.
 pub(super) fn ledger_from_checkpoint(
     plan: &PlannedGraph,
     checkpoint: &GraphCheckpoint,
+    boundary: usize,
+    current_head: &str,
 ) -> FindingLedger {
     let mut ledger = FindingLedger::default();
-    for (index, progress) in checkpoint.nodes.iter().enumerate() {
+    for (index, progress) in checkpoint.nodes.iter().enumerate().take(boundary) {
         let Some(settlement) = progress.review_settlement.as_ref() else {
             continue;
         };
         let Some(outputs) = progress.outputs.as_ref() else {
             continue;
         };
+        if progress.state != NodeState::Succeeded
+            || outputs.partial
+            || outputs.verdict_error.is_some()
+        {
+            continue;
+        }
         let head = settlement.head.to_string();
         let entry = ledger.heads.entry(head.clone()).or_default();
         if let Some(base) = settlement.base {
@@ -784,9 +805,17 @@ pub(super) fn ledger_from_checkpoint(
             entry.covered_lenses.insert(lens.to_owned());
         }
         let (invariants, lenses) = outputs::finding_coverage(&outputs.findings);
-        entry.invariant_coverage = invariants;
+        for (invariant, covered) in invariants {
+            entry
+                .invariant_coverage
+                .entry(invariant)
+                .or_default()
+                .extend(covered);
+        }
         entry.covered_lenses.extend(lenses);
-        ledger.last_reviewed_head = Some(head);
+        if head != current_head {
+            ledger.last_reviewed_head = Some(head);
+        }
     }
     ledger
 }
@@ -809,20 +838,35 @@ mod convergence_tests {
 
     #[test]
     fn severity_aliases_decode() {
-        assert_eq!(decode_severity("critical"), (Severity::Blocking, false));
-        assert_eq!(decode_severity("blocker"), (Severity::Blocking, false));
-        assert_eq!(decode_severity("blocking"), (Severity::Blocking, false));
-        assert_eq!(decode_severity("major"), (Severity::High, false));
-        assert_eq!(decode_severity("high"), (Severity::High, false));
-        assert_eq!(decode_severity("medium"), (Severity::Medium, false));
-        assert_eq!(decode_severity("moderate"), (Severity::Medium, false));
-        assert_eq!(decode_severity("minor"), (Severity::Low, false));
-        assert_eq!(decode_severity("low"), (Severity::Low, false));
-        assert_eq!(decode_severity("nit"), (Severity::Nit, false));
-        assert_eq!(decode_severity("info"), (Severity::Nit, false));
-        assert_eq!(decode_severity("style"), (Severity::Nit, false));
-        assert_eq!(decode_severity("  HIGH  "), (Severity::High, false));
-        assert_eq!(decode_severity("catastrophic"), (Severity::High, true));
+        assert_eq!(
+            model::decode_severity("critical"),
+            (Severity::Blocking, false)
+        );
+        assert_eq!(
+            model::decode_severity("blocker"),
+            (Severity::Blocking, false)
+        );
+        assert_eq!(
+            model::decode_severity("blocking"),
+            (Severity::Blocking, false)
+        );
+        assert_eq!(model::decode_severity("major"), (Severity::High, false));
+        assert_eq!(model::decode_severity("high"), (Severity::High, false));
+        assert_eq!(model::decode_severity("medium"), (Severity::Medium, false));
+        assert_eq!(
+            model::decode_severity("moderate"),
+            (Severity::Medium, false)
+        );
+        assert_eq!(model::decode_severity("minor"), (Severity::Low, false));
+        assert_eq!(model::decode_severity("low"), (Severity::Low, false));
+        assert_eq!(model::decode_severity("nit"), (Severity::Nit, false));
+        assert_eq!(model::decode_severity("info"), (Severity::Nit, false));
+        assert_eq!(model::decode_severity("style"), (Severity::Nit, false));
+        assert_eq!(model::decode_severity("  HIGH  "), (Severity::High, false));
+        assert_eq!(
+            model::decode_severity("catastrophic"),
+            (Severity::High, true)
+        );
         assert_eq!(
             FINDING_SEVERITY_UNKNOWN.as_str(),
             "FINDING_SEVERITY_UNKNOWN"
@@ -850,6 +894,19 @@ mod convergence_tests {
         .unwrap();
         assert!(matches!(
             acceptance_decision(std::slice::from_ref(&boundary), AcceptBelow::Blocking, true),
+            Acceptance::Reject(_)
+        ));
+        let mut no_trigger = finding("F3", "nit", "open");
+        no_trigger.triage = Some(FindingTriage {
+            decision: "confirmed".into(),
+            reason: "r".into(),
+            worth_fixing: true,
+            root_cause: "c".into(),
+            blocking_class: "acceptance".into(),
+            shared_flaw: false,
+        });
+        assert!(matches!(
+            acceptance_decision(&[no_trigger], AcceptBelow::Blocking, true),
             Acceptance::Reject(_)
         ));
         assert!(matches!(
@@ -916,6 +973,24 @@ mod convergence_tests {
         assert!(gaps.iter().any(|gap| gap.contains("correctness")));
         // An uncovered invariant is INCONCLUSIVE, never an agreed PASS.
         assert!(!gaps.is_empty());
+    }
+
+    #[test]
+    fn contradictory_blocking_findings_split_even_with_matching_verdicts() {
+        let mut confirmed = finding("a:F1", "high", "open");
+        confirmed.class = Some("custody".into());
+        confirmed.triage = Some(FindingTriage {
+            decision: "confirmed".into(),
+            reason: "observed".into(),
+            worth_fixing: true,
+            root_cause: "race".into(),
+            blocking_class: "boundary".into(),
+            shared_flaw: false,
+        });
+        let mut rejected = confirmed.clone();
+        rejected.id = "b:F1".into();
+        rejected.triage.as_mut().unwrap().decision = "rejected".into();
+        assert!(contradictory_blocking_findings(&[confirmed, rejected]));
     }
 
     #[test]

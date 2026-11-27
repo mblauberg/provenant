@@ -131,14 +131,22 @@ fn confirmed_worth_fixing(finding: &Finding) -> bool {
 
 /// The PASS contract: an unresolved boundary or data-loss finding needs
 /// falsifying evidence, and a default-path finding blocks at blocking severity
-/// whether or not it is triaged. Once triage confirms a finding is worth
+/// whether or not it is triaged. A missing trigger cannot downgrade an open
+/// blocking severity or blocking class. Once triage confirms a finding is worth
 /// fixing, either blocking class also blocks. A confirmed should-fix does not
 /// contradict PASS.
 pub(super) fn blocks_acceptance(finding: &Finding) -> bool {
     if finding.boundary_or_data_loss() {
         return !finding.falsified_with_evidence();
     }
-    if answered(finding) || !finding.default_path() {
+    if answered(finding) {
+        return false;
+    }
+    if finding.trigger.is_none() {
+        return finding.has_blocking_class()
+            || model::decode_severity(&finding.severity).0 == Severity::Blocking;
+    }
+    if !finding.default_path() {
         return false;
     }
     blocking_severity(finding)
@@ -222,7 +230,7 @@ pub(super) fn split_verdict_patch(parent: &str, head: Option<&str>, revision: u6
         "id": "adjudicate",
         "kind": "adjudicate",
         "access": "read_only",
-        "route": {"alias": "senior"},
+        "route": {"alias": "principal"},
         "after": [parent],
         "inputs": [{"node": parent, "outputs": ["verdict", "findings"]}],
         "require_findings": true,
@@ -1063,6 +1071,20 @@ mod tests {
     }
 
     #[test]
+    fn missing_trigger_does_not_hide_blocking_evidence() {
+        let mut item = finding("F1", "correctness");
+        item.trigger = None;
+        item.severity = "blocking".into();
+        item.triage.as_mut().unwrap().blocking_class = "none".into();
+        assert!(blocks_acceptance(&item));
+        assert!(repair_eligible(&item));
+        assert!(matches!(
+            review::acceptance_decision(&[item], AcceptBelow::Blocking, true),
+            review::Acceptance::Reject(_)
+        ));
+    }
+
+    #[test]
     fn only_a_checked_default_path_blocks_and_boundaries_need_falsification() {
         let mut item = finding("F1", "correctness");
         item.severity = "blocking".into();
@@ -1153,6 +1175,7 @@ mod tests {
         let patch = split_verdict_patch("panel", None, 2);
         assert_eq!(patch.nodes.len(), 1);
         assert_eq!(patch.nodes[0]["kind"], "adjudicate");
+        assert_eq!(patch.nodes[0]["route"]["alias"], "principal");
         assert_eq!(patch.nodes[0]["after"][0], "panel");
         assert!(patch.nodes[0].get("loop").is_none());
         assert!(patch.nodes[0].get("repeat").is_none());

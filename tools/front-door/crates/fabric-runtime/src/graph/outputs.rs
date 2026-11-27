@@ -626,7 +626,7 @@ fn parse_findings_mode(
                         "unrecognised value; accepted words are {}",
                         SEVERITY_VOCABULARY
                             .iter()
-                            .map(|(word, _, _)| *word)
+                            .map(|(word, _, _, _)| *word)
                             .collect::<Vec<_>>()
                             .join(", ")
                     )
