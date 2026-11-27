@@ -169,7 +169,7 @@ fn a_recoverable_stop_keeps_its_code_and_never_reports_auth_required() {
                 skipped_accounts: &[],
             },
         );
-        assert_eq!(decision, SettlementFallback::Continue, "{cause}");
+        assert_eq!(decision, SettlementFallback::ContinueSameRoute, "{cause}");
         assert_ne!(cause.advance_code(), "auth_required", "{cause}");
     }
     // A route-specific cause still reports the pinned-route dead end: the

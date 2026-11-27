@@ -79,6 +79,9 @@ pub(crate) struct Line {
     number: u64,
     state: String,
     pub(crate) head: String,
+    /// Shared CI decision for this head, omitted from status JSON.
+    #[serde(skip)]
+    completion: Option<CiCompletion>,
     #[serde(default, deserialize_with = "display_default")]
     draft: bool,
     #[serde(default, deserialize_with = "display_default")]
@@ -166,6 +169,7 @@ impl Line {
     /// Keep this reading pending until GitHub reports the head being watched.
     pub(crate) fn await_head(&mut self, head: &str) {
         self.awaiting = Some(head.to_owned());
+        self.completion = None;
         self.checks_passed = None;
         self.checks_total = None;
         self.checks_failed = None;
@@ -208,7 +212,9 @@ impl Line {
             } else {
                 "closed"
             }
-        } else if self.checks_failed.unwrap_or(0) > 0 {
+        } else if self.completion == Some(CiCompletion::Failed)
+            || (self.completion.is_none() && self.checks_failed.unwrap_or(0) > 0)
+        {
             "failing"
         } else if matches!(
             self.review.as_str(),
@@ -218,7 +224,11 @@ impl Line {
         } else if self.required_unreadable
             || !self.required_pending.is_empty()
             || self.checks_pending.unwrap_or(0) > 0
-            || self.checks_total.is_none()
+            || matches!(
+                self.completion,
+                Some(CiCompletion::Pending | CiCompletion::Unavailable)
+            )
+            || (self.completion.is_none() && self.checks_total.is_none())
         {
             "pending"
         } else if self.draft {
@@ -251,11 +261,19 @@ impl Line {
             .collect();
         self.checks_failed = Some(self.failed_check_details.len());
         self.batch_uncertain = None;
+        self.completion = None;
     }
     /// What a waiter takes from this pull request: `Some(true)` once it
     /// merged or its checks passed, `Some(false)` once they failed or it
     /// closed unmerged, and `None` while checks run or the read failed.
     pub(crate) fn verdict(&self) -> Option<bool> {
+        if let Some(completion) = self.completion {
+            return match completion {
+                CiCompletion::Green => Some(true),
+                CiCompletion::Failed => Some(false),
+                CiCompletion::Pending | CiCompletion::Unavailable => None,
+            };
+        }
         match self.class() {
             "merged" => Some(true),
             "closed" | "failing" => Some(false),
@@ -1209,8 +1227,43 @@ fn status_line_with(
         .iter()
         .filter(|check| !is_review_gate_context(&check.name, review_gate_contexts))
         .collect();
+    let readable = checks.filter(|_| !observed.is_empty());
+    let completion = match view.state.as_str() {
+        "MERGED" | "CLOSED" => Some(ci_completion(
+            &view.state,
+            &view.head,
+            &[],
+            &[],
+            review_gate_contexts,
+        )),
+        _ => match (&requirement, checks) {
+            (Requirement::Unreadable, _) | (_, None) => Some(CiCompletion::Unavailable),
+            (requirement, Some(checks)) => {
+                let required = match requirement {
+                    Requirement::Known(required) => required.as_slice(),
+                    Requirement::NotConsulted | Requirement::Unreadable => &[],
+                };
+                let normalized: Vec<CiCheck> = checks
+                    .iter()
+                    .map(|check| CiCheck {
+                        head: check.head.clone(),
+                        name: check.name.clone(),
+                        bucket: check.bucket.clone(),
+                        app: check.app,
+                    })
+                    .collect();
+                Some(ci_completion(
+                    &view.state,
+                    &view.head,
+                    &normalized,
+                    required,
+                    review_gate_contexts,
+                ))
+            }
+        },
+    };
     let count = |buckets: &[&str]| {
-        checks.map(|_| {
+        readable.map(|_| {
             observed
                 .iter()
                 .filter(|check| buckets.contains(&check.bucket.as_str()))
@@ -1249,8 +1302,9 @@ fn status_line_with(
     };
     Line {
         number,
+        completion,
         checks_passed: count(&["pass", "skipping"]),
-        checks_total: checks.map(|_| observed.len()),
+        checks_total: readable.map(|_| observed.len()),
         checks_failed: count(&["fail", "cancel"]),
         checks_pending: count(&["pending"]),
         active_workflows: None,
@@ -1424,6 +1478,7 @@ fn rest_line(
                 number,
                 state: "UNAVAILABLE".into(),
                 head: "unknown".into(),
+                completion: None,
                 draft: false,
                 checks_passed: None,
                 checks_total: None,

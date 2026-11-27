@@ -828,6 +828,7 @@ pub(super) fn validate_on_stop(node: &GraphNode) -> Result<(), String> {
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum SettlementFallback {
     Continue,
+    ContinueSameRoute,
     Fail {
         code: Option<&'static str>,
         message: Option<String>,
@@ -880,6 +881,16 @@ pub(super) fn settlement_fallback_decision(
     // in decide(); there is no same-route retry to spend before launch.
     let cause = stop.or_else(|| next_attempt::fallback_cause(outcome));
     let custody_released = live_fallback_allowed(outcome, launched, fallback_evidence);
+    if launched
+        && custody_released
+        && !review_limit_reached
+        && route_index + 1 == node.routes.len()
+        && cause.is_some_and(|cause| {
+            cause.continues_on_same_route() && node.on_stop.get(cause).is_none()
+        })
+    {
+        return SettlementFallback::ContinueSameRoute;
+    }
     let step = cause.map(|cause| {
         if !custody_released {
             NextStep::Chair
@@ -960,6 +971,7 @@ pub(super) fn settlement_fallback_decision(
             && launched
             && node.access == AccessMode::ReadOnly
             && route.is_some_and(|r| r.account.is_some() || r.model.is_some())
+            && cause.is_some_and(|cause| cause.depleted())
         {
             advance_code = Some("fallback_route_pinned");
             advance_note = Some(

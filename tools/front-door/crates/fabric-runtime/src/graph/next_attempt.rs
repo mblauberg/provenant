@@ -108,7 +108,7 @@ pub(super) fn custody_release_pending(
     facts.unreadable = false;
     matches!(
         next_step::settlement_fallback_decision(node, route_index, outcome, stop, launched, facts),
-        SettlementFallback::Continue
+        SettlementFallback::Continue | SettlementFallback::ContinueSameRoute
     )
 }
 
@@ -803,12 +803,12 @@ pub(super) fn next_attempt_transition(
                     skipped_accounts: &[],
                 },
             ) {
-                SettlementFallback::Continue => {}
+                SettlementFallback::Continue => usize::from(last.key.route_index).saturating_add(1),
+                SettlementFallback::ContinueSameRoute => usize::from(last.key.route_index),
                 SettlementFallback::Fail { code, message } => {
                     return NextAttemptDecision::Ready(NextAttempt::Fail { code, message });
                 }
             }
-            usize::from(last.key.route_index).saturating_add(1)
         }
         Some(_) => return NextAttemptDecision::Ready(NextAttempt::None),
     };

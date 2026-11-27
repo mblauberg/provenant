@@ -2215,6 +2215,9 @@ fn production_files_stay_within_their_line_ceilings() -> Result<(), Box<dyn Erro
         ("src/hooks.rs", 3000),
         ("src/install.rs", 3250),
         ("src/lane_cleanup.rs", 3250),
+        // The #4042 CI observer passes declared review-gate contexts to the
+        // shared status poll; 2250 is the next band above size + 100.
+        ("src/event_delivery.rs", 2250),
         ("src/pr/landing/adapters.rs", 3250),
         ("src/pr/landing/driver.rs", 4250),
         ("src/pr/observer.rs", 2750),

@@ -658,8 +658,9 @@ observed history: it adds no refusal and changes no landing decision.
 settles it at once; `--until complete` waits for every observed check and every
 active Actions run of the head. A merged pull request settles successfully and a
 closed unmerged pull request settles unsuccessfully before pending checks are
-considered. A head with no Actions run yet cannot settle a
-wait, because a push's workflows start after the push: a reading that would
+considered. An open pull request with no observed CI checks remains pending; an
+empty check list is not a passing result. A head with no Actions run yet cannot
+settle a wait, because a push's workflows start after the push: a reading that would
 settle stays pending for `domains.wait.actions_grace_seconds`, though a failure
 still settles a default wait at once. `--head SHA` pins the wait to one head:
 until GitHub reports that SHA the reading stays pending, so a push's predecessor

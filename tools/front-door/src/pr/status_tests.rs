@@ -4,6 +4,7 @@ fn row(number: u64, head: &str, error: Option<&str>) -> super::Line {
         number,
         state: "OPEN".into(),
         head: head.into(),
+        completion: None,
         draft: false,
         checks_passed: Some(1),
         checks_total: Some(1),
@@ -268,7 +269,7 @@ fn a_batch_row_renders_its_members_and_per_file_attribution() {
 }
 
 #[test]
-fn complete_wait_keeps_failures_pending_until_all_checks_finish() {
+fn complete_wait_holds_failures_until_checks_finish_but_merged_is_terminal() {
     let mut line = row(1668, "head", None);
     line.checks_failed = Some(1);
     line.checks_pending = Some(1);
@@ -285,7 +286,7 @@ fn complete_wait_keeps_failures_pending_until_all_checks_finish() {
     line.state = "MERGED".into();
     line.active_workflows = Some(true);
     assert_eq!(line.wait_verdict(false), Some(true));
-    assert_eq!(line.wait_verdict(true), None);
+    assert_eq!(line.wait_verdict(true), Some(true));
     line.active_workflows = Some(false);
     assert_eq!(line.wait_verdict(true), Some(true));
     line.await_head("new");
