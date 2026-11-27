@@ -1834,7 +1834,7 @@ printf '%s\n' '{"status":200,"headers":{},"body":"{\"full_name\":\"owner/repo\"}
             let dir = state();
             let mut observer = shared.observer(dir.path());
             let request = Request::within(Duration::from_secs(60));
-            super::super::status::poll_line(&mut observer, 7, None, &request, Duration::ZERO)
+            super::super::status::poll_line(&mut observer, 7, None, &request, Duration::ZERO, &[])
                 .unwrap()
                 .0
         };

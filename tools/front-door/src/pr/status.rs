@@ -978,7 +978,15 @@ pub(crate) fn wait_line_observed(
 ) -> Result<Line> {
     use super::observer::Observer;
     let mut observer = Observer::open(state, project, repository, request)?;
-    let mut line = poll_line(&mut observer, number, None, request, max_age)?.0;
+    let mut line = poll_line(
+        &mut observer,
+        number,
+        None,
+        request,
+        max_age,
+        &gate_contexts(project, state),
+    )?
+    .0;
     match observer.active_workflows(&line.head, max_age, request) {
         Ok(Some(active)) => line.active_workflows = Some(active),
         Ok(None) => provenant_records::warning::warn(
@@ -1064,6 +1072,7 @@ pub(crate) fn poll_line<F: provenant_config::Forge, C: super::observer::Clock>(
     head_override: Option<&str>,
     request: &provenant_config::ports::Request,
     max_age: std::time::Duration,
+    review_gate_contexts: &[String],
 ) -> Result<(Line, Vec<super::observer::Check>)> {
     let value = observer.resource(
         &format!("pulls/{number}"),
@@ -1092,7 +1101,13 @@ pub(crate) fn poll_line<F: provenant_config::Forge, C: super::observer::Clock>(
         url: pull.html_url,
     };
     let checks = observer.checks(head_override.unwrap_or(&view.head), max_age, request)?;
-    let mut line = status_line_with(number, view, Some(&checks), requirement);
+    let mut line = status_line_with(
+        number,
+        view,
+        Some(&checks),
+        requirement,
+        review_gate_contexts,
+    );
     if checks.is_empty() {
         // Mergeability is read (and an UNKNOWN reread) only when it can change
         // the diagnosis: a head with checks needs no cause.
@@ -1145,13 +1160,29 @@ pub(crate) fn wait_line(
         Err(ObserveError::Unavailable(_)) => None,
         Err(error) => return Err(error.to_string().into()),
     };
-    Ok(status_line(number, view, checks.as_deref()))
+    Ok(status_line(
+        number,
+        view,
+        checks.as_deref(),
+        &gate_contexts(project, state),
+    ))
 }
 
 /// One row from the pull request view and its observed checks, for display
 /// paths that did not read the branch's required policy.
-fn status_line(number: u64, view: View, checks: Option<&[super::observer::Check]>) -> Line {
-    status_line_with(number, view, checks, Requirement::NotConsulted)
+fn status_line(
+    number: u64,
+    view: View,
+    checks: Option<&[super::observer::Check]>,
+    review_gate_contexts: &[String],
+) -> Line {
+    status_line_with(
+        number,
+        view,
+        checks,
+        Requirement::NotConsulted,
+        review_gate_contexts,
+    )
 }
 
 /// One row from the pull request view, its observed checks and the branch's
@@ -1162,6 +1193,7 @@ fn status_line_with(
     view: View,
     checks: Option<&[super::observer::Check]>,
     requirement: Requirement,
+    review_gate_contexts: &[String],
 ) -> Line {
     let observed: Vec<&super::observer::Check> = checks
         .unwrap_or(&[])
@@ -1170,8 +1202,8 @@ fn status_line_with(
         .collect();
     let present = !observed.is_empty();
     let count = |buckets: &[&str]| {
-        checks.map(|checks| {
-            checks
+        checks.map(|_| {
+            observed
                 .iter()
                 .filter(|check| buckets.contains(&check.bucket.as_str()))
                 .count()
@@ -1269,7 +1301,7 @@ pub(super) fn class_of(head: &str, checks: &[super::observer::Check]) -> &'stati
         draft: false,
         url: "https://github.com/owner/repo/pull/1".into(),
     };
-    status_line(1, view, Some(checks)).class()
+    status_line(1, view, Some(checks), &[]).class()
 }
 
 fn snapshot(project: &Path, state: &Path, numbers: &[u64]) -> Vec<Line> {

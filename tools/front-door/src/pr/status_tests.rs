@@ -98,7 +98,7 @@ fn completion_report_retains_every_failed_check_and_link() {
         check("one", "fail", "https://ci/one"),
         check("two", "cancel", "https://ci/two"),
     ];
-    let line = super::status_line(1668, view, Some(&checks));
+    let line = super::status_line(1668, view, Some(&checks), &[]);
     assert_eq!(
         line.failure_lines(),
         [
@@ -137,7 +137,7 @@ fn pending_check_names_survive_the_status_line_and_render() {
         check("lint", "pending"),
         check("deploy", "pending"),
     ];
-    let line = super::status_line(7, view, Some(&checks));
+    let line = super::status_line(7, view, Some(&checks), &[]);
     assert_eq!(line.pending_checks, ["lint", "deploy"]);
     let text = line.text();
     assert!(text.contains("pending=2"), "{text}");
@@ -322,7 +322,7 @@ fn a_head_with_only_a_pending_selector_waits_for_the_aggregate_check() {
         }])
     };
     let read = |checks: &[super::super::observer::Check], policy: super::Requirement| {
-        super::status_line_with(7, view(), Some(checks), policy)
+        super::status_line_with(7, view(), Some(checks), policy, &[])
     };
     let selector = check("Select CI suites", "pending");
     let passed_selector = check("Select CI suites", "pass");
