@@ -681,13 +681,13 @@ pub(crate) mod tests {
         let policy_fields = payload["policy"]["fields"]
             .as_object_mut()
             .expect("policy fields are a map");
-        let sourced = policy_fields
-            .values_mut()
-            .next()
-            .expect("resolved policy has sourced fields");
-        sourced["source"]["rule"] = serde_json::json!({"index": 0, "target": "main"});
-        add_future_field(sourced, "future-sourced-field");
-        add_future_field(&mut sourced["source"], "future-source-field");
+        // Sourced fields now use the closed shared provenance record; the
+        // field map and the policy's extension map are the extensible shapes.
+        policy_fields.insert(
+            "future-sourced-field".into(),
+            serde_json::json!({"value": {"from": "newer minor"}, "layer": "default", "origin": "future.toml#future"}),
+        );
+        add_future_field(&mut payload["policy"], "future-source-field");
         add_future_field(&mut payload["publish"], "future-publish-field");
         add_future_field(&mut payload["cost"], "future-cost-field");
         add_future_field(&mut payload["settled"], "future-settlement-field");
@@ -711,13 +711,10 @@ pub(crate) mod tests {
             &mut payload["settled"]["outcomes"]["2"],
             "future-settled-outcome-field",
         );
-        let sourced = payload["policy"]["fields"]
-            .as_object_mut()
-            .expect("policy fields are a map")
-            .values_mut()
-            .next()
-            .expect("resolved policy has sourced fields");
-        add_future_field(&mut sourced["source"]["rule"], "future-target-rule-field");
+        add_future_field(
+            &mut payload["policy"]["fields"]["future-sourced-field"]["value"],
+            "future-target-rule-field",
+        );
         let bytes = serde_json::to_vec(&payload)?;
         let decoded: PendingAttempt =
             provenant_records::decode(bytes.as_slice(), provenant_records::Limits::default())?;
