@@ -89,6 +89,9 @@ pub const STATE_ROOT_OVERLAP: WarningCode = WarningCode("STATE_ROOT_OVERLAP");
 pub const FORGE_CONTEXT_UNRESOLVED: WarningCode = WarningCode("FORGE_CONTEXT_UNRESOLVED");
 /// A result exceeded the output cap and was bounded with a marker.
 pub const RESULT_TOO_LARGE: WarningCode = WarningCode("RESULT_TOO_LARGE");
+/// A host in a `--host all` fan-out did not answer; the remaining hosts are
+/// reported as a partial result.
+pub const PEER_UNREACHABLE: WarningCode = WarningCode("PEER_UNREACHABLE");
 /// A lane's unfinished Git operation is retained while its committed tip settles.
 pub const GIT_OPERATION_RETAINED: WarningCode = WarningCode("GIT_OPERATION_RETAINED");
 /// A live provider emitted no output past its configured stall threshold.

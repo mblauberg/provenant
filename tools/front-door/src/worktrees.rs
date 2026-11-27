@@ -1309,6 +1309,19 @@ pub fn run_gc(command: Gc, globals: &Globals, workers: &dyn WorkerObserver) -> u
     }
 }
 
+/// Run one bounded sweep for a peer `gc` request and return its aggregates.
+/// Unlike `run_gc` this writes no process envelope: the peer wraps the value
+/// in a `PeerResult::Gc` and the calling host renders the fan-out.
+pub(crate) fn gc_for_peer(
+    command: &Gc,
+    globals: &provenant_cli::Globals,
+    workers: &dyn WorkerObserver,
+) -> Result<serde_json::Value, String> {
+    worktrees::set_unreadable_census_detail(globals.full);
+    let data = gc(command, globals, workers, None).map_err(|error| error.local_message())?;
+    serde_json::to_value(&data).map_err(|error| error.to_string())
+}
+
 /// One line per kept class and reason. The default compact view shows this
 /// aggregate first so it survives the renderer's line clip; JSON and `--full`
 /// carry one row per candidate instead.
