@@ -21,9 +21,9 @@ after frontmatter. Each warning names the gap and is a typed `SESSION_ADVISORY`
 in the JSON `warnings` array. The body budget is separate from the configured
 soft budget floored at 8 KiB, so a small body produces neither size warning.
 
-`--from-template` scaffolds the template's sections from the current revision
-and overlays the sections in `--file` (`-` reads stdin): sections in the file
-win, missing ones are filled from the previous revision, and unknown sections
+`--from-template` reads the current revision, scaffolds and publishes under one
+checkpoint lock, so concurrent saves cannot invalidate its input. It overlays
+the sections in `--file` (`-` reads stdin): sections in the file win, missing ones are filled from the previous revision, and unknown sections
 use the same heading-based merge. Repeated headings in one input and additional
 H1 sections retain their content. Preamble text carries forward unless the input
 supplies a nonblank preamble. Frontmatter root keys carry forward unless the

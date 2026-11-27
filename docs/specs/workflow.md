@@ -142,7 +142,9 @@ has a valid record. Preamble text and unknown sections carry forward; input
 nonblank preamble replaces previous preamble and input sections replace matching
 previous sections, including unknown headings. Repeated headings in one input and
 additional H1 sections retain their content. A first save has no previous
-revision and starts from an empty standing record.
+revision and starts from an empty standing record. Reading, scaffolding and
+publishing a template save hold the checkpoint lock together, so another save
+cannot be overwritten by a scaffold based on a stale revision.
 `session show` renders the whole checkpoint as its default human output;
 `--json` stays an independent transport and an explicit `--full` keeps the same
 complete text.

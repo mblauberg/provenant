@@ -583,16 +583,16 @@ fn execute(
                 .with_workspace(cwd.to_owned())
                 .with_rebind(rebind)
                 .with_revisions(keep);
-            let text = if from_template {
-                let previous = store.read()?.map(|checkpoint| checkpoint.markdown);
+            let (saved, text) = if from_template {
                 let input = std::str::from_utf8(&input).map_err(|e| invalid(e.to_string()))?;
-                provenant_workflow::session::scaffold_checkpoint(previous.as_deref(), input)
-                    .map_err(|error| invalid(error.to_string()))?
-                    .into_bytes()
+                let (saved, text) =
+                    store.save_template(input, edge.budget()?, &edge.cancel, &edge.clock)?;
+                (saved, text.into_bytes())
             } else {
-                input
+                let saved =
+                    store.save_revision(&input, edge.budget()?, &edge.cancel, &edge.clock)?;
+                (saved, input)
             };
-            let saved = store.save_revision(&text, edge.budget()?, &edge.cancel, &edge.clock)?;
             for warning in saved.warnings {
                 report_text_warning(warning);
             }

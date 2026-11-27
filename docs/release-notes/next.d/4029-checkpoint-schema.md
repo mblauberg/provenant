@@ -13,6 +13,7 @@ explicit. `workflow session save --from-template` scaffolds every template
 section, prefilled from the previous revision and overridden per section by
 `--file` (`-` reads stdin), including custom sections, repeated headings, additional H1 sections and
 preamble text, carrying the typed standing record forward; the
-first save starts from an empty record. The chair's standing grants belong in
-that typed record with their source and expiry, so hooks restore only sourced,
+first save starts from an empty record. Template saves read and publish under
+the checkpoint lock, so it carries forward the latest saved revision. The
+chair's standing grants belong in that typed record with their source and expiry, so hooks restore only sourced,
 unexpired grants. (#4029)
