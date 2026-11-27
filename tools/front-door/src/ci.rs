@@ -62,14 +62,7 @@ pub(crate) fn run(command: provenant_cli::Ci, globals: &Globals) -> u8 {
                 provenant_cli::ci::FailureTarget::Run { run } => failures_run(run, globals),
             }
         }
-        provenant_cli::Ci::Patch(_) => fail(
-            "ci patch",
-            Outcome::Error,
-            "CONTRACT_NOT_IMPLEMENTED",
-            "`ci patch` is declared but its execution path has not landed",
-            "continue after the generated-patch implementation is available",
-            globals,
-        ),
+        provenant_cli::Ci::Patch(patch) => crate::ci_patch::run(patch, globals),
     }
 }
 
