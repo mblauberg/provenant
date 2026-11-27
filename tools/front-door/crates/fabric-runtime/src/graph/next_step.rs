@@ -952,7 +952,7 @@ pub(super) fn settlement_fallback_decision(
             _ => (None, None),
         };
         if outcome == GraphAttemptOutcome::UsageLimited {
-            advance_code = Some("usage_limited");
+            advance_code = cause.map(StopCause::advance_code);
             let pool = route
                 .and_then(|r| r.alias.as_deref())
                 .map_or_else(String::new, |alias| format!(" for pool {alias}"));

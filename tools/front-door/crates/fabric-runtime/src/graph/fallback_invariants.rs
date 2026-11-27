@@ -213,27 +213,38 @@ fn explicit_on_stop_keeps_the_sealed_cause_code() {
     }))
     .unwrap();
     let (plan, _) = validate_plan(&document).unwrap();
-    let decision = next_step::settlement_fallback_decision(
-        &plan.nodes[0],
-        0,
-        GraphAttemptOutcome::AuthRequired,
-        Some(StopCause::LaneTokenLost),
-        true,
-        FallbackEvidence {
-            preparation: None,
-            unreadable: false,
-            review_limit_reached: false,
-            cause: None,
-            skipped_accounts: &[],
-        },
-    );
-    assert_eq!(
-        decision,
-        SettlementFallback::Fail {
-            code: Some(StopCause::LaneTokenLost.advance_code()),
-            message: Some("The lane requires authentication.".into()),
-        }
-    );
+    for (outcome, expected_message) in [
+        (
+            GraphAttemptOutcome::AuthRequired,
+            "The lane requires authentication.",
+        ),
+        (
+            GraphAttemptOutcome::UsageLimited,
+            "Provider quota or rate limit reached; wait for the allowance to reset or choose an eligible route.",
+        ),
+    ] {
+        let decision = next_step::settlement_fallback_decision(
+            &plan.nodes[0],
+            0,
+            outcome,
+            Some(StopCause::LaneTokenLost),
+            true,
+            FallbackEvidence {
+                preparation: None,
+                unreadable: false,
+                review_limit_reached: false,
+                cause: None,
+                skipped_accounts: &[],
+            },
+        );
+        assert_eq!(
+            decision,
+            SettlementFallback::Fail {
+                code: Some(StopCause::LaneTokenLost.advance_code()),
+                message: Some(expected_message.into()),
+            }
+        );
+    }
     assert_ne!(
         StopCause::LaneTokenLost.advance_code(),
         "auth_required",
