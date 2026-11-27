@@ -1692,8 +1692,15 @@ fn release_pin_keeps_a_release_that_pruning_would_remove() -> Result<(), Box<dyn
     let state = temp.path().join("state");
     let install = state.join("install");
     let releases = state.join("releases");
-    std::fs::create_dir_all(&install)?;
-    std::fs::create_dir_all(&releases)?;
+    use std::os::unix::fs::DirBuilderExt;
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&install)?;
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&releases)?;
     let mut pinned = [0u8; 32];
     pinned[31] = 1;
     let receipt = InstallReceipt {
@@ -1717,10 +1724,14 @@ fn release_pin_keeps_a_release_that_pruning_would_remove() -> Result<(), Box<dyn
         provenant_records::encode(&receipt)?,
     )?;
     let pin = super::verify_release_pin(&state).map_err(std::io::Error::other)?;
-    for n in 1..=4u8 {
+    for n in 1..=5u8 {
         let release = releases.join(format!("sha256:{n:064x}"));
         std::fs::create_dir(&release)?;
         std::fs::write(release.join("release.json"), b"fixture")?;
+        // Control recency so the pinned first release would otherwise be pruned.
+        std::fs::File::open(&release)?.set_modified(
+            std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(u64::from(n)),
+        )?;
     }
     let active = format!("sha256:{:064x}", 4u8);
     let pinned_name = format!("sha256:{:064x}", 1u8);

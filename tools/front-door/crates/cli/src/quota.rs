@@ -3432,7 +3432,7 @@ pub fn run(
     );
     // Spec: docs/specs/cli.md#warnings-are-typed-values
     let outcome =
-        crate::render_command_result(&mut envelope, mode, publish, crate::OverflowPolicy::Refuse);
+        crate::render_command_result(&mut envelope, mode, publish, crate::OverflowPolicy::Proceed);
     outcome.map_or(3, |outcome| crate::exit_status(&outcome))
 }
 

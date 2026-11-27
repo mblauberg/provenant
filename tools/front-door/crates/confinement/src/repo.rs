@@ -1001,7 +1001,7 @@ fn verify_worktree_inner(
             // the registration identity is compared. Classify the layout
             // rather than guessing from the raw error kind, and keep other
             // failures (unsafe metadata, oversized files, races) as they are.
-            match classify_gitdir(path) {
+            match classify_gitdir(repo, path) {
                 Ok(GitdirRegistration::Stale { detail }) => {
                     if let Some(holder) = custody.live_holder.as_deref() {
                         return Err(RepoError::GitdirHeldByOtherLane {
@@ -1086,7 +1086,7 @@ enum GitdirRegistration {
 
 /// Read-only classification of a failing registration. It reopens the same
 /// markers a valid registration needs; it never repairs or mutates them.
-fn classify_gitdir(path: &Path) -> Result<GitdirRegistration, RepoError> {
+fn classify_gitdir(repo: &VerifiedRepo, path: &Path) -> Result<GitdirRegistration, RepoError> {
     let invalid = |detail: String| Ok::<_, RepoError>(GitdirRegistration::Invalid { detail });
     let (root_path, root) = match open_canonical_anchor(path, false) {
         Ok(opened) => opened,
@@ -1132,6 +1132,9 @@ fn classify_gitdir(path: &Path) -> Result<GitdirRegistration, RepoError> {
         Err(error) => return invalid(format!("common Git directory is unreadable: {error}")),
     };
     let common_identity = common.metadata()?;
+    if !common_identity.same_identity(&repo.common_identity) {
+        return invalid("worktree belongs to a different common Git directory".to_owned());
+    }
     if private_identity.same_identity(&common_identity) {
         return invalid("registration has no separate private Git directory".to_owned());
     }
@@ -1142,7 +1145,8 @@ fn classify_gitdir(path: &Path) -> Result<GitdirRegistration, RepoError> {
     let Some(name) = private_path.file_name() else {
         return invalid("private Git directory has no registry name".to_owned());
     };
-    let registered = match common.open_verified_directory(name) {
+    let registry = common.open_verified_directory(OsStr::new("worktrees"))?;
+    let registered = match registry.open_verified_directory(name) {
         Ok(directory) => directory,
         Err(error) => return invalid(format!("worktree is not registered: {error}")),
     };

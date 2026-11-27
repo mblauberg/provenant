@@ -743,6 +743,22 @@ fn stale_gitdir_repairs_only_own_backlink() {
 }
 
 #[test]
+fn stale_foreign_registration_is_never_repaired() {
+    let Some((_owner_temp, owner, _)) = git_fixture() else {
+        return;
+    };
+    let Some((foreign_temp, foreign, old_lane)) = git_fixture() else {
+        return;
+    };
+    let lane = foreign_temp.path().join("moved-lane");
+    fs::rename(&old_lane, &lane).unwrap();
+    let backlink = foreign.join(".git/worktrees/lane/gitdir");
+    let original = fs::read(&backlink).unwrap();
+    assert!(verify_worktree(&stub_repo(&owner), &lane).is_err());
+    assert_eq!(fs::read(&backlink).unwrap(), original);
+}
+
+#[test]
 fn gitdir_held_by_live_lane_refuses() {
     let Some((temp, project, old_lane)) = git_fixture() else {
         return;

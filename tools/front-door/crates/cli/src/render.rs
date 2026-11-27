@@ -1208,7 +1208,7 @@ mod tests {
         assert_eq!(
             compact
                 .lines()
-                .filter(|line| line.starts_with("  "))
+                .filter(|line| line.starts_with("  ") && !line.starts_with("  next:"))
                 .count(),
             1,
             "{compact}"

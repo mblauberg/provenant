@@ -569,7 +569,7 @@ fn land_explains_poll_and_budget_sources() -> Result {
     // reported as `default`, not the retired `bundled` spelling. A CLI flag is
     // the `launch` layer, not a retired `invocation` spelling.
     assert_eq!(
-        default["data"]["fields"]["poll_seconds"]["source"]["layer"],
+        default["data"]["fields"]["poll_seconds"]["layer"],
         "default"
     );
     fs::write(
@@ -578,10 +578,7 @@ fn land_explains_poll_and_budget_sources() -> Result {
     )?;
     let config = show(&["land", "1668", "--explain", "--json"])?;
     assert_eq!(config["data"]["fields"]["poll_seconds"]["value"], 45);
-    assert_eq!(
-        config["data"]["fields"]["poll_seconds"]["source"]["layer"],
-        "host"
-    );
+    assert_eq!(config["data"]["fields"]["poll_seconds"]["layer"], "host");
     assert!(
         config["data"]["warnings"][0]
             .as_str()
@@ -606,10 +603,7 @@ fn land_explains_poll_and_budget_sources() -> Result {
         "--json",
     ])?;
     assert_eq!(cli["data"]["fields"]["poll_seconds"]["value"], 7);
-    assert_eq!(
-        cli["data"]["fields"]["poll_seconds"]["source"]["layer"],
-        "launch"
-    );
+    assert_eq!(cli["data"]["fields"]["poll_seconds"]["layer"], "launch");
     assert_eq!(cli["data"]["ci_patience_seconds"], 90);
     assert_eq!(cli["data"]["ci_patience_source"], "--wait");
     let mut inputs = provenant_core::RootInputs::new(rig.home.clone(), rig.project.clone());
@@ -630,15 +624,12 @@ fn land_explains_poll_and_budget_sources() -> Result {
     let project = show(&["land", "--explain", "--json"])?;
     assert_eq!(project["data"]["fields"]["poll_seconds"]["value"], 21);
     assert_eq!(
-        project["data"]["fields"]["poll_seconds"]["source"]["layer"],
+        project["data"]["fields"]["poll_seconds"]["layer"],
         "host_project"
     );
     let tier = show(&["land", "--explain", "--tier", "crucial", "--json"])?;
     assert_eq!(tier["data"]["fields"]["poll_seconds"]["value"], 12);
-    assert_eq!(
-        tier["data"]["fields"]["poll_seconds"]["source"]["layer"],
-        "tier"
-    );
+    assert_eq!(tier["data"]["fields"]["poll_seconds"]["layer"], "tier");
     assert_eq!(
         project["data"]["resolved_plan"]["provenance"]["review_scope"]["project"],
         binding.project_id().to_string()

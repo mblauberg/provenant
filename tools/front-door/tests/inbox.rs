@@ -736,10 +736,11 @@ fn inbox_outside_a_project_without_state_names_cause_and_repair() -> Result {
     );
     assert!(error["cause"].as_str().is_some());
     assert!(
-        error["repair"]
-            .as_str()
-            .ok_or("repair")?
-            .contains("--all-projects")
+        error["next"]
+            .as_array()
+            .ok_or("next")?
+            .iter()
+            .any(|step| step.to_string().contains("--all-projects"))
     );
     Ok(())
 }

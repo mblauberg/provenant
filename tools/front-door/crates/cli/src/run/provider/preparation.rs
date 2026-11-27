@@ -4105,6 +4105,11 @@ pub(super) fn prepare_candidates_inner(
                             &reason_boundaries,
                             &reason_resources,
                         )?;
+                        for (adapter, plan_error) in &plan_errors {
+                            if !checks.iter().any(|check| check.route == *adapter) {
+                                checks.push(plan_error.skipped(adapter));
+                            }
+                        }
                         return Err(PrepareError::RouteResolution { error, checks });
                     }
                 }

@@ -466,10 +466,17 @@ fn oversized_show_returns_a_bounded_envelope_and_filter_remains_usable() -> Resu
         fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
     }
     let out = rig.command(&["quota", "show", "--json"])?;
-    assert_eq!(code(&out), 3);
-    assert!(out.stdout.bytes.len() < 1024);
+    assert_eq!(code(&out), 0);
+    assert!(out.stdout.bytes.len() < provenant_records::command_result::COMMAND_RESULT_MAX_BYTES);
     let value: serde_json::Value = serde_json::from_slice(&out.stdout.bytes)?;
-    assert_eq!(value["error"]["code"], "RESULT_TOO_LARGE");
+    assert!(value["error"].is_null(), "{value}");
+    assert!(value["data"]["artifact"].as_str().is_some(), "{value}");
+    assert!(
+        value["warnings"].as_array().is_some_and(|warnings| warnings
+            .iter()
+            .any(|warning| warning["code"] == "RESULT_TOO_LARGE")),
+        "{value}"
+    );
     assert_eq!(
         code(&rig.command(&["quota", "show", "--adapter", "codex", "--json"])?),
         0

@@ -174,7 +174,7 @@ pub fn snapshot(
     // `git stash apply` has no flag to restore them.
     let created = git(
         source,
-        &["stash", "create", "provenant carry"],
+        &["stash", "create", "carry lane edits"],
         env,
         executor,
         cancel,
