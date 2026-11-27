@@ -744,6 +744,7 @@ pub(super) fn apply_attempt_observation(
                     }
                     GraphAttemptOutcome::AuthRequired
                     | GraphAttemptOutcome::UsageLimited
+                    | GraphAttemptOutcome::ModelUnavailable
                     | GraphAttemptOutcome::AdapterUnavailable
                     | GraphAttemptOutcome::PreparationRefused(_)
                     | GraphAttemptOutcome::Unclassified => {
@@ -874,6 +875,7 @@ pub(super) fn initial_checkpoint(
 ) -> GraphCheckpoint {
     GraphCheckpoint {
         bases,
+        subject: None,
         extra: Default::default(),
         delivery_queue_controls: None,
         cancellation_request_receipt: None,
@@ -2051,8 +2053,7 @@ pub(super) fn refresh_structure_pause(
             structural_limit_reason(expanded, plan, limits)
         };
     if let Some(reason) = &structural_pause {
-        checkpoint.deactivate_expansion_pauses();
-        checkpoint.set_pause(PauseCause::StructuralLimit, reason);
+        checkpoint.pause_structural(reason);
     }
 
     structural_pause

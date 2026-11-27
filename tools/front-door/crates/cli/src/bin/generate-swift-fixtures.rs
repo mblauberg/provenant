@@ -2243,6 +2243,26 @@ mod tests {
     }
 
     #[test]
+    fn committed_output_preserves_the_projected_first_output_time() {
+        let generated = fixtures::console().expect("synthetic console fixtures");
+        let projected = &generated
+            .iter()
+            .find(|(name, _)| *name == "output-prompt")
+            .expect("output prompt fixture")
+            .1["data"];
+        let bytes = std::fs::read(default_fixtures().join("output-prompt.json"))
+            .expect("committed output prompt");
+        let committed: serde_json::Value = serde_json::from_slice(&bytes).expect("fixture JSON");
+        let first_output_at = projected
+            .get("first_output_at")
+            .expect("projected first output time");
+        assert_eq!(
+            committed["data"].get("first_output_at"),
+            Some(first_output_at)
+        );
+    }
+
+    #[test]
     fn committed_operation_metadata_omits_absent_parents_and_keeps_present_ones() {
         let mut present = 0;
         let mut absent = 0;

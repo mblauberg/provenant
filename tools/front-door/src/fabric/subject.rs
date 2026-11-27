@@ -1,9 +1,48 @@
-//! One host-owned subject for review selection, evidence and provider launch.
+//! The one host-owned subject an operation acts on, resolved once at admission.
+//!
+//! A review, a read-only graph and a writer each resolve their subject here;
+//! nothing downstream re-reads a ref or re-resolves a source for this graph.
+use super::source_policy::{read_source_choice, writer_base_choice};
 use super::*;
 use crate::pr::observer::Observer;
+use provenant_cli::run::{
+    ReadSourceChoice, ReadSourcePin, resolve_default_branch, resolve_read_source,
+};
+use provenant_fabric_runtime::graph::{AccessMode, GraphNode, NodeKind, SourceBinding};
+use provenant_records::Layer;
+use provenant_records::subject::{PinnedSubject, SubjectOrigin, SubjectPolicy, ref_origin};
 use serde::Deserialize;
 use serde_json::Value;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
+
+const IGNORED_PR_WARNING: &str = "--pr was ignored: the selected template does not accept a review range; using the default review subject (source: template review range)";
+
+/// How a read-only lane sees its tree. `Pinned` binds an exact commit; `Live`
+/// keeps the checkout's working tree, which is only valid on the local host.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ReadPlan {
+    Pinned,
+    Live,
+}
+
+/// The one subject, base and read policy resolved for a graph at admission.
+pub(super) struct SubjectAdmission {
+    pub subject: Option<PinnedSubject>,
+    pub writer_base: Option<provenant_core::GitOid>,
+    pub read: ReadPlan,
+    pub warnings: Vec<String>,
+    /// The review advisory that must also be bound into review node prompts.
+    pub review_warning: Option<String>,
+    /// The sourced read-source and writer-base settings admission applied,
+    /// and the read pin it resolved, so reports never resolve them again.
+    pub read_source: ReadSourceChoice,
+    pub writer_base_setting: WriterBaseChoice,
+    pub read_pin: Option<ReadSourcePin>,
+    /// Advisories about the writer base; the caller reports them only for a
+    /// launch that writes.
+    pub writer_warnings: Vec<String>,
+}
 
 /// Read one pull request's subject through the one CI observation transport.
 /// No caller shells out to `gh` for this: the observer selects the forge port,
@@ -13,7 +52,7 @@ fn observed_pull(
     project: &std::path::Path,
     number: u64,
     request: &provenant_config::ports::Request,
-) -> Result<PullSubject, FacadeError> {
+) -> Result<PullSnapshot, FacadeError> {
     let repository = match crate::pr::observer::repository_for_project(state, project, request) {
         Ok(repository) => repository,
         Err(error) => return subject_read_result(state, project, number, error),
@@ -38,7 +77,7 @@ fn subject_read_result(
     project: &std::path::Path,
     number: u64,
     error: crate::pr::observer::ObserveError,
-) -> Result<PullSubject, FacadeError> {
+) -> Result<PullSnapshot, FacadeError> {
     match error {
         crate::pr::observer::ObserveError::RateLimited { reset } => {
             match graphql_pull_subject(state, project, number) {
@@ -57,7 +96,7 @@ fn graphql_pull_subject(
     state: &std::path::Path,
     project: &std::path::Path,
     number: u64,
-) -> Option<PullSubject> {
+) -> Option<PullSnapshot> {
     subject_from_batch(crate::pr::status::batch::single_with_cache_filter(
         state,
         project,
@@ -67,14 +106,14 @@ fn graphql_pull_subject(
 }
 
 /// Map a complete batched row to a subject, independently of check rollup completeness.
-fn subject_from_batch(batch: crate::pr::status::batch::Batch) -> Option<PullSubject> {
+fn subject_from_batch(batch: crate::pr::status::batch::Batch) -> Option<PullSnapshot> {
     let crate::pr::status::batch::Batch::Entries(entries) = batch else {
         return None;
     };
     subject_from_entry(entries.first()?)
 }
 
-fn subject_from_entry(entry: &crate::pr::status::batch::Entry) -> Option<PullSubject> {
+fn subject_from_entry(entry: &crate::pr::status::batch::Entry) -> Option<PullSnapshot> {
     if entry.state == "UNAVAILABLE"
         || entry.base_ref_oid.is_empty()
         || entry.base_ref_name.is_empty()
@@ -85,7 +124,7 @@ fn subject_from_entry(entry: &crate::pr::status::batch::Entry) -> Option<PullSub
     {
         return None;
     }
-    Some(PullSubject {
+    Some(PullSnapshot {
         base_ref_oid: provenant_core::GitOid::parse(&entry.base_ref_oid).ok()?,
         base_ref_name: entry.base_ref_name.clone(),
         head_ref_oid: provenant_core::GitOid::parse(&entry.head).ok()?,
@@ -106,7 +145,7 @@ fn forge_quota_error(reset: jiff::Timestamp) -> FacadeError {
 }
 
 /// The REST pull resource is the same shape the landing adapter observes.
-fn pull_subject(value: &Value) -> Result<PullSubject, FacadeError> {
+fn pull_subject(value: &Value) -> Result<PullSnapshot, FacadeError> {
     let field = |pointer: &str| -> Result<&str, FacadeError> {
         value
             .pointer(pointer)
@@ -117,7 +156,7 @@ fn pull_subject(value: &Value) -> Result<PullSubject, FacadeError> {
         provenant_core::GitOid::parse(field(pointer)?)
             .map_err(|_| graph_subject_error(format!("invalid {pointer}")))
     };
-    Ok(PullSubject {
+    Ok(PullSnapshot {
         base_ref_oid: oid("/base/sha")?,
         base_ref_name: field("/base/ref")?.to_owned(),
         head_ref_oid: oid("/head/sha")?,
@@ -128,7 +167,7 @@ fn pull_subject(value: &Value) -> Result<PullSubject, FacadeError> {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct PullSubject {
+pub(super) struct PullSnapshot {
     base_ref_oid: provenant_core::GitOid,
     base_ref_name: String,
     head_ref_oid: provenant_core::GitOid,
@@ -139,19 +178,13 @@ pub(super) struct PullSubject {
     url: String,
 }
 
-pub(super) struct ReviewSubject {
-    pub base: String,
-    pub head: String,
-    pub warning: Option<String>,
-}
-
 impl Factory {
     pub(super) fn review_subject(
         &self,
         input: &Value,
         review: bool,
         cancel: &CancelToken,
-    ) -> Result<Option<ReviewSubject>, FacadeError> {
+    ) -> Result<Option<(PinnedSubject, Option<String>)>, FacadeError> {
         self.review_subject_with(input, review, cancel, |number| {
             let request =
                 provenant_config::ports::Request::within(std::time::Duration::from_secs(60));
@@ -169,8 +202,8 @@ impl Factory {
         input: &Value,
         review: bool,
         cancel: &CancelToken,
-        pull: impl Fn(u64) -> Result<PullSubject, FacadeError>,
-    ) -> Result<Option<ReviewSubject>, FacadeError> {
+        pull: impl Fn(u64) -> Result<PullSnapshot, FacadeError>,
+    ) -> Result<Option<(PinnedSubject, Option<String>)>, FacadeError> {
         let retry = crate::pr::observer::retry(&self.context.roots);
         self.review_subject_with_wait(
             input,
@@ -190,10 +223,10 @@ impl Factory {
         input: &Value,
         review: bool,
         cancel: &CancelToken,
-        pull: impl Fn(u64) -> Result<PullSubject, FacadeError>,
+        pull: impl Fn(u64) -> Result<PullSnapshot, FacadeError>,
         reread_attempts: usize,
         reread_delay: Duration,
-    ) -> Result<Option<ReviewSubject>, FacadeError> {
+    ) -> Result<Option<(PinnedSubject, Option<String>)>, FacadeError> {
         let pr = input.get("pr").filter(|value| !value.is_null());
         let mut expected_head = input
             .get("head")
@@ -218,9 +251,7 @@ impl Factory {
         if ignored_pr {
             expected_head = None;
         }
-        let ignored_warning = ignored_pr.then(|| {
-            "--pr was ignored: the selected template does not accept a review range; using the default review subject (source: template review range)".to_owned()
-        });
+        let ignored_warning = ignored_pr.then(|| IGNORED_PR_WARNING.to_owned());
         if expected_head.is_some() && pr.is_none() {
             return Err(graph_subject_error("--head requires --pr"));
         }
@@ -237,12 +268,16 @@ impl Factory {
         };
         let subject = setting("subject")?;
         let base = setting("review_base")?;
+        // Capability provenance for the review: the credential-free forge id
+        // and the ref the comparison base came from, when the route had them.
+        let mut forge_repository: Option<String> = None;
+        let mut subject_base_ref: Option<String> = None;
         let git = provenant_os::git::git_executable()
             .ok_or_else(|| graph_subject_error("Git unavailable"))?;
         let resolve = |reference: &str| {
             provenant_run::resolve_git_base(&git, &self.cwd, reference).map_err(run_error)
         };
-        let (base, head, warning) = if let Some(pr) = pr {
+        let (base, head, warning, origin) = if let Some(pr) = pr {
             // Issue #3878: a repair range may narrow a pinned PR review with
             // `--set review_base=SHA`. The head and PR binding still come from
             // the forge; only the base is taken from the explicit pin. Supplying
@@ -289,6 +324,10 @@ impl Factory {
                 .url
                 .rsplit_once("/pull/")
                 .ok_or_else(|| graph_subject_error("PR URL has no repository"))?;
+            let repository_id = forge_repository_id(repository)
+                .ok_or_else(|| graph_subject_error("PR URL has no owner/name repository"))?;
+            forge_repository = Some(repository_id.clone());
+            subject_base_ref = Some(pull_subject.base_ref_name.clone());
             let base_ref =
                 provenant_confinement::repo::GitRefName::branch(&pull_subject.base_ref_name)
                     .map_err(|_| graph_subject_error("invalid PR base branch"))?;
@@ -311,6 +350,7 @@ impl Factory {
                 None => materialise(base_ref.as_str(), pull_subject.base_ref_oid)?,
             };
             let head = materialise(&head_ref, pull_subject.head_ref_oid)?;
+            let (base, range_warning) = review_range_base(&git, &self.cwd, &head, base);
             // Without an expected head, a fresh push can leave the local
             // remote-tracking ref ahead of what the forge still reports. Warn
             // (never refuse) and name both commits so the reviewer can re-run
@@ -327,9 +367,22 @@ impl Factory {
                     )
                 })
                 .flatten();
-            (base, head, warning)
+            let warning = join_warnings(warning, range_warning);
+            let origin = if expected_head.is_some() {
+                // An explicit --head is the authoritative pin, even with --pr.
+                SubjectOrigin::Explicit
+            } else {
+                SubjectOrigin::ForgePr {
+                    repository: repository_id,
+                    number,
+                }
+            };
+            (base, head, warning, origin)
         } else if let (Some(subject), Some(base)) = (subject, base) {
-            (resolve(base)?, resolve(subject)?, None)
+            subject_base_ref = Some(base.to_owned());
+            let head = resolve(subject)?;
+            let (base, warning) = review_range_base(&git, &self.cwd, &head, resolve(base)?);
+            (base, head, warning, ref_origin(subject))
         } else if subject.is_some() || base.is_some() {
             return Err(graph_subject_error(
                 "review requires both subject and review_base",
@@ -349,7 +402,7 @@ impl Factory {
                 _ => match resolve("HEAD^") {
                     Ok(base) => (
                         base,
-                        "checkout first parent; default-branch comparison is empty or unavailable",
+                        "checkout HEAD's parent; default-branch comparison is empty or unavailable",
                     ),
                     Err(_) => (
                         head.clone(),
@@ -360,7 +413,15 @@ impl Factory {
             let warning = format!(
                 "No review subject was supplied; host chose {base}...{head} from {reason}. Pin --pr N or --set subject=HEAD --set review_base=BASE."
             );
-            (base, head, Some(warning))
+            let origin = local_git(&git, &self.cwd, &["rev-parse", "--abbrev-ref", "HEAD"])
+                .filter(|name| name != "HEAD")
+                .unwrap_or_else(|| "HEAD".to_owned());
+            (
+                base,
+                head,
+                Some(warning),
+                SubjectOrigin::LocalRef { name: origin },
+            )
         };
         if base == head && warning.is_none() {
             return Err(graph_subject_error(
@@ -371,12 +432,275 @@ impl Factory {
             (Some(ignored), Some(default)) => Some(format!("{ignored} {default}")),
             (one, other) => one.or(other),
         };
-        Ok(Some(ReviewSubject {
-            base,
-            head,
+        let base = provenant_core::GitOid::parse(&base)
+            .map_err(|_| graph_subject_error("invalid review base"))?;
+        let head = provenant_core::GitOid::parse(&head)
+            .map_err(|_| graph_subject_error("invalid review head"))?;
+        let pinned_at = self
+            .clock
+            .wall_now()
+            .map_err(|error| FacadeError::StateCorruptDetail {
+                detail: format!("subject admission clock: {error}"),
+            })?;
+        let base = if base == head && warning.is_some() {
+            None
+        } else {
+            Some(base)
+        };
+        Ok(Some((
+            PinnedSubject {
+                extra: Default::default(),
+                base,
+                head,
+                origin,
+                pinned_at,
+                policy: SubjectPolicy::Pinned,
+                repository: forge_repository,
+                base_ref: subject_base_ref,
+                policy_source: Some(review_subject_source()),
+                followed_from: Vec::new(),
+            },
             warning,
-        }))
+        )))
     }
+}
+
+/// A review diff starts at merge-base(head, base), never at the base tip: a
+/// head behind its base would otherwise show the newer base commits as
+/// reverts. When the merge base cannot be computed the tip is kept and a
+/// warning names the missing merge base.
+fn review_range_base(git: &Path, cwd: &Path, head: &str, base: String) -> (String, Option<String>) {
+    match provenant_run::review_merge_base_between(git, cwd, head, &base) {
+        Ok(merge_base) => (merge_base, None),
+        Err(_) => {
+            let warning = format!(
+                "cannot compute merge-base({head}, {base}); the review diff starts at the base tip {base}, so base commits newer than the head can read as reverts. Fetch both commits or pin --set review_base=BASE."
+            );
+            (base, Some(warning))
+        }
+    }
+}
+
+fn join_warnings(first: Option<String>, second: Option<String>) -> Option<String> {
+    match (first, second) {
+        (Some(first), Some(second)) => Some(format!("{first} {second}")),
+        (one, other) => one.or(other),
+    }
+}
+
+/// The policy source every review subject records. A review subject without a
+/// base is the empty-range fallback; a read subject never has a base, so this
+/// source is what tells the two apart when a task's base is chosen.
+pub(crate) const REVIEW_SUBJECT_SOURCE: &str = "graph admission (always pinned)";
+
+/// The typed source of a review subject: admission always pins it.
+pub(crate) fn review_subject_source() -> provenant_records::Source {
+    provenant_records::Source::at(provenant_records::Layer::Default, REVIEW_SUBJECT_SOURCE)
+}
+
+/// Whether an admitted subject is the review fallback with an empty range.
+pub(crate) fn is_empty_review_range(subject: &PinnedSubject) -> bool {
+    subject.base.is_none() && subject.policy_source == Some(review_subject_source())
+}
+
+impl Factory {
+    /// Resolve the operation's one subject. Admission calls this once; nothing
+    /// inside the admitted graph re-reads a ref or re-resolves a source.
+    pub(super) fn admit_subject(
+        &self,
+        input: &Value,
+        writer_base_input: Option<&Value>,
+        review: bool,
+        remote: bool,
+        cancel: &CancelToken,
+    ) -> Result<SubjectAdmission, FacadeError> {
+        let pinned_at = self
+            .clock
+            .wall_now()
+            .map_err(|error| FacadeError::StateCorruptDetail {
+                detail: format!("subject observation clock: {error}"),
+            })?;
+        let read_config = provenant_cli::config_reads::read_for(&self.context.roots, "run").ok();
+        let read_source = read_config
+            .as_ref()
+            .map(|config| {
+                read_source_choice(
+                    input,
+                    config,
+                    self.context.roots.state.as_path(),
+                    &self.context.project_root,
+                )
+            })
+            .unwrap_or_default();
+        let writer_base_setting = read_config
+            .as_ref()
+            .map(|config| {
+                writer_base_choice(
+                    input,
+                    config,
+                    self.context.roots.state.as_path(),
+                    &self.context.project_root,
+                )
+            })
+            .unwrap_or_default();
+        let git = provenant_os::git::git_executable();
+        let mut warnings = Vec::new();
+        if read_config.is_none() {
+            warnings.push(
+                "could not read the run configuration; lanes.read_source keeps its compiled default"
+                    .to_owned(),
+            );
+        }
+        // A writer's base is resolved by role, for every graph shape including
+        // a review that also writes: explicit base, branch default, named
+        // worktree HEAD, then no base at all. A missing base is advisory.
+        let writer_base = resolve_writer_base(
+            writer_base_input.unwrap_or(input),
+            &self.context.project_root,
+            &self.cwd,
+            self.context.roots.state.as_path(),
+            &writer_base_setting,
+            &read_source,
+            git.as_deref(),
+        );
+        let writer_warnings: Vec<String> = writer_base
+            .warning
+            .clone()
+            .into_iter()
+            .chain(writer_base.fallback_warning(&self.cwd))
+            .collect();
+        let writer_base = writer_base
+            .commit
+            .as_deref()
+            .and_then(|commit| provenant_core::GitOid::parse(commit).ok());
+        if review {
+            let (subject, review_warning) = self
+                .review_subject(input, true, cancel)?
+                .ok_or_else(|| graph_subject_error("no review subject"))?;
+            if let Some(warning) = &review_warning {
+                warnings.push(warning.clone());
+            }
+            return Ok(SubjectAdmission {
+                subject: Some(subject),
+                writer_base,
+                read: ReadPlan::Pinned,
+                warnings,
+                review_warning,
+                read_source,
+                writer_base_setting,
+                read_pin: None,
+                writer_warnings,
+            });
+        }
+        if input.get("pr").is_some_and(|value| !value.is_null()) {
+            warnings.push(IGNORED_PR_WARNING.to_owned());
+        }
+        // Every other graph also resolves its one read source here: whether
+        // the launch writes is known only once its template resolves, so the
+        // caller keeps the writer base for a writer and this subject otherwise. A pinned source
+        // is a commit; the live choice is HEAD with a follow-latest policy,
+        // live locally and pinned to that same HEAD on a peer.
+        let selected =
+            resolve_read_source(self.context.roots.state.as_path(), &self.cwd, &read_source);
+        if let Some(selected) = selected {
+            return Ok(SubjectAdmission {
+                subject: Some(PinnedSubject {
+                    extra: Default::default(),
+                    base: None,
+                    head: selected.commit,
+                    origin: fixture_origin(&self.context.project_root)
+                        .unwrap_or_else(|| ref_origin(&selected.reference)),
+                    pinned_at,
+                    policy: SubjectPolicy::Pinned,
+                    repository: None,
+                    base_ref: None,
+                    policy_source: Some(read_source.provenance()),
+                    followed_from: Vec::new(),
+                }),
+                writer_base,
+                read: ReadPlan::Pinned,
+                warnings,
+                review_warning: None,
+                read_source,
+                writer_base_setting,
+                read_pin: Some(selected),
+                writer_warnings,
+            });
+        }
+        // A checkout with no commit yet (or no Git at all) has nothing to pin:
+        // the graph admits with no subject and its readers see the live tree,
+        // exactly as before admission pinned anything. This is advisory.
+        let head = git.as_deref().and_then(|git| {
+            provenant_run::resolve_git_base(git, &self.cwd, "HEAD")
+                .ok()
+                .and_then(|head| head.parse::<provenant_core::GitOid>().ok())
+                .map(|head| (git, head))
+        });
+        let Some((git, head)) = head else {
+            warnings.push(format!(
+                "{} has no commit to pin; read-only lanes read the live checkout and the graph records no subject",
+                self.cwd.display()
+            ));
+            return Ok(SubjectAdmission {
+                subject: None,
+                writer_base,
+                read: ReadPlan::Live,
+                warnings,
+                review_warning: None,
+                read_source,
+                writer_base_setting,
+                read_pin: None,
+                writer_warnings,
+            });
+        };
+        let name = local_git(git, &self.cwd, &["rev-parse", "--abbrev-ref", "HEAD"])
+            .filter(|name| name != "HEAD")
+            .unwrap_or_else(|| "HEAD".to_owned());
+        if remote {
+            let message = format!("live read source pinned to {head} for a peer placement");
+            provenant_records::warning::warn(provenant_records::warning::Warning::new(
+                provenant_records::warning::READ_SOURCE_PINNED_FOR_PEER,
+                message.clone(),
+                provenant_records::warning::detected_source(
+                    provenant_records::warning::READ_SOURCE_PINNED_FOR_PEER,
+                ),
+            ));
+            warnings.push(message);
+        }
+        Ok(SubjectAdmission {
+            subject: Some(PinnedSubject {
+                extra: Default::default(),
+                base: None,
+                head,
+                origin: fixture_origin(&self.context.project_root)
+                    .unwrap_or(SubjectOrigin::LocalRef { name }),
+                pinned_at,
+                policy: SubjectPolicy::FollowLatest,
+                repository: None,
+                base_ref: None,
+                policy_source: Some(read_source.provenance()),
+                followed_from: Vec::new(),
+            }),
+            writer_base,
+            read: if remote {
+                ReadPlan::Pinned
+            } else {
+                ReadPlan::Live
+            },
+            warnings,
+            review_warning: None,
+            read_source,
+            writer_base_setting,
+            read_pin: None,
+            writer_warnings,
+        })
+    }
+}
+
+/// A smoke fixture project's origin, from its ownership marker; any other
+/// checkout has none and keeps its ref origin.
+fn fixture_origin(project: &Path) -> Option<SubjectOrigin> {
+    crate::smoke::fixture_nonce(project).map(|nonce| SubjectOrigin::Fixture { nonce })
 }
 
 /// Read a local ref with Git, returning trimmed stdout only on a clean exit.
@@ -485,6 +809,18 @@ fn stale_head_warning(
     ))
 }
 
+/// The credential-free `owner/name` forge id of a pull request's repository
+/// URL prefix (`https://host/owner/name`), as subject provenance records it.
+/// The full URL stays a transport detail of the commit fetch.
+fn forge_repository_id(url: &str) -> Option<String> {
+    let path = url.split_once("://").map_or(url, |(_, rest)| rest);
+    let (_, path) = path.split_once('/')?;
+    let path = path.trim_matches('/').trim_end_matches(".git");
+    let (owner, name) = path.rsplit_once('/')?;
+    let owner = owner.rsplit('/').next().unwrap_or(owner);
+    (!owner.is_empty() && !name.is_empty()).then(|| format!("{owner}/{name}"))
+}
+
 fn graph_subject_error(reason: impl Into<String>) -> FacadeError {
     FacadeError::invalid(InvalidInputDetail::Field(reason.into()))
 }
@@ -494,6 +830,34 @@ mod tests {
     // One entry point keeps every helper and import inside a `#[test]` body:
     // the harness-less worktree driver omits libtest functions, so module-level
     // items would be reported as unused there.
+    #[test]
+    fn writer_base_setting_parses_the_config_vocabulary() {
+        use super::*;
+
+        assert_eq!(
+            WriterBaseSetting::parse("default_branch"),
+            Ok(WriterBaseSetting::DefaultBranch)
+        );
+        assert_eq!(
+            WriterBaseSetting::parse(""),
+            Ok(WriterBaseSetting::DefaultBranch)
+        );
+        assert_eq!(
+            WriterBaseSetting::parse("checkout"),
+            Ok(WriterBaseSetting::Checkout)
+        );
+        assert_eq!(
+            WriterBaseSetting::parse("refs/heads/topic"),
+            Ok(WriterBaseSetting::Ref("refs/heads/topic".into()))
+        );
+        for invalid in ["not a ref", "-bad"] {
+            assert!(
+                WriterBaseSetting::parse(invalid).is_err(),
+                "{invalid} must not be a writer base"
+            );
+        }
+    }
+
     #[test]
     fn review_subject_stale_head_invariants() -> crate::worktree_tests::support::Result {
         use super::*;
@@ -565,8 +929,8 @@ mod tests {
             })
         }
 
-        fn subject(fx: &Fixture, head: &str, name: Option<&str>) -> PullSubject {
-            PullSubject {
+        fn subject(fx: &Fixture, head: &str, name: Option<&str>) -> PullSnapshot {
+            PullSnapshot {
                 base_ref_oid: provenant_core::GitOid::parse(&fx.base).unwrap(),
                 base_ref_name: "main".into(),
                 head_ref_oid: provenant_core::GitOid::parse(head).unwrap(),
@@ -578,8 +942,8 @@ mod tests {
         fn run_with(
             factory: &Factory,
             input: &serde_json::Value,
-            pull: impl Fn(u64) -> std::result::Result<PullSubject, FacadeError>,
-        ) -> std::result::Result<Option<ReviewSubject>, FacadeError> {
+            pull: impl Fn(u64) -> std::result::Result<PullSnapshot, FacadeError>,
+        ) -> std::result::Result<Option<(PinnedSubject, Option<String>)>, FacadeError> {
             factory.review_subject_with_wait(
                 input,
                 true,
@@ -597,9 +961,12 @@ mod tests {
             let input = serde_json::json!({"pr":7,"head":fx.forge_new});
             let result = run_with(&factory, &input, |_| Ok(subject(&fx, &fx.forge_new, None)))?
                 .ok_or("no subject")?;
-            assert_eq!(result.head, fx.forge_new);
-            assert_eq!(result.base, fx.base);
-            assert!(result.warning.is_none());
+            assert_eq!(result.0.head.to_string(), fx.forge_new);
+            assert_eq!(result.0.base.unwrap().to_string(), fx.base);
+            assert_eq!(result.0.repository.as_deref(), Some("owner/repo"));
+            assert_eq!(result.0.base_ref.as_deref(), Some("main"));
+            assert_eq!(result.0.policy_source, Some(review_subject_source()));
+            assert!(result.1.is_none());
         }
 
         // Issue #3878: --pr with review_base keeps the PR binding and narrows
@@ -612,9 +979,17 @@ mod tests {
             });
             let result = run_with(&factory, &input, |_| Ok(subject(&fx, &fx.forge_new, None)))?
                 .ok_or("no subject")?;
-            assert_eq!(result.head, fx.forge_new, "PR head must stay bound");
-            assert_eq!(result.base, fx.forge_old, "range must start at review_base");
-            assert!(result.warning.is_none());
+            assert_eq!(
+                result.0.head.to_string(),
+                fx.forge_new,
+                "PR head must stay bound"
+            );
+            assert_eq!(
+                result.0.base.unwrap().to_string(),
+                fx.forge_old,
+                "range must start at review_base"
+            );
+            assert!(result.1.is_none());
         }
 
         // A forge that catches up is re-read and accepted within the bounded wait.
@@ -634,7 +1009,7 @@ mod tests {
             })?
             .ok_or("no subject")?;
             assert_eq!(calls.get(), 3);
-            assert_eq!(result.head, fx.forge_new);
+            assert_eq!(result.0.head.to_string(), fx.forge_new);
         }
 
         // A persistent mismatch refuses and names both SHAs.
@@ -686,8 +1061,8 @@ mod tests {
                 Ok(subject(&fx, &fx.forge_old, Some("feature")))
             })?
             .ok_or("no subject")?;
-            assert_eq!(result.head, fx.forge_old);
-            let warning = result.warning.as_deref().ok_or("expected warning")?;
+            assert_eq!(result.0.head.to_string(), fx.forge_old);
+            let warning = result.1.as_deref().ok_or("expected warning")?;
             assert!(warning.contains(&fx.forge_old), "{warning}");
             assert!(warning.contains(&fx.forge_new), "{warning}");
         }
@@ -709,11 +1084,7 @@ mod tests {
                 Ok(subject(&fx, &fx.forge_old, Some(name)))
             })?
             .ok_or("no subject")?;
-            assert!(
-                result.warning.is_none(),
-                "unexpected warning: {:?}",
-                result.warning
-            );
+            assert!(result.1.is_none(), "unexpected warning: {:?}", result.1);
         }
 
         // --pr without a review template warns and proceeds with the host's
@@ -732,9 +1103,56 @@ mod tests {
                     Duration::ZERO,
                 )?
                 .ok_or("no default review subject")?;
-            let warning = result.warning.as_deref().ok_or("expected warning")?;
+            let warning = result.1.as_deref().ok_or("expected warning")?;
             assert!(warning.contains("--pr was ignored"), "{warning}");
             assert!(warning.contains("review range"), "{warning}");
+        }
+
+        // A head behind its base is reviewed from merge-base(head, base), so
+        // base commits newer than the head never read as reverts; a base with
+        // no merge base keeps its tip and the warning names the merge base.
+        {
+            let fx = fixture()?;
+            git(&fx.rig, &["checkout", "-q", "-b", "base-ahead", &fx.base])?;
+            std::fs::write(fx.rig.project.join("base.txt"), "newer base\n")?;
+            git(&fx.rig, &["add", "."])?;
+            git(&fx.rig, &["commit", "-qm", "newer base"])?;
+            let base_tip = git(&fx.rig, &["rev-parse", "HEAD"])?;
+            git(&fx.rig, &["checkout", "-q", "--orphan", "unrelated"])?;
+            git(&fx.rig, &["commit", "-qm", "unrelated root"])?;
+            let unrelated = git(&fx.rig, &["rev-parse", "HEAD"])?;
+            git(&fx.rig, &["checkout", "-q", "feature"])?;
+            let factory = factory(&fx.rig)?;
+            let base_tip_oid =
+                provenant_core::GitOid::parse(&base_tip).map_err(|_| "base tip oid")?;
+            let input = serde_json::json!({"pr":7,"head":fx.forge_new});
+            let result = run_with(&factory, &input, |_| {
+                Ok(PullSnapshot {
+                    base_ref_oid: base_tip_oid,
+                    ..subject(&fx, &fx.forge_new, None)
+                })
+            })?
+            .ok_or("no PR subject")?;
+            assert_eq!(result.0.head.to_string(), fx.forge_new);
+            assert_eq!(result.0.base.ok_or("no base")?.to_string(), fx.base);
+            assert!(result.1.is_none(), "{:?}", result.1);
+
+            let input = serde_json::json!({
+                "set":{"subject":fx.forge_new, "review_base":base_tip}
+            });
+            let result = run_with(&factory, &input, |_| Err(graph_subject_error("no forge")))?
+                .ok_or("no explicit subject")?;
+            assert_eq!(result.0.base.ok_or("no base")?.to_string(), fx.base);
+            assert_eq!(result.0.base_ref.as_deref(), Some(base_tip.as_str()));
+
+            let input = serde_json::json!({
+                "set":{"subject":fx.forge_new, "review_base":unrelated}
+            });
+            let result = run_with(&factory, &input, |_| Err(graph_subject_error("no forge")))?
+                .ok_or("no unrelated subject")?;
+            assert_eq!(result.0.base.ok_or("no base")?.to_string(), unrelated);
+            let warning = result.1.as_deref().ok_or("expected merge-base warning")?;
+            assert!(warning.contains("merge-base("), "{warning}");
         }
 
         Ok(())
@@ -898,5 +1316,361 @@ mod tests {
         assert_eq!(subject.head_ref_oid.to_string(), head);
         assert_eq!(subject.base_ref_name, "main");
         Ok(())
+    }
+}
+
+/// The key whose value selects a writer's base when it names no `--base`.
+pub(super) const WRITER_BASE_KNOB: &str = "lanes.writer_base";
+
+/// A resolved `lanes.writer_base` value, before Git is consulted.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum WriterBaseSetting {
+    /// The resolved forge remote's default branch (remote HEAD, then the forge).
+    DefaultBranch,
+    /// The caller's checkout, with no pinned base expression.
+    Checkout,
+    /// A caller-supplied ref, resolved by the one read-source resolver.
+    Ref(String),
+}
+
+impl WriterBaseSetting {
+    /// Parse one knob spelling. An empty value keeps the compiled
+    /// `default_branch`; `checkout` keeps the caller checkout; every other
+    /// bounded printable value names a Git ref.
+    pub(super) fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "" | "default_branch" => Ok(Self::DefaultBranch),
+            "checkout" => Ok(Self::Checkout),
+            value if provenant_confinement::repo::GitRevision::new(value).is_ok() => {
+                Ok(Self::Ref(value.to_owned()))
+            }
+            _ => Err(format!(
+                "expected default_branch, checkout, or a Git ref (got {value:?})"
+            )),
+        }
+    }
+}
+
+impl std::fmt::Display for WriterBaseSetting {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::DefaultBranch => f.write_str("default_branch"),
+            Self::Checkout => f.write_str("checkout"),
+            Self::Ref(value) => f.write_str(value),
+        }
+    }
+}
+
+/// The sourced writer-base policy and the configuration layer that chose it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct WriterBaseChoice {
+    pub(super) value: WriterBaseSetting,
+    pub(super) layer: Layer,
+    pub(super) origin: Option<String>,
+}
+
+impl Default for WriterBaseChoice {
+    fn default() -> Self {
+        Self {
+            value: WriterBaseSetting::DefaultBranch,
+            layer: Layer::Default,
+            origin: None,
+        }
+    }
+}
+
+impl WriterBaseChoice {
+    /// Where this choice was set, for warnings and receipts.
+    pub(super) fn description(&self) -> String {
+        match &self.origin {
+            Some(origin) => format!("{} ({origin})", self.layer.as_str()),
+            None => self.layer.as_str().to_owned(),
+        }
+    }
+}
+
+/// The launch expression that supplied a writer's base.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum WriterBaseSource {
+    ExplicitBase,
+    BranchDefault,
+    ConfiguredRef,
+    WorktreeHead,
+    NodeBase,
+    WorktreeUpstream,
+    DefaultBranchMergeBase,
+    CallerCheckout,
+}
+
+impl WriterBaseSource {
+    pub(super) fn label(self) -> &'static str {
+        match self {
+            Self::ExplicitBase => "explicit --base",
+            Self::BranchDefault => "the --branch default",
+            Self::ConfiguredRef => "lanes.writer_base",
+            Self::WorktreeHead => "the named worktree HEAD",
+            Self::NodeBase => "the writer node's base",
+            Self::WorktreeUpstream => "the reused worktree branch's upstream",
+            Self::DefaultBranchMergeBase => "the worktree's merge base with the default branch",
+            Self::CallerCheckout => "no base expression",
+        }
+    }
+}
+
+/// The one base a writer launch starts from, resolved before its identity.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct WriterBase {
+    pub(super) commit: Option<String>,
+    pub(super) source: WriterBaseSource,
+    /// Set when a configured value could not be resolved; advisory only.
+    pub(super) warning: Option<String>,
+}
+
+impl WriterBase {
+    /// Name the expression and the fallback when no base could be resolved.
+    /// Missing Git evidence is advisory, never a refusal.
+    pub(super) fn fallback_warning(&self, cwd: &Path) -> Option<String> {
+        self.commit.is_none().then(|| {
+            format!(
+                "writer launch has no resolved base (source: {}); its identity falls back to the caller checkout at {}",
+                self.source.label(),
+                cwd.display()
+            )
+        })
+    }
+}
+
+/// Resolve one writer base by role: explicit `--base`, else the configured
+/// `lanes.writer_base` for a `--branch` launch, else the named worktree's HEAD,
+/// else none. The explicit flag always wins; no Git evidence is fatal.
+pub(super) fn resolve_writer_base(
+    input: &Value,
+    project_root: &Path,
+    cwd: &Path,
+    state: &Path,
+    choice: &WriterBaseChoice,
+    read_source: &ReadSourceChoice,
+    git: Option<&Path>,
+) -> WriterBase {
+    if let Some(base) = input
+        .get("base")
+        .and_then(Value::as_str)
+        .filter(|base| !base.is_empty())
+    {
+        return WriterBase {
+            commit: resolve_ref(state, cwd, base, read_source, "--base"),
+            source: WriterBaseSource::ExplicitBase,
+            warning: None,
+        };
+    }
+    if input.get("branch").is_some_and(|branch| !branch.is_null()) {
+        let unresolved = || {
+            format!(
+                "{WRITER_BASE_KNOB}={} (source: {}) could not be resolved; writer base falls back to the caller checkout",
+                choice.value,
+                choice.description()
+            )
+        };
+        return match &choice.value {
+            // `checkout` names the caller checkout's HEAD; resolving it here
+            // lets provisioning and identity start from the same commit.
+            WriterBaseSetting::Checkout => WriterBase {
+                commit: git.and_then(|git| provenant_run::resolve_git_base(git, cwd, "HEAD").ok()),
+                source: WriterBaseSource::CallerCheckout,
+                warning: None,
+            },
+            WriterBaseSetting::DefaultBranch => match resolve_default_branch(state, cwd) {
+                Some(pin) => WriterBase {
+                    commit: Some(pin.commit.to_string()),
+                    source: WriterBaseSource::BranchDefault,
+                    warning: None,
+                },
+                None => WriterBase {
+                    commit: None,
+                    source: WriterBaseSource::CallerCheckout,
+                    warning: Some(unresolved()),
+                },
+            },
+            WriterBaseSetting::Ref(reference) => {
+                match resolve_ref(state, cwd, reference, read_source, WRITER_BASE_KNOB) {
+                    Some(commit) => WriterBase {
+                        commit: Some(commit),
+                        source: WriterBaseSource::ConfiguredRef,
+                        warning: None,
+                    },
+                    None => WriterBase {
+                        commit: None,
+                        source: WriterBaseSource::CallerCheckout,
+                        warning: Some(unresolved()),
+                    },
+                }
+            }
+        };
+    }
+    if let Some(worktree) = named_worktree(input) {
+        let path = absolute(project_root, worktree);
+        return WriterBase {
+            commit: git.and_then(|git| provenant_run::resolve_git_base(git, &path, "HEAD").ok()),
+            source: WriterBaseSource::WorktreeHead,
+            warning: None,
+        };
+    }
+    WriterBase {
+        commit: None,
+        source: WriterBaseSource::CallerCheckout,
+        warning: None,
+    }
+}
+
+/// Resolve the base of a writer node that reuses an existing worktree (#4064).
+/// The node's declared `base` wins; otherwise the worktree branch's upstream,
+/// else the point where it diverged from the default branch of the configured
+/// forge remote (never an assumed `origin`). A worktree with neither has no
+/// Git evidence to pin, so its base stays unresolved and a graph that needs
+/// one is refused before launch.
+/// Spec: docs/specs/run-launch.md#writer-binding
+pub(super) fn resolve_reused_worktree_base(
+    node: &GraphNode,
+    project_root: &Path,
+    cwd: &Path,
+    state: &Path,
+    read_source: &ReadSourceChoice,
+    git: Option<&Path>,
+) -> Option<WriterBase> {
+    if let Some(base) = node.base.as_deref().filter(|base| !base.is_empty()) {
+        return Some(WriterBase {
+            commit: resolve_ref(state, cwd, base, read_source, "node base"),
+            source: WriterBaseSource::NodeBase,
+            warning: None,
+        });
+    }
+    let worktree = node.worktree.as_deref().filter(|path| !path.is_empty())?;
+    let git = git?;
+    let path = absolute(project_root, worktree);
+    if let Ok(commit) = provenant_run::resolve_git_base(git, &path, "HEAD@{upstream}") {
+        return Some(WriterBase {
+            commit: Some(commit),
+            source: WriterBaseSource::WorktreeUpstream,
+            warning: None,
+        });
+    }
+    Some(WriterBase {
+        commit: resolve_default_branch(state, &path).and_then(|pin| {
+            provenant_run::review_merge_base_between(git, &path, "HEAD", &pin.commit.to_string())
+                .ok()
+        }),
+        source: WriterBaseSource::DefaultBranchMergeBase,
+        warning: None,
+    })
+}
+
+/// A `--worktree` control, or a composite's `--set worktree=PATH` binding.
+fn named_worktree(input: &Value) -> Option<&str> {
+    input
+        .get("worktree")
+        .and_then(Value::as_str)
+        .filter(|path| !path.is_empty())
+        .or_else(|| {
+            input
+                .pointer("/set/worktree")
+                .and_then(Value::as_str)
+                .filter(|path| !path.is_empty())
+        })
+}
+
+fn absolute(project_root: &Path, path: &str) -> PathBuf {
+    let path = Path::new(path);
+    if path.is_absolute() {
+        path.to_owned()
+    } else {
+        project_root.join(path)
+    }
+}
+
+/// Resolve a named base through the same read-source resolver as any explicit
+/// ref, keeping the launch layer and the expression that chose it.
+fn resolve_ref(
+    state: &Path,
+    cwd: &Path,
+    base: &str,
+    read_source: &ReadSourceChoice,
+    origin: &str,
+) -> Option<String> {
+    resolve_read_source(
+        state,
+        cwd,
+        &ReadSourceChoice {
+            source: provenant_cli::run::ReadSource::Ref(base.to_owned()),
+            fetch_first: read_source.fetch_first,
+            layer: Layer::Launch,
+            origin: Some(origin.to_owned()),
+        },
+    )
+    .map(|selected| selected.commit.to_string())
+}
+
+/// Pin every read-only agent leaf to the one commit admission chose for it: the
+/// writer base in a writer graph, else the admitted subject's head. This is the
+/// single read-binding rule. A node or composite that names its own source
+/// keeps it: its members inherit that subject when the graph expands, and a
+/// fixed commit must not override (say) the writer head a review panel reads.
+/// Container nodes stay unbindable so a writer member never inherits a read
+/// source from its read-only boundary, and only an agent node takes an
+/// execution binding at all.
+pub(super) fn bind_read_source(node: &mut GraphNode, commit: &str) {
+    if node.source.is_some() {
+        return;
+    }
+    // Only an agent node executes, so only it takes an execution binding;
+    // graph validation refuses a source on a gate, decision or landing.
+    let agent = matches!(
+        node.kind,
+        None | Some(NodeKind::Task | NodeKind::Synthesise)
+    );
+    if agent
+        && node.access == AccessMode::ReadOnly
+        && node.continues.is_none()
+        && node.composite.is_none()
+        && node.loop_body.is_none()
+    {
+        node.source = Some(SourceBinding::Commit {
+            commit: commit.into(),
+        });
+    }
+    if let Some(composite) = &mut node.composite {
+        for child in &mut composite.nodes {
+            bind_read_source(child, commit);
+        }
+    }
+    if let Some(loop_spec) = &mut node.loop_body {
+        for child in &mut loop_spec.body {
+            bind_read_source(child, commit);
+        }
+    }
+}
+
+/// Carry the admitted writer base into every defaulted provisioning intent,
+/// so the worktree a `--branch` launch creates starts from the
+/// `lanes.writer_base` commit its identity names instead of re-deriving the
+/// forge default. An explicit `--base` is not defaulted and stays as given;
+/// an existing remote branch tip still wins during provisioning.
+pub(super) fn bind_provisioning_base(node: &mut GraphNode, commit: &str) {
+    if let Some(spec) = node
+        .attempt
+        .as_mut()
+        .and_then(|attempt| attempt.new_worktree.as_mut())
+        && spec.default_base
+    {
+        spec.base = commit.into();
+    }
+    if let Some(composite) = &mut node.composite {
+        for child in &mut composite.nodes {
+            bind_provisioning_base(child, commit);
+        }
+    }
+    if let Some(loop_spec) = &mut node.loop_body {
+        for child in &mut loop_spec.body {
+            bind_provisioning_base(child, commit);
+        }
     }
 }

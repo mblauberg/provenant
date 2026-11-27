@@ -68,6 +68,10 @@ pub enum GraphAttemptOutcome {
     ReviewRequired,
     AuthRequired,
     UsageLimited,
+    /// The provider does not serve the selected model for this account. It is
+    /// a route-level depletion, like a usage limit, and moves to another
+    /// eligible candidate instead of being reported as an adapter failure.
+    ModelUnavailable,
     AdapterUnavailable,
     PreparationRefused(CauseKind),
     DeadlineExceeded,

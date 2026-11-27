@@ -354,6 +354,9 @@ pub struct TestRig {
     pub root: PathBuf,
     pub home: PathBuf,
     pub project: PathBuf,
+    /// Installed release assets (`PROVENANT_ROOT`), kept apart from the
+    /// project so read-only lanes never see assets inside their source.
+    pub assets: PathBuf,
     pub state: PathBuf,
     pub env: Vec<(OsString, OsString)>,
     executor: SystemExecutor,
@@ -408,10 +411,12 @@ impl TestRig {
         provenant_os::fixture::private_state_dir(&root)?;
         let home = root.join("home");
         let project = root.join("project");
+        let assets = root.join("assets");
         let state = root.join("state");
         for path in [
             &home,
             &project,
+            &assets,
             &root.join("config"),
             &root.join("cache"),
             &root.join("claude"),
@@ -437,7 +442,7 @@ impl TestRig {
             ("CODEX_HOME", root.join("codex")),
             ("PROVENANT_GIT", git.clone()),
             ("PROVENANT_STATE_DIR", state.clone()),
-            ("PROVENANT_ROOT", project.clone()),
+            ("PROVENANT_ROOT", assets.clone()),
             ("TMPDIR", root.clone()),
         ]
         .into_iter()
@@ -464,6 +469,7 @@ impl TestRig {
             root,
             home,
             project,
+            assets,
             state,
             env,
             executor: SystemExecutor::new(8)?,
@@ -491,6 +497,23 @@ impl TestRig {
         }
         Ok(rig)
     }
+    /// The `PROVENANT_LANE_PROJECT` entry a lane launched in this rig's
+    /// project receives. Binds the project on the host first, as a launch does.
+    pub fn lane_project(&self) -> Result<(OsString, OsString)> {
+        let mut inputs = provenant_core::RootInputs::new(self.home.clone(), self.assets.clone());
+        inputs.state_dir = Some(self.state.clone());
+        let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+        let common = fs::canonicalize(self.project.join(".git"))?;
+        let binding = provenant_config::bind_project(
+            &roots,
+            provenant_config::ProjectLocation::new(common)?,
+        )?;
+        Ok((
+            provenant_core::consumer_env::LANE_PROJECT.into(),
+            binding.project_id().to_string().into(),
+        ))
+    }
+
     /// Exercise commands whose contract requires an absent state root.
     pub fn without_state(self) -> Result<Self> {
         fs::remove_file(self.state.join("config.toml"))?;

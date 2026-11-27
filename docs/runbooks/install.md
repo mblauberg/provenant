@@ -157,32 +157,28 @@ the candidate, so it shows the graph shape and route resolution that binary
 would launch; the candidate's graph is exercised only after it installs. It
 passes the same writer branch and base as the real verify, so the previewed
 writer starts from the fixture rather than falling back to the caller checkout.
-The
-scratch fixture commits a base and a fixture change, and both verification modes
-bind that commit as the review nodes' `diff_base`, so the review nodes have a
-non-empty range; its write node runs in a worktree the verification creates on a
-branch of that fixture. On a peer the writer runs in a worktree the peer creates
-in its own clone from a scratch branch supplied by the launch's sourced default;
-pass `--branch B --base REF` to override it, while a caller worktree path is
-refused. A remote smoke reader is pinned to the peer clone's own checkout HEAD
-and its first parent, never to the sender's scratch commit, so a stale peer
-still reads a valid tree and sees the fixture staged into its lane scratch. The
-staged fixture carries a fresh random fact absent from the committed tree and
-the bundled template: a reader that reconstructs the answer from source cannot
-report it. A manual
-`run smoke` reviews the writer's own scratch commit: the review node runs after
-the write and reads the commit the writer produced in its scratch worktree
-against the commit it branched from, so the cost is bounded by the smoke change
-and never by the caller checkout. A
-launch with no writer skips review with a sourced reason. Supply
-`--set diff_base=BASE` to override the review base; its source is shown in the
-warnings.
-The scratch
-project is built under a home-relative state path rather than the system
-temporary directory, so a peer can project it as a cross-host project and the
-remote smoke reaches its reader; the `--dry-run` preview uses the same root.
-Its host binding is removed when the verification ends, including on
-failure, so the deleted fixture never
+The lifecycle creates one deterministic fixture under `domains.smoke.fixture_root`
+(default `.local/state/provenant-smoke`, home-relative, owner-only) on every
+target host; a home-relative fixture is one a peer can project as a cross-host
+project, which a fixture in the system temporary directory never is. A
+six-byte nonce names it; fixed author, committer and timestamps make the same
+nonce yield the same two commits on any host, and a `.git/provenant-smoke.json`
+marker lets the sweep remove only fixtures it owns. The fixture carries a nonce
+line absent from the caller checkout and the bundled template, so a reader that
+reconstructs an answer from source cannot pass. Its write node runs in a worktree
+the verification creates on a branch of that fixture. On a peer the writer runs
+in a worktree the peer creates in its own clone from a scratch branch supplied by
+the launch's sourced default; pass `--branch B --base REF` to override it, while
+a caller worktree path is refused. A remote reader builds the same fixture under
+its own home through the `smoke_fixture` protocol, so a stale peer clone still
+reads a valid tree; no caller path or staged bytes cross the wire. A peer below
+`SMOKE_FIXTURE_PROTOCOL` yields an unverified result instead of a pass, and
+`domains.smoke.unverified` chooses whether that fails the command. `diff_base`
+defaults to the fixture head; a caller value must resolve inside the fixture.
+The result reports five phases (fixture, launch, wait, status, cleanup) and the
+effective values and sources of the `domains.smoke` keys. The fixture's host
+binding is forgotten and its directory removed when verification ends, on
+success, failure and refused launch, so the deleted fixture never
 becomes a registered project. The human view leads with one status line per host
 (`upgraded`, `verified` or `failed - reason`), the smoke host prints its graph
 verdict instead of `run`/`wait`/`status` envelopes, and repeated

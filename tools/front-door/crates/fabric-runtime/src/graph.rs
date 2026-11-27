@@ -3017,10 +3017,9 @@ fn record_observed_attempt<R: AttemptOwner, J: GraphJournal>(
         checkpoint.nodes[node_index].state = NodeState::Blocked;
         checkpoint.nodes[node_index].advance_code = Some("steer_continuation_refused".into());
         checkpoint.nodes[node_index].advance_note = Some(reason.clone());
+        checkpoint.deactivate_expansion_pauses();
         checkpoint.set_pause(
-            provenant_records::pause::PauseCause::Stop(
-                provenant_records::StopCause::LaunchHandoffRefused,
-            ),
+            PauseCause::Stop(provenant_records::StopCause::LaunchHandoffRefused),
             &reason,
         );
     }
@@ -3296,7 +3295,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                 advance_note: None,
             });
         }
-        checkpoint.set_pause(PauseCause::StructuralLimit, &limit.to_string());
+        checkpoint.pause_structural(&limit.to_string());
         journal.save(&checkpoint).map_err(GraphError::Journal)?;
         return Ok(transitions::graph_run(checkpoint));
     }

@@ -1357,6 +1357,7 @@ impl Factory {
                     pending_steers: Default::default(),
 
                     bases: None,
+                    subject: None,
                     extra: Default::default(),
                     delivery_queue_controls: None,
                     delivery_ci_superseded: Vec::new(),

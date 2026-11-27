@@ -88,7 +88,8 @@ published record. Every corrupt checkpoint stays visible as unreadable through
 status with its graph ID and typed reason, and landing review reports unreadable
 graph sources by graph ID while keeping valid settlements. A checkpoint that
 decodes but fails the semantic validation an advance applies — for example a
-writer failure written over a node its own `when` skips — is unloadable in the
+writer failure written over a node its own `when` skips or an expansion pause
+that disagrees with the graph pause — is unloadable in the
 same way. The first tick read of either kind records the file digest, the plan
 digest and the typed reason in a quarantine marker; identical bytes under the
 same plan are skipped on later ticks, changed bytes or a changed plan are
@@ -98,6 +99,15 @@ as settled.
 - Why: stored text must verify on reload, and one damaged graph must not hide
   another's review evidence or flood every tick with an unresolvable retry.
 - Owner: `crates/fabric-runtime/src/graph/journal.rs`, `src/pr/landing/adapters.rs`
+
+`GraphDocument.subject` is additive: the host writes the admitted `PinnedSubject`
+at admission and overwrites any caller-supplied value, and its serialisation is
+skipped when absent so older execution digests stay byte-identical. A document
+with a subject uses graph schema v2; schema v1 cannot represent subject
+provenance. There is no `CHECKPOINT_SCHEMA_VERSION` bump. `GraphCheckpoint.subject`
+is a serde-skipped projection hydrated from the execution on reload and shown under
+`checkpoint.subject` in status; it is never stored on its own. Graphs already in
+flight at upgrade load with `subject` absent and status omits the field.
 
 ## SQLite stores
 
@@ -467,6 +477,14 @@ state to migrate; the receipt it publishes records any later step's id.
 - Why: state a store does not own still changes shape, and one recorded
   crossing keeps retries safe without a permanent decoder.
 - Owner: `crates/records/src/migrate.rs`, `src/install/migrations.rs`
+
+`ReadSourceLiveSpelling` (`read-source-live`) rewrites the retired
+`lanes.read_source` value `checkout` to `live` in the host and host-project
+config files. It is idempotent, reports each changed path, and never rewrites a
+repository's own `.provenant/config.toml`; a repository file still saying
+`checkout` warns `READ_SOURCE_VALUE_RENAMED` and resolves as `auto`. No other
+batch-P rename needs a persisted step: the other names are unreleased or in
+memory only.
 
 ## Typed host metadata in format 2
 

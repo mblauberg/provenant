@@ -33,7 +33,7 @@ reads! {
     "doctor" => ["fabric", "accounts", "quota", "routing", "hooks"],
     "hosts doctor" => ["fabric", "accounts", "quota", "routing", "hooks"], "fabric" => ["fabric", "routing", "accounts", "lanes", "run", "quota", "policy", "wait"],
     "fabric context" => ["fabric", "wait"],
-    "install" => ["accounts", "fabric", "hooks"], "upgrade" => ["accounts", "fabric"],
+    "install" => ["accounts", "fabric", "hooks"], "upgrade" => ["accounts", "fabric", "smoke"],
     "hooks" => ["hooks"],
     "uninstall" => ["accounts", "fabric"],
     // `init` resolves its port table and forge context directly; it reads no
@@ -41,7 +41,8 @@ reads! {
     "init" => [],
     "route" => ["routing", "accounts", "quota", "policy", "fabric"],
     "route preferences" => ["routing"],
-    "run" => ["fabric", "run", "routing", "accounts", "quota", "lanes", "policy", "wait"],
+    // `run smoke` and `upgrade --verify` share the smoke lifecycle and its domain.
+    "run" => ["fabric", "run", "routing", "accounts", "quota", "lanes", "policy", "wait", "smoke"],
     "run admission" => ["policy"],
     "status" => ["fabric"], "wait" => ["wait", "fabric"],
     "land" => ["pr", "routing", "fabric", "run"],
@@ -199,6 +200,31 @@ mod tests {
             );
         }
     }
+    // Spec: docs/specs/cli.md#warnings-are-typed-values
+    #[test]
+    fn capability_overlay_warnings_carry_a_structured_source() {
+        let temp = tempfile::tempdir().unwrap();
+        let roots = roots(&temp);
+        std::fs::create_dir_all(roots.state.as_path()).unwrap();
+        std::fs::write(
+            roots.state.as_path().join("config.toml"),
+            "[[adapter_capabilities]]\nadapter = \"no-such-adapter\"\ndisable = [\"model\"]\n",
+        )
+        .unwrap();
+        let (_, warnings) = provenant_records::warning::capture(|| capability_overlay(&roots));
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert_eq!(
+            warnings[0].code.as_ref(),
+            provenant_records::warning::CONFIG_KEY_IGNORED.as_str()
+        );
+        assert_eq!(warnings[0].source.layer, Layer::Detected, "{warnings:?}");
+        assert_eq!(
+            warnings[0].source.origin.as_deref(),
+            Some("warning:CONFIG_KEY_IGNORED"),
+            "{warnings:?}"
+        );
+    }
+
     #[test]
     fn every_command_declares_its_config_and_unrelated_domains_cannot_refuse_it() {
         let temp = tempfile::tempdir().unwrap();

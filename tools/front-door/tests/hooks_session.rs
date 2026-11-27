@@ -204,6 +204,8 @@ fn session_start_warns_once_only_when_disk_is_below_headroom() -> Result {
         assert!(!String::from_utf8_lossy(&output.stdout.bytes).contains("Disk pressure on "));
         assert!(!String::from_utf8_lossy(&output.stderr.bytes).contains("Disk pressure on "));
     }
+    let declared = rig.lane_project()?;
+    rig.env.push(declared);
     rig.env.push(("PROVENANT_LANE_DEPTH".into(), "1".into()));
     for (hook, source) in [("session-start", "startup"), ("compact", "compact")] {
         let output = run_hook(&rig, hook, &start(&rig, "disk-session", source))?;
@@ -230,6 +232,8 @@ fn chair_session_hooks_are_silent_in_lanes_and_the_answer_guard_stays_active() -
 
     // The lane marker is set by the launcher. All chair and checkpoint
     // lifecycle handlers must return quietly before reading or mutating state.
+    let declared = rig.lane_project()?;
+    rig.env.push(declared);
     rig.env
         .push((provenant_core::consumer_env::LANE_DEPTH.into(), "1".into()));
     let lane_hooks = [
@@ -568,6 +572,8 @@ fn stop_hook_refreshes_only_an_existing_quiet_checkpoint() -> Result {
 #[test]
 fn lane_sessions_report_but_never_write_checkpoint_state() -> Result {
     let mut rig = TestRig::new()?;
+    let declared = rig.lane_project()?;
+    rig.env.push(declared);
     rig.env
         .push((provenant_core::consumer_env::LANE_DEPTH.into(), "1".into()));
     let checkpoint = store(&rig, "lane-session")?;

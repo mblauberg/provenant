@@ -111,7 +111,7 @@ pub use domains::{
 };
 pub use edit::{EditOptions, Edited, edit_config, revision_of, show};
 pub use history::{FieldChange, HistoryEntry, HistoryLimits, history};
-pub use knobs::{KNOB_PRECEDENCE, KnobEdit, knob_source};
+pub use knobs::{KNOB_PRECEDENCE, KnobEdit, knob_source, read_source_value};
 pub use lane_history::{
     CONFLICT_MARKERS, DEFAULT_BRANCH_REWRITE, DefaultBranchRewrite, HistoryEffect, HistoryValue,
     LaneHistory, REBASE, Rebase, Setting, UNROOTED_TIP,
@@ -123,9 +123,10 @@ pub use presets::Profile;
 pub use project_binding::{
     GcProjectSelection, GcProjectStatus, ProjectBinding, ProjectLocation, Retirement, bind_host,
     bind_project, forget_project, forget_project_at_state, host_project_dir, lookup_gc_project,
-    lookup_host, lookup_project, lookup_project_at_state, project_binding_dir,
-    registered_gc_project_selection, registered_gc_project_selection_with_progress,
-    registered_gc_projects, registered_projects, retire_vanished_projects, transient_location,
+    lookup_host, lookup_project, lookup_project_at_state, lookup_project_by_id,
+    project_binding_dir, registered_gc_project_selection,
+    registered_gc_project_selection_with_progress, registered_gc_projects, registered_projects,
+    retire_vanished_projects, transient_location,
 };
 pub use provenant_records::{Finding, Layer};
 pub use schema::{

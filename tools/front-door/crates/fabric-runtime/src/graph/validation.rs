@@ -87,17 +87,18 @@ fn value_has_v2(value: &serde_json::Value) -> bool {
 /// Schema 2 is a superset, so callers may retain an authored version 2 even
 /// when the minimum is 1.
 pub fn minimum_schema_version(document: &GraphDocument) -> u32 {
-    if document_requires_review_fields(document) {
+    if document_requires_v2_fields(document) {
         2
     } else {
         1
     }
 }
 
-pub(super) fn document_requires_review_fields(document: &GraphDocument) -> bool {
+pub(super) fn document_requires_v2_fields(document: &GraphDocument) -> bool {
     document.queue.is_some()
         || document.review_base.is_some()
         || document.queue_ci_wait.is_some()
+        || document.subject.is_some()
         || nodes_have_v2(&document.nodes)
 }
 
@@ -262,7 +263,7 @@ pub(super) fn validate_output_kinds(document: &GraphDocument) -> Result<(), Admi
 }
 
 pub(super) fn validate_schema(document: &GraphDocument) -> Result<(), AdmissionError> {
-    let has_v2 = document_requires_review_fields(document);
+    let has_v2 = document_requires_v2_fields(document);
     // Version 2 is a superset: it may omit every v2 field, but version 1
     // cannot carry one.
     if !matches!(document.schema_version, 1 | 2) || document.schema_version == 1 && has_v2 {

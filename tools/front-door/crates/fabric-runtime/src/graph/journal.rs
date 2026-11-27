@@ -1684,7 +1684,8 @@ impl FileJournal {
         Ok(load_checkpoint_for_tick(root, project, graph_id)?.map(|stored| stored.checkpoint))
     }
 
-    /// Retire an unreadable record under its graph lock without releasing other fences.
+    /// Retire an unreadable or semantically quarantined record under its graph
+    /// lock without releasing other fences.
     pub fn retire_unreadable(
         root: &StateRoot,
         project: ProjectId,
@@ -1708,7 +1709,10 @@ impl FileJournal {
         // A decode-valid record that fails validation is just as unloadable and
         // is retired by the same named command (#4105).
         let retireable = match load_checkpoint(&directory, graph_id) {
-            Ok(Some(stored)) => semantic_validation_error(&stored).is_some(),
+            Ok(Some(stored)) => {
+                !stored.checkpoint.expansion_pause_owns_graph_pause()
+                    || semantic_validation_error(&stored).is_some()
+            }
             Ok(None) => false,
             Err(error) if !error.is_unreadable() => return Err(error.into()),
             Err(_) => true,
@@ -1733,7 +1737,12 @@ impl FileJournal {
                     decode_verified_checkpoint(&bytes, graph_id, bytes.len() as u64).ok()
                 })
             }
-            Ok(Some(stored)) if semantic_validation_error(&stored).is_some() => Some(stored),
+            Ok(Some(stored))
+                if !stored.checkpoint.expansion_pause_owns_graph_pause()
+                    || semantic_validation_error(&stored).is_some() =>
+            {
+                Some(stored)
+            }
             Ok(_) => return Ok(false),
             Err(error) => return Err(error.for_graph(graph_id).into()),
         };
@@ -2325,6 +2334,23 @@ fn load_checkpoint_for_tick(
         }
     };
     match decode_checkpoint_in(&directory, &bytes, graph_id) {
+        Ok(stored) if !stored.checkpoint.expansion_pause_owns_graph_pause() => {
+            // The bytes are readable but the pause pair disagrees. Quarantine
+            // it on the same byte key as a decode failure so a tick reports it
+            // once and `provenant stop -- NAME` is the named next step (#4106).
+            let reason = "invalid_expansion_pause";
+            if quarantine_unreadable_once(
+                &directory,
+                graph_id,
+                &bytes,
+                reason,
+                Some(stored.checkpoint.plan_digest.as_str()),
+            ) {
+                Err(UnreadableCheckpointNotice(graph_id.to_owned(), reason, String::new()).into())
+            } else {
+                Ok(None)
+            }
+        }
         Ok(stored) => {
             if let Some(error) = semantic_validation_error(&stored) {
                 let reason = error.code();
@@ -2569,7 +2595,7 @@ fn decode_verified_checkpoint(
         return Err(JournalError::BadEnvelope);
     }
     let document = &stored.execution.document;
-    let has_v2 = document_requires_review_fields(document)
+    let has_v2 = super::validation::document_requires_v2_fields(document)
         || stored
             .execution
             .bases
@@ -2602,6 +2628,7 @@ fn decode_verified_checkpoint(
 
     let mut stored = stored;
     stored.checkpoint.bases = stored.execution.bases;
+    stored.checkpoint.subject = stored.execution.document.subject.clone();
     Ok(stored)
 }
 

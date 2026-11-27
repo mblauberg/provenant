@@ -11,6 +11,109 @@ pub const SECTION_KEY: &str = "domains.wait";
 pub const MAX_TIMEOUT_KEY: &str = "domains.wait.max_timeout_seconds";
 /// The default budget for `--pr --until complete`, long enough for a normal CI run.
 pub const COMPLETE_TIMEOUT_KEY: &str = "domains.wait.pr_complete_timeout_seconds";
+/// The key whose effective source a pinned wait publishes on its subject.
+pub const PR_HEAD_POLICY_KEY: &str = "domains.wait.pr_head_policy";
+/// The key that selects where a pull request wait takes its head from.
+pub const PR_HEAD_SOURCE_KEY: &str = "domains.wait.pr_head_source";
+/// The key that selects what a wait does when its forge head is unavailable.
+pub const PR_HEAD_UNPINNED_KEY: &str = "domains.wait.pr_head_unpinned";
+
+/// The choices `domains.wait.pr_head_policy` accepts.
+pub const PR_HEAD_POLICY_CHOICES: &[&str] = &["pinned", "follow_latest"];
+/// The choices `domains.wait.pr_head_source` accepts.
+pub const PR_HEAD_SOURCE_CHOICES: &[&str] = &["auto", "forge", "local"];
+/// The choices `domains.wait.pr_head_unpinned` accepts.
+pub const PR_HEAD_UNPINNED_CHOICES: &[&str] = &["first_sample", "refuse"];
+
+/// Where a `wait --pr` takes the head it pins at admission.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PrHeadSource {
+    /// The local tip when it differs from the forge head, else the forge head.
+    #[default]
+    Auto,
+    /// Always the head the forge reports, ignoring a differing local tip.
+    Forge,
+    /// The local tip of the PR branch; fall back to the forge with a warning.
+    Local,
+}
+impl PrHeadSource {
+    /// The configured spelling of this choice.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Forge => "forge",
+            Self::Local => "local",
+        }
+    }
+}
+
+/// What a `wait --pr` does when the forge head cannot be read at admission.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PrHeadUnpinned {
+    /// Warn and let the first successful observation pin the subject.
+    #[default]
+    FirstSample,
+    /// Settle unsuccessful with the `head_unpinned` cause at admission.
+    Refuse,
+}
+impl PrHeadUnpinned {
+    /// The configured spelling of this choice.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::FirstSample => "first_sample",
+            Self::Refuse => "refuse",
+        }
+    }
+}
+
+/// The per-project overrides for PR head settings. A project that has no row
+/// here keeps the host section's value; the effective key names the row that
+/// supplied each value so every report can cite its source.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ProjectWaitConfig {
+    /// Overrides `domains.wait.pr_head_policy` for this project.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pr_head_policy: Option<provenant_records::subject::SubjectPolicy>,
+    /// Overrides `domains.wait.pr_head_source` for this project.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pr_head_source: Option<PrHeadSource>,
+    /// Overrides `domains.wait.pr_head_unpinned` for this project.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pr_head_unpinned: Option<PrHeadUnpinned>,
+}
+
+/// The effective PR head settings for one wait, with the key that supplied
+/// each value. The invariant: a project row wins over the host section, and
+/// the reported key names whichever layer actually supplied the value.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EffectivePrHead {
+    /// The policy applied when the pinned head moves.
+    pub policy: provenant_records::subject::SubjectPolicy,
+    /// Where the pinned head is taken from.
+    pub source: PrHeadSource,
+    /// What happens when no head can be pinned at admission.
+    pub unpinned: PrHeadUnpinned,
+    /// The key that supplied `policy`.
+    pub policy_key: String,
+    /// The key that supplied `source`.
+    pub source_key: String,
+    /// The key that supplied `unpinned`.
+    pub unpinned_key: String,
+}
+
+/// Whether a project row set a named field, so the reported key names the
+/// layer that actually supplied the effective value.
+fn row_has(row: &ProjectWaitConfig, field: &str) -> bool {
+    match field {
+        "pr_head_policy" => row.pr_head_policy.is_some(),
+        "pr_head_source" => row.pr_head_source.is_some(),
+        "pr_head_unpinned" => row.pr_head_unpinned.is_some(),
+        _ => false,
+    }
+}
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
@@ -31,6 +134,15 @@ pub struct Settings {
     /// How long a pull request wait holds a settling reading pending while
     /// Actions has reported no run for its head. Zero settles at once.
     pub actions_grace_seconds: u64,
+    /// Policy for a pull request head that moves during a wait.
+    pub pr_head_policy: provenant_records::subject::SubjectPolicy,
+    /// Where a pull request wait takes the head it pins at admission.
+    pub pr_head_source: PrHeadSource,
+    /// What a pull request wait does when its forge head is unavailable.
+    pub pr_head_unpinned: PrHeadUnpinned,
+    /// Per-project overrides of the PR head settings.
+    #[serde(default)]
+    pub projects: std::collections::BTreeMap<String, ProjectWaitConfig>,
     /// How long a wait's store preflight tolerates a momentarily busy store
     /// before it refuses. The final snapshot stays deliberately nonblocking.
     pub preflight_busy_timeout_ms: u64,
@@ -50,6 +162,10 @@ impl Default for Settings {
             max_targets: 64,
             pr_read_timeout_seconds: 60,
             actions_grace_seconds: 60,
+            pr_head_policy: provenant_records::subject::SubjectPolicy::Pinned,
+            pr_head_source: PrHeadSource::Auto,
+            pr_head_unpinned: PrHeadUnpinned::FirstSample,
+            projects: Default::default(),
             preflight_busy_timeout_ms: 2000,
         }
     }
@@ -86,6 +202,26 @@ impl Origin {
     /// Why compiled defaults apply, when the configuration was unreadable.
     pub fn unavailable(&self) -> Option<&str> {
         self.unavailable.as_deref()
+    }
+
+    /// The typed source of `key`: the compiled profile, the host config file,
+    /// or a host-project config file, each with `FILE#KEY` as its origin.
+    pub fn source(&self, key: &str) -> provenant_records::Source {
+        use provenant_records::{Layer, Source};
+        match self.of(key) {
+            provenant_config::Origin::Compiled { profile } => {
+                Source::at(Layer::Default, format!("{}#{key}", profile.as_str()))
+            }
+            provenant_config::Origin::User { path } => {
+                let path = path.as_path_text().unwrap_or("config.toml").to_owned();
+                let layer = if path == "config.toml" {
+                    Layer::Host
+                } else {
+                    Layer::HostProject
+                };
+                Source::at(layer, format!("{path}#{key}"))
+            }
+        }
     }
 
     /// `KEY from SOURCE`, the form every wait report names a setting in.
@@ -214,6 +350,36 @@ impl Settings {
         )
     }
 
+    /// The effective PR head settings for one project, with the key that
+    /// supplied each value. A project row wins only for the fields it sets;
+    /// the reported key is the one whose origin a report must cite.
+    pub fn effective_pr_head(&self, project: Option<&str>) -> EffectivePrHead {
+        let override_row = project.and_then(|id| self.projects.get(id));
+        let key = |field: &str| match override_row {
+            Some(row) if row_has(row, field) => {
+                format!(
+                    "{SECTION_KEY}.projects.{}.{field}",
+                    project.unwrap_or_default()
+                )
+            }
+            _ => format!("{SECTION_KEY}.{field}"),
+        };
+        EffectivePrHead {
+            policy: override_row
+                .and_then(|row| row.pr_head_policy)
+                .unwrap_or(self.pr_head_policy),
+            source: override_row
+                .and_then(|row| row.pr_head_source)
+                .unwrap_or(self.pr_head_source),
+            unpinned: override_row
+                .and_then(|row| row.pr_head_unpinned)
+                .unwrap_or(self.pr_head_unpinned),
+            policy_key: key("pr_head_policy"),
+            source_key: key("pr_head_source"),
+            unpinned_key: key("pr_head_unpinned"),
+        }
+    }
+
     /// The effective wait budget in seconds: the request, else the configured
     /// default, bounded by the configured maximum with a warning naming it.
     pub fn timeout(&self, override_seconds: Option<u64>, origin: &Origin) -> u64 {
@@ -313,7 +479,7 @@ impl DomainConfig for Settings {
 pub const SECTION: DomainSection = DomainSection::new::<Settings>(
     "wait",
     |_| {
-        "pr_complete_timeout_seconds = 3600\ntimeout_seconds = 300\nmax_timeout_seconds = 14400\nlocal_interval_ms = 500\npr_interval_ms = 5000\npr_slow_interval_ms = 15000\npr_near_end_window_ms = 30000\npr_conditional_requests = true\nforge_source = \"auto\"\nmax_targets = 64\npr_read_timeout_seconds = 60\nactions_grace_seconds = 60\npreflight_busy_timeout_ms = 2000\n"
+        "pr_complete_timeout_seconds = 3600\ntimeout_seconds = 300\nmax_timeout_seconds = 14400\nlocal_interval_ms = 500\npr_interval_ms = 5000\npr_slow_interval_ms = 15000\npr_near_end_window_ms = 30000\npr_conditional_requests = true\nforge_source = \"auto\"\nmax_targets = 64\npr_read_timeout_seconds = 60\nactions_grace_seconds = 60\npr_head_policy = \"pinned\"\npr_head_source = \"auto\"\npr_head_unpinned = \"first_sample\"\npreflight_busy_timeout_ms = 2000\n"
     },
 )
 .with_fields(&[
@@ -329,6 +495,12 @@ pub const SECTION: DomainSection = DomainSection::new::<Settings>(
     FieldMetadata::int("max_targets", 1, 1024),
     FieldMetadata::int("pr_read_timeout_seconds", 1, 600),
     FieldMetadata::int("actions_grace_seconds", 0, 600),
+    FieldMetadata::enumeration("pr_head_policy", PR_HEAD_POLICY_CHOICES),
+    FieldMetadata::enumeration("pr_head_source", PR_HEAD_SOURCE_CHOICES),
+    FieldMetadata::enumeration("pr_head_unpinned", PR_HEAD_UNPINNED_CHOICES),
+    FieldMetadata::enumeration("projects.{project}.pr_head_policy", PR_HEAD_POLICY_CHOICES),
+    FieldMetadata::enumeration("projects.{project}.pr_head_source", PR_HEAD_SOURCE_CHOICES),
+    FieldMetadata::enumeration("projects.{project}.pr_head_unpinned", PR_HEAD_UNPINNED_CHOICES),
     FieldMetadata::int("preflight_busy_timeout_ms", 0, 60000),
 ]);
 
@@ -411,6 +583,24 @@ mod tests {
     }
 
     #[test]
+    fn pr_head_policy_defaults_and_accepts_only_declared_choices() {
+        use provenant_records::subject::SubjectPolicy;
+        assert_eq!(Settings::default().pr_head_policy, SubjectPolicy::Pinned);
+        for (value, expected) in [
+            ("pinned", SubjectPolicy::Pinned),
+            ("follow_latest", SubjectPolicy::FollowLatest),
+        ] {
+            let settings: Settings =
+                serde_json::from_value(serde_json::json!({"pr_head_policy": value})).unwrap();
+            assert_eq!(settings.pr_head_policy, expected);
+        }
+        assert!(
+            serde_json::from_value::<Settings>(serde_json::json!({"pr_head_policy": "other"}))
+                .is_err()
+        );
+    }
+
+    #[test]
     fn requested_wait_is_bounded_by_the_effective_maximum() {
         for configured in [None, Some(1), Some(90), Some(86400)] {
             let settings = Settings {
@@ -435,6 +625,65 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn pr_head_source_and_unpinned_default_and_accept_only_declared_choices() {
+        assert_eq!(Settings::default().pr_head_source, PrHeadSource::Auto);
+        assert_eq!(
+            Settings::default().pr_head_unpinned,
+            PrHeadUnpinned::FirstSample
+        );
+        for value in ["auto", "forge", "local"] {
+            let settings: Settings =
+                serde_json::from_value(serde_json::json!({"pr_head_source": value})).unwrap();
+            assert_eq!(settings.pr_head_source.as_str(), value);
+        }
+        for value in ["first_sample", "refuse"] {
+            let settings: Settings =
+                serde_json::from_value(serde_json::json!({"pr_head_unpinned": value})).unwrap();
+            assert_eq!(settings.pr_head_unpinned.as_str(), value);
+        }
+        assert!(
+            serde_json::from_value::<Settings>(serde_json::json!({"pr_head_source": "other"}))
+                .is_err()
+        );
+        assert!(
+            serde_json::from_value::<Settings>(serde_json::json!({"pr_head_unpinned": "other"}))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn pr_head_project_overrides_win_and_name_the_supplying_key() {
+        use provenant_records::subject::SubjectPolicy;
+        let mut settings = Settings::default();
+        settings.projects.insert(
+            "demo".into(),
+            ProjectWaitConfig {
+                pr_head_policy: Some(SubjectPolicy::FollowLatest),
+                pr_head_source: Some(PrHeadSource::Forge),
+                ..ProjectWaitConfig::default()
+            },
+        );
+        let effective = settings.effective_pr_head(Some("demo"));
+        assert_eq!(effective.policy, SubjectPolicy::FollowLatest);
+        assert_eq!(effective.source, PrHeadSource::Forge);
+        assert_eq!(effective.unpinned, PrHeadUnpinned::FirstSample);
+        assert_eq!(
+            effective.policy_key,
+            "domains.wait.projects.demo.pr_head_policy"
+        );
+        assert_eq!(
+            effective.source_key,
+            "domains.wait.projects.demo.pr_head_source"
+        );
+        // An unset field keeps the host key, so its origin stays truthful.
+        assert_eq!(effective.unpinned_key, PR_HEAD_UNPINNED_KEY);
+        let host = settings.effective_pr_head(Some("other"));
+        assert_eq!(host.policy, SubjectPolicy::Pinned);
+        assert_eq!(host.policy_key, PR_HEAD_POLICY_KEY);
+        assert_eq!(host.source_key, PR_HEAD_SOURCE_KEY);
     }
 
     #[test]
