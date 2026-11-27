@@ -107,7 +107,7 @@ pub const INSTALL_RECEIPT_SCHEMA_VERSION: u64 = 2;
 /// Format of the records a live attempt's supervisor or settlement reads.
 /// Bump this in any release that changes those files, so install can warn when
 /// it would swap under attempts that were started on the previous format.
-pub const LIVE_RECORD_FORMAT: u32 = 12;
+pub const LIVE_RECORD_FORMAT: u32 = 13;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct InstallReceipt {
