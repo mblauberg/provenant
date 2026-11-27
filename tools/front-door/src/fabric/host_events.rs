@@ -47,7 +47,7 @@ impl HostOperations<'_> {
                 self.budget,
                 self.cancel,
             ) {
-                Ok(PeerResult::HostRead { result, .. }) => {
+                Ok(PeerResult::HostRead { data: result, .. }) => {
                     crate::fabric::host_read::result_to_host_result(*result)
                 }
                 Ok(PeerResult::Error { data, .. }) => {
@@ -89,7 +89,7 @@ impl HostOperations<'_> {
                 self.budget,
                 self.cancel,
             ) {
-                Ok(PeerResult::HostRead { result, .. }) => {
+                Ok(PeerResult::HostRead { data: result, .. }) => {
                     crate::fabric::host_read::result_to_host_result(*result)
                 }
                 Ok(PeerResult::Error { data, .. }) => {

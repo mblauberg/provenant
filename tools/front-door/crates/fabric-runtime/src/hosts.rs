@@ -927,13 +927,13 @@ pub enum PeerResult {
     },
     /// One typed host read, retaining the command's own outcome and data.
     HostRead {
-        result: Box<provenant_records::CommandResult<serde_json::Value>>,
+        data: Box<provenant_records::CommandResult<serde_json::Value>>,
         #[serde(flatten)]
         extra: provenant_records::ExtraFields,
     },
     /// The bounded per-class aggregates of a peer `gc` sweep.
     Gc {
-        result: Box<provenant_records::CommandResult<serde_json::Value>>,
+        data: Box<provenant_records::CommandResult<serde_json::Value>>,
         #[serde(flatten)]
         extra: provenant_records::ExtraFields,
     },
@@ -1453,14 +1453,14 @@ pub fn encode_peer_response(
                 }
             }
         },
-        PeerResult::HostRead { result, .. } => {
+        PeerResult::HostRead { data: result, .. } => {
             let mut value = serde_json::to_value(result.as_ref()).map_err(|_| PeerError::Frame)?;
             provenant_confinement::publication::CrossHostTransport::new(projector)
                 .json(&mut value)
                 .map_err(|_| PeerError::Frame)?;
             **result = serde_json::from_value(value).map_err(|_| PeerError::Frame)?;
         }
-        PeerResult::Gc { result, .. } => {
+        PeerResult::Gc { data: result, .. } => {
             let mut value = serde_json::to_value(result.as_ref()).map_err(|_| PeerError::Frame)?;
             provenant_confinement::publication::CrossHostTransport::new(projector)
                 .json(&mut value)
@@ -1862,6 +1862,41 @@ mod tests {
 
     fn project_key(home: &Path) -> CrossHostProjectKey {
         CrossHostProjectKey::from_home(home, &home.join("repo/.git")).unwrap()
+    }
+
+    #[test]
+    fn host_read_and_gc_frames_preserve_tag_and_command_envelope() {
+        for (tag, is_gc) in [("host_read", false), ("gc", true)] {
+            let command = provenant_records::CommandResult::new(
+                tag,
+                provenant_records::Outcome::Ok,
+                serde_json::json!({"value": 42}),
+            );
+            let result = if is_gc {
+                PeerResult::Gc {
+                    data: Box::new(command),
+                    extra: Default::default(),
+                }
+            } else {
+                PeerResult::HostRead {
+                    data: Box::new(command),
+                    extra: Default::default(),
+                }
+            };
+            let bytes = serde_json::to_vec(&result).unwrap();
+            let wire: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(wire["result"], tag);
+            assert_eq!(wire["data"]["data"]["value"], 42);
+            let decoded: PeerResult =
+                provenant_records::decode(bytes.as_slice(), Limits::CONFIG).unwrap();
+            let data = match decoded {
+                PeerResult::HostRead { data, .. } | PeerResult::Gc { data, .. } => data,
+                _ => panic!("host command response expected"),
+            };
+            assert_eq!(data.command, tag);
+            assert_eq!(data.status, provenant_records::Outcome::Ok);
+            assert_eq!(data.data["value"], 42);
+        }
     }
 
     #[test]

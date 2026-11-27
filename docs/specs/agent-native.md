@@ -216,6 +216,8 @@ error [PEER_PROJECT_UNLOCATABLE] smoke-7f3a/task--read#1 on workshop: project is
 
 `CommonArgs { host: Vec<HostArg>, timeout: Option<DurationArg> }` is flattened into these verbs: `status`, `output`, `result`, `wait`, `events`, `gc`, `run`, `upgrade`, `ci`, `retire` and `queue`. `--json` and `--full` stay global. The exempt verbs are `help`, `hook`, `internal`, `declare`, `notes` and `config`; that list lives in the catalogue test.
 
+Peer host-read and GC responses carry the full command envelope in `data`, alongside the `result` variant tag; this keeps the tag distinct from the payload and preserves command outcomes across hosts.
+
 | Flag | Meaning |
 |---|---|
 | `--host H` (repeatable, `all`) | The host the command acts on. For reads (`status`, `output`, `result`, `events`) the selected host serves the read through typed `PeerAction::HostRead`; all command options and the result data are preserved. `output --final` pages over that action and validates the sealed attempt, digest and contiguous offsets before writing `--to`. `run` uses it for placement, as today, with exactly one host. `gc` uses `PeerAction::Gc`. On `upgrade` it names the hosts to upgrade (default `all`); the old `--hosts` is deleted and smoke placement moves to `--verify-host`. |

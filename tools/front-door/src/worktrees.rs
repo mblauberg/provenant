@@ -1570,7 +1570,7 @@ fn run_gc_hosts(
             }
         };
         let reading = match result {
-            Ok(provenant_fabric_runtime::hosts::PeerResult::Gc { result, .. }) => {
+            Ok(provenant_fabric_runtime::hosts::PeerResult::Gc { data: result, .. }) => {
                 crate::fabric::peer::HostResult::Command {
                     status: result.status,
                     data: result.data,

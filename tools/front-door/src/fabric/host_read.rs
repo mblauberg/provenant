@@ -368,7 +368,7 @@ fn read_host(
             operations.budget,
             operations.cancel,
         ) {
-            Ok(PeerResult::HostRead { result, .. }) => result_to_host_result(*result),
+            Ok(PeerResult::HostRead { data: result, .. }) => result_to_host_result(*result),
             Ok(PeerResult::Error { data, .. }) => facade_to_host_result(data.error),
             Ok(_) => HostResult::Failed("peer returned an unexpected host-read result".into()),
             Err(failure) => crate::fabric::peer::host_result_from_peer(Err(failure)),

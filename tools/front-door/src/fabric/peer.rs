@@ -1425,7 +1425,7 @@ pub fn peer(
                     .map_err(|reason| FacadeError::io(format!("serialize gc result: {reason}")))
                 },
                 |result| PeerResult::Gc {
-                    result: Box::new(result),
+                    data: Box::new(result),
                     extra: Default::default(),
                 },
             ),
@@ -1445,7 +1445,7 @@ pub fn peer(
                 };
                 match super::host_read::execute(input, &globals, workers) {
                     Ok(result) => PeerResult::HostRead {
-                        result: Box::new(result),
+                        data: Box::new(result),
                         extra: Default::default(),
                     },
                     Err(error) => PeerResult::Error {
