@@ -1,6 +1,6 @@
 //! Host-local project identity indexed by the canonical Git common directory.
 use crate::ConfigError;
-use provenant_core::{Clock, ProjectId, Roots, WaitBudget};
+use provenant_core::{Clock, ProjectId, Roots, WaitBudget, WallTime};
 use provenant_os::fs::{
     Directory, DirectoryPosition, FileKind, LockMode, Metadata, PublishMode, effective_uid,
 };
@@ -10,6 +10,41 @@ use std::collections::BTreeSet;
 use std::ffi::{OsStr, OsString};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Component, Path, PathBuf};
+
+/// One scheduler's classification of a registered project location.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ProjectPresence {
+    Present,
+    Absent { since: WallTime },
+    Unreachable { error: String, retry_at: WallTime },
+}
+
+/// Classify one metadata probe without turning permission and I/O failures
+/// into a false `Present` result. Callers retain incarnation timing and choose
+/// the bounded retry time.
+pub fn classify_project_presence(
+    metadata: std::io::Result<std::fs::Metadata>,
+    absent_since: WallTime,
+    retry_at: WallTime,
+) -> ProjectPresence {
+    match metadata {
+        Ok(_) => ProjectPresence::Present,
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+            ) =>
+        {
+            ProjectPresence::Absent {
+                since: absent_since,
+            }
+        }
+        Err(error) => ProjectPresence::Unreachable {
+            error: error.to_string(),
+            retry_at,
+        },
+    }
+}
 
 const PROJECTS_DIR: &str = "projects";
 const RECORD: &str = "project.json";

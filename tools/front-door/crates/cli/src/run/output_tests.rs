@@ -63,6 +63,7 @@ fn output_followups_use_the_public_handle_for_local_and_peer_placements() {
             "part":"result", "next_offset":42
         });
         let command = crate::Output {
+            common: Default::default(),
             target: "repair/writer#2".parse().unwrap(),
             part: crate::Part::Result,
             to: None,
@@ -100,6 +101,7 @@ fn output_followups_use_the_public_handle_for_local_and_peer_placements() {
 #[test]
 fn a_running_result_envelope_is_ok_and_labels_partial_or_pending() {
     let command = crate::Output {
+        common: Default::default(),
         target: "repair/writer#2".parse().unwrap(),
         part: crate::Part::Result,
         to: None,
@@ -261,6 +263,7 @@ fn output_summary_keeps_local_headers_without_unavailable_lines() {
     // line says "unavailable". This invariant already held before the gate
     // removal; keep it as a regression guard for the local path.
     let command = crate::Output {
+        common: Default::default(),
         target: "repair/writer#2".parse().unwrap(),
         part: crate::Part::Result,
         to: None,
@@ -331,6 +334,7 @@ fn peer_output_renders_committed_head_and_publication_from_lane_projection() {
     let attempt = provenant_core::AttemptId::from_bytes([2; 16]);
     let host = provenant_core::HostId::from_bytes([3; 16]);
     let command = crate::Output {
+        common: Default::default(),
         target: "repair/writer#2".parse().unwrap(),
         part: crate::Part::Result,
         to: None,
@@ -672,6 +676,7 @@ fn final_export_preserves_the_complete_result_across_pages() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("result.md");
     let command = crate::Output {
+        common: Default::default(),
         target: "repair/writer#2".parse().unwrap(),
         part: crate::Part::Result,
         to: Some(path.clone()),
@@ -872,6 +877,7 @@ fn tail_lines_returns_at_most_the_requested_lines_and_clamps() {
         "a line tail starts on a text boundary"
     );
     let selection = crate::Output {
+        common: Default::default(),
         target: "repair/writer#2".parse().unwrap(),
         part: crate::Part::Result,
         to: None,
@@ -894,6 +900,7 @@ fn tail_lines_returns_at_most_the_requested_lines_and_clamps() {
     );
     assert_eq!(
         crate::Output {
+            common: Default::default(),
             tail: Some(64),
             tail_lines: None,
             ..selection

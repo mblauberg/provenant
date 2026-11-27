@@ -607,7 +607,7 @@ pub fn run(
             );
             let mut result = CommandResult::new(&command, status, Value::Null);
             let mut command_error = CommandError::new(code, message, None, repair);
-            command_error.diagnostic = diagnostic;
+            command_error.set_diagnostic(diagnostic);
             result.error = Some(command_error);
             result
         }

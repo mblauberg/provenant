@@ -51,6 +51,7 @@ pub(super) fn worktree_subject_matches_path(
             subject.worktree_path().as_deref() == Some(path)
         }
         provenant_records::custody::SubjectKind::Path => Path::new(&subject.id) == path,
+        provenant_records::custody::SubjectKind::Project => false,
         _ => false,
     }
 }

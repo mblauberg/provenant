@@ -105,7 +105,7 @@ fn run(inv: &Call) -> Result<Outcome, CommandError> {
                                 .and_then(|diagnostic| diagnostic.next.as_deref())
                                 .unwrap_or("run `provenant accounts sync` and retry"),
                         );
-                        error.diagnostic = projection.as_ref().map(Into::into);
+                        error.set_diagnostic(projection.as_ref().map(Into::into));
                         result.error = Some(error);
                         provenant_cli::run::Reply {
                             result,

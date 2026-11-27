@@ -10,6 +10,7 @@ mod chair;
 mod check_providers;
 mod checks;
 mod ci;
+mod ci_patch;
 mod cloud;
 pub mod commands;
 #[cfg(any(test, feature = "fixture"))]
@@ -296,7 +297,7 @@ fn fail_with_diagnostic(
             .as_deref()
             .unwrap_or("correct the reported condition and rerun the command"),
     );
-    error.diagnostic = Some(diagnostic.into());
+    error.set_diagnostic(Some(diagnostic.into()));
     result.error = Some(error);
     emit(&result, globals, "", false)
 }
@@ -1214,7 +1215,7 @@ fn config_command(command: &str, action: ConfigAction, globals: &provenant_cli::
                         .as_deref()
                         .unwrap_or("run `provenant accounts sync`"),
                 );
-                error.diagnostic = Some((&projection).into());
+                error.set_diagnostic(Some((&projection).into()));
                 result.error = Some(error);
                 return emit(&result, globals, "", false);
             }
@@ -1837,3 +1838,7 @@ mod unpublished_result_tests {
         assert!(!out.is_empty());
     }
 }
+
+#[cfg(test)]
+#[path = "../tests/epic_e_contract.rs"]
+mod epic_e_contract;

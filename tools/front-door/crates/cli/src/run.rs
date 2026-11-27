@@ -296,7 +296,7 @@ fn command_error(fail: &Fail) -> CommandError {
         cause.as_deref(),
         repair,
     );
-    error.diagnostic = fail.projection.as_deref().map(Into::into);
+    error.set_diagnostic(fail.projection.as_deref().map(Into::into));
     error
 }
 

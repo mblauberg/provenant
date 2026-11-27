@@ -183,6 +183,7 @@ fn composite_output_preserves_every_public_typed_export() {
         "warnings": []
     }));
     let command = provenant_cli::Output {
+        common: Default::default(),
         target: "typed-output/panel".parse().unwrap(),
         part: provenant_cli::Part::Result,
         to: None,
@@ -218,6 +219,7 @@ fn composite_progress(outputs: Value) -> provenant_fabric_runtime::graph::NodePr
 
 fn composite_output_command(offset: u64, max_bytes: u64) -> provenant_cli::Output {
     provenant_cli::Output {
+        common: Default::default(),
         target: "typed-output/panel".parse().unwrap(),
         part: provenant_cli::Part::Result,
         to: None,
@@ -1690,7 +1692,16 @@ fn unified_status_uses_one_row_contract_and_selects_attempts() {
     // resolve to the WorkKey and reference that produced it.
     let mut projected = checkpoint("g");
     projected.nodes[0].attempts[0].key.attempt = 7;
-    projected.nodes[0].warnings.push("retry warning".into());
+    projected.nodes[0]
+        .warnings
+        .push(provenant_records::Warning::new(
+            provenant_records::warning::LEGACY_WARNING,
+            "retry warning",
+            provenant_records::Source {
+                layer: provenant_records::Layer::Detected,
+                origin: Some("legacy graph warning".into()),
+            },
+        ));
     let run = graph_snapshot(projected);
     let graph = GraphTarget {
         graph: "g".into(),
@@ -1705,7 +1716,8 @@ fn unified_status_uses_one_row_contract_and_selects_attempts() {
     );
     for row in &rows {
         if row["kind"] == "node" && row["node_id"] == "parent" {
-            assert_eq!(row["warnings"], json!(["retry warning"]));
+            assert_eq!(row["warnings"][0]["code"], "LEGACY_WARNING");
+            assert_eq!(row["warnings"][0]["message"], "retry warning");
         } else if row["kind"] != "node" {
             assert!(row["warnings"].is_null());
         }

@@ -1900,8 +1900,12 @@ pub(super) fn settle(
                         .and_then(|value| {
                             let warnings = super::refusal::input_warnings(&value, policy);
                             for warning in warnings {
-                                if !checkpoint.nodes[index].warnings.contains(&warning.message) {
-                                    checkpoint.nodes[index].warnings.push(warning.message);
+                                if !checkpoint.nodes[index]
+                                    .warnings
+                                    .iter()
+                                    .any(|existing| existing.message == warning.message)
+                                {
+                                    checkpoint.nodes[index].warnings.push(warning);
                                 }
                             }
                             normalise_fragment(&json).inspect(|json| {

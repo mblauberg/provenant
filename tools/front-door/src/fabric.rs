@@ -22,6 +22,7 @@ mod graph_document;
 pub(crate) mod owner;
 mod peer;
 mod peer_source_binding;
+pub(crate) mod progress;
 mod queue_adoption;
 mod queue_controls;
 mod queue_delivery;

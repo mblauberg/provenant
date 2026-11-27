@@ -845,6 +845,14 @@ fn validate(inv: &Invocation) -> Result<(), CliError> {
         return invalid("--json is invalid for hook/internal execution");
     }
     match &inv.command {
+        Command::Run(request)
+            if request.common.host.len() > 1
+                || matches!(request.common.host.first(), Some(HostArg::All)) =>
+        {
+            return invalid(
+                "run accepts exactly one named --host; aggregation is not available for run",
+            );
+        }
         Command::Route(Route::Resolve(resolve)) => {
             if resolve.name.is_none()
                 && resolve.request.model.is_none()
@@ -1551,18 +1559,14 @@ mod tests {
     }
 
     #[test]
-    fn run_accepts_an_explicit_local_read_only_source() {
-        let invocation = valid(&["run", "task", "Review the tree", "--source", "local"]);
-        let Command::Run(request) = invocation.command else {
-            panic!("expected run");
-        };
-        assert_eq!(request.source.as_deref(), Some("local"));
-        let invocation = valid(&["run", "task", "Review the tree", "--source", "upstream"]);
-        let Command::Run(request) = invocation.command else {
-            panic!("expected run");
-        };
-        assert_eq!(request.source.as_deref(), Some("upstream"));
-        invalid(&["run", "task", "Review the tree", "--source", "elsewhere"]);
+    fn run_accepts_declared_source_values_and_refs() {
+        for source in ["checkout", "default-branch", "auto", "feature/topic"] {
+            let invocation = valid(&["run", "task", "Review the tree", "--source", source]);
+            let Command::Run(request) = invocation.command else {
+                panic!("expected run");
+            };
+            assert_eq!(request.source.as_deref(), Some(source));
+        }
     }
 
     #[test]
@@ -2162,7 +2166,7 @@ mod tests {
         };
         assert_eq!(request.template.as_deref(), Some("explore"));
         assert_eq!(request.brief.as_deref(), Some("Inspect the code"));
-        assert_eq!(request.brief_text, None);
+        assert!(request.brief_text.is_empty());
         assert_eq!(request.name.as_deref(), Some("inspect"));
         assert_eq!(request.route.as_deref(), Some("junior"));
         assert_eq!(request.over, ["cli", "runtime"]);
@@ -2180,7 +2184,7 @@ mod tests {
         else {
             panic!("run")
         };
-        assert_eq!(named.brief_text.as_deref(), Some("Named brief"));
+        assert_eq!(named.brief_text, ["Named brief"]);
         invalid(&["run", "explore", "positional", "--brief", "named"]);
         valid(&[
             "retry",
@@ -2239,8 +2243,30 @@ mod tests {
         valid(&["templates"]);
         valid(&["upgrade", "--verify", "--dry-run"]);
         valid(&[
-            "upgrade", "--verify", "--host", "peer-a", "--route", "junior",
+            "upgrade",
+            "--verify",
+            "--verify-host",
+            "peer-a",
+            "--route",
+            "junior",
         ]);
+        valid(&["upgrade", "--host", "all"]);
+        invalid(&["upgrade", "--hosts", "all"]);
+        valid(&["run", "task", "--brief", "one", "--brief", "two"]);
+        valid(&[
+            "run",
+            "task",
+            "--timeout",
+            "90s",
+            "--source",
+            "feature/topic",
+        ]);
+        valid(&["config", "explain", "domains.wait.advance"]);
+        valid(&["tick", "--task", "graphs"]);
+        valid(&["retire", "graph:example"]);
+        valid(&["ci", "patch", "pr", "17", "--apply"]);
+        valid(&["lane", "share", "refuse"]);
+        valid(&["queue", "hold", "issue:17"]);
         invalid(&["upgrade", "--dry-run"]);
         valid(&[
             "templates",
@@ -2255,6 +2281,80 @@ mod tests {
         valid(&["run", "task", "--plan", "example"]);
         for flag in ["--preset", "--prompt-file", "--manifest"] {
             invalid(&["run", "task", flag, "example"]);
+        }
+    }
+
+    #[test]
+    fn common_host_and_timeout_options_parse_on_owned_verbs() {
+        let cases: &[&[&str]] = &[
+            &["status", "--host", "host-a", "--timeout", "90s"],
+            &["output", "task", "--host", "host-a", "--timeout", "10m"],
+            &["result", "task", "--host", "host-a", "--timeout", "2h"],
+            &["events", "--host", "host-a", "--timeout", "90s"],
+            &["wait", "task", "--host", "host-a", "--timeout", "10m"],
+            &["gc", "--host", "host-a", "--timeout", "2h"],
+            &["run", "task", "--host", "host-a", "--timeout", "90s"],
+            &["upgrade", "--host", "all", "--timeout", "10m"],
+            &[
+                "ci",
+                "failures",
+                "--pr",
+                "12",
+                "--host",
+                "host-a",
+                "--timeout",
+                "2h",
+            ],
+            &[
+                "ci",
+                "failures",
+                "pr",
+                "12",
+                "--host",
+                "host-a",
+                "--timeout",
+                "90s",
+            ],
+            &[
+                "ci",
+                "patch",
+                "pr",
+                "12",
+                "--apply",
+                "--host",
+                "host-a",
+                "--timeout",
+                "10m",
+            ],
+            &[
+                "retire",
+                "graph:graph-a",
+                "--host",
+                "host-a",
+                "--timeout",
+                "2h",
+            ],
+            &[
+                "queue",
+                "hold",
+                "issue:12",
+                "--host",
+                "host-a",
+                "--timeout",
+                "90s",
+            ],
+            &[
+                "queue",
+                "--host",
+                "all",
+                "--timeout",
+                "10m",
+                "hold",
+                "issue:12",
+            ],
+        ];
+        for words in cases {
+            valid(words);
         }
     }
     #[test]
@@ -3320,7 +3420,7 @@ mod tests {
             };
             assert_eq!(
                 crate::wait::Settings::default().timeout(
-                    wait.timeout,
+                    wait.common.timeout.map(|timeout| timeout.seconds()),
                     &crate::wait::Origin::compiled(Default::default())
                 ),
                 provenant_core::MAX_LANE_RUNTIME_SECONDS

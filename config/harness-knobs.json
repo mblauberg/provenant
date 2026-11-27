@@ -36,6 +36,7 @@
       "domains.pr.land.batch_size",
       "domains.pr.land.gate.checks",
       "domains.pr.land.gate.timeout_seconds",
+      "domains.wait.timeout_seconds",
       "domains.wait.pr_complete_timeout_seconds",
       "domains.pr.land.local_gate.mode",
       "domains.pr.land.local_gate.commands",
@@ -53,7 +54,63 @@
       "domains.adapter.capabilities.measurement_records",
       "providers.codex.clean_config",
       "gc.graph_checkpoint_days",
-      "session.digest.scope"
+      "session.digest.scope",
+      "domains.tick.tasks.settlement.budget_seconds",
+      "domains.tick.tasks.settlement.enabled",
+      "domains.tick.tasks.graphs.budget_seconds",
+      "domains.tick.tasks.graphs.enabled",
+      "domains.tick.tasks.forge_events.budget_seconds",
+      "domains.tick.tasks.forge_events.enabled",
+      "domains.tick.tasks.steward.budget_seconds",
+      "domains.tick.tasks.steward.enabled",
+      "domains.tick.tasks.gc.budget_seconds",
+      "domains.tick.tasks.gc.enabled",
+      "domains.tick.subject_budget_seconds",
+      "domains.tick.concurrency",
+      "domains.wait.advance",
+      "domains.wait.advance_budget_ms",
+      "domains.wait.max_timeout_seconds",
+      "domains.fabric.project_projection",
+      "policy.default",
+      "domains.review.later_rounds",
+      "domains.review.adjudicator_route",
+      "domains.review.accept_below",
+      "domains.review.evidence_retries",
+      "domains.review.lens_retry",
+      "domains.review.acceptance",
+      "routing.pin",
+      "domains.cli.timeouts.status",
+      "domains.cli.timeouts.output",
+      "domains.cli.timeouts.result",
+      "domains.cli.timeouts.events",
+      "domains.cli.timeouts.gc",
+      "domains.cli.timeouts.ci",
+      "domains.cli.timeouts.run",
+      "domains.cli.timeouts.upgrade",
+      "domains.cli.collapse_warnings",
+      "domains.ci.generated_patch",
+      "domains.install.lock_wait_seconds",
+      "domains.install.quiesce_seconds",
+      "domains.fabric.queue.conflict_strategy",
+      "domains.fabric.queue.rerun_cancelled",
+      "domains.fabric.queue.head_binding.push_lag",
+      "domains.fabric.queue.head_binding.resync",
+      "domains.fabric.queue.head_binding.resync_after",
+      "domains.fabric.queue.ci_wait.wall",
+      "domains.fabric.queue.ci_wait.poll_floor",
+      "domains.fabric.queue.infra_retry.push",
+      "domains.fabric.queue.infra_retry.launch",
+      "domains.fabric.queue.infra_retry.backoff",
+      "domains.fabric.queue.infra_retry.factor",
+      "domains.pr.land.enabled",
+      "lanes.worktree.sharing",
+      "domains.fabric.lanes.lease_unreachable_seconds",
+      "domains.fabric.lanes.index_lock_retries",
+      "lanes.context_max_bytes",
+      "lanes.destination.write",
+      "lanes.carry_uncommitted",
+      "lanes.launch.mode",
+      "domains.run.launch_warn_ms"
   ],
   "host_gc_settings": {
     "path": "gc",
@@ -1326,6 +1383,352 @@
       "reader": "tools/front-door/crates/cli/src/run/provider/confinement.rs",
       "effect": "Whether a lane runs under the operating-system sandbox. auto (default) and off run unsandboxed unless the user configured a sandboxed route or selected lanes.sandbox_floor=strict for an explicitly sandboxed parent. on opts into sandboxing. An inherited operating-system sandbox remains effective. Unsupported hosts warn and proceed without a sandbox; the requested and effective mode and source remain visible. Set per run with --sandbox or --no-sandbox, per node with attempt.sandbox, or in the host [knobs].",
       "trade_off": "Unsandboxed lanes work like the same CLI started by hand: they share host build caches and services, and can read on-disk credential stores and write outside their worktree. Host access inherits the host environment; isolated access strips hosted-cloud keys and sandboxed isolated lanes use a minimal environment. Git delivery stays host-owned with one writer per worktree, and host_policy path denials apply only to sandboxed lanes. A sandboxed lane reads domains.run.sandbox_cache_reads and never writes there."
+    },
+    "domains.tick.tasks.settlement.budget_seconds": {
+      "type": "int",
+      "default": 30,
+      "status": "declared",
+      "effect": "Per-task wall-clock budget for this tick worker, in seconds."
+    },
+    "domains.tick.tasks.settlement.enabled": {
+      "type": "bool",
+      "default": true,
+      "status": "declared",
+      "effect": "Whether this tick worker is scheduled."
+    },
+    "domains.tick.tasks.graphs.budget_seconds": {
+      "type": "int",
+      "default": 60,
+      "status": "declared",
+      "effect": "Per-task wall-clock budget for this tick worker, in seconds."
+    },
+    "domains.tick.tasks.graphs.enabled": {
+      "type": "bool",
+      "default": true,
+      "status": "declared",
+      "effect": "Whether this tick worker is scheduled."
+    },
+    "domains.tick.tasks.forge_events.budget_seconds": {
+      "type": "int",
+      "default": 30,
+      "status": "declared",
+      "effect": "Per-task wall-clock budget for this tick worker, in seconds."
+    },
+    "domains.tick.tasks.forge_events.enabled": {
+      "type": "bool",
+      "default": true,
+      "status": "declared",
+      "effect": "Whether this tick worker is scheduled."
+    },
+    "domains.tick.tasks.steward.budget_seconds": {
+      "type": "int",
+      "default": 30,
+      "status": "declared",
+      "effect": "Per-task wall-clock budget for this tick worker, in seconds."
+    },
+    "domains.tick.tasks.steward.enabled": {
+      "type": "bool",
+      "default": true,
+      "status": "declared",
+      "effect": "Whether this tick worker is scheduled."
+    },
+    "domains.tick.tasks.gc.budget_seconds": {
+      "type": "int",
+      "default": 5,
+      "status": "declared",
+      "effect": "Per-task wall-clock budget for this tick worker, in seconds."
+    },
+    "domains.tick.tasks.gc.enabled": {
+      "type": "bool",
+      "default": true,
+      "status": "declared",
+      "effect": "Whether this tick worker is scheduled."
+    },
+    "domains.tick.subject_budget_seconds": {
+      "type": "int",
+      "default": 10,
+      "status": "declared",
+      "effect": "Maximum time spent advancing one graph or queue subject during a tick pass."
+    },
+    "domains.tick.concurrency": {
+      "type": "int",
+      "default": 4,
+      "status": "declared",
+      "effect": "Maximum number of independent tick task workers running at once."
+    },
+    "domains.wait.advance": {
+      "type": "enum",
+      "values": ["on", "off"],
+      "default": "on",
+      "status": "declared",
+      "effect": "Whether named read commands advance due work before returning."
+    },
+    "domains.wait.advance_budget_ms": {
+      "type": "int",
+      "default": 2000,
+      "status": "declared",
+      "effect": "Maximum time a named status or output read spends advancing its subject, in milliseconds."
+    },
+    "domains.fabric.project_projection": {
+      "type": "enum",
+      "values": ["auto", "locate", "mirror"],
+      "default": "auto",
+      "status": "declared",
+      "effect": "How a peer resolves a project for reads: locate it, mirror a snapshot, or try both."
+    },
+    "policy.default": {
+      "type": "enum",
+      "values": ["off", "warn", "refuse"],
+      "default": "warn",
+      "status": "declared",
+      "effect": "Default strength for configurable policy checks."
+    },
+    "domains.review.later_rounds": {
+      "type": "enum",
+      "values": ["delta", "full"],
+      "default": "delta",
+      "status": "declared",
+      "effect": "Review later rounds against the changed head and unresolved findings, or the full head."
+    },
+    "domains.review.adjudicator_route": {
+      "type": "string",
+      "default": "principal",
+      "status": "declared",
+      "effect": "Route used for one adjudication lane when reviewers split on the same head."
+    },
+    "domains.review.accept_below": {
+      "type": "enum",
+      "values": ["nit", "low", "medium", "high", "blocking"],
+      "default": "high",
+      "status": "declared",
+      "effect": "Highest severity of an open finding that can be accepted after exact-head CI and review requirements pass."
+    },
+    "domains.review.evidence_retries": {
+      "type": "int",
+      "default": 2,
+      "status": "declared",
+      "effect": "Retries for missing or malformed review evidence on the same route and head."
+    },
+    "domains.review.lens_retry": {
+      "type": "int",
+      "default": 1,
+      "status": "declared",
+      "effect": "Retries for an unavailable review lens on a later eligible route."
+    },
+    "domains.review.acceptance": {
+      "type": "enum",
+      "values": ["review", "ci"],
+      "default": "review",
+      "status": "declared",
+      "effect": "Evidence required for delivery acceptance."
+    },
+    "routing.pin": {
+      "type": "enum",
+      "values": ["tier", "family", "exact"],
+      "default": "family",
+      "status": "declared",
+      "effect": "Fallback scope for an unavailable model route."
+    },
+    "domains.cli.timeouts.status": {
+      "type": "int",
+      "default": 30,
+      "status": "declared",
+      "effect": "Default whole-command deadline in seconds."
+    },
+    "domains.cli.timeouts.output": {
+      "type": "int",
+      "default": 30,
+      "status": "declared",
+      "effect": "Default whole-command deadline in seconds."
+    },
+    "domains.cli.timeouts.result": {
+      "type": "int",
+      "default": 30,
+      "status": "declared",
+      "effect": "Default whole-command deadline in seconds."
+    },
+    "domains.cli.timeouts.events": {
+      "type": "int",
+      "default": 30,
+      "status": "declared",
+      "effect": "Default whole-command deadline in seconds."
+    },
+    "domains.cli.timeouts.gc": {
+      "type": "int",
+      "default": 300,
+      "status": "declared",
+      "effect": "Default whole-command deadline in seconds."
+    },
+    "domains.cli.timeouts.ci": {
+      "type": "int",
+      "default": 120,
+      "status": "declared",
+      "effect": "Default whole-command deadline in seconds."
+    },
+    "domains.cli.timeouts.run": {
+      "type": "int",
+      "default": 1800,
+      "status": "declared",
+      "effect": "Default whole-command deadline in seconds."
+    },
+    "domains.cli.timeouts.upgrade": {
+      "type": "int",
+      "default": 1200,
+      "status": "declared",
+      "effect": "Default whole-command deadline in seconds."
+    },
+    "domains.cli.collapse_warnings": {
+      "type": "enum",
+      "values": ["on", "off"],
+      "default": "on",
+      "status": "declared",
+      "effect": "Collapse repeated warnings in human output while retaining bounded instances in JSON."
+    },
+    "domains.ci.generated_patch": {
+      "type": "enum",
+      "values": ["off", "offer", "apply"],
+      "default": "offer",
+      "status": "declared",
+      "effect": "Policy for generated-file patches produced by CI."
+    },
+    "domains.install.lock_wait_seconds": {
+      "type": "int",
+      "default": 120,
+      "status": "declared",
+      "effect": "Maximum time to wait for the install lock before reporting its holder."
+    },
+    "domains.install.quiesce_seconds": {
+      "type": "int",
+      "default": 300,
+      "status": "declared",
+      "effect": "Maximum time to wait for graph, queue and custody locks to drain before store migration."
+    },
+    "domains.fabric.queue.conflict_strategy": {
+      "type": "enum",
+      "values": ["merge", "rebase"],
+      "default": "merge",
+      "status": "declared",
+      "effect": "Strategy used to resolve integration conflicts."
+    },
+    "domains.fabric.queue.rerun_cancelled": {
+      "type": "bool",
+      "default": true,
+      "status": "declared",
+      "effect": "Whether the CI gate reruns a cancelled check without spending a review round."
+    },
+    "domains.fabric.queue.head_binding.push_lag": {
+      "type": "int",
+      "default": 900,
+      "status": "declared",
+      "effect": "Maximum wait for a pushed head to appear in the pull request, in seconds."
+    },
+    "domains.fabric.queue.head_binding.resync": {
+      "type": "enum",
+      "values": ["reopen", "off"],
+      "default": "reopen",
+      "status": "declared",
+      "effect": "Pull request event that permits one recorded head resynchronisation."
+    },
+    "domains.fabric.queue.head_binding.resync_after": {
+      "type": "int",
+      "default": 300,
+      "status": "declared",
+      "effect": "Minimum age before reopening a stale pull request head binding, in seconds."
+    },
+    "domains.fabric.queue.ci_wait.wall": {
+      "type": "int",
+      "default": 14400,
+      "status": "declared",
+      "effect": "Maximum wall time spent waiting for CI, in seconds."
+    },
+    "domains.fabric.queue.ci_wait.poll_floor": {
+      "type": "int",
+      "default": 60,
+      "status": "declared",
+      "effect": "Minimum interval between CI observations, in seconds."
+    },
+    "domains.fabric.queue.infra_retry.push": {
+      "type": "int",
+      "default": 3,
+      "status": "declared",
+      "effect": "Maximum retry count for transient pushes."
+    },
+    "domains.fabric.queue.infra_retry.launch": {
+      "type": "int",
+      "default": 3,
+      "status": "declared",
+      "effect": "Maximum retry count for transient lane launches."
+    },
+    "domains.fabric.queue.infra_retry.backoff": {
+      "type": "int",
+      "default": 20,
+      "status": "declared",
+      "effect": "Initial infrastructure retry delay, in seconds."
+    },
+    "domains.fabric.queue.infra_retry.factor": {
+      "type": "int",
+      "default": 2,
+      "status": "declared",
+      "effect": "Multiplier for each subsequent infrastructure retry delay."
+    },
+    "domains.pr.land.enabled": {
+      "type": "enum",
+      "values": ["on", "off"],
+      "default": "off",
+      "status": "declared",
+      "effect": "Host-only authority to land an accepted pull request.",
+      "host_only": true
+    },
+    "lanes.worktree.sharing": {
+      "type": "enum",
+      "values": ["allow", "warn", "refuse"],
+      "default": "warn",
+      "status": "declared",
+      "effect": "Behaviour when a second live writer shares a worktree."
+    },
+    "domains.fabric.lanes.lease_unreachable_seconds": {
+      "type": "int",
+      "default": 900,
+      "status": "declared",
+      "effect": "Time an unreachable lease holder remains live before its lease lapses, in seconds."
+    },
+    "domains.fabric.lanes.index_lock_retries": {
+      "type": "int",
+      "default": 5,
+      "status": "declared",
+      "effect": "Number of retries after a Git index lock conflict."
+    },
+    "lanes.context_max_bytes": {
+      "type": "int",
+      "default": 262144,
+      "status": "declared",
+      "effect": "Combined byte limit for explicitly supplied context files and shared notes."
+    },
+    "lanes.destination.write": {
+      "type": "enum",
+      "values": ["auto", "parent", "new"],
+      "default": "auto",
+      "status": "declared",
+      "effect": "Writer destination selection for a lane launch."
+    },
+    "lanes.carry_uncommitted": {
+      "type": "enum",
+      "values": ["off", "tracked", "all"],
+      "default": "tracked",
+      "status": "declared",
+      "effect": "Which chair edits are carried into a new writer worktree."
+    },
+    "lanes.launch.mode": {
+      "type": "string",
+      "default": "template",
+      "status": "declared",
+      "effect": "Whether a lane runs inline or as a handle; template shape supplies the default."
+    },
+    "domains.run.launch_warn_ms": {
+      "type": "int",
+      "default": 10000,
+      "status": "declared",
+      "effect": "Launch duration above which a warning is emitted, in milliseconds."
     }
   },
   "presets": {

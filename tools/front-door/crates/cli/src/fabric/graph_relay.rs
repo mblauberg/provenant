@@ -1037,8 +1037,16 @@ fn serve_authorised(
         && let Some(owner) = checkpoint.nodes.iter_mut().find(|row| row.id == parent)
     {
         for warning in warnings.iter().filter_map(Value::as_str) {
-            if owner.warnings.len() < 64 && !owner.warnings.iter().any(|old| old == warning) {
-                owner.warnings.push(warning.to_owned());
+            if owner.warnings.len() < 64 && !owner.warnings.iter().any(|old| old.message == warning)
+            {
+                owner.warnings.push(Warning::new(
+                    provenant_records::warning::LEGACY_WARNING,
+                    warning,
+                    provenant_records::Source {
+                        layer: provenant_records::Layer::Detected,
+                        origin: Some("legacy graph warning".to_owned()),
+                    },
+                ));
             }
         }
     }

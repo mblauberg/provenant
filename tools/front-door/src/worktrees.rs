@@ -1189,6 +1189,7 @@ pub(crate) fn scheduled_gc(
     home: Option<&Path>,
 ) -> Result<GcCompletion, String> {
     let command = Gc {
+        common: Default::default(),
         scheduled: true,
         pressure: false,
         free_floor: None,
@@ -2295,6 +2296,7 @@ pub(crate) fn retention_event(
                     }
                     SubjectKind::Path => path == Path::new(&subject.id),
                     SubjectKind::Branch => branch == Some(subject.id.as_str()),
+                    SubjectKind::Project => false,
                     _ => false,
                 })
             })?;
@@ -5162,8 +5164,8 @@ mod gc_subpass_removal_tests {
             .expect("a typed forge refusal warning");
         assert!(warning.message.contains("alpha"), "{}", warning.message);
         assert!(warning.message.contains("beta"), "{}", warning.message);
-        let repair = warning.repair.as_deref().expect("an actionable repair");
-        assert!(repair.contains("git.remote"), "{repair}");
+        let next = warning.next.first().expect("next").display_text();
+        assert!(next.contains("git.remote"), "{next}");
     }
 
     #[test]

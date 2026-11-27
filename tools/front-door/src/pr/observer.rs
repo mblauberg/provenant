@@ -18,6 +18,7 @@ use super::gh::Response;
 use super::gh::rate_limit_reset;
 use provenant_config::ports::Request;
 use provenant_config::{Forge, ForgePort};
+use provenant_core::GitOid;
 pub(crate) mod journal;
 mod port;
 mod retry;
@@ -113,6 +114,38 @@ impl MergeState {
 pub(crate) struct PrCause {
     pub code: &'static str,
     pub next: String,
+}
+
+/// One immutable, head-bound reading for queue and landing decisions.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[allow(dead_code)]
+pub(crate) struct HeadReading {
+    pub expected_head: GitOid,
+    pub branch_ref: Option<String>,
+    pub pr_head: Option<GitOid>,
+    pub mergeable: MergeState,
+    pub required: Vec<Check>,
+    pub observed_at: jiff::Timestamp,
+    pub complete: bool,
+    pub pending_reason: Option<String>,
+    pub retry_at: Option<jiff::Timestamp>,
+}
+
+/// Contract stub for the batch's single head-bound CI reader. It performs no
+/// forge I/O and marks the observation incomplete until the reader is wired.
+#[allow(dead_code)]
+pub(crate) fn observe_head(_repo: &str, _pr: u64, expected: GitOid) -> HeadReading {
+    HeadReading {
+        expected_head: expected,
+        branch_ref: None,
+        pr_head: None,
+        mergeable: MergeState::Unknown,
+        required: Vec::new(),
+        observed_at: WallClock.now(),
+        complete: false,
+        pending_reason: Some("head observation is not wired".into()),
+        retry_at: None,
+    }
 }
 
 /// Read mergeability from one PR resource. GraphQL `mergeable` and

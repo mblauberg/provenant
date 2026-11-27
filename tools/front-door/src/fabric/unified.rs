@@ -1129,7 +1129,10 @@ pub(crate) fn status_summary(rows: &[Value]) -> provenant_cli::Summary {
 
 fn append_status_warnings(line: &mut String, row: &Value) {
     if let Some(warnings) = row["warnings"].as_array() {
-        for warning in warnings.iter().filter_map(Value::as_str) {
+        for warning in warnings
+            .iter()
+            .filter_map(|warning| warning["message"].as_str())
+        {
             line.push_str(&format!(
                 "  warning: {}\n",
                 provenant_cli::bounded_text(warning, 2048)

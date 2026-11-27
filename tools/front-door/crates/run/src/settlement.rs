@@ -1571,8 +1571,12 @@ mod tests {
             })
             .collect();
         assert_eq!(stale.len(), 1, "{warnings:?}");
-        let repair = stale[0].repair.as_deref().ok_or("missing remedy")?;
-        assert!(repair.ends_with("worktree prune"), "exact remedy: {repair}");
+        let next = stale[0]
+            .next
+            .first()
+            .ok_or("missing next step")?
+            .display_text();
+        assert!(next.ends_with("worktree prune"), "exact remedy: {next}");
         assert!(common.join("worktrees/other").exists());
         Ok(())
     }

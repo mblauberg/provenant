@@ -32,6 +32,7 @@ mod objects;
 mod overview;
 mod plan;
 mod pr_contribution;
+pub mod reclaim;
 pub use pr_contribution::{Contribution, Contributions, PullRequest, WEIGHT_ONE};
 pub mod reactions;
 pub use reactions::Reaction;

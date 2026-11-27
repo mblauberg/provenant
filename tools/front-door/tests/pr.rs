@@ -440,9 +440,9 @@ fn rest_merge_refusal(flag: &str, cause: &str, expected_message: &str) -> Result
     assert_eq!(report["data"]["steps"], serde_json::json!([]));
     assert_eq!(report["error"]["cause"], cause, "{report}");
     assert!(
-        report["error"]["repair"]
+        report["next"][0]["why"]
             .as_str()
-            .is_some_and(|repair| !repair.is_empty()),
+            .is_some_and(|why| !why.is_empty()),
         "{report}"
     );
     assert!(
@@ -510,7 +510,7 @@ fn land_refuses_a_draft_pull_request_before_gate_step() -> Result {
     assert_eq!(report["data"]["merged"], false, "{report}");
     assert_eq!(report["data"]["steps"], serde_json::json!([]));
     assert_eq!(report["error"]["cause"], "PR_DRAFT", "{report}");
-    assert_eq!(report["error"]["repair"], "gh pr ready 1668", "{report}");
+    assert_eq!(report["next"][0]["why"], "gh pr ready 1668", "{report}");
     assert!(
         report["error"]["message"]
             .as_str()

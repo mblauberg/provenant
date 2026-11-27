@@ -1,6 +1,6 @@
 //! The format-2 custody contract. Advisory ownership is never a writer lease.
 use crate::ExtraFields;
-use provenant_core::{ActorId, AttemptId, HostId, ProjectId, WallTime};
+use provenant_core::{ActorId, AttemptId, GitOid, HostId, ProjectId, WallTime};
 use serde::{Deserialize, Serialize};
 
 /// The durable attempt generation bound to supervisor custody and diagnostics.
@@ -54,7 +54,7 @@ macro_rules! subject_kinds {
 }
 subject_kinds! {
     Graph => ("graph", false), Attempt => ("attempt", false), Branch => ("branch", false), Ref => ("ref", false), Worktree => ("worktree", false),
-    Pr => ("pr", false), Issue => ("issue", false), Path => ("path", true), CloudKey => ("cloud_key", false),
+    Pr => ("pr", false), Issue => ("issue", false), Project => ("project", false), Path => ("path", true), CloudKey => ("cloud_key", false),
 }
 impl std::fmt::Display for SubjectKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -164,6 +164,135 @@ impl Holder {
         })
     }
 }
+
+/// How a second writer is admitted when a worktree lease is live.
+/// `Inherit` means resolve the ordinary layered setting for a new lease.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Sharing {
+    #[default]
+    Inherit,
+    Allow,
+    Warn,
+    Refuse,
+}
+
+/// Durable worktree or branch custody. Whether this lease is live is derived
+/// from the holder's attempt state at read time and is never stored here.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorktreeLease {
+    pub holder: AttemptId,
+    pub since: WallTime,
+    #[serde(default)]
+    pub sharing: Sharing,
+}
+
+/// Current derived state of a lease. An unreachable holder remains live until
+/// the configured grace period expires; callers then classify it as lapsed.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum LeaseState {
+    Live { attempt_state: String },
+    Lapsed { attempt_state: String },
+    Unreachable { retry_at: WallTime },
+}
+
+/// Durable fact that a new attempt continued a lapsed lease.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Handover {
+    pub from: AttemptId,
+    pub to: AttemptId,
+    pub at: WallTime,
+    pub head: Option<GitOid>,
+    /// Paths left uncommitted by the previous holder; they must be preserved.
+    pub uncommitted: Vec<String>,
+}
+
+/// A lease record paired with its current, non-persisted holder classification.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LeaseObservation {
+    pub lease: WorktreeLease,
+    pub state: LeaseState,
+}
+
+/// Outcome of the shared writer-admission policy.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Admit {
+    Proceed { warning: Option<String> },
+    Refuse { holder: Option<AttemptId> },
+}
+
+/// Resolve the effect of an already-classified lease and sharing setting.
+/// This pure seam leaves warning/error rendering to the caller. Callers pass
+/// `Lapsed` for a terminal holder and `Live` while its attempt is nonterminal.
+pub fn admit_writer(tree: &Subject, lease: Option<&LeaseObservation>, sharing: Sharing) -> Admit {
+    let Some(observation) = lease else {
+        return Admit::Proceed { warning: None };
+    };
+    let effective_sharing = match observation.lease.sharing {
+        Sharing::Inherit => sharing,
+        owner_sharing => owner_sharing,
+    };
+    match &observation.state {
+        LeaseState::Lapsed { .. } => Admit::Proceed { warning: None },
+        LeaseState::Live { attempt_state } => match effective_sharing {
+            Sharing::Inherit | Sharing::Warn => Admit::Proceed {
+                warning: Some(format!(
+                    "WORKTREE_SHARED: {tree} is held by attempt {} ({attempt_state})",
+                    observation.lease.holder
+                )),
+            },
+            Sharing::Allow => Admit::Proceed { warning: None },
+            Sharing::Refuse => Admit::Refuse {
+                holder: Some(observation.lease.holder),
+            },
+        },
+        LeaseState::Unreachable { retry_at } => match effective_sharing {
+            Sharing::Inherit | Sharing::Warn => Admit::Proceed {
+                warning: Some(format!(
+                    "LEASE_HOLDER_UNREACHABLE: {tree} holder {} is unreachable until {retry_at}",
+                    observation.lease.holder
+                )),
+            },
+            Sharing::Allow => Admit::Proceed { warning: None },
+            Sharing::Refuse => Admit::Refuse {
+                holder: Some(observation.lease.holder),
+            },
+        },
+    }
+}
+
+/// Boundary guard signature for operations that could destroy another live
+/// lane's work. The caller supplies the already-resolved fact; no filesystem
+/// or Git mutation belongs in this records crate.
+pub fn guard_destructive(
+    op: &str,
+    subject: &Subject,
+    destroys_live_work: bool,
+    holder: Option<AttemptId>,
+) -> Result<(), crate::command_result::CommandError> {
+    if destroys_live_work {
+        let holder = holder
+            .map(|attempt| attempt.to_string())
+            .unwrap_or_default();
+        Err(crate::command_result::CommandError::new(
+            "DESTROYS_LIVE_WORK",
+            format!("{op} on {subject} would destroy work held by a live lane"),
+            Some(&holder),
+            if holder.is_empty() {
+                "identify and wait for the holder".to_owned()
+            } else {
+                format!("provenant wait {holder}")
+            },
+        )
+        .with_class(crate::command_result::ErrorClass::Boundary(
+            crate::policy::Boundary::OtherWork,
+        )))
+    } else {
+        Ok(())
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Origin {
@@ -1560,5 +1689,103 @@ mod tests {
                 subject
             );
         }
+    }
+
+    #[test]
+    fn writer_admission_obeys_live_lapsed_and_owner_sharing_rules() {
+        let holder = AttemptId::from_bytes([1; 16]);
+        let lease = WorktreeLease {
+            holder,
+            since: WallTime::from_micros(1).unwrap(),
+            sharing: Sharing::Inherit,
+        };
+        let tree = Subject::worktree("/fixture/tree", "generation-1");
+        let live = LeaseObservation {
+            lease: lease.clone(),
+            state: LeaseState::Live {
+                attempt_state: "running".into(),
+            },
+        };
+
+        assert!(matches!(
+            admit_writer(&tree, None, Sharing::Warn),
+            Admit::Proceed { warning: None }
+        ));
+        let Admit::Proceed {
+            warning: Some(warning),
+        } = admit_writer(&tree, Some(&live), Sharing::Warn)
+        else {
+            panic!("warn sharing should proceed with a warning");
+        };
+        assert!(warning.contains("WORKTREE_SHARED"));
+        assert!(warning.contains(&holder.to_string()));
+        assert!(matches!(
+            admit_writer(&tree, Some(&live), Sharing::Allow),
+            Admit::Proceed { warning: None }
+        ));
+        assert_eq!(
+            admit_writer(&tree, Some(&live), Sharing::Refuse),
+            Admit::Refuse {
+                holder: Some(holder)
+            }
+        );
+
+        let owner_refuse = LeaseObservation {
+            lease: WorktreeLease {
+                sharing: Sharing::Refuse,
+                ..lease.clone()
+            },
+            state: live.state.clone(),
+        };
+        assert_eq!(
+            admit_writer(&tree, Some(&owner_refuse), Sharing::Allow),
+            Admit::Refuse {
+                holder: Some(holder)
+            }
+        );
+        let unreachable = LeaseObservation {
+            lease: lease.clone(),
+            state: LeaseState::Unreachable {
+                retry_at: WallTime::from_micros(10).unwrap(),
+            },
+        };
+        let Admit::Proceed {
+            warning: Some(warning),
+        } = admit_writer(&tree, Some(&unreachable), Sharing::Warn)
+        else {
+            panic!("unreachable holder should remain live during its grace period");
+        };
+        assert!(warning.contains("LEASE_HOLDER_UNREACHABLE"));
+        let lapsed = LeaseObservation {
+            lease: lease.clone(),
+            state: LeaseState::Lapsed {
+                attempt_state: "stopped".into(),
+            },
+        };
+        assert!(matches!(
+            admit_writer(&tree, Some(&lapsed), Sharing::Refuse),
+            Admit::Proceed { warning: None }
+        ));
+
+        assert!(guard_destructive("checkout", &tree, false, None).is_ok());
+        let error = guard_destructive("checkout", &tree, true, Some(holder)).unwrap_err();
+        assert_eq!(error.code, "DESTROYS_LIVE_WORK");
+    }
+
+    #[test]
+    fn handover_fact_round_trips_with_preserved_paths() {
+        let handover = Handover {
+            from: AttemptId::from_bytes([1; 16]),
+            to: AttemptId::from_bytes([2; 16]),
+            at: WallTime::from_micros(123).unwrap(),
+            head: Some(GitOid::parse(&"ab".repeat(20)).unwrap()),
+            uncommitted: vec!["src/kept.rs".into(), "notes.txt".into()],
+        };
+        let value = serde_json::to_value(&handover).unwrap();
+        assert_eq!(
+            value["uncommitted"],
+            serde_json::json!(["src/kept.rs", "notes.txt"])
+        );
+        assert_eq!(serde_json::from_value::<Handover>(value).unwrap(), handover);
     }
 }

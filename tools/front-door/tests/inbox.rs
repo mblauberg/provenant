@@ -301,7 +301,7 @@ fn inbox_explicit_local_and_unconfigured_owner() -> Result {
             .contains("retry-answer")
     );
     assert!(
-        answer["error"]["repair"]
+        answer["next"][0]["why"]
             .as_str()
             .ok_or("repair")?
             .contains("--operation-id retry-answer")
@@ -325,7 +325,9 @@ fn inbox_explicit_local_and_unconfigured_owner() -> Result {
         None,
         3,
     )?;
-    let repair = generated["error"]["repair"].as_str().ok_or("repair")?;
+    let repair = generated["next"][0]["why"]
+        .as_str()
+        .ok_or("next condition")?;
     let operation = repair
         .split_once("--operation-id ")
         .ok_or("operation ID in repair")?

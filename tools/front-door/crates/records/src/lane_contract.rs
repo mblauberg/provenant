@@ -81,6 +81,45 @@ pub enum CommitChoice {
     OwnPaths,
 }
 
+/// Whether a lane launch runs inline or returns a handle immediately.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LaunchMode {
+    #[default]
+    Inline,
+    Handle,
+}
+
+/// Explicit context inputs for a native lane. Conversation history is not
+/// represented here: only named files and shared notes are opt-in inputs.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContextInputs {
+    #[serde(default)]
+    pub files: Vec<String>,
+    #[serde(default)]
+    pub notes: Vec<String>,
+}
+
+/// Which uncommitted files to carry when creating a new lane worktree.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CarryMode {
+    Off,
+    #[default]
+    Tracked,
+    All,
+}
+
+/// Writer destination resolved from the launch setting.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DestinationChoice {
+    #[default]
+    Auto,
+    Parent,
+    New,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChildLaunchRequest {
     pub parent_attempt: AttemptId,

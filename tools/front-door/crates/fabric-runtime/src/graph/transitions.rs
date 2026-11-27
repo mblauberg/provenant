@@ -134,13 +134,18 @@ pub(super) fn apply_launch_metadata(
     warnings: Vec<String>,
 ) {
     if !warnings.is_empty() {
-        checkpoint.nodes[node_index].warnings = warnings;
+        checkpoint.nodes[node_index].warnings =
+            warnings.into_iter().map(super::legacy_warning).collect();
     }
 }
 
 pub(super) fn apply_route(progress: &mut NodeProgress, applied_route: Option<GraphRoute>) {
     if let Some(route) = applied_route {
-        fn warn_value(warnings: &mut Vec<String>, field: &str, value: &serde_json::Value) {
+        fn warn_value(
+            warnings: &mut Vec<provenant_records::Warning>,
+            field: &str,
+            value: &serde_json::Value,
+        ) {
             match value {
                 serde_json::Value::String(value) => {
                     for (bad, reason) in [
@@ -151,8 +156,8 @@ pub(super) fn apply_route(progress: &mut NodeProgress, applied_route: Option<Gra
                         ),
                     ] {
                         let message = format!("route.{field} {reason}");
-                        if bad && !warnings.contains(&message) {
-                            warnings.push(message);
+                        if bad && !warnings.iter().any(|warning| warning.message == message) {
+                            warnings.push(super::legacy_warning(message));
                         }
                     }
                 }

@@ -276,7 +276,7 @@ pub(crate) fn pr_contribution_roundtrip() -> Result {
     let opened_warnings = warnings(&opened)?;
     assert!(opened_warnings.iter().any(|warning| {
         warning["code"] == "PR_CONTRIBUTION_BINDING_FAILED"
-            && warning["repair"]
+            && warning["next"][0]["why"]
                 .as_str()
                 .is_some_and(|repair| repair.contains("provenant pr contributions 1668 --bind"))
     }));

@@ -6,6 +6,43 @@ pub use provenant_records::Harness;
 use provenant_records::warning::{Warning, warn};
 use std::{ffi::OsString, path::PathBuf};
 
+/// Options shared by verbs that can be served by a peer and bounded by a deadline.
+#[derive(Clone, Debug, Default, Args)]
+pub struct CommonArgs {
+    /// Host that serves this command (repeatable; `all` aggregates across hosts)
+    #[arg(long = "host", global = true, value_parser = host_arg)]
+    pub host: Vec<HostArg>,
+    /// Bound the full command invocation (for example 90s, 10m or 2h)
+    #[arg(long, global = true, value_parser = parse_duration_arg)]
+    pub timeout: Option<DurationArg>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum HostArg {
+    All,
+    Named(String),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DurationArg(u64);
+
+impl DurationArg {
+    pub fn seconds(self) -> u64 {
+        self.0
+    }
+}
+
+fn parse_duration_arg(value: &str) -> Result<DurationArg, &'static str> {
+    positive_span_seconds(value).map(DurationArg)
+}
+
+fn host_arg(value: &str) -> Result<HostArg, String> {
+    if value == "all" {
+        return Ok(HostArg::All);
+    }
+    host_alias(value).map(HostArg::Named).map_err(str::to_owned)
+}
+
 #[derive(Debug, Parser)]
 #[command(name = "provenant", disable_help_subcommand = true)]
 pub(crate) struct RawInvocation {
@@ -119,6 +156,8 @@ pub enum Command {
     Wait(Wait),
     /// Replay project observations as JSON lines
     Events {
+        #[command(flatten)]
+        common: CommonArgs,
         /// Resume after this project sequence cursor
         #[arg(long, catalog_i64_range = 0..)]
         from: Option<i64>,
@@ -169,6 +208,8 @@ pub enum Command {
     /// Summarise a lane's handoff, branch, head and verification
     #[command(add = crate::metadata::CoreCommand(11, "provenant result fix-login/implement"))]
     Result {
+        #[command(flatten)]
+        common: CommonArgs,
         /// Graph, node or attempt, as NAME[/NODE[#N]]
         #[arg(value_name = "TARGET", catalog_graph_target())]
         target: Target,
@@ -196,6 +237,9 @@ pub enum Command {
     /// Deliver a settled writer attempt
     #[command(subcommand)]
     Lane(Lane),
+    /// Control delivery queue items
+    #[command(subcommand)]
+    Queue(QueueArgs),
     /// Settle open attempts, reclaim dead leases behind undecodable records, and report uncertain custody
     Reconcile(Reconcile),
     /// Report local usage and cost
@@ -228,7 +272,9 @@ pub enum Command {
     /// Collect lane caches, ignored output, merged worktrees and expired captures
     Gc(Gc),
     /// Advance due graphs and run scheduled host tasks
-    Tick,
+    Tick(TickArgs),
+    /// Retire an unreadable graph or fence an unreachable project
+    Retire(RetireArgs),
     /// Inspect disk use without changing files
     #[command(subcommand)]
     Disk(Disk),
@@ -610,6 +656,8 @@ pub enum Config {
         #[arg(long, default_value = "50", catalog_u64_range = 1..=500)]
         limit: u64,
     },
+    /// Explain the winning value and losing candidates for a setting key
+    Explain { key: String },
     /// Set `profile` (balanced or economy) or a registry knob such
     /// as `lanes.max_concurrency`.
     Set {
@@ -674,6 +722,8 @@ impl Access {
 }
 #[derive(Clone, Debug, Args)]
 pub struct GraphRunArgs {
+    #[command(flatten)]
+    pub common: CommonArgs,
     /// Template to run (see `provenant templates`)
     #[arg(catalog_required_unless = "file", conflicts_with = "file")]
     pub template: Option<String>,
@@ -681,8 +731,8 @@ pub struct GraphRunArgs {
     #[arg(conflicts_with_all = ["file", "brief_file", "brief_text"])]
     pub brief: Option<String>,
     /// Brief for the template (alternative to the positional brief)
-    #[arg(long = "brief", value_name = "TEXT", conflicts_with_all = ["file", "brief", "brief_file"])]
-    pub brief_text: Option<String>,
+    #[arg(long = "brief", value_name = "TEXT", action = clap::ArgAction::Append, conflicts_with_all = ["file", "brief", "brief_file"])]
+    pub brief_text: Vec<String>,
     /// Handle for the graph: `status`, `wait` and `output` take it. The same
     /// input under the same name finds its graph; changed input starts NAME-2.
     #[arg(long, value_parser = graph_name)]
@@ -693,9 +743,6 @@ pub struct GraphRunArgs {
     /// Standing lane rules to append to every lane's preamble as its launch layer
     #[arg(long = "preamble-file", value_name = "PATH")]
     pub preamble_file: Option<PathBuf>,
-    /// Place attempts on this peer name or host ID
-    #[arg(long)]
-    pub host: Option<String>,
     /// Use this exact adapter/model instead of a route; a bare model name works when one provider offers it
     #[arg(long, conflicts_with = "route")]
     pub model: Option<String>,
@@ -713,8 +760,8 @@ pub struct GraphRunArgs {
     /// Access for a plain task; writer targets imply worktree-write
     #[arg(long, value_parser = ["read-only", "worktree-write"])]
     pub mode: Option<String>,
-    /// Tree a read-only task reads: the fetched upstream head, or the local checkout
-    #[arg(long, value_parser = ["upstream", "local"])]
+    /// Tree a read-only task reads: the checkout, default branch, or automatic choice
+    #[arg(long)]
     pub source: Option<String>,
     /// Existing writer worktree
     #[arg(long, conflicts_with = "branch")]
@@ -737,6 +784,15 @@ pub struct GraphRunArgs {
     /// Copy the node over comma-separated items, or a resolver such as @review-panel
     #[arg(long, value_delimiter = ',')]
     pub over: Vec<String>,
+    /// Adopt a pull request or branch as a delivery queue item
+    #[arg(long, value_name = "pr:N|branch:B")]
+    pub adopt: Option<String>,
+    /// Priority for queue submission
+    #[arg(long)]
+    pub priority: Option<i32>,
+    /// Batch manifest for `deliver.batch`
+    #[arg(long, value_name = "FILE")]
+    pub batch: Option<PathBuf>,
     /// Bind a template parameter or attempt.FIELD (NAME=VALUE), typed by its
     /// declaration: a string as written, a number or boolean as that type, a
     /// list or table as TOML; repeatable
@@ -751,6 +807,36 @@ pub struct GraphRunArgs {
     /// Let this child outlive parent and graph cancellation (inside a lane only)
     #[arg(long)]
     pub detached: bool,
+    /// Wait for this inline launch to settle
+    #[arg(long, conflicts_with = "no_wait")]
+    pub wait: bool,
+    /// Return after launch without waiting
+    #[arg(long, conflicts_with = "wait")]
+    pub no_wait: bool,
+    /// Inline context files (repeatable)
+    #[arg(long = "context", value_name = "FILE")]
+    pub context: Vec<PathBuf>,
+    /// Shared note names to inline (repeatable)
+    #[arg(long = "notes", value_name = "NAME")]
+    pub notes: Vec<String>,
+    /// Raise only refusable checks to refuse
+    #[arg(long)]
+    pub strict: bool,
+    /// Check policy override
+    #[arg(long, value_parser = ["on", "off", "warn", "refuse"])]
+    pub checks: Option<String>,
+    /// Set the standard isolated-lane bundle
+    #[arg(long)]
+    pub isolated: bool,
+    /// Writer destination choice
+    #[arg(long, value_parser = ["auto", "parent", "new"])]
+    pub destination: Option<String>,
+    /// Commit only the lane's own changed paths
+    #[arg(long, value_parser = ["own"])]
+    pub commit: Option<String>,
+    /// Behaviour when another live writer holds the worktree
+    #[arg(long = "worktree-sharing", value_parser = ["allow", "warn", "refuse"])]
+    pub worktree_sharing: Option<String>,
     /// Run the lane under the macOS sandbox (sets attempt.sandbox = "on")
     #[arg(long, conflicts_with = "no_sandbox")]
     pub sandbox: bool,
@@ -807,6 +893,8 @@ pub enum Part {
 }
 #[derive(Clone, Debug, Args)]
 pub struct Output {
+    #[command(flatten)]
+    pub common: CommonArgs,
     /// Output source, as NAME[/NODE[#N]]; composites expose their declared result
     #[arg(value_name = "TARGET", catalog_graph_target())]
     pub target: Target,
@@ -947,6 +1035,56 @@ pub enum Lane {
         #[arg(long)]
         accept_review: bool,
     },
+    /// Set the owning lane's worktree sharing rule
+    Share {
+        #[arg(value_parser = ["allow", "warn", "refuse"])]
+        mode: String,
+    },
+}
+
+#[derive(Clone, Debug, Subcommand)]
+pub enum Queue {
+    /// Hold an item after reconciling any in-flight effect
+    Hold {
+        item: String,
+        #[arg(long)]
+        reason: Option<String>,
+    },
+    /// Resume a held item
+    Resume {
+        item: String,
+        #[arg(long)]
+        stage: Option<String>,
+    },
+    /// Set an item's scheduling priority
+    Prioritise { item: String, priority: i32 },
+    /// List queue items
+    Status {
+        #[arg(long)]
+        parked: bool,
+    },
+    /// Accept the named findings for an item
+    Accept {
+        item: String,
+        #[arg(long = "findings", value_name = "FILE", required = true)]
+        findings: PathBuf,
+    },
+    /// Request a fix from the named findings for an item
+    Fix {
+        item: String,
+        #[arg(long = "findings", value_name = "FILE", required = true)]
+        findings: PathBuf,
+    },
+    /// Drop an item
+    Drop { item: String },
+}
+
+#[derive(Clone, Debug, Args)]
+pub struct QueueArgs {
+    #[command(flatten)]
+    pub common: CommonArgs,
+    #[command(subcommand)]
+    pub action: Queue,
 }
 #[derive(Clone, Debug, Subcommand)]
 pub enum Native {
@@ -1168,6 +1306,8 @@ pub enum Disk {
 }
 #[derive(Clone, Debug, Args)]
 pub struct Gc {
+    #[command(flatten)]
+    pub common: CommonArgs,
     /// Run for registered projects from the scheduled per-user agent
     #[arg(long, hide = true)]
     pub scheduled: bool,
@@ -1461,6 +1601,8 @@ pub(crate) fn observation_wait_seconds(value: &str) -> Result<u64, &'static str>
 }
 #[derive(Clone, Debug, Args)]
 pub struct Status {
+    #[command(flatten)]
+    pub common: CommonArgs,
     /// Active custody of this chair and unattended items, across projects unless --project is set
     #[arg(long, conflicts_with_all = ["targets", "session_stream", "all", "adoptable"])]
     pub mine: bool,
@@ -1502,6 +1644,8 @@ pub enum PrWaitUntil {
 /// `wait`: block until graph work or pull requests settle.
 #[derive(Clone, Debug, Args)]
 pub struct Wait {
+    #[command(flatten)]
+    pub common: CommonArgs,
     /// Graphs, nodes or attempts (NAME[/NODE[#N]]); this project's running
     /// graphs when neither a target nor --pr is given
     #[arg(value_name = "TARGET", catalog_graph_target())]
@@ -1527,9 +1671,34 @@ pub struct Wait {
     /// Print one line per transition until the wait ends
     #[arg(long)]
     pub follow: bool,
-    /// Wait budget (default domains.wait.timeout_seconds, or domains.wait.pr_complete_timeout_seconds with --pr --until complete; clamped to domains.wait.max_timeout_seconds)
-    #[arg(long, value_name = "SPAN", value_parser = positive_span_seconds, catalog_bounds = (1, u64::MAX))]
-    pub timeout: Option<u64>,
+}
+
+#[derive(Clone, Debug, Args)]
+pub struct TickArgs {
+    #[command(flatten)]
+    pub common: CommonArgs,
+    /// Limit this pass to selected tasks (repeatable)
+    #[arg(long = "task", value_name = "TASK", value_parser = ["settlement", "graphs", "forge_events", "gc", "steward"])]
+    pub task: Vec<String>,
+}
+
+#[derive(Clone, Debug, Args)]
+pub struct RetireArgs {
+    #[command(flatten)]
+    pub common: CommonArgs,
+    /// Graph or project, as graph:ID or project:ID
+    #[arg(value_name = "SUBJECT", value_parser = retire_subject)]
+    pub subject: String,
+}
+
+fn retire_subject(value: &str) -> Result<String, String> {
+    let (kind, id) = value
+        .split_once(':')
+        .ok_or_else(|| "expected graph:ID or project:ID".to_owned())?;
+    if !matches!(kind, "graph" | "project") || id.is_empty() {
+        return Err("expected graph:ID or project:ID".into());
+    }
+    Ok(value.to_owned())
 }
 /// `trace`: a graph's revisions and attempt timeline.
 #[derive(Clone, Debug, Args)]

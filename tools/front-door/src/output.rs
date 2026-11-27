@@ -84,8 +84,11 @@ impl CommandSink {
     /// Spec: docs/specs/cli.md#warnings-are-typed-values
     fn display_with(&self, warning: Warning, err: &mut dyn Write) {
         let delivered = writeln!(err, "warning: {}", warning.message).is_ok();
-        if let Some(repair) = warning.repair.as_deref() {
-            let _ = writeln!(err, "  repair: {repair}");
+        for next in &warning.next {
+            let text = next.display_text();
+            if !text.is_empty() {
+                let _ = writeln!(err, "  next: {text}");
+            }
         }
         if delivered {
             remember_for_change(&warning);

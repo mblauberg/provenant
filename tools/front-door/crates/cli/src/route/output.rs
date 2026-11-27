@@ -392,7 +392,7 @@ pub fn run(
                     next.to_owned()
                 });
             let mut command_error = CommandError::new(code, error.to_string(), None, repair);
-            command_error.diagnostic = diagnostic;
+            command_error.set_diagnostic(diagnostic);
             result.error = Some(command_error);
             result
         }

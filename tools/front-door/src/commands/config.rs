@@ -23,6 +23,11 @@ pub static DOMAIN: Domain = Domain {
             run,
         },
         Verb {
+            path: &["config", "explain"],
+            stability: Stability::Evolving,
+            run,
+        },
+        Verb {
             path: &["config", "history"],
             stability: Stability::Evolving,
             run,
@@ -63,6 +68,12 @@ pub static DOMAIN: Domain = Domain {
 fn run(inv: &Call) -> Result<Outcome, CommandError> {
     let globals = inv.globals;
     let command = inv.command.clone();
+    if matches!(
+        &command,
+        Command::Config(provenant_cli::Config::Explain { .. })
+    ) {
+        return crate::commands::not_implemented(inv.leaf);
+    }
     let status = match command {
         Command::Config(provenant_cli::Config::Ports) => {
             crate::config_command("config ports", crate::ConfigAction::Ports, globals)

@@ -17,7 +17,10 @@ fn run(inv: &Call) -> Result<Outcome, CommandError> {
     let globals = inv.globals;
     let process = inv.process;
     let status = match inv.command {
-        Command::Tick => crate::tick::run(globals, process.workers()),
+        Command::Tick(args) if !args.task.is_empty() => {
+            return crate::commands::not_implemented("tick --task");
+        }
+        Command::Tick(_) => crate::tick::run(globals, process.workers()),
         _ => return crate::commands::mismatched(),
     };
     crate::commands::rendered(status)

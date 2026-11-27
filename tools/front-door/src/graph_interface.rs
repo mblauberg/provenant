@@ -295,7 +295,7 @@ fn invoke(
                 None,
                 &repair,
             );
-            error.diagnostic = Some(projection.as_ref().into());
+            error.set_diagnostic(Some(projection.as_ref().into()));
             result.error = Some(error);
             return crate::emit(&result, globals, "", false);
         }
@@ -504,7 +504,7 @@ fn invoke(
                 Some(cause.as_str()),
                 &repair,
             );
-            error.diagnostic = Some((&projection).into());
+            error.set_diagnostic(Some((&projection).into()));
             result.error = Some(error);
             crate::emit(&result, globals, "", false)
         }
@@ -692,7 +692,7 @@ fn run_input(
         let sandbox = request.sandbox_override();
         let brief_source = select_brief_source([
             request.brief.map(BriefSource::Text),
-            request.brief_text.map(BriefSource::Text),
+            request.brief_text.into_iter().next().map(BriefSource::Text),
             request.brief_file.map(BriefSource::file),
         ])
         .map_err(|error| cli_input_error(&error.to_string()))?;
@@ -705,7 +705,13 @@ fn run_input(
             input["preamble_file"] = json!(path);
         }
         for (field, value) in [
-            ("host", request.host),
+            (
+                "host",
+                request.common.host.first().and_then(|host| match host {
+                    provenant_cli::HostArg::All => Some("all".to_owned()),
+                    provenant_cli::HostArg::Named(name) => Some(name.clone()),
+                }),
+            ),
             ("model", model),
             ("effort", request.effort),
             ("account", request.account),
@@ -1046,13 +1052,13 @@ mod tests {
     )]
     fn run_request() -> GraphRunArgs {
         GraphRunArgs {
-            host: None,
+            common: Default::default(),
             model: None,
             effort: None,
             account: None,
             name: None,
             brief: None,
-            brief_text: None,
+            brief_text: Vec::new(),
             brief_file: None,
             preamble_file: None,
             template: None,
@@ -1066,10 +1072,23 @@ mod tests {
             head: None,
             write_scope: Vec::new(),
             over: Vec::new(),
+            adopt: None,
+            priority: None,
+            batch: None,
             set: Vec::new(),
             plan: false,
             file: None,
             detached: false,
+            wait: false,
+            no_wait: false,
+            context: Vec::new(),
+            notes: Vec::new(),
+            strict: false,
+            checks: None,
+            isolated: false,
+            destination: None,
+            commit: None,
+            worktree_sharing: None,
             sandbox: false,
             no_sandbox: false,
             explain: false,

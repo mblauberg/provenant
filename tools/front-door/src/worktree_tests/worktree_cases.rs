@@ -557,7 +557,7 @@ pub(super) fn unrelated_base_refuses_and_names_worktree() -> Result {
     let value = json(&json_output)?;
     let message = value["error"]["message"].as_str().ok_or("error message")?;
     assert!(message.contains("--worktree"), "{value}");
-    let repair = value["error"]["repair"].as_str().ok_or("repair")?;
+    let repair = serde_json::to_string(&value["next"][0])?;
     assert!(
         repair.contains("--worktree") && (repair.contains("merge") || repair.contains("rebase")),
         "{value}"

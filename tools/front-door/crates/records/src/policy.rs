@@ -1,8 +1,16 @@
 //! One executable policy table, shared by enforcement and presentation.
-use crate::provenance::{Layer, Source as ProvenanceSource};
+use crate::provenance::{CANONICAL_ORDER, Layer, Source as ProvenanceSource, Sourced};
 use crate::warning::{self, CONFIG_KEY_IGNORED, CONFIG_MALFORMED, Warning, WarningCode};
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, sync::OnceLock};
+
+pub const WRITER_HANDOVER: &str = "WRITER_HANDOVER";
+pub const WRITER_HEAD_MOVED: &str = "WRITER_HEAD_MOVED";
+pub const WORKTREE_SHARED: &str = "WORKTREE_SHARED";
+pub const WORKTREE_SHARING_REFUSED: &str = "WORKTREE_SHARING_REFUSED";
+pub const PATH_CLAIM_OVERLAP: &str = "PATH_CLAIM_OVERLAP";
+pub const DESTROYS_LIVE_WORK: &str = "DESTROYS_LIVE_WORK";
+pub const LEASE_HOLDER_UNREACHABLE: &str = "LEASE_HOLDER_UNREACHABLE";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -96,6 +104,8 @@ pub struct Rule {
     pub code: String,
     pub boundary: Boundary,
     pub strength: Strength,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
     pub knob: Option<String>,
     pub justification: String,
     pub site: String,
@@ -104,6 +114,69 @@ pub struct Rule {
     /// when its consumer has a meaningful stop path.
     #[serde(default)]
     pub refusable: bool,
+}
+
+/// Policy setting candidates grouped by their fully qualified key, for
+/// example `policy.CODE` or `policy.default`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Settings {
+    pub candidates: BTreeMap<String, Vec<Sourced<Strength>>>,
+}
+
+impl Settings {
+    /// Add a candidate while preserving caller order within a layer.
+    pub fn insert(&mut self, key: impl Into<String>, value: Sourced<Strength>) {
+        self.candidates.entry(key.into()).or_default().push(value);
+    }
+}
+
+/// Resolve a rule's setting by layer first, then key specificity. The exact
+/// `policy.CODE` key wins ties against `policy.GROUP`, which wins ties against
+/// `policy.default`. A row's compiled strength is the final fallback.
+#[allow(clippy::expect_used)] // callers resolve codes from the compiled policy table
+pub fn resolve_strength(code: &str, group: Option<&str>, settings: &Settings) -> Sourced<Strength> {
+    let mut keys = vec![(format!("policy.{code}"), 3usize)];
+    if let Some(group) = group {
+        keys.push((format!("policy.{group}"), 2));
+    }
+    keys.push(("policy.default".to_owned(), 1));
+
+    let mut winner: Option<(usize, usize, Sourced<Strength>)> = None;
+    for (key, specificity) in keys {
+        let Some(candidates) = settings.candidates.get(&key) else {
+            continue;
+        };
+        for candidate in candidates {
+            let layer_rank = CANONICAL_ORDER
+                .iter()
+                .position(|layer| *layer == candidate.source.layer)
+                .expect("candidate layer is canonical");
+            let should_replace = winner
+                .as_ref()
+                .is_none_or(|(best_layer, best_specificity, _)| {
+                    layer_rank > *best_layer
+                        || (layer_rank == *best_layer && specificity >= *best_specificity)
+                });
+            if should_replace {
+                winner = Some((layer_rank, specificity, candidate.clone()));
+            }
+        }
+    }
+    if let Some((_, _, winner)) = winner {
+        return winner;
+    }
+
+    let rule = table()
+        .iter()
+        .find(|rule| rule.code == code)
+        .expect("policy code in table");
+    Sourced {
+        value: rule.strength,
+        source: ProvenanceSource {
+            layer: Layer::Default,
+            origin: Some("crates/run/assets/policy.toml".to_owned()),
+        },
+    }
 }
 impl Rule {
     pub fn supports(&self, strength: Strength) -> bool {

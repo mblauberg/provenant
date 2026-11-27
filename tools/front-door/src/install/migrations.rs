@@ -21,6 +21,29 @@ use std::io::ErrorKind;
 use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 
+/// Pure record transform owned by one store. Store migrations run under that
+/// store's lock; this trait deliberately does not open or publish files.
+#[allow(dead_code)]
+pub(crate) trait StoreMigration {
+    fn migrate(from: u64, to: u64, record: Value) -> Result<Value, MigrationError>;
+}
+
+/// Marker spelling shared by store migrations while an interrupted cut-over
+/// is resumed. The marker is written beside the owning store.
+#[allow(dead_code)]
+pub(crate) fn migrating_marker(to: u64) -> String {
+    format!("migrating-{to}")
+}
+
+/// Stub for the batch cut-over's quiesce gate. It fails closed until the tick,
+/// graph, queue and lease locks are wired into install.
+#[allow(dead_code)]
+pub(crate) fn quiesce_stub() -> Result<(), MigrationError> {
+    Err(MigrationError::new(
+        "store migration quiesce has not been wired",
+    ))
+}
+
 /// Ordered steps for this release. Steps are deleted in the release after the
 /// one that ships them.
 const STEPS: &[&dyn Migration] = &[
@@ -1171,10 +1194,10 @@ grants = ["postgres"]
             "{:?}",
             warning.message
         );
-        let repair = warning.repair.as_deref().expect("repair");
-        assert!(repair.contains(&old.display().to_string()), "{repair}");
-        assert!(repair.contains(&target.display().to_string()), "{repair}");
-        assert!(repair.contains("remove"), "{repair}");
+        let next = warning.next.first().expect("next").display_text();
+        assert!(next.contains(&old.display().to_string()), "{next}");
+        assert!(next.contains(&target.display().to_string()), "{next}");
+        assert!(next.contains("remove"), "{next}");
         assert_eq!(
             std::fs::read_to_string(old.join("config.toml")).expect("old kept"),
             "slots = 3\n"

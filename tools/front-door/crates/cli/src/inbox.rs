@@ -1640,7 +1640,14 @@ mod unsupported_receipt_tests {
         assert_eq!(error.code, CONTROL_UNSUPPORTED);
         assert_eq!(error.message, receipt.refusal_message());
         assert!(error.message.contains("retry"));
-        assert_eq!(error.repair.as_deref(), Some(CONTROL_UNSUPPORTED_REPAIR));
+        assert_eq!(
+            error
+                .next
+                .first()
+                .map(|step| step.display_text())
+                .as_deref(),
+            Some(CONTROL_UNSUPPORTED_REPAIR)
+        );
     }
 }
 

@@ -25,6 +25,7 @@ mod ci;
 mod cloud;
 mod config;
 mod console;
+mod contracts;
 mod custody;
 mod declaration;
 mod disk;
@@ -82,6 +83,7 @@ pub static DOMAINS: &[&Domain] = &[
     &ci::DOMAIN,
     &cloud::DOMAIN,
     &config::DOMAIN,
+    &contracts::DOMAIN,
     &console::DOMAIN,
     &custody::DOMAIN,
     &declaration::DOMAIN,
@@ -165,5 +167,16 @@ pub(crate) fn mismatched() -> Result<Outcome, CommandError> {
         "the command registry dispatched a command to the wrong domain",
         None,
         "report this internal dispatch error; rerun the command",
+    ))
+}
+
+/// A batch contract may parse before its execution slice lands. Keep that
+/// state explicit at the command boundary instead of dispatching as success.
+pub(crate) fn not_implemented(path: &str) -> Result<Outcome, CommandError> {
+    Err(CommandError::new(
+        "CONTRACT_NOT_IMPLEMENTED",
+        format!("`{path}` is declared but its execution path has not landed"),
+        None,
+        "continue after the command implementation is available",
     ))
 }

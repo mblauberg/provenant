@@ -5,7 +5,14 @@ fn home_refusal_has_install_repair() {
     let result = super::home_error_result("install", "HOME must be absolute");
     let error = result.error.unwrap();
     assert_eq!(error.code, "HOME");
-    assert!(error.repair.unwrap().contains("provenant install"));
+    assert!(
+        error
+            .next
+            .first()
+            .unwrap()
+            .display_text()
+            .contains("provenant install")
+    );
 }
 
 /// An installed state root whose receipt records the given live-record format.
@@ -349,9 +356,11 @@ fn verify_execs_the_installed_binary() -> Result<(), Box<dyn std::error::Error>>
         &environment,
         &targets,
         &cli::Upgrade {
+            common: Default::default(),
             yes: false,
             from_source: None,
             hosts: "all".into(),
+            keep: false,
             verify: true,
             verify_only: false,
             dry_run: false,
@@ -430,9 +439,11 @@ fn verify_smoke_runs_outside_a_checkout_without_requiring_one()
         &environment,
         &targets,
         &cli::Upgrade {
+            common: Default::default(),
             yes: false,
             from_source: None,
             hosts: "all".into(),
+            keep: false,
             verify: true,
             verify_only: false,
             dry_run: false,
@@ -625,9 +636,11 @@ fn smoke_wait_and_status_use_the_scratch_project() -> Result<(), Box<dyn std::er
         &state,
         &scratch,
         &cli::Upgrade {
+            common: Default::default(),
             yes: false,
             from_source: None,
             hosts: "all".into(),
+            keep: false,
             verify: true,
             verify_only: false,
             dry_run: false,
@@ -688,9 +701,11 @@ fn smoke_verify_gives_the_review_a_non_empty_range() -> Result<(), Box<dyn std::
         &state,
         &scratch,
         &cli::Upgrade {
+            common: Default::default(),
             yes: false,
             from_source: None,
             hosts: "all".into(),
+            keep: false,
             verify: true,
             verify_only: false,
             dry_run: false,
@@ -791,9 +806,11 @@ fn remote_smoke_verify_carries_the_writer_branch_and_staged_fixture()
         &state,
         &scratch,
         &cli::Upgrade {
+            common: Default::default(),
             yes: false,
             from_source: None,
             hosts: "all".into(),
+            keep: false,
             verify: true,
             verify_only: false,
             dry_run: false,
@@ -848,9 +865,11 @@ fn failed_smoke_node_is_reported_by_verify() -> Result<(), Box<dyn std::error::E
         &state,
         tmp.path(),
         &cli::Upgrade {
+            common: Default::default(),
             yes: false,
             from_source: None,
             hosts: "all".into(),
+            keep: false,
             verify: true,
             verify_only: false,
             dry_run: false,
@@ -905,9 +924,11 @@ fn smoke_dry_run_previews_nodes_without_launching() -> Result<(), Box<dyn std::e
         &state,
         tmp.path(),
         &cli::Upgrade {
+            common: Default::default(),
             yes: false,
             from_source: None,
             hosts: "all".into(),
+            keep: false,
             verify: true,
             verify_only: false,
             dry_run: true,
@@ -998,9 +1019,11 @@ fn smoke_preview_and_verify_share_writer_branch_and_base() -> Result<(), Box<dyn
     let state = tmp.path().join("state");
     let graph = "smoke-verify-test";
     let args = cli::Upgrade {
+        common: Default::default(),
         yes: false,
         from_source: None,
         hosts: "all".into(),
+        keep: false,
         verify: true,
         verify_only: false,
         dry_run: true,
@@ -1491,12 +1514,9 @@ fn upgrade_failure_repair_points_at_json_per_host_detail() {
     let hosts = vec![fixture_smoke_host(false, "graph child failed\n")];
     let error = super::failed_upgrade_result(hosts).error.unwrap();
     assert_eq!(error.code, "UPGRADE_FAILED");
-    let repair = error.repair.unwrap();
-    assert!(
-        repair.contains("provenant upgrade --verify --json"),
-        "{repair}"
-    );
-    assert!(!repair.contains("--full"), "{repair}");
+    let next = error.next.first().unwrap().display_text();
+    assert!(next.contains("provenant upgrade --verify --json"), "{next}");
+    assert!(!next.contains("--full"), "{next}");
 }
 
 #[test]

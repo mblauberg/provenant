@@ -482,6 +482,7 @@ pub(crate) fn read_lane_graph(
             .and_then(|id| id.parse().ok())
             .ok_or_else(|| FacadeError::invalid(InvalidInputDetail::Field("id".into())))?;
         let command = provenant_cli::Output {
+            common: Default::default(),
             target,
             part,
             to: None,

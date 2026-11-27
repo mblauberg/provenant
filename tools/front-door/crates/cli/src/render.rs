@@ -156,6 +156,12 @@ pub fn next_steps_text(steps: &[NextStep], prefix: &CommandPrefix) -> String {
                     out.push_str(&format!("next: {why}; {command}\n"));
                 }
             }
+            _ if step.argv.is_empty() && !step.why.trim().is_empty() => {
+                out.push_str(&format!(
+                    "next: {}\n",
+                    bounded_text(&step.why, limits::SUMMARY_ROW_BYTES)
+                ));
+            }
             _ => out.push_str("next: [this command cannot be shown safely]\n"),
         }
     }
@@ -435,6 +441,12 @@ pub fn render_within<T: Serialize>(
     limit: usize,
 ) -> Result<(), RenderError> {
     let error = result.error.clone();
+    let mut next = result.next.clone();
+    if let Some(error) = &error {
+        let mut combined = error.next.clone();
+        combined.append(&mut next);
+        next = combined;
+    }
     let result = CommandResult {
         schema_version: result.schema_version,
         command: result.command.clone(),
@@ -442,7 +454,7 @@ pub fn render_within<T: Serialize>(
         data: &result.data,
         error,
         warnings: result.warnings.clone(),
-        next: result.next.clone(),
+        next,
     };
     let mut buffer = Buffer {
         bytes: Vec::new(),
@@ -503,13 +515,7 @@ pub fn render_within<T: Serialize>(
                             RenderMode::Json => {}
                         }
                     }
-                    // The repair is a typed field of the error envelope, not an
-                    // owner suggestion: JSON carries it at `error.repair` and
-                    // this renders that same field once for a human reader.
-                    text.push_str(&format!(
-                        "next: {}\n",
-                        error.repair.as_deref().unwrap_or_default()
-                    ));
+                    text.push_str(&next_steps_text(&result.next, &CommandPrefix::default()));
                     text
                 }
                 None => {

@@ -15,7 +15,9 @@ use std::{
     time::{Duration, UNIX_EPOCH},
 };
 
+mod registry;
 mod steward;
+pub(super) use registry::TickTask;
 
 const DAY_SECONDS: u64 = 86_400;
 /// An unfinished scheduled collection retries after this delay, then after
@@ -48,7 +50,7 @@ struct Cadence {
 
 /// A task's last outcome, written by its detached worker or its scheduler.
 #[derive(Serialize, Deserialize)]
-struct TaskResult {
+pub(super) struct TaskResult {
     #[serde(flatten)]
     extra: provenant_records::ExtraFields,
     state: String,

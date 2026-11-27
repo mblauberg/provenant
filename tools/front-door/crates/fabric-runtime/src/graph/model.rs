@@ -2166,7 +2166,7 @@ pub struct NodeProgress {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provisioned_owner: Option<provenant_core::Digest>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub warnings: Vec<String>,
+    pub warnings: Vec<provenant_records::Warning>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub removed_requirements: Vec<RemovedRequirement>,
     /// Every direct child of this parent was cancelled with its subtree.
@@ -2265,6 +2265,64 @@ pub struct NodeProgress {
     pub previous_attempts: Vec<GraphAttempt>,
     /// Current attempt on each route actually tried, in route order.
     pub attempts: Vec<GraphAttempt>,
+}
+
+/// Normalised review severity used by acceptance thresholds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Severity {
+    Nit,
+    Low,
+    Medium,
+    High,
+    Blocking,
+}
+
+/// The highest unresolved severity a review may accept.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AcceptBelow {
+    Off,
+    Nit,
+    Low,
+    Medium,
+    High,
+    Blocking,
+}
+
+/// Review evidence retained for a particular reviewed head.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FindingLedger {
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub heads: std::collections::BTreeMap<String, FindingHead>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_reviewed_head: Option<String>,
+}
+
+/// Findings, dispositions and coverage for one exact head.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FindingHead {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unresolved: Vec<Finding>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub dispositions: std::collections::BTreeMap<String, String>,
+    /// Lenses that completed against this head.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
+    pub covered_lenses: std::collections::BTreeSet<String>,
+    /// Invariant name to the lenses that covered it.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub invariant_coverage: std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
+}
+
+/// Timing breakdown for a lane launch, in milliseconds.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LaunchTimings {
+    pub admission_ms: u64,
+    pub census_ms: u64,
+    pub git_ms: u64,
+    pub worktree_ms: u64,
+    pub prepare_ms: u64,
+    pub total_ms: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

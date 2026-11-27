@@ -2376,6 +2376,97 @@ fn migrate_checkpoint_2_3(mut value: serde_json::Value) -> Result<serde_json::Va
     Ok(value)
 }
 
+/// Pure transform hook for the batch's next graph-store version. Store cutover
+/// calls this while holding the graph store's migration lock, then publishes
+/// the returned record atomically.
+pub fn migrate(
+    from: u64,
+    to: u64,
+    mut record: serde_json::Value,
+) -> Result<serde_json::Value, JournalError> {
+    if from == to {
+        return Ok(record);
+    }
+    if (from, to) != (3, 4) {
+        return Err(JournalError::BadEnvelope);
+    }
+
+    let nodes = record
+        .pointer_mut("/checkpoint/nodes")
+        .and_then(serde_json::Value::as_array_mut)
+        .ok_or(JournalError::BadEnvelope)?;
+    for node in nodes {
+        if let Some(warnings) = node.get_mut("warnings") {
+            let warnings = warnings.as_array_mut().ok_or(JournalError::BadEnvelope)?;
+            for warning in warnings {
+                if let Some(message) = warning.as_str() {
+                    *warning = serde_json::json!({
+                        "code": "LEGACY_WARNING",
+                        "message": message,
+                        "source": { "layer": "default" }
+                    });
+                }
+            }
+        }
+    }
+
+    fn rewrite_sealed_values(value: &mut serde_json::Value) {
+        match value {
+            serde_json::Value::Array(values) => {
+                for value in values {
+                    rewrite_sealed_values(value);
+                }
+            }
+            serde_json::Value::Object(object) => {
+                if let Some(accepted) = object
+                    .get("accept_inconclusive_without_blocking")
+                    .and_then(serde_json::Value::as_bool)
+                {
+                    object.remove("accept_inconclusive_without_blocking");
+                    object.insert(
+                        "accept_below".into(),
+                        serde_json::Value::String(if accepted { "blocking" } else { "off" }.into()),
+                    );
+                }
+                if let Some(isolation) = object.remove("lanes.isolation") {
+                    if isolation.as_str() == Some("shared") {
+                        object.insert("lanes.read_source".into(), "checkout".into());
+                    } else if isolation.as_str() != Some("private") {
+                        object.insert("lanes.isolation".into(), isolation);
+                    }
+                }
+                for (key, value) in object.iter_mut() {
+                    if key == "source" || key.ends_with("_source") {
+                        if let Some(source) = value.as_str() {
+                            let replacement = match source {
+                                "shipped_default" | "bundled" | "builtin" => Some("default"),
+                                "dispatch" => Some("launch"),
+                                _ => None,
+                            };
+                            if let Some(replacement) = replacement {
+                                *value = serde_json::Value::String(replacement.into());
+                                continue;
+                            }
+                        }
+                    }
+                    rewrite_sealed_values(value);
+                }
+            }
+            _ => {}
+        }
+    }
+    let execution = record
+        .get_mut("execution")
+        .ok_or(JournalError::BadEnvelope)?;
+    rewrite_sealed_values(execution);
+
+    let mut stored: StoredCheckpoint =
+        serde_json::from_value(record).map_err(|_| JournalError::BadEnvelope)?;
+    stored.schema_version = to;
+    stored.digest = checkpoint_digest(&stored.checkpoint, &stored.execution)?.to_string();
+    serde_json::to_value(stored).map_err(|_| JournalError::BadEnvelope)
+}
+
 // Called only after acquiring the graph writer lock.
 fn migrate_checkpoint_locked(
     directory: &Directory,

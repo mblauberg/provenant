@@ -288,6 +288,7 @@ fn output_retains_safe_refusal_remedies() -> Result<(), Box<dyn std::error::Erro
             );
             let attempt = prepared.attempt_id;
             let output_command = || Output {
+                common: Default::default(),
                 target: crate::Target::parse("g/n").expect("fixture target"),
                 part: Part::Result,
                 to: None,

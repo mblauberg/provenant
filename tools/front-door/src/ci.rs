@@ -27,7 +27,7 @@ const MAX_ERROR_LINES: usize = 20;
 
 pub(crate) fn run(command: provenant_cli::Ci, globals: &Globals) -> u8 {
     match command {
-        provenant_cli::Ci::Failures { pr, target } => {
+        provenant_cli::Ci::Failures { pr, target, .. } => {
             let target = match (pr.is_empty(), target) {
                 (false, None) => provenant_cli::ci::FailureTarget::Pr { numbers: pr },
                 (true, Some(target)) => target,
@@ -62,6 +62,14 @@ pub(crate) fn run(command: provenant_cli::Ci, globals: &Globals) -> u8 {
                 provenant_cli::ci::FailureTarget::Run { run } => failures_run(run, globals),
             }
         }
+        provenant_cli::Ci::Patch(_) => fail(
+            "ci patch",
+            Outcome::Error,
+            "CONTRACT_NOT_IMPLEMENTED",
+            "`ci patch` is declared but its execution path has not landed",
+            "continue after the generated-patch implementation is available",
+            globals,
+        ),
     }
 }
 

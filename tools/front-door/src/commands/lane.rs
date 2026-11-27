@@ -6,11 +6,18 @@ use provenant_records::{CommandError, Outcome};
 
 pub static DOMAIN: Domain = Domain {
     name: "lane",
-    verbs: &[Verb {
-        path: &["lane", "deliver"],
-        stability: Stability::Evolving,
-        run,
-    }],
+    verbs: &[
+        Verb {
+            path: &["lane", "deliver"],
+            stability: Stability::Evolving,
+            run,
+        },
+        Verb {
+            path: &["lane", "share"],
+            stability: Stability::Evolving,
+            run,
+        },
+    ],
 };
 
 fn run(inv: &Call) -> Result<Outcome, CommandError> {

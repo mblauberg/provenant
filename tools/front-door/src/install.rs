@@ -536,7 +536,7 @@ fn install_error_result(command: &str, error: &InstallError) -> CommandResult<In
             }
         });
     let mut failure = CommandError::new(code, error.to_string(), None, repair);
-    failure.diagnostic = diagnostic;
+    failure.set_diagnostic(diagnostic);
     result.error = Some(failure);
     result
 }

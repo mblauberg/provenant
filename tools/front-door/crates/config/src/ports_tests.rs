@@ -1545,11 +1545,11 @@ fn an_older_schema_warning_uses_the_sink_and_names_the_file_and_change() {
     let path = file.display().to_string();
     assert!(warning.message.contains(&path), "{:?}", warning.message);
     assert!(warning.message.contains("found 2"), "{:?}", warning.message);
-    let repair = warning.repair.as_deref().expect("repair");
-    assert!(repair.contains(&path), "{repair}");
+    let next = warning.next.first().expect("next").display_text();
+    assert!(next.contains(&path), "{next}");
     assert!(
-        repair.contains(&format!("schema_version\": {PORTS_SCHEMA_VERSION}")),
-        "{repair}"
+        next.contains(&format!("schema_version\": {PORTS_SCHEMA_VERSION}")),
+        "{next}"
     );
 }
 

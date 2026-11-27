@@ -22,6 +22,21 @@ pub static DOMAIN: Domain = Domain {
             stability: Stability::Evolving,
             run,
         },
+        Verb {
+            path: &["ci", "patch"],
+            stability: Stability::Evolving,
+            run,
+        },
+        Verb {
+            path: &["ci", "patch", "pr"],
+            stability: Stability::Evolving,
+            run,
+        },
+        Verb {
+            path: &["ci", "patch", "run"],
+            stability: Stability::Evolving,
+            run,
+        },
     ],
 };
 

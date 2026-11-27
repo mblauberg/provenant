@@ -235,7 +235,7 @@ fn a_lane_reads_quota_but_cannot_mutate_it() -> Result {
             report["error"]["code"], "QUOTA_UNAVAILABLE_IN_LANE",
             "{report}"
         );
-        let repair = report["error"]["repair"]
+        let repair = report["next"][0]["why"]
             .as_str()
             .ok_or("mutating quota refusal has a repair")?;
         assert!(repair.contains("chair's session"), "{repair}");

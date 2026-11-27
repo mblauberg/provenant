@@ -72,6 +72,8 @@ pub mod relay;
 mod repair;
 mod schedule;
 use schedule::{ScheduleExit, advance_schedule};
+pub mod root_cause;
+pub use root_cause::{RootCause, root_cause};
 #[cfg(test)]
 use schedule::{preparation_exhausted_message, queue_conflict_recheck, same_expanded_round};
 mod retire;
@@ -127,6 +129,19 @@ mod when_tests;
 use budget::*;
 pub use journal::*;
 pub use model::*;
+
+/// Preserve the text of warnings from graph producers that have not yet been
+/// assigned a dedicated catalogue code.
+pub(crate) fn legacy_warning(message: impl Into<String>) -> provenant_records::Warning {
+    provenant_records::Warning::new(
+        provenant_records::warning::LEGACY_WARNING,
+        message,
+        provenant_records::provenance::Source {
+            layer: provenant_records::Layer::Detected,
+            origin: Some("legacy graph warning".to_owned()),
+        },
+    )
+}
 
 /// Shared recovery guidance for a pull request that conflicts with its base.
 pub const CONFLICT_GUIDANCE: &str =

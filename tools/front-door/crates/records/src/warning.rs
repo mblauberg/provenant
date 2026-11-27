@@ -1,5 +1,6 @@
 //! The one way library code reports a warning: a typed value with a stable
 //! code and structured source, routed to a capture or the command's sink.
+use crate::command_result::{NextStep, SettingRef, Subject};
 use crate::provenance::Source;
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
@@ -17,11 +18,17 @@ pub struct Warning {
     /// What it is about: a path, key, branch, attempt or route.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subject: Option<String>,
+    /// Structured subject identity when one is available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subject_ref: Option<Subject>,
     /// The structured cause or origin of this event.
     pub source: Source,
-    /// One command or edit that clears it.
+    /// The setting that selected the behaviour reported by this warning.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub repair: Option<String>,
+    pub setting: Option<SettingRef>,
+    /// Suggested commands or conditions that address this warning.
+    #[serde(default)]
+    pub next: Vec<NextStep>,
     /// How repeats collapse. Never part of the wire.
     #[serde(skip)]
     pub dedup: Dedup,
@@ -87,6 +94,8 @@ pub const PROVIDER_STALLED: WarningCode = WarningCode("PROVIDER_STALLED");
 pub const ANSWER_DELIVERY_SKIPPED: WarningCode = WarningCode("ANSWER_DELIVERY_SKIPPED");
 /// An oversized stored answer was retained for Fabric mail during local delivery.
 pub const ANSWER_DELIVERY_RETAINED: WarningCode = WarningCode("ANSWER_DELIVERY_RETAINED");
+/// An older graph record stored this warning as free-form text.
+pub const LEGACY_WARNING: WarningCode = WarningCode("LEGACY_WARNING");
 /// A holder's terminal failure could not be retained in the settlement journal.
 pub const TERMINAL_FAILURE_UNRETAINED: WarningCode = WarningCode("TERMINAL_FAILURE_UNRETAINED");
 /// Terminal settlement was incomplete, so the writer reservation is retained.
@@ -434,8 +443,10 @@ impl Warning {
             code: Cow::Borrowed(code.0),
             message: message.into(),
             subject: None,
+            subject_ref: None,
             source,
-            repair: None,
+            setting: None,
+            next: Vec::new(),
             dedup: Dedup::default(),
         }
     }
@@ -446,15 +457,28 @@ impl Warning {
         self
     }
 
+    /// Attach machine-readable subject identity.
+    pub fn subject_ref(mut self, subject: Subject) -> Self {
+        self.subject_ref = Some(subject);
+        self
+    }
+
     /// Replace the initial detected-event source with a more specific cause.
     pub fn source(mut self, source: Source) -> Self {
         self.source = source;
         self
     }
 
-    /// State one command or edit that clears it.
+    /// Identify the setting and source that selected this warning.
+    pub fn setting(mut self, setting: SettingRef) -> Self {
+        self.setting = Some(setting);
+        self
+    }
+
+    /// Add one command or condition that addresses this warning.
     pub fn repair(mut self, repair: impl Into<String>) -> Self {
-        self.repair = Some(repair.into());
+        let repair: String = repair.into();
+        self.next.push(NextStep::from_text(&repair));
         self
     }
 

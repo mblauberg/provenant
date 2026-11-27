@@ -1422,9 +1422,15 @@ pub(crate) fn run(
     // every budget shares the same maximum.
     let complete = matches!(command.until, Some(provenant_cli::PrWaitUntil::Complete));
     let budget = if complete {
-        settings.complete_timeout(command.timeout, &origin)
+        settings.complete_timeout(
+            command.common.timeout.map(|timeout| timeout.seconds()),
+            &origin,
+        )
     } else {
-        settings.timeout(command.timeout, &origin)
+        settings.timeout(
+            command.common.timeout.map(|timeout| timeout.seconds()),
+            &origin,
+        )
     };
     let deadline = Instant::now() + Duration::from_secs(budget);
     // Preflight reads tolerate a momentarily busy store instead of failing a

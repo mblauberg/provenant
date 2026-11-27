@@ -2593,9 +2593,9 @@ fn invalid_install_home_names_the_repair() -> Result {
         assert_eq!(value["status"], "invalid", "{value}");
         assert_eq!(value["error"]["code"], "HOME", "{value}");
         assert!(
-            value["error"]["repair"]
+            value["next"][0]["why"]
                 .as_str()
-                .is_some_and(|repair| !repair.is_empty())
+                .is_some_and(|why| !why.is_empty())
         );
     }
     Ok(())
