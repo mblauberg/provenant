@@ -847,6 +847,7 @@ pub(super) fn settlement_fallback_decision(
     node: &PlannedNode,
     route_index: usize,
     outcome: GraphAttemptOutcome,
+    stop: Option<provenant_records::StopCause>,
     launched: bool,
     evidence: FallbackEvidence<'_>,
 ) -> SettlementFallback {

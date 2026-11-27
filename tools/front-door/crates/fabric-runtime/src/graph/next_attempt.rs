@@ -75,6 +75,7 @@ pub(super) fn custody_release_pending(
     node: &PlannedNode,
     route_index: usize,
     outcome: GraphAttemptOutcome,
+    stop: Option<provenant_records::StopCause>,
     launched: bool,
     mut facts: FallbackEvidence<'_>,
 ) -> bool {
@@ -106,7 +107,7 @@ pub(super) fn custody_release_pending(
     facts.preparation = Some(evidence);
     facts.unreadable = false;
     matches!(
-        next_step::settlement_fallback_decision(node, route_index, outcome, launched, facts),
+        next_step::settlement_fallback_decision(node, route_index, outcome, stop, launched, facts),
         SettlementFallback::Continue
     )
 }
@@ -786,6 +787,7 @@ pub(super) fn next_attempt_transition(
                 node,
                 usize::from(last.key.route_index),
                 outcome,
+                last.stop,
                 last.launched,
                 FallbackEvidence {
                     preparation: fallback.evidence,
@@ -908,6 +910,7 @@ pub(super) fn decide_next_attempt<R: AttemptOwner>(
                         node,
                         usize::from(last.key.route_index),
                         last.outcome.unwrap_or(GraphAttemptOutcome::Unclassified),
+                        last.stop,
                         last.launched,
                         FallbackEvidence {
                             preparation: evidence,
@@ -1184,6 +1187,7 @@ mod tests {
             &single,
             0,
             GraphAttemptOutcome::AuthRequired,
+            None,
             false,
             FallbackEvidence {
                 preparation: None,
@@ -1218,6 +1222,7 @@ mod tests {
             &single,
             0,
             GraphAttemptOutcome::UsageLimited,
+            None,
             false,
             FallbackEvidence {
                 preparation: None,
