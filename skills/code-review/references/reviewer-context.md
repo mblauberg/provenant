@@ -19,40 +19,23 @@ council.
 
 ## What blocks
 
-This is the only definition of blocking. A finding blocks when it shows one of:
+Report a failed acceptance criterion, a reachable defect, a breach of a real
+boundary, or data loss with the evidence and impact needed to assess it. Real
+boundaries include credentials or secrets reaching an ungranted destination,
+one lane moving or deleting another lane's work, and authority beyond the grant.
+Assume tooling inside the host boundary cooperates; distinguish observed facts
+from inferred triggers.
 
-- a failed acceptance criterion, which includes an undisclosed divergence from
-  the spec and a write outside the write scope;
-- a defect on a reachable default path;
-- a breach of a real boundary: a credential or secret reaching a lane,
-  provider or output not granted it; a lane moving, rewriting or deleting
-  another lane's refs, commits or uncommitted files; authority beyond the
-  grant; or a boundary the repository declares;
-- data loss.
+Report concrete findings with the severity and evidence that fit the impact.
+Severity applies regardless of the trigger's reach. Acceptance and repair use
+the configured `domains.review.accept_below` threshold; an open blocking class
+also blocks. Boundary and data-loss findings require evidence of falsification.
 
-A default path is what ordinary use reaches: normal input, the scenarios the
-spec names, and ordinary failures such as a crash, a restart, a timeout or an
-interleaving the design permits. Untrusted input the system is built to accept
-is ordinary use, so an exploit through it is a default-path defect. Assume
-tooling inside the host boundary cooperates: a peer tool that forges the
-host's own state or ignores its locks is not a trigger.
-
-Should-fix is a concrete cost on a default path that does not meet that test,
-such as a broken repository convention. Everything else is a note, if worth
-acting on: a finding with no trigger, and anything off the default path that
-neither breaches a boundary nor loses data. Use `blocking`, `should-fix` or
-`note` as the finding's `severity`. Notes are reported, not repaired.
-
-Reviewers may use any word from one vocabulary: `critical`, `blocker`,
-`blocking`, `p0`, `high`, `error` or `p1` is blocking; `medium`, `moderate`,
-`should-fix` or `p2` is should-fix; `low`, `warning`, `p3`, `info`,
-`informational`, `note` or `p4` is a note. Only `blocking` contradicts PASS on
-severity. A confirmed, worth-fixing `should-fix` on a default path starts a
-repair writer, and a blocking class (`acceptance` or `default_path_defect`)
-also blocks acceptance and repair, whatever the severity word. A note without
-a blocking class is reported, never repaired, and a finding triage rejects
-never reaches a writer. An unrecognised severity word is warned and kept as
-`should-fix`, not treated as an invalid review.
+The severity vocabulary is `critical`, `blocker` or `blocking` for Blocking;
+`major` or `high` for High; `medium` or `moderate` for Medium; `minor` or `low`
+for Low; and `nit`, `info` or `style` for Nit. An unrecognised severity becomes
+High with `FINDING_SEVERITY_UNKNOWN`. Lower findings remain reported when they
+fall below the configured acceptance threshold.
 
 ## What a finding states
 

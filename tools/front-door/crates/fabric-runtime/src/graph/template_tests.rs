@@ -12,6 +12,7 @@ fn document(nodes: Vec<GraphNode>) -> GraphDocument {
         queue_ci_wait: None,
         queue: None,
         review: None,
+        review_policy: None,
         subject: None,
         exclude: Vec::new(),
         network: None,
@@ -1180,7 +1181,8 @@ fn renamed_composites_keep_their_behaviour_and_bindings() {
 #[test]
 // Spec: docs/specs/fabric.md#fix-round-invariants-and-split-verdict-adjudication
 fn split_verdict_yields_one_adjudication_node_and_no_new_round() {
-    let patch = super::repair::split_verdict_patch("panel", None, 2);
+    let panels = ["panel".to_owned()];
+    let patch = super::repair::split_verdict_patch("item", "panel", &panels, None, 2, "principal");
     assert_eq!(
         patch.nodes.len(),
         1,
@@ -1201,8 +1203,9 @@ fn split_verdict_yields_one_adjudication_node_and_no_new_round() {
     );
     assert_eq!(
         patch.idempotency_key,
-        super::repair::split_verdict_patch("panel", None, 2).idempotency_key,
-        "split detection is idempotent per panel and head"
+        super::repair::split_verdict_patch("item", "another-panel", &panels, None, 3, "principal",)
+            .idempotency_key,
+        "split detection is idempotent per item and head"
     );
 }
 

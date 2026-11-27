@@ -314,6 +314,10 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
         )
     }
 
+    fn review_policy(&self) -> provenant_fabric_runtime::graph::ReviewPolicy {
+        self.factory.context.review_policy.clone()
+    }
+
     fn launch_retry_policy(&self) -> provenant_fabric_runtime::graph::LaunchRetryPolicy {
         let mut policy = provenant_fabric_runtime::graph::LaunchRetryPolicy::default();
         let config = match provenant_cli::config_reads::read_for(&self.factory.context.roots, "run")
@@ -997,6 +1001,28 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             None => ReviewRange::Unknown,
         })
     }
+
+    fn review_delta_attributable(&mut self, base: &str, head: &str) -> bool {
+        let (Ok(base), Ok(head)) = (
+            provenant_core::GitOid::parse(base),
+            provenant_core::GitOid::parse(head),
+        ) else {
+            return false;
+        };
+        provenant_confinement::worktrees::with_context_using_facts(
+            &self.factory.context.roots,
+            &self.factory.home,
+            &self.factory.cwd,
+            &self.factory.clock,
+            self.cancel,
+            &self.repo_facts,
+            |context| {
+                provenant_confinement::worktrees::is_ancestor(context, base, head, self.cancel)
+            },
+        )
+        .is_ok_and(|attributable| attributable)
+    }
+
     fn respect_ci_wake(&self) -> bool {
         self.tick
     }

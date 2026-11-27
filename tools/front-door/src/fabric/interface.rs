@@ -26,6 +26,70 @@ pub(super) fn graph_input_reason(reason: impl std::fmt::Display) -> FacadeError 
     FacadeError::invalid(InvalidInputDetail::graph_reason(reason))
 }
 
+fn merge_review_policy_override(
+    target: &mut provenant_fabric_runtime::graph::ReviewPolicyOverride,
+    overlay: provenant_fabric_runtime::graph::ReviewPolicyOverride,
+) {
+    if overlay.later_rounds.is_some() {
+        target.later_rounds = overlay.later_rounds;
+    }
+    if overlay.adjudicator_route.is_some() {
+        target.adjudicator_route = overlay.adjudicator_route;
+    }
+    if overlay.accept_below.is_some() {
+        target.accept_below = overlay.accept_below;
+    }
+    if overlay.evidence_retries.is_some() {
+        target.evidence_retries = overlay.evidence_retries;
+    }
+    if overlay.lens_retry.is_some() {
+        target.lens_retry = overlay.lens_retry;
+    }
+}
+
+fn extract_review_policy_set(mut input: Value) -> Result<Value, FacadeError> {
+    let Some(set) = input.get_mut("set").and_then(Value::as_object_mut) else {
+        return Ok(input);
+    };
+    let entries = set
+        .iter()
+        .filter_map(|(key, value)| {
+            key.strip_prefix("domains.review.")
+                .map(|field| (key.clone(), field.to_owned(), value.clone()))
+        })
+        .collect::<Vec<_>>();
+    for (key, _, _) in &entries {
+        set.remove(key);
+    }
+    for (_, field, raw) in entries {
+        let value = if matches!(field.as_str(), "evidence_retries" | "lens_retry") {
+            match raw {
+                Value::String(text) => text
+                    .parse::<usize>()
+                    .map(|value| json!(value))
+                    .map_err(|_| FacadeError::invalid(InvalidInputDetail::Field(field.clone())))?,
+                value if value.as_u64().is_some() => value,
+                _ => return Err(FacadeError::invalid(InvalidInputDetail::Field(field))),
+            }
+        } else {
+            raw
+        };
+        if input.get("review_policy").is_none_or(Value::is_null) {
+            input["review_policy"] = json!({});
+        }
+        let Some(policy) = input
+            .get_mut("review_policy")
+            .and_then(Value::as_object_mut)
+        else {
+            return Err(FacadeError::invalid(InvalidInputDetail::Field(
+                "review_policy".into(),
+            )));
+        };
+        policy.insert(field, value);
+    }
+    Ok(input)
+}
+
 pub(super) fn seal_delivery_queue_knobs(
     config: &provenant_fabric_runtime::config::QueueConfig,
     origins: &BTreeMap<String, provenant_config::Origin>,
@@ -1535,6 +1599,7 @@ impl Factory {
                 "integration_branch",
                 "limits",
                 "delivery",
+                "review_policy",
                 "review_base",
                 "decision_session",
                 "retry",
@@ -2074,7 +2139,7 @@ impl Factory {
             return super::queue_dispatch::submit_queue(self, input, budget, cancel, announce);
         }
         let submitted = input;
-        let prepared = launch_input(input)?;
+        let prepared = extract_review_policy_set(launch_input(input)?)?;
         let queue_launch = if prepared.get("queue_item").is_some() {
             let registry =
                 super::queue_registry::QueueRegistry::open(self.context.roots.state.as_path())
@@ -2537,6 +2602,13 @@ impl Factory {
             )
             .map_err(graph_patch_error)?
         };
+        if let Some(launch_policy) = input.get("review_policy").filter(|value| !value.is_null()) {
+            let launch_policy = decode_input::<
+                provenant_fabric_runtime::graph::ReviewPolicyOverride,
+            >(launch_policy.clone(), "review_policy")?;
+            let target = document.review_policy.get_or_insert_with(Default::default);
+            merge_review_policy_override(target, launch_policy);
+        }
         // Borrow the optional base: the prompt binding below still needs it
         // after the document has been given its own copy.
         // The host overwrites any caller-supplied subject and review base with
@@ -2783,13 +2855,14 @@ impl Factory {
         // Static admission is the single compile gate: a launch no longer seals
         // the submission patch above, so admit here to keep every entry on the
         // same typed (redacted) refusal.
-        provenant_fabric_runtime::graph::admit_candidate(
+        provenant_fabric_runtime::graph::admit_candidate_with_review_policy(
             &document,
             None,
             &[],
             &self.context.config.graph.limits,
             &self.context.config.graph.budget,
             Some(&self.requester_lane_path()?),
+            &self.context.review_policy,
         )
         .map_err(FacadeError::graph_candidate)?;
         if !writer_launch && let Some(selected) = &default_source {

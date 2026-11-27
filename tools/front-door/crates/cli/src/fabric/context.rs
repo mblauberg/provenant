@@ -1,8 +1,13 @@
 use super::EdgeError;
+use provenant_config::DomainConfig;
 use provenant_core::{CancelToken, Clock, HostId, Roots, WaitBudget};
 use provenant_fabric_runtime::{
     config::FabricConfig,
     coordination::facade::FacadeError,
+    graph::{
+        REVIEW_ACCEPT_BELOW_KEY, REVIEW_ADJUDICATOR_ROUTE_KEY, REVIEW_EVIDENCE_RETRIES_KEY,
+        REVIEW_LATER_ROUNDS_KEY, REVIEW_LENS_RETRY_KEY, ReviewPolicy,
+    },
     hosts::{
         PeerAction, PeerError, PeerRequest, PeerResult, PeerTransport, ProjectLocator,
         SshTransport, discover_ssh_executable,
@@ -36,6 +41,8 @@ pub struct Context {
     pub roots: Roots,
     pub identity: Identity,
     pub config: FabricConfig,
+    /// Review settings resolved from host/project config and sealed on new graphs.
+    pub review_policy: ReviewPolicy,
     pub local_observation: provenant_fabric_runtime::coordination::ObservationSettings,
     /// Project ports resolved once from the discovered project root.
     pub port_table: provenant_config::PortTable,
@@ -51,6 +58,116 @@ pub struct Context {
     pub(super) executor: SystemExecutor,
     pub(super) home: PathBuf,
     pub(super) cwd: PathBuf,
+}
+
+fn review_policy(
+    settings: &provenant_fabric_runtime::config::ReviewSettings,
+    knobs: &std::collections::BTreeMap<String, Sourced<serde_json::Value>>,
+    origins: &std::collections::BTreeMap<String, provenant_config::Origin>,
+) -> ReviewPolicy {
+    fn effective<T>(
+        fallback: T,
+        key: &str,
+        knobs: &std::collections::BTreeMap<String, Sourced<serde_json::Value>>,
+        origins: &std::collections::BTreeMap<String, provenant_config::Origin>,
+    ) -> Sourced<T>
+    where
+        T: serde::de::DeserializeOwned,
+    {
+        let candidate = knobs.get(key);
+        let override_value = candidate
+            .filter(|candidate| candidate.source.layer != provenant_records::Layer::Default)
+            .and_then(|candidate| serde_json::from_value(candidate.value.clone()).ok());
+        let has_override = override_value.is_some();
+        let value = override_value.unwrap_or(fallback);
+        let source = if has_override {
+            candidate.map(|candidate| candidate.source.clone())
+        } else {
+            None
+        }
+        .unwrap_or_else(|| crate::config_reads::origin_source(origins.get(key), key));
+        Sourced { value, source }
+    };
+    ReviewPolicy {
+        later_rounds: effective(
+            settings.later_rounds,
+            REVIEW_LATER_ROUNDS_KEY,
+            knobs,
+            origins,
+        ),
+        adjudicator_route: effective(
+            settings.adjudicator_route.clone(),
+            REVIEW_ADJUDICATOR_ROUTE_KEY,
+            knobs,
+            origins,
+        ),
+        accept_below: effective(
+            settings.accept_below,
+            REVIEW_ACCEPT_BELOW_KEY,
+            knobs,
+            origins,
+        ),
+        evidence_retries: effective(
+            settings.evidence_retries,
+            REVIEW_EVIDENCE_RETRIES_KEY,
+            knobs,
+            origins,
+        ),
+        lens_retry: effective(settings.lens_retry, REVIEW_LENS_RETRY_KEY, knobs, origins),
+    }
+}
+
+fn project_review_policy(
+    mut policy: ReviewPolicy,
+    state: &Path,
+    project: Option<&Path>,
+) -> ReviewPolicy {
+    let (layers, _) = provenant_config::overlays::read_layers(state, project, "review");
+    for layer in layers {
+        if layer.path == state.join("config.toml") {
+            continue;
+        }
+        let Ok(document) = layer.text.parse::<toml_edit::DocumentMut>() else {
+            continue;
+        };
+        let Some(review_table) = document
+            .get("domains")
+            .and_then(toml_edit::Item::as_table)
+            .and_then(|domains| domains.get("review"))
+            .and_then(toml_edit::Item::as_table)
+            .cloned()
+        else {
+            continue;
+        };
+        let Ok(settings) = toml_edit::de::from_document::<
+            provenant_fabric_runtime::config::ReviewSettings,
+        >(toml_edit::DocumentMut::from(review_table.clone())) else {
+            continue;
+        };
+        if !settings.validate().is_empty() {
+            continue;
+        }
+        let source = |field: &str| Source {
+            layer: layer.source,
+            origin: Some(format!("{}#domains.review.{field}", layer.path.display())),
+        };
+        macro_rules! apply_field {
+            ($name:literal, $field:ident) => {
+                if review_table.get($name).is_some() {
+                    policy.$field = Sourced {
+                        value: settings.$field,
+                        source: source($name),
+                    };
+                }
+            };
+        }
+        apply_field!("later_rounds", later_rounds);
+        apply_field!("adjudicator_route", adjudicator_route);
+        apply_field!("accept_below", accept_below);
+        apply_field!("evidence_retries", evidence_retries);
+        apply_field!("lens_retry", lens_retry);
+    }
+    policy
 }
 pub(super) fn canonical(path: &Path) -> Result<PathBuf, EdgeError> {
     Ok(provenant_os::fs::canonicalize(path)?)
@@ -454,6 +571,8 @@ impl Context {
         let graph_prompt_limit_source = prompt_limit_source(&resolved.origins);
         let graph_decide_timeout_source = decide_timeout_source(&resolved.origins);
         let local_observation = crate::wait::observation_settings(&resolved);
+        let review_policy_base =
+            review_policy(&resolved.domains.review, &resolved.knobs, &resolved.origins);
         let config = resolved.domains.fabric;
         private_dir(roots.state.as_path(), roots.state.as_path())?;
         let utility_home = roots.state.as_path().join("tmp").join("git-home");
@@ -482,6 +601,11 @@ impl Context {
         } else {
             (common_dir.clone(), Some(common_dir.clone()))
         };
+        let review_policy = project_review_policy(
+            review_policy_base,
+            roots.state.as_path(),
+            Some(&project_root),
+        );
         let port_table = provenant_config::PortTable::read_for(
             project_config_root.as_deref(),
             roots.state.as_path(),
@@ -511,6 +635,7 @@ impl Context {
             roots,
             identity,
             config,
+            review_policy,
             projection: projection_from_knobs(&resolved.knobs),
             local_observation,
             port_table,
@@ -532,6 +657,8 @@ impl Context {
         let graph_prompt_limit_source = prompt_limit_source(&resolved.origins);
         let graph_decide_timeout_source = decide_timeout_source(&resolved.origins);
         let local_observation = crate::wait::observation_settings(&resolved);
+        let review_policy_base =
+            review_policy(&resolved.domains.review, &resolved.knobs, &resolved.origins);
         let config = resolved.domains.fabric;
         let git = provenant_os::git::git_executable().ok_or(EdgeError::GitUnavailable)?;
         let runtime = provenant_confinement::UtilityRuntime::read_only(git, roots.state.as_path())?;
@@ -554,6 +681,11 @@ impl Context {
         } else {
             (common_dir.clone(), Some(common_dir.clone()))
         };
+        let review_policy = project_review_policy(
+            review_policy_base,
+            roots.state.as_path(),
+            Some(&project_root),
+        );
         let port_table = provenant_config::PortTable::read_for(
             project_config_root.as_deref(),
             roots.state.as_path(),
@@ -582,6 +714,7 @@ impl Context {
             roots,
             identity,
             config,
+            review_policy,
             projection: projection_from_knobs(&resolved.knobs),
             local_observation,
             port_table,
@@ -601,6 +734,8 @@ impl Context {
         let graph_prompt_limit_source = prompt_limit_source(&resolved.origins);
         let graph_decide_timeout_source = decide_timeout_source(&resolved.origins);
         let local_observation = crate::wait::observation_settings(&resolved);
+        let review_policy_base =
+            review_policy(&resolved.domains.review, &resolved.knobs, &resolved.origins);
         let config = resolved.domains.fabric;
         let git = provenant_os::git::git_executable().ok_or(EdgeError::GitUnavailable)?;
         let runtime = provenant_confinement::UtilityRuntime::read_only(git, roots.state.as_path())?;
@@ -657,6 +792,11 @@ impl Context {
                 (root.clone(), Some(root))
             }
         };
+        let review_policy = project_review_policy(
+            review_policy_base,
+            roots.state.as_path(),
+            Some(&project_root),
+        );
         let port_table = provenant_config::PortTable::read_for(
             project_config_root.as_deref(),
             roots.state.as_path(),
@@ -696,6 +836,7 @@ impl Context {
             roots,
             identity,
             config,
+            review_policy,
             projection: projection_from_knobs(&resolved.knobs),
             local_observation,
             port_table,
@@ -739,6 +880,11 @@ impl Context {
         let graph_prompt_limit_source = prompt_limit_source(&resolved.origins);
         let graph_decide_timeout_source = decide_timeout_source(&resolved.origins);
         let local_observation = crate::wait::observation_settings(&resolved);
+        let review_policy = project_review_policy(
+            review_policy(&resolved.domains.review, &resolved.knobs, &resolved.origins),
+            roots.state.as_path(),
+            Some(&project_root),
+        );
         let config = resolved.domains.fabric;
         let host = provenant_config::lookup_host(&roots)?.ok_or(EdgeError::Invalid)?;
         let key = match CrossHostProjectKey::from_home(home, binding.common_dir()) {
@@ -760,6 +906,7 @@ impl Context {
             roots,
             identity,
             config,
+            review_policy,
             projection: projection_from_knobs(&resolved.knobs),
             local_observation,
             port_table,

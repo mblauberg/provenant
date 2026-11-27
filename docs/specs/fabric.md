@@ -587,17 +587,40 @@ A blocking finding names the invariant it breaks in its top-level `class`. A
 finding without one is warned first at settlement; a blocking finding without
 one is refused. A fix round returns invariants, not patched sites: for each
 invariant its `repair_item` carries the sweep query it ran, every site it changed
-and the test that pins the invariant. Round two reviews only the repair delta
-against those named invariants, never a fresh full panel; a lens may raise a new
-invariant, which then follows the same contract. Two distinct findings with the
-same invariant are one shared flaw and route to the principal design continuation.
+and the test that pins the invariant. Later rounds use the sealed
+`domains.review.later_rounds` policy. In delta mode they review
+`last_reviewed_head..head` with the ledger's unresolved findings and invariants;
+only lenses with open findings run again. A moved base, an unattributable delta,
+or an invariant whose only lens was unavailable widens the scope to full. A lens
+may raise a new invariant, which then follows the same contract. Two distinct
+findings with the same invariant are one shared flaw and route to the principal design continuation.
 Distinct member verdicts on one head, including approval and inconclusive, are a
-split and go to one adjudication node that returns a single
-verdict; the read-only adjudicator runs as an agent on the configured `senior`
-route on the panel members' pinned head when one is recorded. Each gate consumes only the adjudicator
-associated with its own panel and head; later panels receive their own adjudicator.
-Once admitted, an adjudicator must succeed with a verdict before its panel can
-pass; the original panel verdict cannot substitute for a failed or missing result.
+split and go to one adjudication node keyed by the stable review-chain owner and
+pinned head; the read-only adjudicator uses the resolved
+`domains.review.adjudicator_route` and the panel members' pinned head when one is
+recorded. Panels in the same chain and head reuse that adjudicator; a different
+chain or head gets its own. The adjudicator receives the chain's conflicting
+verdicts and findings. Once admitted, it must succeed with a verdict before its
+panel can pass; the original panel verdict cannot substitute for a failed or
+missing result.
+If another split panel for the same chain and head settles after that
+adjudicator succeeds, continue the same adjudicator node with the union of its
+known panels. Preserve the prior attempt history and an immutable receipt for
+its pinned head, prior verdict, output digest, the panels consumed by that
+verdict, the newly added panel IDs and the complete prior output snapshot as
+separate fields; the journalled expansion history retains each attempt's full
+input union. Keep the snapshot even when the provider supplies no immutable
+attempt reference, and enforce the existing 32 MiB prompt-store blob cap. Clear
+its current output and verdict before the new attempt. Downstream gates wait for
+that fresh adjudication; they cannot consume the superseded verdict. The
+continuation is a journalled revision so replay resumes the same node and input
+union.
+
+Before admission, every split panel must have succeeded with a usable verdict,
+complete findings and no partial output. The adjudicator must return every full
+input finding under its qualified identity with an explicit disposition. PASS
+is invalid while a blocking finding remains, including boundary and data-loss
+findings until evidence falsifies them.
 A split in a nested lens group remains visible when a panel synthesises its output;
 the adjudicator receives the outer panel's synthesised findings.
 A panel whose members have different pinned heads cannot be adjudicated as one

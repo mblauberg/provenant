@@ -32,8 +32,8 @@ pub(in crate::graph) fn validate_progress(
         return Err(());
     }
 
-    let clean = repair::clean_start(node, checkpoint, positions);
-    let escalated = repair::escalation(node, checkpoint, positions);
+    let clean = repair::clean_start(node, plan, checkpoint, positions);
+    let escalated = repair::escalation(node, plan, checkpoint, positions);
     let passed = passed(node, checkpoint, plan);
     let failed = body
         .iter()
@@ -179,8 +179,8 @@ pub(in crate::graph) fn settle<R: AttemptOwner, J: GraphJournal>(
     let failed = body
         .iter()
         .any(|progress| failed_member(progress, plan, checkpoint, positions));
-    let clean = repair::clean_start(node, checkpoint, positions);
-    let escalation = repair::escalation(node, checkpoint, positions);
+    let clean = repair::clean_start(node, plan, checkpoint, positions);
+    let escalation = repair::escalation(node, plan, checkpoint, positions);
     let passed = passed(node, checkpoint, plan);
     let settled = body.iter().all(|n| n.state.settled());
     let rounds = body
@@ -514,9 +514,13 @@ pub(in crate::graph) fn prepare_decision_extension(
     if let Some(limit) = structural_limit(&expanded, &plan, limits) {
         return Err(DecisionExtensionError::Structural(limit));
     }
-    if let Some(reason) =
-        graph_envelope_reason(document, &checkpoint.expansions, &extensions, &plan)
-    {
+    if let Some(reason) = graph_envelope_reason_with_policy(
+        document,
+        &checkpoint.expansions,
+        &extensions,
+        &plan,
+        &checkpoint.review_policy(),
+    ) {
         return Err(DecisionExtensionError::Invalid(reason));
     }
     Ok(())

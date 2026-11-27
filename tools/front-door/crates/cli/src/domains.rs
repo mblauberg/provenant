@@ -20,6 +20,7 @@ pub struct Domains {
     pub accounts: provenant_providers::accounts::Settings,
     pub quota: provenant_quota::Settings,
     pub routing: provenant_routing::RoutingConfig,
+    pub review: provenant_fabric_runtime::config::ReviewSettings,
     pub fabric: provenant_fabric_runtime::config::FabricConfig,
     #[serde(default)]
     pub run: provenant_confinement::run_config::RunConfig,
@@ -814,6 +815,7 @@ static ENTRIES: &[DomainSection] = &[
     provenant_providers::accounts::SECTION,
     provenant_quota::SECTION,
     provenant_routing::SECTION,
+    provenant_fabric_runtime::config::REVIEW_SECTION,
     provenant_fabric_runtime::config::SECTION,
     provenant_confinement::run_config::SECTION,
     PR_SECTION,
@@ -885,6 +887,10 @@ mod tests {
             ("quota", typed_paths::<provenant_quota::Settings>()),
             ("routing", typed_paths::<provenant_routing::RoutingConfig>()),
             (
+                "review",
+                typed_paths::<provenant_fabric_runtime::config::ReviewSettings>(),
+            ),
+            (
                 "fabric",
                 typed_paths::<provenant_fabric_runtime::config::FabricConfig>(),
             ),
@@ -912,8 +918,8 @@ mod tests {
     #[test]
     fn every_domain_section_is_registered_once() {
         let expected = [
-            "policy", "wait", "smoke", "accounts", "quota", "routing", "fabric", "run", "pr",
-            "lanes", "steward", "hooks",
+            "policy", "wait", "smoke", "accounts", "quota", "routing", "review", "fabric", "run",
+            "pr", "lanes", "steward", "hooks",
         ];
         for name in expected {
             let count = SECTIONS

@@ -322,6 +322,23 @@ fn filled_checkpoint(document: &GraphDocument, plan: &PlannedGraph) -> GraphChec
         .map(|node| node.id.clone())
         .max_by_key(String::len)
         .unwrap();
+    let prior_finding = serde_json::from_value::<Finding>(serde_json::json!({
+        "id": "prior:F1",
+        "severity": "high",
+        "file": "src/lib.rs",
+        "line": 1,
+        "summary": "prior adjudication disposition",
+        "status": "resolved",
+        "disposition": "accepted"
+    }))
+    .unwrap();
+    let mut prior_outputs = NodeOutputs::default();
+    prior_outputs.schema_version = 2;
+    prior_outputs.verdict = Some("VERDICT: INCONCLUSIVE".into());
+    prior_outputs.findings_available = Some(true);
+    prior_outputs.findings = vec![prior_finding.clone()];
+    prior_outputs.full_artifact_findings = Some(vec![prior_finding.clone()]);
+    prior_outputs.full_disposition_findings = Some(vec![prior_finding]);
     let nodes = plan
         .nodes
         .iter()
@@ -336,6 +353,38 @@ fn filled_checkpoint(document: &GraphDocument, plan: &PlannedGraph) -> GraphChec
                 delivery_publication: None,
                 delivery_park: None,
                 conflict: None,
+                finding_ledger: None,
+                review_adjudication_receipts: if node.kind == Some(NodeKind::Adjudicate) {
+                    (0..plan.nodes.len())
+                        .map(|_| {
+                            let attempt_key = AttemptKey {
+                                extra: Default::default(),
+                                retry_generation: Some(u64::MAX),
+                                previous_attempt_ref: Some("x".repeat(OUTPUT_FIELD_BYTES)),
+                                graph_id: plan.graph_id.clone(),
+                                node_id: node.id.clone(),
+                                attempt: u32::MAX,
+                                route_index: u16::MAX,
+                            };
+                            ReviewAdjudicationReceipt {
+                                head: Some("1".repeat(64)),
+                                panels: plan.nodes.iter().map(|candidate| candidate.id.clone()).collect(),
+                                added_panels: plan.nodes.iter().map(|candidate| candidate.id.clone()).collect(),
+                                prior_outputs: prior_outputs.clone(),
+                                attempt_key,
+                                attempt_ref: Some("x".repeat(OUTPUT_FIELD_BYTES)),
+                                verdict: "VERDICT: INCONCLUSIVE".into(),
+                                output_digest: "1".repeat(64),
+                            }
+                        })
+                        .collect()
+                } else {
+                    Vec::new()
+                },
+                review_round_scope: Some(ReviewRoundScope::Delta {
+                    base: "1".repeat(64),
+                    head: "2".repeat(64),
+                }),
                 children_cancelled: false,
                 detached_from_graph_cancel: false,
                 subtree_cancel: None,
@@ -354,9 +403,6 @@ fn filled_checkpoint(document: &GraphDocument, plan: &PlannedGraph) -> GraphChec
                 provisioned_owner: None,
                 removed_requirements: node.removed_requirements.clone(),
                 extra: Default::default(),
-                review_verdict_correction_refused: (template::review_behaviour(node)
-                    == Some(template::ReviewBehaviour::Lens))
-                .then(|| worst(MAX_ADVANCE_NOTE_BYTES)),
                 warnings: Vec::new(),
                 children: node.composite_members.clone(),
                 source_binding: node.source.clone(),
@@ -376,6 +422,7 @@ fn filled_checkpoint(document: &GraphDocument, plan: &PlannedGraph) -> GraphChec
                     verdict: provenant_records::workflow::ReviewVerdict::ApproveWithNits,
                     independent: false,
                 }),
+                review_retry: None,
                 decisions: if template::review_node(node) {
                     vec![worst_decision()]
                 } else {
@@ -504,7 +551,7 @@ host_refused_before_acceptance: false,
                                 peer_source_head: None,
                                 peer_requested_route: None,
                                 peer_network: None,
-                                peer_retry_limit: None, account_key: None, source: None, pool_selection: None, extra: Default::default(), adapter: Some("a".repeat(256)), model: Some("m".repeat(256)), effort: Some("e".repeat(256)), account: Some("a".repeat(256)), name: None, alias: None, tier: None, }),
+                                peer_retry_limit: None, account_key: None, source: None, pool_selection: None, extra: Default::default(), adapter: Some("a".repeat(256)), model: Some("m".repeat(256)), effort: Some("e".repeat(256)), account: Some("a".repeat(256)), name: None, alias: None, tier: None, review_policy: None, effective_review_policy: None, }),
                             dependencies: Some(node.depends_on.iter().take(MANIFEST_INPUT_LIMIT).cloned().collect()), dependencies_omitted: node.depends_on.len().saturating_sub(MANIFEST_INPUT_LIMIT),
                             inputs: node.inputs.iter().flat_map(|input| input.outputs.iter().map(move |kind| AttemptInputEvidence { extra: Default::default(), producer_node: input.node.clone(), producer_attempt: Some(AttemptKey { extra: Default::default(), retry_generation: None, previous_attempt_ref: None, graph_id: plan.graph_id.clone(), node_id: input.node.clone(), route_index: u16::MAX, attempt: 1 }), kind: *kind, required: true, producer_result_digest: Some("a".repeat(71)), commit: Some("a".repeat(64)), delivery: InputDelivery::Delivered, file_delivery: InputDelivery::Delivered })).take(MANIFEST_INPUT_LIMIT).collect(),
                             omitted: node.inputs.iter().map(|input| input.outputs.len()).sum::<usize>().saturating_sub(MANIFEST_INPUT_LIMIT),
@@ -552,6 +599,7 @@ host_refused_before_acceptance: false,
         integration_pin: Some("1".repeat(64)),
         cancelled: true,
         on_stop_defaults: envelope::worst_case_on_stop_defaults(),
+        review_policy: Some(ReviewPolicy::default()),
         delivery_ci_superseded: Vec::new(),
         cancel_reason: Some(worst(MAX_CANCEL_REASON_BYTES)),
         pause: Some(
@@ -952,6 +1000,43 @@ fn long_and_many_extensions_are_kept_and_count_toward_the_envelope() {
 
 fn fixture_task() -> GraphDocument {
     graph(vec![node("task", route("fixture"))])
+}
+
+#[test]
+fn effective_review_retry_limits_expand_the_checkpoint_reservation() {
+    let compiled = template::Compiler::new(&template::TemplateLibrary::bundled())
+        .compile(&json!({"id":"review","use":"review.tests","route":{"alias":"fixture"}}))
+        .unwrap();
+    let mut document = graph(vec![compiled]);
+    let plan = planned(&document);
+    let base = envelope::checkpoint_bound_with_policy(
+        &document,
+        &[],
+        &[],
+        &plan,
+        &ReviewPolicy::default(),
+    );
+
+    let mut node_policy = ReviewPolicy::default();
+    node_policy.evidence_retries.value = 12;
+    let mut route_policy = node_policy.clone();
+    route_policy.lens_retry.value = 1_000_000;
+    document.nodes[0].effective_review_policy = Some(node_policy);
+    document.nodes[0]
+        .route
+        .as_mut()
+        .unwrap()
+        .effective_review_policy = Some(route_policy);
+
+    let plan = planned(&document);
+    let bounded = envelope::checkpoint_bound_with_policy(
+        &document,
+        &[],
+        &[],
+        &plan,
+        &ReviewPolicy::default(),
+    );
+    assert!(bounded > base);
 }
 
 #[test]

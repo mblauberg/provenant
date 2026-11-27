@@ -1054,6 +1054,7 @@ fn validate_flat_plan_inner(
             loop_body: node.loop_body.clone(),
             escalate: node.escalate.clone(),
             delivery_review: node.delivery_review.clone(),
+            effective_review_policy: node.effective_review_policy.clone(),
             delivery_adoption: node.delivery_adoption.clone(),
             decide: node.decide.clone(),
             continues: node.continues.clone(),

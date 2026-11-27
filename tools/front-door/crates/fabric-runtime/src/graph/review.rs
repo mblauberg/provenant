@@ -10,7 +10,7 @@ pub(super) const VERDICT_LAST: &str = "After all findings and prose, end with ex
 /// A delivery review is acceptable only with complete structured evidence.
 /// Keep the original verdict in the record; this policy affects the gate only.
 pub(super) fn delivery_matches(
-    policy: &DeliveryReviewSpec,
+    threshold: AcceptBelow,
     outputs: &NodeOutputs,
     expected: &str,
 ) -> bool {
@@ -32,14 +32,13 @@ pub(super) fn delivery_matches(
     {
         return false;
     }
-    let threshold = policy.accept_below;
     let agrees = match outputs
         .verdict
         .as_deref()
         .and_then(ReviewVerdict::from_token)
     {
         Some(ReviewVerdict::Approve) => true,
-        Some(ReviewVerdict::Inconclusive) => policy.accept_below != AcceptBelow::Off,
+        Some(ReviewVerdict::Inconclusive) => threshold != AcceptBelow::Off,
         _ => false,
     };
     agrees
@@ -163,11 +162,14 @@ pub(super) fn contract_error(
     node: &PlannedNode,
     upstream: &[Finding],
     outputs: &NodeOutputs,
+    threshold: AcceptBelow,
 ) -> Option<(&'static str, String)> {
     let repair_triage = node.repair_triage;
+    let adjudicator = node.kind == Some(NodeKind::Adjudicate);
     if template::review_behaviour(node).is_none()
         && node.delivery_review.is_none()
         && !repair_triage
+        && !adjudicator
     {
         return None;
     }
@@ -197,14 +199,36 @@ pub(super) fn contract_error(
     if outputs.findings_available != Some(true) {
         return Some(("review_findings_invalid", "review findings are missing, malformed or incomplete; retained findings remain available as partial evidence".into()));
     }
+    if adjudicator && outputs.partial {
+        return Some((
+            "review_adjudication_incomplete",
+            "adjudicator output is partial; complete input dispositions are required".into(),
+        ));
+    }
+    let reviewed_findings = if adjudicator {
+        outputs
+            .full_disposition_findings
+            .as_deref()
+            .or(outputs.full_artifact_findings.as_deref())
+            .unwrap_or(outputs.findings.as_slice())
+    } else {
+        outputs.findings.as_slice()
+    };
     let mut ids = std::collections::BTreeSet::new();
-    for finding in &outputs.findings {
-        if upstream.iter().any(|source| source.id == finding.id) {
+    for finding in reviewed_findings {
+        let source_finding = upstream.iter().any(|source| source.id == finding.id);
+        if adjudicator && !ids.insert(&finding.id) {
+            return Some((
+                "review_adjudication_incomplete",
+                format!("adjudicator repeats input identity {}", finding.id),
+            ));
+        }
+        if source_finding {
             // Identity-only decisions inherit the source evidence. Copies from
             // multiple verifiers are checked by their disposition contract.
             continue;
         }
-        if !ids.insert(&finding.id) {
+        if !adjudicator && !ids.insert(&finding.id) {
             return Some((
                 "review_findings_invalid",
                 format!("finding {} repeats an independent id", finding.id),
@@ -227,13 +251,39 @@ pub(super) fn contract_error(
             }
         }
     }
+    if adjudicator {
+        for source in upstream {
+            let Some(dispositioned) = reviewed_findings
+                .iter()
+                .find(|finding| finding.id == source.id)
+            else {
+                return Some((
+                    "review_adjudication_incomplete",
+                    format!("adjudicator omitted input finding {}", source.id),
+                ));
+            };
+            if dispositioned
+                .disposition
+                .as_deref()
+                .is_none_or(|disposition| disposition.trim().is_empty())
+            {
+                return Some((
+                    "review_adjudication_incomplete",
+                    format!(
+                        "adjudicator omitted a disposition for input finding {}",
+                        source.id
+                    ),
+                ));
+            }
+        }
+    }
     if repair_triage
         || matches!(
             template::review_behaviour(node),
             Some(template::ReviewBehaviour::Verify | template::ReviewBehaviour::Synthesis)
         )
     {
-        for finding in &outputs.findings {
+        for finding in reviewed_findings {
             let valid = finding.triage().is_some_and(|triage| {
                 matches!(triage.decision.as_str(), "confirmed" | "rejected")
                     && !triage.reason.trim().is_empty()
@@ -255,8 +305,8 @@ pub(super) fn contract_error(
         }
     }
     if outputs.verdict.as_deref() == Some("VERDICT: PASS")
-        && outputs.findings.iter().any(|finding| {
-            (repair::blocks_acceptance(finding)
+        && reviewed_findings.iter().any(|finding| {
+            (repair::blocks_acceptance_for(finding, threshold)
                 && !(upstream.iter().any(|source| source.id == finding.id)
                     && finding.verification.as_deref() == Some("falsified")
                     && finding.falsified_with_evidence()))
@@ -276,13 +326,14 @@ pub(super) fn repair_result_error(
     node: &PlannedNode,
     upstream: &[Finding],
     outputs: &NodeOutputs,
+    threshold: AcceptBelow,
 ) -> Option<(&'static str, String)> {
     if !repair_writer(node) {
         return None;
     }
     let required: std::collections::BTreeSet<_> = upstream
         .iter()
-        .filter(|finding| repair::repair_eligible(finding))
+        .filter(|finding| repair::repair_eligible_for(finding, threshold))
         .filter_map(Finding::triage)
         .map(|triage| triage.root_cause)
         .collect();
@@ -399,87 +450,6 @@ pub(super) fn repair_return_warnings(node: &PlannedNode, outputs: &NodeOutputs) 
         .collect()
 }
 
-/// A malformed verdict gets one isolated, checkpointed correction. Expansion
-/// history survives resets and restarts, so it is also the retry fence.
-pub(super) fn correct_verdict(
-    document: &GraphDocument,
-    plan: &PlannedGraph,
-    checkpoint: &GraphCheckpoint,
-    limits: &crate::config::GraphLimits,
-    worktree_layout: &provenant_config::WorktreeLayoutPort,
-) -> Result<Option<GraphCheckpoint>, PatchError> {
-    if checkpoint.cancelled || checkpoint.pause.is_some() {
-        return Ok(None);
-    }
-    let Some((index, node)) = plan.nodes.iter().enumerate().find(|(index, node)| {
-        template::review_behaviour(node) == Some(template::ReviewBehaviour::Lens)
-            && checkpoint.nodes[*index].state == NodeState::Failed
-            && checkpoint.nodes[*index]
-                .review_verdict_correction_refused
-                .is_none()
-            && checkpoint.nodes[*index].advance_code.as_deref() == Some("review_verdict_invalid")
-            && !checkpoint
-                .expansions
-                .iter()
-                .filter_map(|expansion| expansion.patch.as_ref())
-                .any(|patch| {
-                    patch.reason.as_deref()
-                        == Some(format!("correct review verdict {}", node.id).as_str())
-                })
-    }) else {
-        return Ok(None);
-    };
-    let mut next = checkpoint.clone();
-    let brief = format!(
-        "{}\n\nThe previous reply had an invalid verdict. Return the findings. {VERDICT_LAST} This is the only automatic verdict correction.",
-        node.prompt
-    );
-    if let Err(error) = patch::correct_review_verdict(
-        &mut LiveGraph {
-            document,
-            checkpoint: &mut next,
-        },
-        &node.id,
-        &brief,
-        &PatchContext {
-            catalogue: None,
-            library: &TemplateLibrary::bundled(),
-            resolvers: &Default::default(),
-            limits,
-
-            journal: None,
-            worktree_layout: worktree_layout.clone(),
-        },
-    ) {
-        if let Some(PlanFailureFact::Structural(limit)) = &error.cause {
-            next = checkpoint.clone();
-            plans::set_expansion_pause(
-                &mut next,
-                index,
-                limit.to_string(),
-                false,
-                None,
-                Some(*limit),
-            );
-            return Ok(Some(next));
-        }
-        // Admission is atomic: keep the failed attempt and fence further
-        // automatic corrections so coverage can settle on subsequent advances.
-        next = checkpoint.clone();
-        if next.nodes[index].expansion_pause.is_some() {
-            plans::clear_expansion_pause(&mut next, index, true);
-        }
-        next.nodes[index].review_verdict_correction_refused =
-            Some(bounded(&error.to_string(), MAX_ADVANCE_NOTE_BYTES));
-        return Ok(Some(next));
-    }
-    transitions::retain_automatic_retry_accounting(
-        &checkpoint.nodes[index],
-        &mut next.nodes[index],
-    );
-    Ok(Some(next))
-}
-
 /// Review evidence can cross several aggregation boundaries.
 pub(super) fn composite_review(
     spec: &CompositeSpec,
@@ -508,6 +478,160 @@ pub(super) fn composite_review(
 pub(super) const FINDING_SEVERITY_UNKNOWN: provenant_records::warning::WarningCode =
     provenant_records::warning::WarningCode("FINDING_SEVERITY_UNKNOWN");
 
+/// Stable owner for review retry and finding-ledger state. Loop members and an
+/// initial panel explicitly bound into a repair loop share that loop ID; an
+/// otherwise standalone panel uses its reduced-verdict boundary. Explicit
+/// initial bindings are resolved through their findings/verdict input closure,
+/// so a sibling synthesis node still belongs to the panel it summarises.
+pub(super) fn chain_owner_id(node_index: usize, plan: &PlannedGraph) -> String {
+    let Some(node) = plan.nodes.get(node_index) else {
+        return String::new();
+    };
+    if let Some(round) = &node.round {
+        return round.loop_id.clone();
+    }
+    let panel = plan
+        .nodes
+        .iter()
+        .filter(|candidate| {
+            candidate
+                .composite
+                .as_ref()
+                .is_some_and(|spec| spec.reduce_verdict)
+                && (node.id == candidate.id || node.id.starts_with(&format!("{}--", candidate.id)))
+        })
+        .max_by_key(|candidate| candidate.id.len())
+        .map_or_else(|| node.id.clone(), |candidate| candidate.id.clone());
+    let Some(&panel_index) = plan
+        .nodes
+        .iter()
+        .position(|candidate| candidate.id == panel)
+        .as_ref()
+    else {
+        return panel;
+    };
+    let positions: BTreeMap<_, _> = plan
+        .nodes
+        .iter()
+        .enumerate()
+        .map(|(index, candidate)| (candidate.id.clone(), index))
+        .collect();
+    let consumers: BTreeSet<_> = plan
+        .nodes
+        .iter()
+        .filter(|candidate| {
+            candidate.loop_body.as_ref().is_some_and(|loop_body| {
+                loop_body.previous_bindings.values().any(|binding| {
+                    evidence_dependency_closure(binding, plan, &positions).contains(&panel_index)
+                })
+            })
+        })
+        .map(|candidate| candidate.id.as_str())
+        .collect();
+    if consumers.len() == 1 {
+        consumers
+            .first()
+            .map_or_else(|| panel.clone(), |id| (*id).to_owned())
+    } else {
+        // With multiple explicit consumers, keep one immutable seed at the
+        // standalone panel. Each loop copies that seed into its own chain when
+        // it begins; choosing the first loop would starve the others.
+        panel
+    }
+}
+
+/// Follow only declared evidence-bearing inputs (plus their composite and
+/// source relationships) from an initial binding. Ordinary ordering edges do
+/// not transfer review-chain ownership.
+pub(super) fn evidence_dependency_closure(
+    start: &str,
+    plan: &PlannedGraph,
+    positions: &BTreeMap<String, usize>,
+) -> BTreeSet<usize> {
+    let mut closure = BTreeSet::new();
+    let mut pending = vec![start.to_owned()];
+    while let Some(id) = pending.pop() {
+        let index = positions.get(&id).copied().or_else(|| {
+            let canonical = id.replace('.', "--");
+            positions.get(&canonical).copied()
+        });
+        let Some(index) = index else {
+            continue;
+        };
+        if !closure.insert(index) {
+            continue;
+        }
+        let node = &plan.nodes[index];
+        if let Some(parent) = node.parent_node.as_deref() {
+            pending.push(parent.to_owned());
+        }
+        pending.extend(node.composite_members.iter().cloned());
+        pending.extend(
+            node.inputs
+                .iter()
+                .filter(|input| {
+                    input.outputs.contains(&OutputKind::Findings)
+                        || input.outputs.contains(&OutputKind::Verdict)
+                })
+                .map(|input| input.node.clone()),
+        );
+        if let Some(SourceBinding::Node { node } | SourceBinding::Head { node }) = &node.source {
+            pending.push(node.clone());
+        }
+    }
+    closure
+}
+
+/// A repair loop may seed its owner ledger from one explicitly bound initial
+/// panel when multiple loops share that immutable panel seed.
+pub(super) fn initial_chain_ledger(
+    loop_id: &str,
+    plan: &PlannedGraph,
+    checkpoint: &GraphCheckpoint,
+) -> Option<FindingLedger> {
+    let positions: BTreeMap<_, _> = plan
+        .nodes
+        .iter()
+        .enumerate()
+        .map(|(index, candidate)| (candidate.id.clone(), index))
+        .collect();
+    let loop_node = plan.nodes.iter().find(|node| node.id == loop_id)?;
+    let loop_body = loop_node.loop_body.as_ref()?;
+    let mut panels = BTreeSet::new();
+    for binding in loop_body.previous_bindings.values() {
+        let closure = evidence_dependency_closure(binding, plan, &positions);
+        panels.extend(plan.nodes.iter().enumerate().filter_map(|(index, node)| {
+            (closure.contains(&index)
+                && node
+                    .composite
+                    .as_ref()
+                    .is_some_and(|spec| spec.reduce_verdict))
+            .then_some(index)
+        }));
+    }
+    let outermost: Vec<_> = panels
+        .iter()
+        .copied()
+        .filter(|candidate| {
+            let id = plan.nodes[*candidate].id.as_str();
+            panels.iter().all(|other| {
+                let other = plan.nodes[*other].id.as_str();
+                other == id || other.starts_with(&format!("{id}--"))
+            })
+        })
+        .collect();
+    if outermost.len() != 1 {
+        return None;
+    }
+    let panel = outermost[0];
+    let panel_owner = chain_owner_id(panel, plan);
+    checkpoint
+        .nodes
+        .iter()
+        .find(|progress| progress.id == panel_owner)
+        .and_then(|progress| progress.finding_ledger.clone())
+}
+
 /// Decode a finding's severity and flag an unknown source word.
 pub(super) fn finding_severity(finding: &Finding) -> (Severity, bool) {
     model::decode_severity(&finding.severity)
@@ -524,6 +648,25 @@ pub(super) fn is_open(finding: &Finding) -> bool {
             .is_none_or(|value| !matches!(value, "accepted" | "rejected" | "wont_fix"))
 }
 
+/// Boundary and data-loss risks stay in the persisted ledger until evidence
+/// falsifies them, even when a nominal disposition says they are closed.
+pub(super) fn ledger_unresolved(finding: &Finding) -> bool {
+    is_open(finding) || (finding.boundary_or_data_loss() && !finding.falsified_with_evidence())
+}
+
+pub(super) fn validate_ledger_blob(ledger: &FindingLedger) -> Result<(), String> {
+    let size = serde_json::to_vec(ledger)
+        .map_err(|_| "review finding ledger could not be serialised".to_owned())?
+        .len();
+    if size > MAX_CHECKPOINT_BYTES as usize {
+        return Err(format!(
+            "review finding ledger exceeds the {} byte prompt-store cap; complete review evidence is unavailable",
+            MAX_CHECKPOINT_BYTES
+        ));
+    }
+    Ok(())
+}
+
 /// The exclusive ceiling a `domains.review.accept_below` value allows. `Off`
 /// accepts no open finding; `Blocking` accepts everything strictly below it.
 fn threshold_severity(threshold: AcceptBelow) -> Option<Severity> {
@@ -535,6 +678,25 @@ fn threshold_severity(threshold: AcceptBelow) -> Option<Severity> {
         AcceptBelow::High => Some(Severity::High),
         AcceptBelow::Blocking => Some(Severity::Blocking),
     }
+}
+
+/// Whether an unresolved finding blocks acceptance at the configured ceiling.
+/// Boundary and data-loss findings remain blocking until evidence falsifies
+/// them, regardless of their severity or disposition.
+pub(super) fn blocks_threshold(finding: &Finding, threshold: AcceptBelow) -> bool {
+    if finding.boundary_or_data_loss() {
+        return !finding.falsified_with_evidence();
+    }
+    if !is_open(finding) {
+        return false;
+    }
+    if finding.has_blocking_class() {
+        return true;
+    }
+    let Some(ceiling) = threshold_severity(threshold) else {
+        return true;
+    };
+    finding_severity(finding).0 >= ceiling
 }
 
 /// The acceptance decision for one exact reviewed head.
@@ -555,30 +717,39 @@ pub(super) fn acceptance_decision(
     if !ci_complete_green {
         return Acceptance::Reject("ci is not complete and green on the exact head".into());
     }
-    let Some(ceiling) = threshold_severity(threshold) else {
-        return findings.iter().find(|finding| is_open(finding)).map_or(
-            Acceptance::Accept,
-            |finding| {
-                Acceptance::Reject(format!(
-                    "finding {} is open but acceptance is off",
-                    finding.id
-                ))
-            },
-        );
-    };
-    for finding in findings.iter().filter(|finding| is_open(finding)) {
+    for finding in findings {
+        if !blocks_threshold(finding, threshold) {
+            continue;
+        }
+        if finding.boundary_or_data_loss() && !finding.falsified_with_evidence() {
+            return Acceptance::Reject(format!(
+                "finding {} is an unresolved boundary or data-loss risk",
+                finding.id
+            ));
+        }
+        if !is_open(finding) {
+            continue;
+        }
+        if threshold == AcceptBelow::Off {
+            return Acceptance::Reject(format!(
+                "finding {} is open but acceptance is off",
+                finding.id
+            ));
+        }
         if finding.has_blocking_class() {
             return Acceptance::Reject(format!(
                 "finding {} has an open blocking class",
                 finding.id
             ));
         }
-        let (severity, _) = finding_severity(finding);
-        if severity >= ceiling {
-            return Acceptance::Reject(format!(
-                "finding {} severity {severity:?} is not below {ceiling:?}",
-                finding.id
-            ));
+        if let Some(ceiling) = threshold_severity(threshold) {
+            let (severity, _) = finding_severity(finding);
+            if severity >= ceiling {
+                return Acceptance::Reject(format!(
+                    "finding {} severity {severity:?} is not below {ceiling:?}",
+                    finding.id
+                ));
+            }
         }
     }
     Acceptance::Accept
@@ -635,8 +806,8 @@ pub(super) enum RoundMode {
 }
 
 /// A later round reviews `last_reviewed_head..head` plus the ledger's open
-/// findings. A moved base, an unattributable delta (no previous head), or no
-/// open findings widens the round to the full head.
+/// findings and invariants. A moved or missing base, an unattributable delta,
+/// or an invariant whose only lens was unavailable widens to the full head.
 pub(super) fn round_scope(
     ledger: &FindingLedger,
     head: &str,
@@ -645,18 +816,37 @@ pub(super) fn round_scope(
     mode: RoundMode,
 ) -> RoundScope {
     let last = ledger.last_reviewed_head.as_deref();
-    let base_moved = previous_base.is_some_and(|previous| previous != base_head);
-    let has_open = last
-        .and_then(|last_head| ledger.heads.get(last_head))
-        .is_some_and(|entry| !entry.unresolved.is_empty());
-    if mode == RoundMode::Delta
-        && !base_moved
-        && last.is_some_and(|last_head| last_head != head)
-        && has_open
-    {
-        RoundScope::Delta {
-            base: last.unwrap_or("").to_owned(),
-            head: head.to_owned(),
+    let base_moved = previous_base != Some(base_head);
+    if mode == RoundMode::Delta && !base_moved && last.is_some_and(|last_head| last_head != head) {
+        let previous = last.and_then(|last_head| ledger.heads.get(last_head));
+        let attributable = previous.is_some_and(|entry| {
+            entry.unresolved.iter().all(|finding| {
+                finding
+                    .lens
+                    .as_deref()
+                    .is_some_and(|lens| !lens.trim().is_empty())
+                    && finding.named_invariant().is_none_or(|invariant| {
+                        entry
+                            .invariant_coverage
+                            .get(invariant)
+                            .is_some_and(|lenses| {
+                                !lenses.is_empty()
+                                    && lenses
+                                        .iter()
+                                        .any(|lens| !entry.unavailable_lenses.contains(lens))
+                            })
+                    })
+            })
+        });
+        if attributable {
+            RoundScope::Delta {
+                base: last.unwrap_or("").to_owned(),
+                head: head.to_owned(),
+            }
+        } else {
+            RoundScope::Full {
+                head: head.to_owned(),
+            }
         }
     } else {
         RoundScope::Full {
@@ -677,7 +867,7 @@ pub(super) fn record_head(
     let entry = ledger.heads.entry(head.to_owned()).or_default();
     entry.unresolved = findings
         .iter()
-        .filter(|finding| is_open(finding))
+        .filter(|finding| ledger_unresolved(finding))
         .cloned()
         .collect();
     entry.dispositions = dispositions;
@@ -692,6 +882,84 @@ pub(super) fn carried_findings(ledger: &FindingLedger, head: &str) -> Vec<Findin
         .heads
         .get(head)
         .map_or_else(Vec::new, |entry| entry.unresolved.clone())
+}
+
+/// Merge a later-round delta with unresolved findings from its sealed base.
+/// Structural origins survive across heads, so a newly introduced raw-ID
+/// collision cannot rename an existing carried finding or close it by ID.
+pub(super) fn merge_carried_findings(
+    ledger: &mut FindingLedger,
+    head: &str,
+    previous_head: &str,
+    carried: &[Finding],
+) {
+    if carried.is_empty() || head == previous_head {
+        return;
+    }
+    let prior = ledger.heads.get(previous_head).cloned().unwrap_or_default();
+    let Some(current) = ledger.heads.get(head).cloned() else {
+        return;
+    };
+
+    let mut current_by_origin = BTreeMap::<outputs::RootIdentity, Finding>::new();
+    for finding in &current.findings {
+        let origin = current
+            .finding_origins
+            .get(&finding.id)
+            .map(|origin| (origin.source.clone(), origin.id.clone()))
+            .unwrap_or_else(|| (format!("legacy:{head}"), finding.id.clone()));
+        current_by_origin.insert(origin, finding.clone());
+    }
+
+    let mut previous_ids = BTreeMap::<outputs::RootIdentity, String>::new();
+    for finding in carried {
+        let origin = prior
+            .finding_origins
+            .get(&finding.id)
+            .map(|origin| (origin.source.clone(), origin.id.clone()))
+            .unwrap_or_else(|| (format!("legacy:{previous_head}"), finding.id.clone()));
+        previous_ids
+            .entry(origin.clone())
+            .or_insert_with(|| finding.id.clone());
+        current_by_origin
+            .entry(origin)
+            .or_insert_with(|| finding.clone());
+    }
+
+    let mut identified = current_by_origin.into_iter().collect::<Vec<_>>();
+    outputs::qualify_finding_origins(&mut identified, &previous_ids);
+    let Some(entry) = ledger.heads.get_mut(head) else {
+        return;
+    };
+    entry.findings = identified
+        .iter()
+        .map(|(_, finding)| finding.clone())
+        .collect();
+    entry.unresolved = identified
+        .iter()
+        .filter(|(_, finding)| ledger_unresolved(finding))
+        .map(|(_, finding)| finding.clone())
+        .collect();
+    entry.finding_origins.clear();
+    entry
+        .dispositions
+        .retain(|key, _| !key.starts_with("finding_disposition:"));
+    for (origin, finding) in identified {
+        entry.finding_origins.insert(
+            finding.id.clone(),
+            FindingOrigin {
+                source: origin.0,
+                id: origin.1,
+            },
+        );
+        entry.dispositions.insert(
+            format!("finding_disposition:{}", finding.id),
+            finding
+                .disposition
+                .clone()
+                .unwrap_or_else(|| finding.status.clone()),
+        );
+    }
 }
 
 /// Coverage gaps for a panel: lenses that never completed and invariants that
@@ -727,9 +995,10 @@ pub(super) fn coverage_gaps(
 pub(super) fn split_needs_adjudicator(
     verdicts: &[provenant_records::workflow::ReviewVerdict],
 ) -> bool {
-    verdicts
-        .first()
-        .is_some_and(|first| verdicts.iter().any(|verdict| verdict != first))
+    let Some(first) = verdicts.first() else {
+        return false;
+    };
+    verdicts.iter().any(|verdict| verdict != first)
 }
 
 /// Conflicting judgements about the same blocking finding require adjudication.
@@ -742,7 +1011,7 @@ pub(super) fn contradictory_blocking_findings(findings: &[Finding]) -> bool {
                 && left.named_invariant().is_some()
                 && left.named_invariant() == right.named_invariant();
             let upheld = |finding: &Finding| {
-                finding.has_blocking_class()
+                (finding.has_blocking_class() || repair::blocking_severity(finding))
                     && finding
                         .triage
                         .as_ref()
@@ -769,55 +1038,440 @@ pub(super) fn ledger_from_checkpoint(
     boundary: usize,
     current_head: &str,
 ) -> FindingLedger {
-    let mut ledger = FindingLedger::default();
-    for (index, progress) in checkpoint.nodes.iter().enumerate().take(boundary) {
-        let Some(settlement) = progress.review_settlement.as_ref() else {
-            continue;
-        };
-        let Some(outputs) = progress.outputs.as_ref() else {
-            continue;
-        };
-        if progress.state != NodeState::Succeeded
-            || outputs.partial
-            || outputs.verdict_error.is_some()
-        {
-            continue;
-        }
-        let head = settlement.head.to_string();
-        let entry = ledger.heads.entry(head.clone()).or_default();
-        if let Some(base) = settlement.base {
-            entry
-                .dispositions
-                .insert("base".to_owned(), base.to_string());
-        }
-        entry.unresolved.extend(
-            outputs
-                .findings
+    let Some(owner) = plan.nodes.get(boundary) else {
+        return FindingLedger::default();
+    };
+    let chain_owner = chain_owner_id(boundary, plan);
+    let mut ledger = checkpoint
+        .nodes
+        .iter()
+        .find(|progress| progress.id == chain_owner)
+        .and_then(|progress| progress.finding_ledger.clone())
+        .or_else(|| initial_chain_ledger(&chain_owner, plan, checkpoint))
+        .unwrap_or_default();
+    let previous_last_reviewed_head = ledger.last_reviewed_head.clone();
+    let stored_current = ledger.heads.remove(current_head);
+    let previous_ids = stored_current
+        .as_ref()
+        .map(|head| {
+            head.finding_origins
                 .iter()
-                .filter(|finding| is_open(finding))
-                .cloned(),
-        );
-        if let Some(lens) = plan
-            .nodes
-            .get(index)
-            .and_then(|node| node.review_lens.as_deref())
-        {
-            entry.covered_lenses.insert(lens.to_owned());
+                .map(|(display, origin)| {
+                    ((origin.source.clone(), origin.id.clone()), display.clone())
+                })
+                .collect::<BTreeMap<_, _>>()
+        })
+        .unwrap_or_default();
+    let positions: BTreeMap<_, _> = plan
+        .nodes
+        .iter()
+        .enumerate()
+        .map(|(index, node)| (node.id.clone(), index))
+        .collect();
+    let mut members = BTreeSet::new();
+    add_review_closure(
+        checkpoint.nodes.get(boundary).map(|node| node.id.as_str()),
+        plan,
+        checkpoint,
+        &positions,
+        &mut members,
+    );
+
+    // Round one consumes an initial panel outside the loop. Its explicit
+    // previous_bindings are the only safe way to attach that panel to this
+    // repair chain; matching by head would merge unrelated queue items.
+    let chain = owner.round.as_ref();
+    if let Some(round) = chain
+        && let Some(loop_index) = positions.get(round.loop_id.as_str())
+        && let Some(loop_spec) = plan.nodes[*loop_index].loop_body.as_ref()
+    {
+        for initial in loop_spec.previous_bindings.values() {
+            add_review_closure(Some(initial), plan, checkpoint, &positions, &mut members);
         }
-        let (invariants, lenses) = outputs::finding_coverage(&outputs.findings);
+    }
+    if let Some(round) = chain {
+        for node in &plan.nodes {
+            if node.round.as_ref().is_some_and(|member| {
+                member.loop_id == round.loop_id && member.round <= round.round
+            }) {
+                add_review_closure(Some(&node.id), plan, checkpoint, &positions, &mut members);
+            }
+        }
+    }
+    // Dynamic adjudicators are recorded in patch expansions. Include them by
+    // their declared panel parent even if the progress row's child list or
+    // round metadata does not yet contain the patch relationship.
+    let adjudicators: Vec<_> = checkpoint
+        .expansions
+        .iter()
+        .flat_map(|expansion| &expansion.nodes)
+        .filter(|node| {
+            node.kind == Some(NodeKind::Adjudicate)
+                && node
+                    .parent_node
+                    .as_deref()
+                    .and_then(|parent| positions.get(parent))
+                    .is_some_and(|parent| members.contains(parent))
+        })
+        .filter_map(|node| positions.contains_key(&node.id).then(|| node.id.clone()))
+        .collect();
+    for id in adjudicators {
+        add_review_closure(Some(&id), plan, checkpoint, &positions, &mut members);
+    }
+
+    let mut candidates: Vec<_> = plan
+        .nodes
+        .iter()
+        .enumerate()
+        .filter(|(index, node)| {
+            members.contains(index)
+                || chain.is_some_and(|round| {
+                    node.round.as_ref().is_some_and(|member| {
+                        member.loop_id == round.loop_id && member.round <= round.round
+                    })
+                })
+        })
+        .collect();
+    candidates
+        .sort_by_key(|(index, node)| (node.round.as_ref().map_or(0, |round| round.round), *index));
+    let panel_ids: Vec<_> = plan
+        .nodes
+        .iter()
+        .enumerate()
+        .filter(|(index, node)| {
+            members.contains(index)
+                && node
+                    .composite
+                    .as_ref()
+                    .is_some_and(|spec| spec.reduce_verdict)
+        })
+        .map(|(_, node)| node.id.clone())
+        .collect();
+    let mut heads = BTreeMap::<String, ReviewHeadBuilder>::new();
+    let mut last_previous_head = None::<(usize, usize, String)>;
+
+    // A head can be reviewed by several members in a round. Merge those rows,
+    // but when the same head is reviewed again replace its prior-round snapshot
+    // instead of appending stale findings or coverage.
+    for (index, node) in candidates {
+        if checkpoint.nodes.get(index).is_none_or(|progress| {
+            progress.state != NodeState::Succeeded
+                || progress
+                    .outputs
+                    .as_ref()
+                    .is_none_or(|outputs| outputs.partial || outputs.verdict_error.is_some())
+        }) {
+            continue;
+        }
+
+        let progress = &checkpoint.nodes[index];
+        let adjudicator = node.kind == Some(NodeKind::Adjudicate);
+        let (head, base, round_number, panel_id, verdict_key, verdict) = if adjudicator {
+            let Some(parent_id) = node.parent_node.as_deref() else {
+                continue;
+            };
+            let pinned_head = match node.source.as_ref() {
+                Some(SourceBinding::Commit { commit }) => Some(commit.as_str()),
+                _ => None,
+            };
+            let Some((head, base, round_number)) =
+                panel_review_settlement(parent_id, pinned_head, plan, checkpoint, &positions)
+            else {
+                continue;
+            };
+            let Some(verdict) = progress
+                .outputs
+                .as_ref()
+                .and_then(|outputs| outputs.verdict.as_deref())
+                .and_then(provenant_records::workflow::ReviewVerdict::from_token)
+            else {
+                continue;
+            };
+            (
+                head,
+                base,
+                round_number,
+                parent_id.to_owned(),
+                format!("adjudicator_verdict:{parent_id}"),
+                verdict.as_token().to_owned(),
+            )
+        } else {
+            let Some(settlement) = progress.review_settlement.as_ref() else {
+                continue;
+            };
+            let panel_id = panel_ids
+                .iter()
+                .filter(|panel| {
+                    node.id.as_str() == panel.as_str() || node.id.starts_with(&format!("{panel}--"))
+                })
+                .max_by_key(|panel| panel.len())
+                .cloned()
+                .unwrap_or_else(|| node.id.clone());
+            (
+                settlement.head.to_string(),
+                settlement.base.map(|base| base.to_string()),
+                node.round.as_ref().map_or(0, |round| round.round),
+                panel_id,
+                format!("verdict:{}", node.id),
+                settlement.verdict.as_token().to_owned(),
+            )
+        };
+
+        let record = heads.entry(head.clone()).or_default();
+        if round_number < record.round {
+            continue;
+        }
+        if round_number > record.round {
+            *record = ReviewHeadBuilder {
+                round: round_number,
+                ..Default::default()
+            };
+        }
+        record.head.round = round_number;
+        if let Some(base) = base {
+            record.head.dispositions.insert("base".to_owned(), base);
+        }
+        record.head.dispositions.insert(verdict_key, verdict);
+        if adjudicator {
+            record.adjudicated_panel_ids.extend(adjudicator_panel_ids(
+                node, plan, checkpoint, &positions, &panel_ids,
+            ));
+        }
+
+        let findings = outputs::materialised_finding_origins(index, plan, checkpoint, &positions);
+        for (origin, finding) in findings {
+            if adjudicator {
+                record
+                    .adjudicated_records
+                    .push((panel_id.clone(), origin, finding));
+            } else {
+                record
+                    .member_records
+                    .entry(panel_id.clone())
+                    .or_default()
+                    .entry(origin)
+                    .or_insert(finding);
+            }
+        }
+        if !adjudicator && let Some(lens) = node.review_lens.as_deref() {
+            record.head.covered_lenses.insert(lens.to_owned());
+        }
+        let (invariants, lenses) = outputs::finding_coverage(&findings);
         for (invariant, covered) in invariants {
-            entry
+            record
+                .head
                 .invariant_coverage
                 .entry(invariant)
                 .or_default()
                 .extend(covered);
         }
-        entry.covered_lenses.extend(lenses);
+        if !adjudicator {
+            record.head.covered_lenses.extend(lenses);
+        }
         if head != current_head {
-            ledger.last_reviewed_head = Some(head);
+            let position = last_previous_head
+                .as_ref()
+                .map_or(true, |(last_round, last_index, _)| {
+                    (round_number, index) >= (*last_round, *last_index)
+                });
+            if position {
+                last_previous_head = Some((round_number, index, head));
+            }
         }
     }
+
+    for (head, mut record) in heads {
+        // An adjudicator updates only identities represented by its declared
+        // input closure. Keep unmatched member records: an omitted finding is
+        // still unresolved evidence, including when an aggregate was capped.
+        let covered_origins = record
+            .member_records
+            .iter()
+            .filter(|(panel, _)| record.adjudicated_panel_ids.contains(*panel))
+            .flat_map(|(_, findings)| findings.keys().cloned())
+            .collect::<BTreeSet<_>>();
+        let mut records = BTreeMap::<outputs::RootIdentity, Finding>::new();
+        for findings in record.member_records.into_values() {
+            for (origin, finding) in findings {
+                records.entry(origin).or_insert(finding);
+            }
+        }
+        for (panel, origin, finding) in record.adjudicated_records {
+            if !record.adjudicated_panel_ids.contains(&panel) {
+                continue;
+            }
+            if covered_origins.contains(&origin) || !records.contains_key(&origin) {
+                records.insert(origin, finding);
+            }
+        }
+        let mut identified = records.into_iter().collect::<Vec<_>>();
+        outputs::qualify_finding_origins(&mut identified, &previous_ids);
+        record.head.finding_origins.clear();
+        for (origin, finding) in &identified {
+            record.head.finding_origins.insert(
+                finding.id.clone(),
+                FindingOrigin {
+                    source: origin.0.clone(),
+                    id: origin.1.clone(),
+                },
+            );
+            let disposition = finding
+                .disposition
+                .clone()
+                .unwrap_or_else(|| finding.status.clone());
+            record
+                .head
+                .dispositions
+                .insert(format!("finding_disposition:{}", finding.id), disposition);
+            if ledger_unresolved(finding) {
+                record.head.unresolved.push(finding.clone());
+            }
+        }
+        record.head.findings = identified.into_iter().map(|(_, finding)| finding).collect();
+        ledger.heads.insert(head, record.head);
+    }
+    if !ledger.heads.contains_key(current_head)
+        && let Some(previous) = stored_current
+    {
+        ledger.heads.insert(current_head.to_owned(), previous);
+    }
+    if let Some((_, _, head)) = last_previous_head {
+        let new_round = ledger.heads.get(&head).map_or(0, |entry| entry.round);
+        let old_round = previous_last_reviewed_head
+            .as_deref()
+            .and_then(|previous| ledger.heads.get(previous))
+            .map_or(0, |entry| entry.round);
+        if new_round >= old_round {
+            ledger.last_reviewed_head = Some(head);
+        }
+    } else if previous_last_reviewed_head
+        .as_deref()
+        .is_some_and(|previous| ledger.heads.contains_key(previous))
+    {
+        ledger.last_reviewed_head = previous_last_reviewed_head;
+    }
     ledger
+}
+
+#[derive(Default)]
+struct ReviewHeadBuilder {
+    round: usize,
+    head: FindingHead,
+    member_records: BTreeMap<String, BTreeMap<outputs::RootIdentity, Finding>>,
+    adjudicated_records: Vec<(String, outputs::RootIdentity, Finding)>,
+    adjudicated_panel_ids: BTreeSet<String>,
+}
+
+fn adjudicator_panel_ids(
+    adjudicator: &PlannedNode,
+    plan: &PlannedGraph,
+    checkpoint: &GraphCheckpoint,
+    positions: &BTreeMap<String, usize>,
+    panel_ids: &[String],
+) -> BTreeSet<String> {
+    let roots: Vec<_> = if adjudicator.inputs.is_empty() {
+        adjudicator.parent_node.as_deref().into_iter().collect()
+    } else {
+        adjudicator
+            .inputs
+            .iter()
+            .map(|input| input.node.as_str())
+            .collect()
+    };
+    let mut closure = BTreeSet::new();
+    for root in roots {
+        add_review_closure(Some(root), plan, checkpoint, positions, &mut closure);
+    }
+    let covered: BTreeSet<_> = panel_ids
+        .iter()
+        .filter(|panel| {
+            positions
+                .get(panel.as_str())
+                .is_some_and(|index| closure.contains(index))
+        })
+        .cloned()
+        .collect();
+    if covered.is_empty() {
+        adjudicator
+            .inputs
+            .iter()
+            .map(|input| input.node.clone())
+            .chain(adjudicator.parent_node.iter().cloned())
+            .collect()
+    } else {
+        covered
+    }
+}
+
+fn add_review_closure(
+    root: Option<&str>,
+    plan: &PlannedGraph,
+    checkpoint: &GraphCheckpoint,
+    positions: &BTreeMap<String, usize>,
+    members: &mut BTreeSet<usize>,
+) {
+    let Some(root) = root else {
+        return;
+    };
+    let mut pending = vec![root];
+    while let Some(id) = pending.pop() {
+        let Some(index) = positions.get(id).copied() else {
+            continue;
+        };
+        if !members.insert(index) {
+            continue;
+        }
+        if let Some(progress) = checkpoint.nodes.get(index) {
+            pending.extend(progress.children.iter().map(String::as_str));
+        }
+        pending.extend(
+            plan.nodes[index]
+                .inputs
+                .iter()
+                .filter(|input| {
+                    input.outputs.contains(&OutputKind::Findings)
+                        || input.outputs.contains(&OutputKind::Verdict)
+                })
+                .map(|input| input.node.as_str()),
+        );
+    }
+}
+
+fn panel_review_settlement(
+    panel_id: &str,
+    pinned_head: Option<&str>,
+    plan: &PlannedGraph,
+    checkpoint: &GraphCheckpoint,
+    positions: &BTreeMap<String, usize>,
+) -> Option<(String, Option<String>, usize)> {
+    let mut panel_members = BTreeSet::new();
+    add_review_closure(
+        Some(panel_id),
+        plan,
+        checkpoint,
+        positions,
+        &mut panel_members,
+    );
+    panel_members
+        .into_iter()
+        .filter_map(|index| {
+            let settlement = checkpoint.nodes.get(index)?.review_settlement.as_ref()?;
+            let head = settlement.head.to_string();
+            if pinned_head.is_some_and(|pinned| pinned != head.as_str()) {
+                return None;
+            }
+            Some((
+                head,
+                settlement.base.map(|base| base.to_string()),
+                plan.nodes[index]
+                    .round
+                    .as_ref()
+                    .map_or(0, |round| round.round),
+                index,
+            ))
+        })
+        .max_by_key(|(_, _, round, index)| (*round, *index))
+        .map(|(head, base, round, _)| (head, base, round))
 }
 
 #[cfg(test)]
@@ -834,6 +1488,100 @@ mod convergence_tests {
             "status": status
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn initial_synthesis_binding_resolves_panel_owner_and_shared_seed_stays_unassigned() {
+        let document: GraphDocument = serde_json::from_value(serde_json::json!({
+            "schema_version": 1,
+            "graph_id": "synthesis-panel-owner",
+            "nodes": [
+                {
+                    "id": "initial-panel",
+                    "kind": "composite",
+                    "access": "read_only",
+                    "composite": {
+                        "reduce_verdict": true,
+                        "nodes": [{"id":"lens", "access":"read_only", "prompt":"review"}],
+                        "exports": [{"node":"lens", "outputs":["findings", "verdict"]}]
+                    }
+                },
+                {
+                    "id": "initial-synthesis",
+                    "access": "read_only",
+                    "prompt": "synthesise the panel",
+                    "inputs": [{"node":"initial-panel", "outputs":["findings", "verdict"]}]
+                },
+                {"id":"cycle-a", "access":"read_only", "prompt":"repair"}
+            ]
+        }))
+        .unwrap();
+        let limits = crate::config::GraphLimits::default();
+        let expanded = plans::expand(&document, &[], &[], &limits).unwrap();
+        let (mut plan, _) = validate_flat_plan(&expanded, &limits).unwrap();
+        let cycle = plan
+            .nodes
+            .iter_mut()
+            .find(|node| node.id == "cycle-a")
+            .unwrap();
+        cycle.loop_body = Some(
+            serde_json::from_value(serde_json::json!({
+                "body": [], "until": "accepted", "max_rounds": 2,
+                "previous_bindings": {"review": "initial-synthesis"}
+            }))
+            .unwrap(),
+        );
+        let panel = plan
+            .nodes
+            .iter()
+            .position(|node| node.id == "initial-panel")
+            .unwrap();
+        assert_eq!(chain_owner_id(panel, &plan), "cycle-a");
+
+        let mut second_cycle = plan.nodes[plan
+            .nodes
+            .iter()
+            .position(|node| node.id == "cycle-a")
+            .unwrap()]
+        .clone();
+        second_cycle.id = "cycle-b".into();
+        plan.nodes.push(second_cycle);
+        assert_eq!(
+            chain_owner_id(panel, &plan),
+            "initial-panel",
+            "a shared initial panel remains a standalone seed for both consumers"
+        );
+        let mut checkpoint = transitions::initial_checkpoint(
+            &document,
+            &plan,
+            "synthesis-panel-owner".into(),
+            None,
+            None,
+            None,
+        );
+        let mut seed = FindingLedger::default();
+        record_head(
+            &mut seed,
+            "1".repeat(40).as_str(),
+            &[finding("F1", "high", "open")],
+            BTreeMap::new(),
+            BTreeSet::from(["correctness".into()]),
+            BTreeMap::new(),
+        );
+        let seed_row = checkpoint
+            .nodes
+            .iter_mut()
+            .find(|progress| progress.id == "initial-panel")
+            .unwrap();
+        seed_row.finding_ledger = Some(seed.clone());
+        assert_eq!(
+            initial_chain_ledger("cycle-a", &plan, &checkpoint),
+            Some(seed.clone())
+        );
+        assert_eq!(
+            initial_chain_ledger("cycle-b", &plan, &checkpoint),
+            Some(seed)
+        );
     }
 
     #[test]
@@ -876,6 +1624,8 @@ mod convergence_tests {
     #[test]
     fn accept_below_respects_blocking_class() {
         let high = finding("F1", "high", "open");
+        assert!(!blocks_threshold(&high, AcceptBelow::Blocking));
+        assert!(blocks_threshold(&high, AcceptBelow::High));
         assert_eq!(
             acceptance_decision(std::slice::from_ref(&high), AcceptBelow::Blocking, true),
             Acceptance::Accept
@@ -892,9 +1642,33 @@ mod convergence_tests {
             }
         }))
         .unwrap();
+        assert!(blocks_threshold(&boundary, AcceptBelow::Blocking));
         assert!(matches!(
             acceptance_decision(std::slice::from_ref(&boundary), AcceptBelow::Blocking, true),
             Acceptance::Reject(_)
+        ));
+        let mut closed_boundary = boundary.clone();
+        closed_boundary.status = "closed".into();
+        closed_boundary.disposition = Some("accepted".into());
+        assert!(blocks_threshold(&closed_boundary, AcceptBelow::Blocking));
+        assert!(matches!(
+            acceptance_decision(&[closed_boundary], AcceptBelow::Blocking, true),
+            Acceptance::Reject(_)
+        ));
+        let mut falsified_boundary = boundary.clone();
+        falsified_boundary.verification = Some("falsified".into());
+        falsified_boundary.evidence = Some("counterexample disproved by test".into());
+        assert!(!blocks_threshold(
+            &falsified_boundary,
+            AcceptBelow::Blocking
+        ));
+        assert_eq!(
+            acceptance_decision(&[falsified_boundary], AcceptBelow::Blocking, true),
+            Acceptance::Accept
+        );
+        assert!(blocks_threshold(
+            &finding("F-off", "nit", "open"),
+            AcceptBelow::Off
         ));
         let mut no_trigger = finding("F3", "nit", "open");
         no_trigger.triage = Some(FindingTriage {
@@ -905,6 +1679,14 @@ mod convergence_tests {
             blocking_class: "acceptance".into(),
             shared_flaw: false,
         });
+        let mut closed = no_trigger.clone();
+        closed.status = "closed".into();
+        assert!(!blocks_threshold(&closed, AcceptBelow::Off));
+        assert!(!repair::blocks_acceptance_for(&closed, AcceptBelow::Off));
+        assert_eq!(
+            acceptance_decision(&[closed], AcceptBelow::Off, true),
+            Acceptance::Accept
+        );
         assert!(matches!(
             acceptance_decision(&[no_trigger], AcceptBelow::Blocking, true),
             Acceptance::Reject(_)
@@ -922,7 +1704,8 @@ mod convergence_tests {
     #[test]
     fn delta_round_carries_open_findings() {
         let mut ledger = FindingLedger::default();
-        let open = finding("F1", "high", "open");
+        let mut open = finding("F1", "high", "open");
+        open.lens = Some("correctness".into());
         let fixed = finding("F2", "low", "fixed");
         record_head(
             &mut ledger,
@@ -937,6 +1720,93 @@ mod convergence_tests {
         let scope = round_scope(&ledger, "bbb", "base1", Some("base1"), RoundMode::Delta);
         assert_eq!(
             scope,
+            RoundScope::Delta {
+                base: "aaa".into(),
+                head: "bbb".into()
+            }
+        );
+    }
+
+    #[test]
+    fn delta_widens_for_unattributable_findings_or_uncovered_invariants() {
+        let open = finding("F1", "high", "open");
+        let mut ledger = FindingLedger::default();
+        record_head(
+            &mut ledger,
+            "aaa",
+            &[open.clone()],
+            BTreeMap::new(),
+            BTreeSet::new(),
+            BTreeMap::new(),
+        );
+        assert_eq!(
+            round_scope(&ledger, "bbb", "base", Some("base"), RoundMode::Delta),
+            RoundScope::Full { head: "bbb".into() }
+        );
+
+        let mut attributable = open;
+        attributable.lens = Some("correctness".into());
+        attributable.class = Some("invariant-a".into());
+        record_head(
+            &mut ledger,
+            "aaa",
+            &[attributable],
+            BTreeMap::new(),
+            BTreeSet::from(["correctness".into()]),
+            BTreeMap::new(),
+        );
+        assert_eq!(
+            round_scope(&ledger, "bbb", "base", Some("base"), RoundMode::Delta),
+            RoundScope::Full { head: "bbb".into() }
+        );
+
+        // An invariant still has a usable prior lens, so one unrelated
+        // unavailable lens does not widen every later round.
+        ledger
+            .heads
+            .get_mut("aaa")
+            .unwrap()
+            .invariant_coverage
+            .get_mut("invariant-a")
+            .unwrap()
+            .insert("tests".into());
+        assert_eq!(
+            round_scope(&ledger, "bbb", "base", Some("base"), RoundMode::Delta),
+            RoundScope::Delta {
+                base: "aaa".into(),
+                head: "bbb".into()
+            }
+        );
+        // Without a pinned prior base the old delta cannot be attributed.
+        assert_eq!(
+            round_scope(&ledger, "bbb", "base", None, RoundMode::Delta),
+            RoundScope::Full { head: "bbb".into() }
+        );
+
+        let entry = ledger.heads.get_mut("aaa").unwrap();
+        entry
+            .invariant_coverage
+            .insert("invariant-a".into(), BTreeSet::from(["correctness".into()]));
+        entry.unavailable_lenses.insert("correctness".into());
+        assert_eq!(
+            round_scope(&ledger, "bbb", "base", Some("base"), RoundMode::Delta),
+            RoundScope::Full { head: "bbb".into() }
+        );
+    }
+
+    #[test]
+    fn delta_round_is_valid_when_no_findings_remain_open() {
+        let mut ledger = FindingLedger::default();
+        record_head(
+            &mut ledger,
+            "aaa",
+            &[finding("F1", "low", "fixed")],
+            BTreeMap::new(),
+            BTreeSet::from(["correctness".into()]),
+            BTreeMap::new(),
+        );
+        assert_eq!(
+            round_scope(&ledger, "bbb", "base", Some("base"), RoundMode::Delta),
             RoundScope::Delta {
                 base: "aaa".into(),
                 head: "bbb".into()
@@ -990,6 +1860,12 @@ mod convergence_tests {
         let mut rejected = confirmed.clone();
         rejected.id = "b:F1".into();
         rejected.triage.as_mut().unwrap().decision = "rejected".into();
+        assert!(contradictory_blocking_findings(&[
+            confirmed.clone(),
+            rejected.clone()
+        ]));
+        confirmed.triage.as_mut().unwrap().blocking_class = "none".into();
+        rejected.triage.as_mut().unwrap().blocking_class = "none".into();
         assert!(contradictory_blocking_findings(&[confirmed, rejected]));
     }
 
@@ -1003,6 +1879,22 @@ mod convergence_tests {
         assert!(!split_needs_adjudicator(&[
             ReviewVerdict::Approve,
             ReviewVerdict::Approve
+        ]));
+        assert!(split_needs_adjudicator(&[
+            ReviewVerdict::Approve,
+            ReviewVerdict::Inconclusive
+        ]));
+        assert!(split_needs_adjudicator(&[
+            ReviewVerdict::ApproveWithNits,
+            ReviewVerdict::RequestChanges
+        ]));
+        assert!(split_needs_adjudicator(&[
+            ReviewVerdict::Inconclusive,
+            ReviewVerdict::RequestChanges
+        ]));
+        assert!(!split_needs_adjudicator(&[
+            ReviewVerdict::Inconclusive,
+            ReviewVerdict::Inconclusive
         ]));
         assert!(!split_needs_adjudicator(&[]));
     }
@@ -1039,21 +1931,34 @@ mod delivery_tests {
 
     #[test]
     fn delivery_review_requires_complete_nonblocking_evidence() {
-        let mut policy = DeliveryReviewSpec::default();
         let mut outputs = NodeOutputs {
             verdict: Some("VERDICT: INCONCLUSIVE".into()),
             findings_available: Some(true),
             ..Default::default()
         };
-        assert!(delivery_matches(&policy, &outputs, "VERDICT: PASS"));
-        policy.accept_below = AcceptBelow::Off;
-        assert!(!delivery_matches(&policy, &outputs, "VERDICT: PASS"));
-        policy.accept_below = AcceptBelow::Blocking;
+        assert!(delivery_matches(
+            AcceptBelow::Blocking,
+            &outputs,
+            "VERDICT: PASS"
+        ));
+        assert!(!delivery_matches(
+            AcceptBelow::Off,
+            &outputs,
+            "VERDICT: PASS"
+        ));
         outputs.findings_available = None;
-        assert!(!delivery_matches(&policy, &outputs, "VERDICT: PASS"));
+        assert!(!delivery_matches(
+            AcceptBelow::Blocking,
+            &outputs,
+            "VERDICT: PASS"
+        ));
         outputs.findings_available = Some(true);
         outputs.partial = true;
-        assert!(!delivery_matches(&policy, &outputs, "VERDICT: PASS"));
+        assert!(!delivery_matches(
+            AcceptBelow::Blocking,
+            &outputs,
+            "VERDICT: PASS"
+        ));
         outputs.partial = false;
         outputs.findings.push(
             serde_json::from_value(serde_json::json!({
@@ -1062,10 +1967,18 @@ mod delivery_tests {
             }))
             .unwrap(),
         );
-        assert!(!delivery_matches(&policy, &outputs, "VERDICT: PASS"));
+        assert!(!delivery_matches(
+            AcceptBelow::Blocking,
+            &outputs,
+            "VERDICT: PASS"
+        ));
         outputs.findings.clear();
         outputs.verdict = Some("VERDICT: FAIL".into());
-        assert!(!delivery_matches(&policy, &outputs, "VERDICT: PASS"));
+        assert!(!delivery_matches(
+            AcceptBelow::Blocking,
+            &outputs,
+            "VERDICT: PASS"
+        ));
     }
 
     #[test]

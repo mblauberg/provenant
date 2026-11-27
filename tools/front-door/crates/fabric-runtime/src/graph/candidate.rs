@@ -66,6 +66,7 @@ impl CandidateError {
 pub struct AdmittedCandidate {
     pub(super) source: GraphDocument,
     pub(super) checkpoint: Option<GraphCheckpoint>,
+    pub(super) review_policy: ReviewPolicy,
     pub(super) extensions: Vec<String>,
     pub(super) expanded: GraphDocument,
     pub(super) plan: PlannedGraph,
@@ -89,6 +90,28 @@ pub fn admit_candidate(
     budget: &crate::config::GraphBudget,
     requester_path: Option<&[u8]>,
 ) -> Result<AdmittedCandidate, CandidateError> {
+    admit_candidate_with_review_policy(
+        document,
+        checkpoint,
+        extensions,
+        limits,
+        budget,
+        requester_path,
+        &ReviewPolicy::default(),
+    )
+}
+
+/// Build and check a candidate with the review settings resolved by its owner.
+/// Existing checkpoints always keep their sealed policy on replay.
+pub fn admit_candidate_with_review_policy(
+    document: &GraphDocument,
+    checkpoint: Option<&GraphCheckpoint>,
+    extensions: &[String],
+    limits: &crate::config::GraphLimits,
+    budget: &crate::config::GraphBudget,
+    requester_path: Option<&[u8]>,
+    review_policy: &ReviewPolicy,
+) -> Result<AdmittedCandidate, CandidateError> {
     admit(
         document,
         checkpoint,
@@ -97,6 +120,7 @@ pub fn admit_candidate(
         budget,
         requester_path,
         false,
+        review_policy,
     )
 }
 
@@ -117,6 +141,7 @@ pub fn admit_running_candidate(
         budget,
         requester_path,
         true,
+        &checkpoint.review_policy(),
     )
 }
 
@@ -128,6 +153,7 @@ fn admit(
     budget: &crate::config::GraphBudget,
     requester_path: Option<&[u8]>,
     running_unchanged: bool,
+    requested_review_policy: &ReviewPolicy,
 ) -> Result<AdmittedCandidate, CandidateError> {
     GraphInput::Resume {
         extra: Default::default(),
@@ -203,8 +229,18 @@ fn admit(
     }
     validate_schema(document).map_err(CandidateError::from_admission)?;
     validate_delivery_contracts(document).map_err(CandidateError::from_admission)?;
-    let expanded = plans::expand_typed(document, &all, expansions, &generous)
+    let mut review_policy = checkpoint
+        .map(GraphCheckpoint::review_policy)
+        .unwrap_or_else(|| requested_review_policy.clone());
+    apply_review_policy_override(
+        &mut review_policy,
+        document.review_policy.as_ref(),
+        provenant_records::Layer::Launch,
+        "launch",
+    )?;
+    let mut expanded = plans::expand_typed(document, &all, expansions, &generous)
         .map_err(CandidateError::from_admission)?;
+    resolve_review_policies(&mut expanded, &review_policy)?;
     // Route models are canonicalised once by the host entry point that holds
     // the effective catalogue. Admission reads the stored ids verbatim and
     // never rewrites them. Spec: docs/specs/fabric.md#one-model-spelling-per-route
@@ -222,8 +258,9 @@ fn admit(
         validate_flat_plan(&expanded, &generous).map_err(CandidateError::from_admission)?;
     validate_output_kinds(&expanded).map_err(CandidateError::from_admission)?;
     let topology_changes = if running_unchanged {
-        let previous =
+        let mut previous =
             plans::expand(document, saved, expansions, &generous).map_err(CandidateError::Plan)?;
+        resolve_review_policies(&mut previous, &review_policy)?;
         previous != expanded
     } else {
         false
@@ -257,19 +294,189 @@ fn admit(
         }
         return Err(CandidateError::Structural(limit));
     }
-    let bound = graph_envelope_bound(document, expansions, &all, &plan).saturating_add(
-        requester_path.map_or(0, |path| path.len().saturating_mul(4).saturating_add(2)),
-    );
+    let bound = graph_envelope_bound_with_policy(document, expansions, &all, &plan, &review_policy)
+        .saturating_add(
+            requester_path.map_or(0, |path| path.len().saturating_mul(4).saturating_add(2)),
+        );
     if bound > MAX_CHECKPOINT_BYTES as usize {
         return Err(CandidateError::Envelope(GraphEnvelopeLimit { bound }));
     }
     Ok(AdmittedCandidate {
         source: document.clone(),
         checkpoint: checkpoint.cloned(),
+        review_policy,
         extensions: extensions.to_vec(),
         expanded,
         plan,
         effective_budget,
         growth_limit,
     })
+}
+
+fn layer_rank(layer: provenant_records::Layer) -> usize {
+    provenant_records::Layer::ALL
+        .iter()
+        .position(|candidate| *candidate == layer)
+        .unwrap_or(usize::MAX)
+}
+
+fn scope_allows_review_setting(layer: provenant_records::Layer, field: &str) -> bool {
+    use provenant_records::Layer;
+    match layer {
+        Layer::Template => true,
+        Layer::Route => matches!(field, "adjudicator_route" | "lens_retry"),
+        Layer::Launch => field != "lens_retry",
+        _ => false,
+    }
+}
+
+fn apply_review_field<T>(
+    target: &mut provenant_records::Sourced<T>,
+    value: T,
+    layer: provenant_records::Layer,
+    origin: &str,
+    field: &str,
+) {
+    if layer_rank(layer) >= layer_rank(target.source.layer) {
+        *target = provenant_records::Sourced {
+            value,
+            source: provenant_records::Source {
+                layer,
+                origin: Some(format!("{origin}#domains.review.{field}")),
+            },
+        };
+    }
+}
+
+fn apply_review_policy_override(
+    policy: &mut ReviewPolicy,
+    override_: Option<&ReviewPolicyOverride>,
+    layer: provenant_records::Layer,
+    origin: &str,
+) -> Result<(), CandidateError> {
+    let Some(override_) = override_ else {
+        return Ok(());
+    };
+    macro_rules! apply {
+        ($field:ident, $name:literal) => {
+            if let Some(value) = &override_.$field {
+                if !scope_allows_review_setting(layer, $name) {
+                    return Err(CandidateError::Schema(format!(
+                        "domains.review.{} does not accept the {} scope",
+                        $name,
+                        match layer {
+                            provenant_records::Layer::Template => "template",
+                            provenant_records::Layer::Route => "route",
+                            provenant_records::Layer::Launch => "launch",
+                            _ => "selected",
+                        }
+                    )));
+                }
+                apply_review_field(&mut policy.$field, value.clone(), layer, origin, $name);
+            }
+        };
+    }
+    apply!(later_rounds, "later_rounds");
+    apply!(adjudicator_route, "adjudicator_route");
+    apply!(accept_below, "accept_below");
+    apply!(evidence_retries, "evidence_retries");
+    apply!(lens_retry, "lens_retry");
+    policy
+        .validate()
+        .map_err(|reason| CandidateError::Schema(reason.into()))
+}
+
+fn template_review_policy(
+    template_library: &std::collections::BTreeMap<String, Template>,
+    node: &GraphNode,
+) -> Option<(String, ReviewPolicyOverride)> {
+    let name = node
+        .extra
+        .get(super::template::TEMPLATE_FIELD)
+        .and_then(serde_json::Value::as_str)?;
+    let policy = template_library
+        .get(name)
+        .and_then(|template| template.review_policy.clone())?;
+    Some((name.to_owned(), policy))
+}
+
+fn resolve_review_node(
+    template_library: &std::collections::BTreeMap<String, Template>,
+    node: &mut GraphNode,
+    inherited: &ReviewPolicy,
+) -> Result<(), CandidateError> {
+    let mut policy = inherited.clone();
+    if let Some((template, override_)) = template_review_policy(template_library, node) {
+        apply_review_policy_override(
+            &mut policy,
+            Some(&override_),
+            provenant_records::Layer::Template,
+            &format!("template:{template}"),
+        )?;
+    }
+    apply_review_policy_override(
+        &mut policy,
+        node.review_policy.as_ref(),
+        provenant_records::Layer::Launch,
+        &format!("node:{}", node.id),
+    )?;
+    node.effective_review_policy = Some(policy.clone());
+    if let Some(route) = node.route.as_mut() {
+        let mut route_policy = policy.clone();
+        apply_review_policy_override(
+            &mut route_policy,
+            route.review_policy.as_ref(),
+            provenant_records::Layer::Route,
+            &format!(
+                "route:{}",
+                route
+                    .alias
+                    .as_deref()
+                    .or(route.name.as_deref())
+                    .unwrap_or("unnamed")
+            ),
+        )?;
+        route.effective_review_policy = Some(route_policy);
+    }
+    if let Some(routes) = node.routes.as_mut() {
+        for route in routes {
+            let mut route_policy = policy.clone();
+            apply_review_policy_override(
+                &mut route_policy,
+                route.review_policy.as_ref(),
+                provenant_records::Layer::Route,
+                &format!(
+                    "route:{}",
+                    route
+                        .alias
+                        .as_deref()
+                        .or(route.name.as_deref())
+                        .unwrap_or("unnamed")
+                ),
+            )?;
+            route.effective_review_policy = Some(route_policy);
+        }
+    }
+    if let Some(composite) = node.composite.as_mut() {
+        for child in &mut composite.nodes {
+            resolve_review_node(template_library, child, &policy)?;
+        }
+    }
+    if let Some(loop_body) = node.loop_body.as_mut() {
+        for child in &mut loop_body.body {
+            resolve_review_node(template_library, child, &policy)?;
+        }
+    }
+    Ok(())
+}
+
+pub(super) fn resolve_review_policies(
+    document: &mut GraphDocument,
+    base: &ReviewPolicy,
+) -> Result<(), CandidateError> {
+    let template_library = &document.template_library;
+    for node in &mut document.nodes {
+        resolve_review_node(template_library, node, base)?;
+    }
+    Ok(())
 }

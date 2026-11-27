@@ -700,7 +700,7 @@ pub(super) fn outputs(passed: bool, ci: Option<&CiEvidence>, delivery_queue: boo
                 risk_grew: None,
                 scope_grew: None,
                 id: format!("ci-{}", index + 1),
-                severity: "error".into(),
+                severity: "high".into(),
                 file: String::new(),
                 line: None,
                 summary: match &check.job_id {

@@ -70,6 +70,60 @@ pub struct QueueConfig {
     pub prep_retries: usize,
 }
 
+/// Domain settings that govern review convergence across admitted graphs.
+/// Sources are retained when the graph owner seals them into its checkpoint.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ReviewSettings {
+    pub later_rounds: crate::graph::ReviewRounds,
+    pub adjudicator_route: String,
+    pub accept_below: crate::graph::AcceptBelow,
+    pub evidence_retries: usize,
+    pub lens_retry: usize,
+}
+
+impl Default for ReviewSettings {
+    fn default() -> Self {
+        Self {
+            later_rounds: crate::graph::ReviewRounds::Delta,
+            adjudicator_route: "principal".into(),
+            accept_below: crate::graph::AcceptBelow::High,
+            evidence_retries: 2,
+            lens_retry: 1,
+        }
+    }
+}
+
+impl DomainConfig for ReviewSettings {
+    fn validate(&self) -> Vec<SectionError> {
+        if self.adjudicator_route.is_empty()
+            || self.adjudicator_route.len() > 128
+            || provenant_core::valid_name(&self.adjudicator_route).is_none()
+        {
+            return vec![SectionError {
+                detail: None,
+                field: "adjudicator_route".into(),
+                code: "invalid",
+            }];
+        }
+        Vec::new()
+    }
+}
+
+pub const REVIEW_SECTION: DomainSection = DomainSection::new::<ReviewSettings>("review", |_| {
+    "later_rounds = \"delta\"\nadjudicator_route = \"principal\"\naccept_below = \"high\"\nevidence_retries = 2\nlens_retry = 1\n"
+})
+.with_fields(&[
+    FieldMetadata::enumeration("later_rounds", &["delta", "full"]),
+    FieldMetadata::new("adjudicator_route", "string"),
+    FieldMetadata::enumeration(
+        "accept_below",
+        &["off", "nit", "low", "medium", "high", "blocking"],
+    ),
+    FieldMetadata::int("evidence_retries", 0, i64::MAX),
+    FieldMetadata::int("lens_retry", 0, i64::MAX),
+]);
+
 impl Default for QueueConfig {
     fn default() -> Self {
         Self {

@@ -87,6 +87,90 @@ pub(super) fn is_false(value: &bool) -> bool {
 pub const QUEUE_MAX_PARALLEL_KEY: &str = "domains.fabric.queue.max_parallel";
 pub const QUEUE_CI_SLOTS_KEY: &str = "domains.fabric.queue.ci_slots";
 pub const QUEUE_PREP_RETRIES_KEY: &str = "domains.fabric.queue.prep_retries";
+pub const REVIEW_LATER_ROUNDS_KEY: &str = "domains.review.later_rounds";
+pub const REVIEW_ADJUDICATOR_ROUTE_KEY: &str = "domains.review.adjudicator_route";
+pub const REVIEW_ACCEPT_BELOW_KEY: &str = "domains.review.accept_below";
+pub const REVIEW_EVIDENCE_RETRIES_KEY: &str = "domains.review.evidence_retries";
+pub const REVIEW_LENS_RETRY_KEY: &str = "domains.review.lens_retry";
+
+/// Whether review after round one covers only the attributable delta or the
+/// full head. This value is sealed with the graph checkpoint at admission.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewRounds {
+    #[default]
+    Delta,
+    Full,
+}
+
+/// Review convergence settings resolved once when a graph is first admitted.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReviewPolicy {
+    pub later_rounds: provenant_records::Sourced<ReviewRounds>,
+    pub adjudicator_route: provenant_records::Sourced<String>,
+    pub accept_below: provenant_records::Sourced<AcceptBelow>,
+    pub evidence_retries: provenant_records::Sourced<usize>,
+    pub lens_retry: provenant_records::Sourced<usize>,
+}
+
+/// Optional review settings supplied at graph, node, or route scope before
+/// admission resolves and seals the effective policy.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReviewPolicyOverride {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub later_rounds: Option<ReviewRounds>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adjudicator_route: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accept_below: Option<AcceptBelow>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence_retries: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lens_retry: Option<usize>,
+}
+
+impl Default for ReviewPolicy {
+    fn default() -> Self {
+        fn sourced<T>(value: T) -> provenant_records::Sourced<T> {
+            provenant_records::Sourced {
+                value,
+                source: provenant_records::Source {
+                    layer: provenant_records::Layer::Default,
+                    origin: None,
+                },
+            }
+        }
+        Self {
+            later_rounds: sourced(ReviewRounds::Delta),
+            adjudicator_route: sourced("principal".into()),
+            accept_below: sourced(AcceptBelow::High),
+            evidence_retries: sourced(2),
+            lens_retry: sourced(1),
+        }
+    }
+}
+
+impl ReviewPolicy {
+    /// A pre-policy checkpoint used `blocking` for the delivery gate. Keep that
+    /// behavior deterministic when replaying one of those checkpoints.
+    pub fn legacy() -> Self {
+        let mut policy = Self::default();
+        policy.accept_below.value = AcceptBelow::Blocking;
+        policy
+    }
+
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if self.adjudicator_route.value.trim().is_empty()
+            || self.adjudicator_route.value.len() > 128
+            || provenant_core::valid_name(&self.adjudicator_route.value).is_none()
+        {
+            return Err("review.adjudicator_route must be a non-empty route alias");
+        }
+        Ok(())
+    }
+}
 
 /// Effective values and their sources, sealed before queue admission.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -166,14 +250,15 @@ impl EscalateSpec {
 #[serde(default, deny_unknown_fields)]
 pub struct DeliveryReviewSpec {
     pub shape: provenant_records::graph::ReviewShape,
-    pub accept_below: AcceptBelow,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accept_below: Option<AcceptBelow>,
 }
 
 impl Default for DeliveryReviewSpec {
     fn default() -> Self {
         Self {
             shape: Default::default(),
-            accept_below: AcceptBelow::Blocking,
+            accept_below: None,
         }
     }
 }
@@ -254,6 +339,9 @@ pub struct GraphDocument {
     /// Review resolution inputs retained with the submitted graph.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review: Option<provenant_routing::ReviewRequest>,
+    /// Review convergence overrides applied to this graph before admission.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_policy: Option<ReviewPolicyOverride>,
     /// Written by the host at admission; a caller-supplied value is overwritten.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subject: Option<provenant_records::subject::PinnedSubject>,
@@ -349,6 +437,12 @@ pub struct GraphRoute {
     pub peer_network: Option<provenant_records::run::NetworkAccess>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub peer_retry_limit: Option<u8>,
+    /// Partial review settings authored for this route.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_policy: Option<ReviewPolicyOverride>,
+    /// Effective review settings sealed for this route at admission.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effective_review_policy: Option<ReviewPolicy>,
 }
 
 /// The selector used when launching a graph route.
@@ -843,6 +937,12 @@ pub struct GraphNode {
     pub escalate: Option<EscalateSpec>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delivery_review: Option<DeliveryReviewSpec>,
+    /// Partial review settings authored for this node.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_policy: Option<ReviewPolicyOverride>,
+    /// Effective review settings sealed for this node at admission.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effective_review_policy: Option<ReviewPolicy>,
     /// Untrusted facts for a host-verified queue PR adoption seed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delivery_adoption: Option<DeliveryAdoptionIntent>,
@@ -1683,6 +1783,33 @@ mod typed_findings_blob {
     }
 }
 
+mod typed_finding_ledger_blob {
+    use super::FindingLedger;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(
+        value: &Option<FindingLedger>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        use serde::ser::Error;
+        match value {
+            Some(ledger) => {
+                serializer.serialize_str(&serde_json::to_string(ledger).map_err(S::Error::custom)?)
+            }
+            None => serializer.serialize_none(),
+        }
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Option<FindingLedger>, D::Error> {
+        use serde::de::Error;
+        Option::<String>::deserialize(deserializer)?
+            .map(|text| serde_json::from_str(&text).map_err(D::Error::custom))
+            .transpose()
+    }
+}
+
 /// Compact, versioned settlement record. No provider transcript is retained.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NodeOutputs {
@@ -1918,6 +2045,118 @@ pub struct ReviewSettlement {
     pub independent: bool,
 }
 
+/// Durable retry history for one review leaf and one pinned head. The original
+/// route list is retained because a retry replaces the node's route list.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReviewRetryState {
+    pub review_chain: String,
+    pub head: String,
+    pub eligible_routes: Vec<GraphRoute>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub evidence_retries: Vec<ReviewEvidenceRetryCount>,
+    #[serde(default, skip_serializing_if = "is_zero_usize")]
+    pub lens_retries: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_retry: Option<ReviewRetryIntent>,
+}
+
+/// Host-verified later-review range pinned before input staging and launch.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ReviewRoundScope {
+    Delta { base: String, head: String },
+    Full { head: String },
+}
+
+/// Number of malformed-evidence retries already used on one exact route.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReviewEvidenceRetryCount {
+    pub route: GraphRoute,
+    pub retries: usize,
+}
+
+/// Crash-safe intent to retry one review attempt on a pinned route.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReviewRetryIntent {
+    pub route: GraphRoute,
+    pub cause: ReviewRetryCause,
+    pub attempt: AttemptKey,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewRetryCause {
+    Evidence,
+    LensUnavailable,
+}
+
+impl ReviewRetryState {
+    pub fn new(review_chain: &str, head: &str, eligible_routes: &[GraphRoute]) -> Self {
+        Self {
+            review_chain: review_chain.to_owned(),
+            head: head.to_owned(),
+            eligible_routes: eligible_routes.to_vec(),
+            evidence_retries: Vec::new(),
+            lens_retries: 0,
+            pending_retry: None,
+        }
+    }
+
+    pub fn evidence_retries_for(&self, route: &GraphRoute) -> usize {
+        self.evidence_retries
+            .iter()
+            .find(|entry| &entry.route == route)
+            .map_or(0, |entry| entry.retries)
+    }
+
+    pub fn record_evidence_retry(&mut self, route: &GraphRoute) -> Option<usize> {
+        if let Some(entry) = self
+            .evidence_retries
+            .iter_mut()
+            .find(|entry| &entry.route == route)
+        {
+            entry.retries = entry.retries.checked_add(1)?;
+            Some(entry.retries)
+        } else {
+            self.evidence_retries.push(ReviewEvidenceRetryCount {
+                route: route.clone(),
+                retries: 1,
+            });
+            Some(1)
+        }
+    }
+
+    pub fn record_lens_retry(&mut self) -> Option<usize> {
+        self.lens_retries = self.lens_retries.checked_add(1)?;
+        Some(self.lens_retries)
+    }
+
+    pub fn next_route(&self, current: &GraphRoute) -> Option<&GraphRoute> {
+        let index = self
+            .eligible_routes
+            .iter()
+            .position(|route| route == current)?;
+        self.eligible_routes.get(index + 1)
+    }
+
+    pub fn matches(&self, chain: &str, head: &str) -> bool {
+        self.review_chain == chain && self.head == head
+    }
+
+    pub fn valid_for(&self, chain: &str, head: &str, max_evidence: usize, max_lens: usize) -> bool {
+        self.matches(chain, head)
+            && !self.eligible_routes.is_empty()
+            && self.evidence_retries.len() <= self.eligible_routes.len()
+            && self.lens_retries <= max_lens
+            && self.evidence_retries.iter().all(|entry| {
+                self.eligible_routes.contains(&entry.route) && entry.retries <= max_evidence
+            })
+    }
+}
+
 /// A chair's reasoned disposition of valid review evidence for one exact head.
 /// It is stored on the reviewed node and never replaces the reviewer output.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -2001,6 +2240,10 @@ pub struct GraphCheckpoint {
     /// own `on_stop` entry wins over these; old checkpoints decode to empty.
     #[serde(default, skip_serializing_if = "provenant_records::OnStop::is_empty")]
     pub on_stop_defaults: provenant_records::OnStop,
+    /// Review behavior resolved once at admission. A legacy checkpoint with
+    /// no value uses the deterministic shipped default on replay.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_policy: Option<ReviewPolicy>,
     /// Exact-head evidence that permits replay-safe release after conflict recovery.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub delivery_ci_superseded: Vec<DeliveryCiSupersession>,
@@ -2144,6 +2387,20 @@ pub struct NodeProgress {
     pub delivery_adoption: Option<super::queue_adoption::DeliveryAdoptionProgress>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delivery_review_disposition: Option<DeliveryReviewDisposition>,
+    /// Full, chain-owned review evidence retained in one externalisable blob.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "typed_finding_ledger_blob"
+    )]
+    pub finding_ledger: Option<FindingLedger>,
+    /// Prior adjudication receipts retained when the stable lane is continued
+    /// with newly settled same-head panels.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub review_adjudication_receipts: Vec<ReviewAdjudicationReceipt>,
+    /// Scope verified against the producer's Git ancestry before staging.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_round_scope: Option<ReviewRoundScope>,
     #[serde(flatten)]
     pub extra: provenant_records::ExtraFields,
     /// Direct children of a composite, whose individual evidence stays available.
@@ -2191,8 +2448,6 @@ pub struct NodeProgress {
     pub concurrency_warning: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repair_growth: Option<RepairGrowth>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub review_verdict_correction_refused: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provisioned_source: Option<String>,
     /// Nested creation authority survives clearing the pending effect fence
@@ -2294,6 +2549,9 @@ pub struct NodeProgress {
     /// Machine-readable review verdict and the exact subject reviewed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review_settlement: Option<ReviewSettlement>,
+    /// Checkpointed retry budget and eligible routes for this review leaf.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_retry: Option<ReviewRetryState>,
     /// Immutable evidence from redos and continuations, included in budgets.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub previous_attempts: Vec<GraphAttempt>,
@@ -2336,16 +2594,56 @@ pub struct FindingLedger {
 /// Findings, dispositions and coverage for one exact head.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FindingHead {
+    #[serde(default, skip_serializing_if = "is_zero_usize")]
+    pub round: usize,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub findings: Vec<Finding>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub unresolved: Vec<Finding>,
+    /// Structural source identity for each displayed finding ID. Retaining
+    /// this map keeps IDs stable when later rounds add a colliding raw ID.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub finding_origins: std::collections::BTreeMap<String, FindingOrigin>,
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub dispositions: std::collections::BTreeMap<String, String>,
     /// Lenses that completed against this head.
     #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
     pub covered_lenses: std::collections::BTreeSet<String>,
+    /// Lenses that did not produce usable evidence against this head.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
+    pub unavailable_lenses: std::collections::BTreeSet<String>,
     /// Invariant name to the lenses that covered it.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub invariant_coverage: std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
+}
+
+/// Immutable structural origin for one materialised finding identity.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FindingOrigin {
+    pub source: String,
+    pub id: String,
+}
+
+/// Bounded identity and digest for a superseded adjudication attempt. The full
+/// output remains available from its immutable attempt reference.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReviewAdjudicationReceipt {
+    #[serde(default)]
+    pub head: Option<String>,
+    /// Panels whose outputs produced the superseded verdict.
+    #[serde(default)]
+    pub panels: Vec<String>,
+    /// New panels admitted in the continuation that superseded that verdict.
+    #[serde(default)]
+    pub added_panels: Vec<String>,
+    /// Full output superseded by continuation. It remains replayable even
+    /// when the provider supplied no immutable attempt reference.
+    #[serde(default)]
+    pub prior_outputs: NodeOutputs,
+    pub attempt_key: AttemptKey,
+    pub attempt_ref: Option<String>,
+    pub verdict: String,
+    pub output_digest: String,
 }
 
 /// Timing breakdown for a lane launch, in milliseconds.
@@ -2520,6 +2818,14 @@ pub struct UnknownUsageEvent {
 }
 
 impl GraphCheckpoint {
+    /// Return the policy sealed at admission, or the historical blocking
+    /// threshold for a checkpoint written before convergence settings existed.
+    pub fn review_policy(&self) -> ReviewPolicy {
+        self.review_policy
+            .clone()
+            .unwrap_or_else(ReviewPolicy::legacy)
+    }
+
     /// Record the exact queue publication head settled by conflict recovery.
     pub fn record_delivery_ci_supersession(
         &mut self,

@@ -229,6 +229,8 @@ fn target_route(target: &ladder::Target, effort: Option<String>) -> GraphRoute {
             effort,
             account: account.clone(),
             tier: None,
+            review_policy: None,
+            effective_review_policy: None,
         },
         ladder::Target::HostNative { name } => GraphRoute {
             required_family: None,
@@ -247,6 +249,8 @@ fn target_route(target: &ladder::Target, effort: Option<String>) -> GraphRoute {
             effort: None,
             account: None,
             tier: None,
+            review_policy: None,
+            effective_review_policy: None,
         },
     }
 }
