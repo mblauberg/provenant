@@ -121,6 +121,15 @@ pub trait Forge {
         Ok(Vec::new())
     }
     fn checks(&mut self, commit: &str) -> Result<Vec<GateEvidence>, LandingError>;
+    /// One exact-head CI reading, including the PR head and required policy.
+    /// Implementations share the observer transport and keep quota waits
+    /// inside the caller's time budget.
+    fn observe_head(
+        &mut self,
+        pr: &EligiblePr,
+        required_names: &[String],
+        timeout: std::time::Duration,
+    ) -> Result<crate::pr::observer::HeadReading, LandingError>;
     /// Read required checks for the PR's base branch. `None` means the policy
     /// could not be established; an empty vector is a known empty policy.
     fn required_ci_policy(

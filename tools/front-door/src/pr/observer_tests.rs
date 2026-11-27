@@ -26,6 +26,8 @@ mod tests {
         statuses: BTreeMap<String, Value>,
         /// Unix second until which every request is rate limited.
         limited_until: Option<i64>,
+        /// Optional path substring limiting only one resource family.
+        limited_path: Option<String>,
         /// The next request is limited with a reset already past.
         past_limit: bool,
         delay: Duration,
@@ -124,7 +126,13 @@ mod tests {
                             body: Vec::new(),
                         });
                     }
-                    if let Some(until) = world.limited_until.filter(|until| *until > now) {
+                    if let Some(until) = world.limited_until.filter(|until| {
+                        *until > now
+                            && world
+                                .limited_path
+                                .as_ref()
+                                .is_none_or(|needle| path.contains(needle))
+                    }) {
                         headers.insert("x-ratelimit-remaining".into(), "0".into());
                         headers.insert("x-ratelimit-reset".into(), until.to_string());
                         return Ok(Response {
@@ -705,18 +713,16 @@ printf '%s\n' '{"status":200,"headers":{},"body":"{\"full_name\":\"owner/repo\"}
             .expect_err("still limited");
         assert!(matches!(error, ObserveError::RateLimited { .. }), "{error}");
         assert_eq!(shared.requests(), 1);
-        // A budget that outlasts the reset still skips this poll at once.
-        let before = shared.with(|world| world.now_ms);
-        let error = shared
+        // A budget that outlasts the reset waits, then resumes the same read.
+        let checks = shared
             .observer(dir.path())
             .checks(HEAD, POLL, &Request::within(Duration::from_secs(300)))
-            .expect_err("skips the poll");
-        assert!(matches!(error, ObserveError::RateLimited { .. }), "{error}");
-        assert_eq!(shared.with(|world| world.now_ms), before);
-        assert_eq!(shared.requests(), 1);
-        // The first poll after the reset reads again.
+            .expect("waits for quota reset");
+        assert_eq!(checks[0].bucket, "pass");
+        assert!(shared.with(|world| world.now_ms) >= reset * 1000);
+        assert!(shared.requests() > 1);
+        // A subsequent read uses the shared result after the reset.
         shared.with(|world| {
-            world.now_ms = reset * 1000;
             world.limited_until = None;
         });
         let checks = shared
@@ -727,7 +733,7 @@ printf '%s\n' '{"status":200,"headers":{},"body":"{\"full_name\":\"owner/repo\"}
     }
 
     #[test]
-    fn a_rate_limit_whose_reset_is_past_still_skips_one_poll() {
+    fn a_rate_limit_whose_reset_is_past_retries_after_a_short_hold() {
         let shared = Shared::new();
         shared.with(|world| {
             world.runs.insert(
@@ -737,16 +743,6 @@ printf '%s\n' '{"status":200,"headers":{},"body":"{\"full_name\":\"owner/repo\"}
             world.past_limit = true;
         });
         let dir = state();
-        let error = shared
-            .observer(dir.path())
-            .checks(
-                HEAD,
-                Duration::ZERO,
-                &Request::within(Duration::from_secs(60)),
-            )
-            .expect_err("skips the poll");
-        assert!(matches!(error, ObserveError::RateLimited { .. }), "{error}");
-        shared.with(|world| world.now_ms += 1000);
         let checks = shared
             .observer(dir.path())
             .checks(
@@ -754,8 +750,44 @@ printf '%s\n' '{"status":200,"headers":{},"body":"{\"full_name\":\"owner/repo\"}
                 Duration::ZERO,
                 &Request::within(Duration::from_secs(60)),
             )
-            .expect("next poll");
+            .expect("short quota hold ends within the request");
         assert_eq!(checks[0].bucket, "pass");
+        assert!(shared.with(|world| world.now_ms) >= START + 1000);
+    }
+
+    #[test]
+    fn head_observation_waits_for_a_rate_limited_check_page_with_a_fake_clock() {
+        let shared = Shared::new();
+        seed_head(&shared, HEAD, run("build", "completed", Some("success")));
+        let reset = START / 1000 + 8;
+        shared.with(|world| {
+            world.limited_until = Some(reset);
+            world.limited_path = Some("check-runs".into());
+        });
+        let dir = state();
+        let reading = read_head(&shared, dir.path(), &|| None);
+        assert!(reading.complete, "{:?}", reading.pending_reason);
+        assert_eq!(reading.required[0].bucket, "pass");
+        assert!(shared.with(|world| world.now_ms) >= reset * 1000);
+    }
+
+    #[test]
+    fn current_head_observation_waits_for_rate_limited_pull_metadata() {
+        let shared = Shared::new();
+        seed_head(&shared, HEAD, run("build", "completed", Some("success")));
+        let reset = START / 1000 + 8;
+        shared.with(|world| {
+            world.limited_until = Some(reset);
+            world.limited_path = Some("pulls/7".into());
+        });
+        let dir = state();
+        let mut observer = shared.observer(dir.path());
+        let request = Request::within(Duration::from_secs(60));
+        let reading = observer
+            .observe_current_head(7, &request, Duration::ZERO, None, &|| None)
+            .expect("current head observation");
+        assert!(reading.complete, "{:?}", reading.pending_reason);
+        assert!(shared.with(|world| world.now_ms) >= reset * 1000);
     }
 
     #[test]
@@ -837,9 +869,9 @@ printf '%s\n' '{"status":200,"headers":{},"body":"{\"full_name\":\"owner/repo\"}
         }
     }
 
-    /// Spec: docs/specs/cli.md#ci-observations
+    /// Both status and landing consume the same head-bound check vocabulary.
     #[test]
-    fn one_fake_forge_drives_pending_to_green_and_red_through_both_waiters() {
+    fn one_head_observer_keeps_status_and_landing_ci_in_agreement() {
         let dir = state();
         for (final_run, expected) in [
             (
@@ -852,58 +884,30 @@ printf '%s\n' '{"status":200,"headers":{},"body":"{\"full_name\":\"owner/repo\"}
             ),
         ] {
             let shared = Shared::new();
-            let mut observer = shared.observer(dir.path());
-            let request = Request::within(Duration::from_secs(60));
-            let reads = std::cell::Cell::new(0_usize);
-            let pauses: std::cell::RefCell<Vec<Duration>> = std::cell::RefCell::new(Vec::new());
-            let outcome = super::await_ci(
-                || {
-                    let index = reads.get();
-                    reads.set(index + 1);
-                    let run = if index == 0 {
-                        run("build", "in_progress", None)
-                    } else {
-                        final_run.clone()
-                    };
-                    shared.with(|world| {
-                        world.runs.insert(HEAD.into(), page(vec![run]));
-                    });
-                    let checks = observer
-                        .checks(HEAD, Duration::ZERO, &request)
-                        .unwrap_or_default();
-                    let status = crate::pr::status::class_of(HEAD, &checks);
-                    let gate = match crate::pr::landing::adapters::gate_checks(checks).1 {
-                        crate::pr::landing::model::GateResult::Passed => "passed",
-                        crate::pr::landing::model::GateResult::Failed => "failed",
-                        crate::pr::landing::model::GateResult::Pending => "pending",
-                        other => panic!("unexpected gate result {other:?}"),
-                    };
-                    // Read 0 deliberately injects an in-progress run, so both
-                    // waiters must agree on `pending` there; the final state
-                    // is checked on the settled read.
-                    let read_expected = if index == 0 {
-                        ("pending", "pending")
-                    } else {
-                        expected
-                    };
-                    assert_eq!(
-                        (status, gate),
-                        read_expected,
-                        "the landing gate and wait --pr must agree on read {index}"
-                    );
-                    Ok::<_, ()>(if index == 0 {
-                        Observation::Pending(Duration::from_millis(1))
-                    } else {
-                        Observation::Settled
-                    })
-                },
-                Duration::from_secs(5),
-                &|duration| pauses.borrow_mut().push(duration),
-            )
-            .unwrap();
-            assert_eq!(outcome, AwaitOutcome::Settled);
-            assert_eq!(reads.get(), 2);
-            assert_eq!(pauses.borrow().as_slice(), &[Duration::from_millis(1)]);
+            seed_head(&shared, HEAD, run("build", "in_progress", None));
+            let mut expected_reads = [
+                (run("build", "in_progress", None), ("pending", "pending")),
+                (final_run, expected),
+            ];
+            for (run, read_expected) in expected_reads.iter_mut() {
+                shared.with(|world| {
+                    world.runs.insert(HEAD.into(), page(vec![run.clone()]));
+                });
+                let reading = read_head(&shared, dir.path(), &|| None);
+                let checks = reading.required;
+                let status = crate::pr::status::class_of(HEAD, &checks);
+                let gate = match crate::pr::landing::adapters::gate_checks(checks).1 {
+                    crate::pr::landing::model::GateResult::Passed => "passed",
+                    crate::pr::landing::model::GateResult::Failed => "failed",
+                    crate::pr::landing::model::GateResult::Pending => "pending",
+                    other => panic!("unexpected gate result {other:?}"),
+                };
+                assert_eq!(
+                    (status, gate),
+                    *read_expected,
+                    "the landing gate and wait --pr must agree"
+                );
+            }
         }
     }
 
@@ -1308,6 +1312,35 @@ printf '%s\n' '{"status":200,"headers":{},"body":"{\"full_name\":\"owner/repo\"}
     }
 
     #[test]
+    fn required_check_identity_preserves_its_github_app_pin() {
+        let shared = Shared::new();
+        seed_head(&shared, HEAD, run("build", "completed", Some("success")));
+        shared.with(|world| {
+            world.resources.insert(
+                "repos/Owner/Repo/branches/main/protection".into(),
+                json!({"required_status_checks": {
+                    "contexts": ["build"],
+                    "checks": [{"context":"build", "app_id":42}]
+                }}),
+            );
+        });
+        let dir = state();
+        let wrong_app = read_head(&shared, dir.path(), &|| None);
+        assert!(!wrong_app.complete);
+        assert_eq!(wrong_app.required_policy[0].app, Some(42));
+        assert!(wrong_app.required.is_empty());
+
+        let mut matching = run("build", "completed", Some("success"));
+        matching["app"]["id"] = json!(42);
+        shared.with(|world| {
+            world.runs.insert(HEAD.into(), page(vec![matching]));
+        });
+        let right_app = read_head(&shared, dir.path(), &|| None);
+        assert!(right_app.complete);
+        assert_eq!(right_app.required[0].app, Some(42));
+    }
+
+    #[test]
     fn a_head_that_moved_since_the_read_is_not_a_verdict() {
         let shared = Shared::new();
         seed_head(&shared, OTHER, run("build", "completed", Some("success")));
@@ -1322,6 +1355,36 @@ printf '%s\n' '{"status":200,"headers":{},"body":"{\"full_name\":\"owner/repo\"}
                 .pending_reason
                 .as_deref()
                 .is_some_and(|reason| reason.contains("not the expected"))
+        );
+    }
+
+    #[test]
+    fn a_head_that_moves_during_check_pages_cannot_settle() {
+        let shared = Shared::new();
+        seed_head(&shared, HEAD, run("build", "completed", Some("success")));
+        shared.queue_pull([
+            json!({
+                "number": 7,
+                "head": {"sha": HEAD, "ref": "work"},
+                "base": {"ref": "main"},
+                "mergeable": "MERGEABLE"
+            }),
+            json!({
+                "number": 7,
+                "head": {"sha": OTHER, "ref": "work"},
+                "base": {"ref": "main"},
+                "mergeable": "MERGEABLE"
+            }),
+        ]);
+        let dir = state();
+        let reading = read_head(&shared, dir.path(), &|| None);
+        assert!(!reading.complete);
+        assert_eq!(reading.pr_head, Some(GitOid::parse(OTHER).expect("moved head")));
+        assert!(
+            reading
+                .pending_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("moved during observation"))
         );
     }
 

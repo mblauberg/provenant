@@ -1033,6 +1033,124 @@ fn permission_error_is_unreachable_not_present() {
 }
 
 #[test]
+fn transient_project_failure_keeps_retry_deadline_until_recovery() {
+    let temp = tempdir();
+    let roots = roots(&temp);
+    let common = canonical_base(&temp).join("repository/.git");
+    fs::create_dir_all(common.join("objects")).unwrap();
+    fs::write(common.join("HEAD"), "ref: refs/heads/main").unwrap();
+    let binding = bind_project(&roots, ProjectLocation::new(common.clone()).unwrap()).unwrap();
+    let retry_after = DurationMicros::from_seconds(PROJECT_RETRY_SECONDS).unwrap();
+    let now = WallTime::from_unix_seconds(1_700_000_000).unwrap();
+    let retry_at = now.checked_add(retry_after).unwrap();
+    let mut probes = 0;
+
+    let (first, incarnation) =
+        project_presence_with_probe(&roots, &binding, now, retry_after, |_| {
+            probes += 1;
+            Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "temporarily unavailable",
+            ))
+        })
+        .unwrap();
+    assert_eq!(
+        first,
+        ProjectPresence::Unreachable {
+            error: "temporarily unavailable".to_owned(),
+            retry_at,
+        }
+    );
+
+    let (between_ticks, next_incarnation) = project_presence_with_probe(
+        &roots,
+        &binding,
+        now.checked_add(DurationMicros::from_seconds(10).unwrap())
+            .unwrap(),
+        retry_after,
+        |_| panic!("the registered retry deadline has not elapsed"),
+    )
+    .unwrap();
+    assert_eq!(between_ticks, first);
+    assert_eq!(next_incarnation, incarnation);
+    assert_eq!(probes, 1);
+
+    let oversized_error = format!("{}édiscarded", "\u{1}".repeat(510));
+    let bounded_error = format!("{}é", "\u{1}".repeat(510));
+    let (second_failure, second_incarnation) =
+        project_presence_with_probe(&roots, &binding, retry_at, retry_after, |_| {
+            probes += 1;
+            Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                oversized_error,
+            ))
+        })
+        .unwrap();
+    let second_retry_at = retry_at.checked_add(retry_after).unwrap();
+    assert!(matches!(
+        second_failure,
+        ProjectPresence::Unreachable {
+            retry_at: next_retry,
+            ..
+        } if next_retry == second_retry_at
+    ));
+    assert_eq!(second_incarnation, incarnation);
+    assert_eq!(probes, 2);
+
+    let retry_record_path =
+        project_binding_dir(roots.state.as_path(), binding.project_id()).join(PROJECT_RETRY_RECORD);
+    let retry_record_bytes = fs::read(&retry_record_path).unwrap();
+    assert!(retry_record_bytes.len() <= PROJECT_RETRY_RECORD_LIMIT as usize);
+    assert!(
+        retry_record_bytes.len() > 3_000,
+        "JSON escaping remains bounded"
+    );
+    let saved_retry: ProjectRetryRecord = provenant_records::decode(
+        &retry_record_bytes,
+        provenant_records::Limits {
+            max_bytes: PROJECT_RETRY_RECORD_LIMIT as usize,
+            ..provenant_records::Limits::CONFIG
+        },
+    )
+    .unwrap();
+    assert_eq!(saved_retry.error, bounded_error);
+    assert_eq!(saved_retry.error.len(), PROJECT_RETRY_ERROR_BYTES);
+
+    let (between_second_retry, _) = project_presence_with_probe(
+        &roots,
+        &binding,
+        retry_at
+            .checked_add(DurationMicros::from_seconds(10).unwrap())
+            .unwrap(),
+        retry_after,
+        |_| panic!("the second retry deadline has not elapsed"),
+    )
+    .unwrap();
+    assert_eq!(
+        between_second_retry,
+        ProjectPresence::Unreachable {
+            error: bounded_error,
+            retry_at: second_retry_at,
+        }
+    );
+
+    let (recovered, final_incarnation) =
+        project_presence_with_probe(&roots, &binding, second_retry_at, retry_after, |path| {
+            probes += 1;
+            fs::metadata(path)
+        })
+        .unwrap();
+    assert_eq!(recovered, ProjectPresence::Present);
+    assert_eq!(final_incarnation, incarnation);
+    assert_eq!(probes, 3);
+    assert!(
+        !project_binding_dir(roots.state.as_path(), binding.project_id())
+            .join(PROJECT_RETRY_RECORD)
+            .exists()
+    );
+}
+
+#[test]
 fn absent_project_warns_once_per_incarnation() {
     let temp = tempdir();
     let roots = roots(&temp);

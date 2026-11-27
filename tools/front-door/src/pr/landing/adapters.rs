@@ -829,6 +829,61 @@ impl Forge for GhForge {
             extra: Default::default(),
         }])
     }
+    fn observe_head(
+        &mut self,
+        pr: &EligiblePr,
+        required_names: &[String],
+        timeout: Duration,
+    ) -> Result<crate::pr::observer::HeadReading, LandingError> {
+        let repository = self.repository_name()?;
+        let request = provenant_config::ports::Request::within(timeout);
+        let expected = provenant_core::GitOid::parse(&pr.head)
+            .map_err(|error| LandingError::Failed(format!("invalid PR head: {error}")))?;
+        let reading = if required_names.is_empty() {
+            self.observation_interval =
+                crate::pr::observer::fast_interval(&self.state, &self.project);
+            crate::pr::observer::observe_head(
+                &self.state,
+                &self.project,
+                &repository,
+                pr.number,
+                expected,
+                &request,
+            )
+        } else {
+            let mut observer = Observer::open(&self.state, &self.project, &repository, &request)
+                .map_err(|error| match error {
+                    ObserveError::RateLimited { .. } => {
+                        LandingError::RateLimited(error.to_string())
+                    }
+                    _ => LandingError::CiUnavailable(error.to_string()),
+                })?;
+            self.observation_interval = Some(observer.fast_interval());
+            let graphql_head = || match crate::pr::status::batch::single_for_repository_with_request(
+                &self.state,
+                &self.project,
+                &repository,
+                pr.number,
+                &request,
+            ) {
+                crate::pr::status::batch::Batch::Entries(entries) => {
+                    entries.first().map(|entry| entry.head.clone())
+                }
+                _ => None,
+            };
+            let reading = observer.observe_head_with_required_names(
+                pr.number,
+                expected,
+                &request,
+                crate::pr::observer::HEAD_MAX_AGE,
+                Some(required_names),
+                &graphql_head,
+            );
+            self.observation_interval = Some(observer.next_poll_interval());
+            reading
+        };
+        Ok(reading)
+    }
     fn required_ci_policy(
         &mut self,
         base_branch: &str,

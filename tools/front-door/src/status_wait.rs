@@ -728,13 +728,14 @@ fn read_pr(
     cancel: &CancelToken,
 ) -> Reading {
     let label = source.label();
-    let (number, repository, complete, policy, policy_source) = match &*source {
+    let (number, repository, complete, policy, policy_source, pinned_head) = match &*source {
         Source::Pr {
             number,
             repository,
             complete,
             policy,
             policy_source,
+            subject,
             ..
         } => (
             *number,
@@ -742,6 +743,7 @@ fn read_pr(
             *complete,
             *policy,
             policy_source.clone(),
+            subject.as_deref().map(|subject| subject.head),
         ),
         _ => return Reading::unavailable(&label, "not a pull request source"),
     };
@@ -757,6 +759,7 @@ fn read_pr(
         // Spec: docs/specs/cli.md#ci-observations — the PR path reads
         // through the one observer and its one sourced retry family.
         crate::pr::observer::retry(edge.roots).poll.value,
+        pinned_head,
     ) {
         Ok(line) => line,
         Err(error) => return Reading::unavailable(&label, &error.to_string()),

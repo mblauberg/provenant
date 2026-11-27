@@ -1002,197 +1002,118 @@ pub(crate) fn wait_line_observed(
     number: u64,
     request: &provenant_config::ports::Request,
     max_age: std::time::Duration,
+    pinned_head: Option<provenant_core::GitOid>,
 ) -> Result<Line> {
     use super::observer::Observer;
     let mut observer = Observer::open(state, project, repository, request)?;
-    let mut line = poll_line(
-        &mut observer,
-        number,
-        None,
-        request,
-        max_age,
-        &gate_contexts(project, state),
-    )?
-    .0;
-    match observer.active_workflows(&line.head, max_age, request) {
-        Ok(Some(active)) => line.active_workflows = Some(active),
-        Ok(None) => provenant_records::warning::warn(
-            provenant_records::warning::Warning::new(
-                provenant_records::warning::ACTIONS_RUNS_UNAVAILABLE,
-                "Actions runs unavailable for this head (no runs found); using observed checks only",
-             provenant_records::warning::detected_source(provenant_records::warning::ACTIONS_RUNS_UNAVAILABLE))
-            .subject(line.head.clone()),
-        ),
-        Err(error) => provenant_records::warning::warn(
-            provenant_records::warning::Warning::new(
-                provenant_records::warning::ACTIONS_RUNS_UNAVAILABLE,
-                format!("Actions runs unavailable for this head ({error}); using observed checks only"),
-             provenant_records::warning::detected_source(provenant_records::warning::ACTIONS_RUNS_UNAVAILABLE))
-            .subject(line.head.clone()),
-        ),
+    let graphql_entry = std::cell::RefCell::new(None);
+    let graphql_head = || match batch::single_for_repository_with_request(
+        state, project, repository, number, request,
+    ) {
+        batch::Batch::Entries(entries) => entries.first().map(|entry| {
+            *graphql_entry.borrow_mut() = Some(entry.clone());
+            entry.head.clone()
+        }),
+        _ => None,
+    };
+    let mut reading = pinned_head
+        .map(|head| observer.observe_head(number, head, request, max_age, &graphql_head));
+    let (view, base_ref) = match observer.resource(&format!("pulls/{number}"), max_age, request) {
+        Ok(value) => {
+            let pull: RestWaitPull = serde_json::from_value(value)?;
+            let base_ref = pull.base.as_ref().map(|base| base.branch.clone());
+            (
+                View {
+                    state: if pull.merged_at.is_some() {
+                        "MERGED".into()
+                    } else {
+                        pull.state.to_ascii_uppercase()
+                    },
+                    head: pull.head.sha,
+                    merge: pull
+                        .mergeable_state
+                        .map_or_else(|| "UNKNOWN".into(), |state| state.to_ascii_uppercase()),
+                    review: Some("unknown".into()),
+                    draft: pull.draft,
+                    url: pull.html_url,
+                },
+                base_ref,
+            )
+        }
+        Err(error) => {
+            let entry = graphql_entry
+                .borrow_mut()
+                .take()
+                .or_else(|| {
+                    match batch::single_for_repository_with_request(
+                        state, project, repository, number, request,
+                    ) {
+                        batch::Batch::Entries(entries) => entries.into_iter().next(),
+                        _ => None,
+                    }
+                })
+                .ok_or(error)?;
+            let base_ref = Some(entry.base_ref_name.clone());
+            (view_from_batch_entry(entry), base_ref)
+        }
+    };
+    let expected = match pinned_head {
+        Some(expected) => expected,
+        None => provenant_core::GitOid::parse(&view.head)?,
+    };
+    if reading.is_none() {
+        reading = Some(observer.observe_head(number, expected, request, max_age, &graphql_head));
+    }
+    let Some(reading) = reading else {
+        return Err("CI observer did not return a head reading".into());
+    };
+    let no_checks_for_current_head = reading.pr_head == Some(reading.expected_head)
+        && reading.retry_at.is_none()
+        && reading.observed.is_empty();
+    let merge_state = reading.mergeable;
+    let mut line = line_from_head_reading(number, view, reading, &gate_contexts(project, state));
+    if no_checks_for_current_head {
+        let cause = merge_state.no_checks_cause(base_ref.as_deref());
+        line.cause = Some(cause.code.to_owned());
+        line.next = Some(cause.next);
+    }
+    if line.awaiting.is_none() {
+        match observer.active_workflows(&line.head, max_age, request) {
+            Ok(Some(active)) => line.active_workflows = Some(active),
+            Ok(None) => provenant_records::warning::warn(
+                provenant_records::warning::Warning::new(
+                    provenant_records::warning::ACTIONS_RUNS_UNAVAILABLE,
+                    "Actions runs unavailable for this head (no runs found); using observed checks only",
+                    provenant_records::warning::detected_source(
+                        provenant_records::warning::ACTIONS_RUNS_UNAVAILABLE,
+                    ),
+                )
+                .subject(line.head.clone()),
+            ),
+            Err(error) => provenant_records::warning::warn(
+                provenant_records::warning::Warning::new(
+                    provenant_records::warning::ACTIONS_RUNS_UNAVAILABLE,
+                    format!("Actions runs unavailable for this head ({error}); using observed checks only"),
+                    provenant_records::warning::detected_source(
+                        provenant_records::warning::ACTIONS_RUNS_UNAVAILABLE,
+                    ),
+                )
+                .subject(line.head.clone()),
+            ),
+        }
     }
     Ok(line)
 }
 
-/// Read the base branch's required checks through the same observer as the PR
-/// and its checks. A ruleset is part of the branch's policy, so the names come
-/// from GitHub rather than from a job name compiled into this binary. An
-/// unreadable policy is reported as such rather than treated as an empty set.
-fn observed_policy<F: provenant_config::Forge, C: super::observer::Clock>(
-    observer: &mut super::observer::Observer<F, C>,
-    base: &str,
-    max_age: std::time::Duration,
-    request: &provenant_config::ports::Request,
-) -> Requirement {
-    let branch = encode(base);
-    let Ok(info) = observer.resource(&format!("branches/{branch}"), max_age, request) else {
-        return Requirement::Unreadable;
-    };
-    let Some(protected) = info.get("protected").and_then(serde_json::Value::as_bool) else {
-        return Requirement::Unreadable;
-    };
-    // The branch read carries its classic protection's required checks, so no
-    // admin-only `/protection` read is needed; an unprotected branch has none.
-    // A branch protected only by a ruleset reports `protected` with its classic
-    // protection disabled; that protection requires nothing and the ruleset read
-    // below supplies the required set.
-    let protection = match info.get("protection") {
-        _ if !protected => None,
-        Some(value) if value.get("enabled").and_then(serde_json::Value::as_bool) == Some(false) => {
-            None
-        }
-        Some(value) => Some(value.clone()),
-        None => return Requirement::Unreadable,
-    };
-    let Ok(rules) = observer.resource(
-        &format!("rules/branches/{branch}?per_page=100"),
-        max_age,
-        request,
-    ) else {
-        return Requirement::Unreadable;
-    };
-    // A paginated observer page is a flat array; the direct forge reader uses
-    // --slurp and returns an array of pages. Accept either shape.
-    let pages: Option<Vec<Vec<serde_json::Value>>> = if rules
-        .as_array()
-        .and_then(|array| array.first())
-        .is_some_and(serde_json::Value::is_array)
-    {
-        serde_json::from_value(rules).ok()
-    } else {
-        serde_json::from_value(rules).ok().map(|page| vec![page])
-    };
-    let Some(pages) = pages else {
-        return Requirement::Unreadable;
-    };
-    match parse_required_checks(protection.as_ref(), &pages) {
-        Some(checks) => Requirement::Known(checks),
-        None => Requirement::Unreadable,
+fn view_from_batch_entry(entry: batch::Entry) -> View {
+    View {
+        state: entry.state,
+        head: entry.head,
+        merge: entry.merge,
+        review: entry.review,
+        draft: entry.draft,
+        url: entry.url,
     }
-}
-
-/// One shared conditional host read of PR metadata and checks. Waiters use this
-/// only to reconcile; the tick indexes the same projection for replay.
-pub(crate) fn poll_line<F: provenant_config::Forge, C: super::observer::Clock>(
-    observer: &mut super::observer::Observer<F, C>,
-    number: u64,
-    head_override: Option<&str>,
-    request: &provenant_config::ports::Request,
-    max_age: std::time::Duration,
-    review_gate_contexts: &[String],
-) -> Result<(Line, Vec<super::observer::Check>)> {
-    let value = observer.resource(
-        &format!("pulls/{number}"),
-        std::time::Duration::ZERO,
-        request,
-    )?;
-    let pull: RestWaitPull = serde_json::from_value(value.clone())?;
-    let state = if pull.merged_at.is_some() {
-        "MERGED".to_owned()
-    } else {
-        pull.state.to_ascii_uppercase()
-    };
-    let base = pull.base.as_ref().map(|base| base.branch.clone());
-    let requirement = match base.as_deref() {
-        Some(branch) => observed_policy(observer, branch, max_age, request),
-        None => Requirement::Unreadable,
-    };
-    let view = View {
-        state,
-        head: pull.head.sha,
-        merge: pull
-            .mergeable_state
-            .map_or_else(|| "UNKNOWN".to_owned(), |state| state.to_ascii_uppercase()),
-        review: Some("unknown".to_owned()),
-        draft: pull.draft,
-        url: pull.html_url,
-    };
-    let checks = observer.checks(head_override.unwrap_or(&view.head), max_age, request)?;
-    let mut line = status_line_with(
-        number,
-        view,
-        Some(&checks),
-        requirement,
-        review_gate_contexts,
-    );
-    if checks.is_empty() {
-        // Mergeability is read (and an UNKNOWN reread) only when it can change
-        // the diagnosis: a head with checks needs no cause.
-        let (merge_state, _) = observer.pull_merge_state(number, value, request)?;
-        let cause = merge_state.no_checks_cause(base.as_deref());
-        line.cause = Some(cause.code.to_owned());
-        line.next = Some(cause.next);
-    }
-    Ok((line, checks))
-}
-
-/// `max_age` is how old an observed CI answer may be: a waiter's poll, or
-/// zero for a one-shot read.
-pub(crate) fn wait_line(
-    project: &Path,
-    state: &Path,
-    number: u64,
-    request: &provenant_config::ports::Request,
-    max_age: std::time::Duration,
-) -> Result<Line> {
-    use super::observer::{ObserveError, Observer};
-    let text = number.to_string();
-    let bytes = successful(super::forge_execute(
-        state,
-        project,
-        &[
-            "gh",
-            "pr",
-            "view",
-            &text,
-            "--json",
-            "state,headRefOid,mergeStateStatus,reviewDecision,isDraft,url",
-        ],
-        request,
-        false,
-        None,
-    )?)?;
-    let view: View = serde_json::from_slice(&bytes)?;
-    let segments: Vec<&str> = view.url.trim_end_matches('/').split('/').collect();
-    let repository = match segments.as_slice() {
-        [.., owner, name, "pull", _] => format!("{owner}/{name}"),
-        _ => return Err(format!("pull request URL names no repository: {}", view.url).into()),
-    };
-    // Unreadable or incomplete checks leave the row readable, as before; a
-    // rate limit or an expired read is a failed row naming why.
-    let checks = match Observer::open(state, project, &repository, request)
-        .and_then(|mut observer| observer.checks(&view.head, max_age, request))
-    {
-        Ok(checks) => Some(checks),
-        Err(ObserveError::Unavailable(_)) => None,
-        Err(error) => return Err(error.to_string().into()),
-    };
-    Ok(status_line(
-        number,
-        view,
-        checks.as_deref(),
-        &gate_contexts(project, state),
-    ))
 }
 
 /// One row from the pull request view and its observed checks, for display
@@ -1347,6 +1268,64 @@ fn status_line_with(
     }
 }
 
+/// Render a batch or waiter result only after the shared observer has bound
+/// the PR's required checks to the requested head.
+pub(super) fn line_from_head_reading(
+    number: u64,
+    mut view: View,
+    reading: super::observer::HeadReading,
+    review_gate_contexts: &[String],
+) -> Line {
+    view.merge = match reading.mergeable {
+        super::observer::MergeState::Mergeable => "CLEAN",
+        super::observer::MergeState::Conflicting => "DIRTY",
+        super::observer::MergeState::Unknown => "UNKNOWN",
+    }
+    .into();
+    let Some(head) = reading.pr_head else {
+        return status_line_with(
+            number,
+            view,
+            None,
+            Requirement::Unreadable,
+            review_gate_contexts,
+        );
+    };
+    if head != reading.expected_head {
+        let mut line = status_line_with(
+            number,
+            view,
+            None,
+            Requirement::Unreadable,
+            review_gate_contexts,
+        );
+        line.await_head(&head.to_string());
+        return line;
+    }
+    view.head = head.to_string();
+    let checks = reading.observed;
+    let required = reading
+        .required_policy
+        .iter()
+        .map(|check| Required {
+            name: check.name.clone(),
+            app: check.app,
+        })
+        .collect();
+    let mut line = status_line_with(
+        number,
+        view,
+        Some(&checks),
+        Requirement::Known(required),
+        review_gate_contexts,
+    );
+    if !reading.complete && line.state == "OPEN" {
+        line.completion = Some(CiCompletion::Pending);
+        line.required_unreadable = true;
+    }
+    line
+}
+
 #[cfg(test)]
 pub(super) fn line_for(
     number: u64,
@@ -1401,30 +1380,10 @@ fn snapshot(project: &Path, state: &Path, numbers: &[u64]) -> Vec<Line> {
         .map(|entry| {
             (
                 entry.number,
-                batch::line_from_entry(entry, &review_gate_contexts),
+                batch::line_from_entry_observed(state, project, entry, &review_gate_contexts),
             )
         })
         .collect();
-    // A rollup too large for one page is not evidence; re-read it exactly.
-    for entry in &entries {
-        if entry.truncated
-            && let Some(line) = {
-                let request =
-                    provenant_config::ports::Request::within(std::time::Duration::from_secs(60));
-                wait_line(
-                    project,
-                    state,
-                    entry.number,
-                    &request,
-                    std::time::Duration::ZERO,
-                )
-                .ok()
-            }
-        {
-            lines.retain(|(number, _)| *number != entry.number);
-            lines.push((entry.number, line));
-        }
-    }
     let answered: std::collections::BTreeSet<_> = lines.iter().map(|(number, _)| *number).collect();
     for &number in numbers {
         if answered.contains(&number) {
@@ -1452,9 +1411,8 @@ fn snapshot(project: &Path, state: &Path, numbers: &[u64]) -> Vec<Line> {
     lines
 }
 
-/// The per-PR REST read, falling back to one GraphQL query when REST itself
-/// runs out of quota. `batch_limited` is false only while the GraphQL quota
-/// may still answer, so a PR never loops between the two transports.
+/// A status row when the batch metadata read cannot answer. CI still comes
+/// from the shared head observer, which uses GraphQL only as its head fallback.
 fn rest_line(
     project: &Path,
     state: &Path,
@@ -1463,7 +1421,21 @@ fn rest_line(
     review_gate_contexts: &[String],
 ) -> Line {
     let request = provenant_config::ports::Request::within(std::time::Duration::from_secs(60));
-    match wait_line(project, state, number, &request, std::time::Duration::ZERO) {
+    let repository = match batch::repository(state, project) {
+        Ok(repository) => repository,
+        Err(error) => {
+            return unavailable_line(number, error);
+        }
+    };
+    match wait_line_observed(
+        project,
+        state,
+        &repository,
+        number,
+        &request,
+        std::time::Duration::ZERO,
+        None,
+    ) {
         Ok(line) => line,
         Err(error) => {
             if try_graphql
@@ -1472,38 +1444,47 @@ fn rest_line(
                 && let Some(entry) = entries.first()
                 && !entry.truncated
             {
-                return batch::line_from_entry(entry, review_gate_contexts);
+                return batch::line_from_entry_observed(
+                    state,
+                    project,
+                    entry,
+                    review_gate_contexts,
+                );
             }
-            Line {
-                number,
-                state: "UNAVAILABLE".into(),
-                head: "unknown".into(),
-                completion: None,
-                draft: false,
-                checks_passed: None,
-                checks_total: None,
-                checks_failed: None,
-                checks_pending: None,
-                active_workflows: None,
-                failing_checks: Vec::new(),
-                pending_checks: Vec::new(),
-                failed_check_details: Vec::new(),
-                failures: None,
-                merge: "unknown".into(),
-                review: "unknown".into(),
-                cause: None,
-                next: None,
-                awaiting: None,
-                actions_grace: false,
-                required_checks: Vec::new(),
-                required_pending: Vec::new(),
-                required_unreadable: false,
-                error: Some(provenant_cli::bounded_text(&error.to_string(), 256)),
-                batch: None,
-                batch_detail: None,
-                batch_uncertain: None,
-            }
+            unavailable_line(number, error.to_string())
         }
+    }
+}
+
+fn unavailable_line(number: u64, error: impl std::fmt::Display) -> Line {
+    Line {
+        number,
+        state: "UNAVAILABLE".into(),
+        head: "unknown".into(),
+        completion: None,
+        draft: false,
+        checks_passed: None,
+        checks_total: None,
+        checks_failed: None,
+        checks_pending: None,
+        active_workflows: None,
+        failing_checks: Vec::new(),
+        pending_checks: Vec::new(),
+        failed_check_details: Vec::new(),
+        failures: None,
+        merge: "unknown".into(),
+        review: "unknown".into(),
+        cause: None,
+        next: None,
+        awaiting: None,
+        actions_grace: false,
+        required_checks: Vec::new(),
+        required_pending: Vec::new(),
+        required_unreadable: false,
+        error: Some(provenant_cli::bounded_text(&error.to_string(), 256)),
+        batch: None,
+        batch_detail: None,
+        batch_uncertain: None,
     }
 }
 

@@ -979,13 +979,15 @@ impl Context {
             .ok_or_else(|| mirror_failure(&self.projection, "Git executable is unavailable"))?;
         let snapshot = mirror::mirror_snapshot(
             &self.executor,
-            &git,
-            &self.cwd,
-            &self.roots.state.as_path().join("tmp").join("mirror"),
-            self.roots.state.as_path(),
-            &self.identity.host.to_string(),
-            &self.identity.project.to_string(),
-            cancel,
+            mirror::MirrorRequest {
+                git_executable: &git,
+                worktree: &self.cwd,
+                scratch: &self.roots.state.as_path().join("tmp").join("mirror"),
+                state: self.roots.state.as_path(),
+                origin_host: &self.identity.host.to_string(),
+                project_id: &self.identity.project.to_string(),
+                cancel,
+            },
         )
         .map_err(|error| mirror_failure(&self.projection, &error.to_string()))?;
         warn_mirror(&self.projection, &snapshot, peer);
