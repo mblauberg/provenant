@@ -630,9 +630,7 @@ fn repo_revalidation_accepts_a_tracked_sibling_worktree() {
 
 /// A real registered worktree, for the Git-registration repair tests.
 fn git_fixture() -> Option<(tempfile::TempDir, std::path::PathBuf, std::path::PathBuf)> {
-    let Some(git) = provenant_os::git::git_executable() else {
-        return None;
-    };
+    let git = provenant_os::git::git_executable()?;
     let temp = tempfile::tempdir().unwrap();
     let project = temp.path().join("project");
     fs::create_dir(&project).unwrap();

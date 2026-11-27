@@ -268,25 +268,25 @@ impl ConfinedPlan {
             ));
         }
         for grant in &p.write_roots {
-            if let Some(policy) = &p.policy {
-                if let Err(error) = policy.mandatory().validate_extra_write(grant) {
-                    if matches!(&error, PermissionError::ProtectedOverlap) {
-                        warn_plan_root_overlap("extra write grant overlaps a protected root")?;
-                    } else {
-                        let code = match &error {
-                            PermissionError::CredentialRoot
-                            | PermissionError::CredentialRootAt { .. }
-                            | PermissionError::CredentialGrant { .. }
-                            | PermissionError::CredentialStore { .. } => {
-                                "PLAN_CONFINEDPLAN_NEW_CREDENTIALS"
-                            }
-                            PermissionError::InvalidPath(_)
-                            | PermissionError::BroadRoot
-                            | PermissionError::NonUtf8Path => "PLAN_CONFINEDPLAN_NEW_AUTHORITY_2",
-                            _ => return Err(error.into()),
-                        };
-                        return Err(plan_boundary_error(code, error.into()));
-                    }
+            if let Some(policy) = &p.policy
+                && let Err(error) = policy.mandatory().validate_extra_write(grant)
+            {
+                if matches!(&error, PermissionError::ProtectedOverlap) {
+                    warn_plan_root_overlap("extra write grant overlaps a protected root")?;
+                } else {
+                    let code = match &error {
+                        PermissionError::CredentialRoot
+                        | PermissionError::CredentialRootAt { .. }
+                        | PermissionError::CredentialGrant { .. }
+                        | PermissionError::CredentialStore { .. } => {
+                            "PLAN_CONFINEDPLAN_NEW_CREDENTIALS"
+                        }
+                        PermissionError::InvalidPath(_)
+                        | PermissionError::BroadRoot
+                        | PermissionError::NonUtf8Path => "PLAN_CONFINEDPLAN_NEW_AUTHORITY_2",
+                        _ => return Err(error.into()),
+                    };
+                    return Err(plan_boundary_error(code, error.into()));
                 }
             }
             validate_noncredential_for_plan(grant, p).map_err(|error| {
