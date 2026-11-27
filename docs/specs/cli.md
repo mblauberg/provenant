@@ -159,7 +159,9 @@ both ends with an omitted-bytes marker and a warning naming the cap, its source
 and the repair. A result the owner can page is published once and the envelope
 carries a pointer to it, never a truncated object; commands that warn and
 proceed keep the result's status. A surface that keeps the refusal contract
-instead emits a typed `RESULT_TOO_LARGE` Error envelope and exits 3. A surface
+instead adds a typed `RESULT_TOO_LARGE` warning naming the private report and
+keeps the real outcome; only a report that cannot be written becomes a typed IO
+Error envelope and exits 3. A surface
 that cannot publish a result carries a bounded marker in `data` (`truncated`,
 `omitted_bytes`, `source`, `repair`) with a warning, beside the result's typed
 error. Paged reads bind the cursor to the input, terminal text escapes control

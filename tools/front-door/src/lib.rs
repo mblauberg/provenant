@@ -1546,7 +1546,7 @@ pub fn dispatch(
     let verb = verb.to_owned();
     // One sink for the whole command: warnings raised while resolving roots or
     // loading config reach it, and the guard restores the previous sink on exit.
-    let _command_sink = output::install_command_sink(globals.json);
+    let _command_sink = output::install_command_sink_with(globals.json, globals.full);
     // The CLI crate's command surfaces drain this sink through one shared seam
     // so warnings raised while a command runs reach its envelope, not stderr.
     // Spec: docs/specs/cli.md#warnings-are-typed-values
