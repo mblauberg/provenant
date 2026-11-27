@@ -591,11 +591,6 @@ pub struct AttemptSpec {
     /// below that the node leaves unset; an explicit setting always wins.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preset: Option<String>,
-    /// `shared` lets an unpinned read-only node read its bound checkout live;
-    /// a node pinned to a commit always gets an immutable source view. Writers
-    /// keep their one worktree, so `shared` is refused on a writer node.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub isolation: Option<String>,
     /// `delivery` (default) keeps the delivery receipt; `none` withholds it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub receipts: Option<String>,
@@ -666,7 +661,6 @@ impl AttemptSpec {
             pr: self.pr.clone(),
             preamble_file: self.preamble_file.clone(),
             preset: self.preset.clone(),
-            isolation: self.isolation.clone(),
             receipts: self.receipts.clone(),
             sandbox: self.sandbox.clone(),
             lane_access: self.lane_access.clone(),
@@ -686,14 +680,6 @@ impl AttemptSpec {
 
     fn preset_default(&self, light: &'static str) -> Option<&str> {
         (self.preset.as_deref() == Some(LIGHT_PRESET)).then_some(light)
-    }
-
-    /// Effective isolation after the preset: `private` or `shared`.
-    pub fn effective_isolation(&self) -> &str {
-        self.isolation
-            .as_deref()
-            .or(self.preset_default("shared"))
-            .unwrap_or("private")
     }
 
     /// Effective receipts after the preset: `delivery` or `none`.
@@ -721,9 +707,6 @@ impl AttemptSpec {
         }
         if let Some(grace) = self.budget_grace {
             knobs.push(format!("lanes.budget_grace={}", grace.as_fraction()));
-        }
-        if self.effective_isolation() != "private" {
-            knobs.push(format!("lanes.isolation={}", self.effective_isolation()));
         }
         if self.effective_receipts() != "delivery" {
             knobs.push(format!("lanes.receipts={}", self.effective_receipts()));
@@ -777,7 +760,6 @@ impl AttemptSpec {
             && self.pr.is_none()
             && self.preamble_file.is_none()
             && self.preset.is_none()
-            && self.isolation.is_none()
             && self.receipts.is_none()
             && self.sandbox.is_none()
             && self.lane_access.is_none()

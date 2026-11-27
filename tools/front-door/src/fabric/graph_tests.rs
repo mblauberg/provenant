@@ -4110,7 +4110,7 @@ mod provisioned_writer_submission_tests {
             };
             let spec = if condition == "unpinned" {
                 serde_json::from_value(
-                    serde_json::json!({"isolation":"shared", "directory": source}),
+                    serde_json::json!({"directory": source}),
                 )?
             } else {
                 serde_json::from_value(serde_json::json!({"preset":"light"}))?

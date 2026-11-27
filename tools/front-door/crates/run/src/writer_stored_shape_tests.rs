@@ -41,11 +41,5 @@ fn persisted_writer_records_preserve_fields_from_newer_minors() -> TestResult {
         schema_version: 1,
         scope,
     })?;
-    unknown_field_survives(WriterOwnership {
-        extra: Default::default(),
-        schema_version: 1,
-        lane_owned: false,
-        owner: None,
-    })?;
     Ok(())
 }

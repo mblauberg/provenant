@@ -3,21 +3,53 @@
 //! state on every read, so no sweeper runs and a crash leaves no stale lease.
 //!
 //! The transform is pure and deterministic; [`migrate_store`] is the only
-//! file-touching path and it runs under each attempt's writer lock.
+//! file-touching path. It runs under the attempt's writer lock and publishes
+//! the lease under the named worktree slot's writer lock.
 
-use crate::writer::WriterOwnership;
-use provenant_core::AttemptId;
-use provenant_os::fs::{Directory, LockMode};
+use provenant_confinement::worktrees::{LEASE_FILE, lease_path, state_dir_name};
+use provenant_core::{AttemptId, ProjectId};
+use provenant_os::fs::{Directory, LockMode, PublishMode};
 use provenant_records::custody::{Sharing, WorktreeLease};
 use provenant_records::migrate::MigrationError;
+use provenant_records::run::CanonicalRequest;
 use std::ffi::OsStr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// A sealed `writer-owned.json` record is version 1. The replacement lease
 /// store is version 2; the marker names this target so an interrupted pass is
 /// resumed by the next install.
 pub const WRITER_OWNERSHIP_VERSION: u64 = 1;
 pub const LEASE_STORE_VERSION: u64 = 2;
+
+/// The legacy sealed launch record. Only this migration decodes it; no live
+/// path writes it again.
+#[derive(serde::Serialize, serde::Deserialize)]
+pub(crate) struct LegacyWriterOwnership {
+    #[serde(default, flatten)]
+    pub extra: provenant_records::ExtraFields,
+    pub schema_version: u64,
+    pub lane_owned: bool,
+    #[serde(deserialize_with = "serde::Deserialize::deserialize")]
+    pub owner: Option<provenant_confinement::worktrees::WorktreeOwner>,
+}
+
+/// Locate the worktree slot named by an attempt's sealed launch request. The
+/// slot is the one place a confinement reader looks for `lease.json`, so the
+/// migrated lease must be published there and nowhere else.
+fn slot_for_request(state_root: &Path, directory: &Directory) -> Option<PathBuf> {
+    let raw = crate::artifacts::read_sealed(directory, "request.json", crate::RECORD_LIMIT)
+        .ok()
+        .flatten()?;
+    let request: CanonicalRequest = crate::db::decode(&raw).ok()?;
+    let writer = request.task.writer?;
+    let project: ProjectId = writer.custody_project?;
+    Some(
+        state_root
+            .join("worktrees")
+            .join(project.to_string())
+            .join(state_dir_name(&writer.worktree)),
+    )
+}
 
 /// Pure transform of one sealed ownership record. A record that is not owned
 /// by a lane has no lease; a record already at the target version is left as
@@ -26,7 +58,7 @@ pub const LEASE_STORE_VERSION: u64 = 2;
 pub(crate) fn migrate(
     from: u64,
     to: u64,
-    record: &WriterOwnership,
+    record: &LegacyWriterOwnership,
 ) -> Result<Option<WorktreeLease>, MigrationError> {
     if from == to {
         return Ok(None);
@@ -102,7 +134,7 @@ pub fn migrate_store(state_root: &Path) -> Result<Vec<String>, MigrationError> {
             else {
                 continue;
             };
-            let ownership: WriterOwnership =
+            let ownership: LegacyWriterOwnership =
                 crate::db::decode(&raw).map_err(|error| MigrationError::new(error.to_string()))?;
             if ownership.schema_version != WRITER_OWNERSHIP_VERSION {
                 // A future writer, or a record already handled by a resumed
@@ -112,13 +144,37 @@ pub fn migrate_store(state_root: &Path) -> Result<Vec<String>, MigrationError> {
             let lease = migrate(WRITER_OWNERSHIP_VERSION, LEASE_STORE_VERSION, &ownership)?;
             // Publish the replacement before removing the old record: a
             // failure here must leave the ownership evidence for a resumed
-            // pass, never an attempt with neither record.
+            // pass, never an attempt with neither record. The lease goes to
+            // the worktree slot, the one path confinement reads; there is no
+            // second lease in the attempt directory.
             if let Some(lease) = lease {
+                let slot = slot_for_request(state_root, &directory).ok_or_else(|| {
+                    MigrationError::new(format!(
+                        "{}: no sealed writer slot for migrated lease",
+                        entry.path().display()
+                    ))
+                })?;
+                let slot_directory = Directory::open_anchor(&slot)?;
+                let _slot_lock = slot_directory
+                    .try_lock(OsStr::new("writer.lock"), LockMode::Exclusive)
+                    .map_err(|error| {
+                        MigrationError::new(format!(
+                            "{}: slot writer lock: {error}",
+                            slot.display()
+                        ))
+                    })?;
                 let bytes = serde_json::to_vec(&lease)
                     .map_err(|error| MigrationError::new(error.to_string()))?;
-                crate::artifacts::seal(&directory, "lease.json", &bytes, crate::RECORD_LIMIT)
+                slot_directory
+                    .atomic_write(
+                        OsStr::new(LEASE_FILE),
+                        ".lease-",
+                        &bytes,
+                        PublishMode::Replace,
+                    )
+                    .and_then(|publication| publication.require_durable())
                     .map_err(|error| MigrationError::new(error.to_string()))?;
-                changed.push(entry.path().join("lease.json").display().to_string());
+                changed.push(lease_path(&slot).display().to_string());
             }
             directory
                 .unlink(OsStr::new("writer-owned.json"))
@@ -153,7 +209,7 @@ mod tests {
     }
 
     fn write_ownership(directory: &Directory, lane_owned: bool, holder: Option<AttemptId>) {
-        let record = WriterOwnership {
+        let record = LegacyWriterOwnership {
             extra: Default::default(),
             schema_version: WRITER_OWNERSHIP_VERSION,
             lane_owned,
@@ -162,6 +218,29 @@ mod tests {
         let bytes = crate::db::bytes(&record).expect("encode ownership");
         crate::artifacts::seal(directory, "writer-owned.json", &bytes, crate::RECORD_LIMIT)
             .expect("seal ownership");
+    }
+
+    /// Seal the launch request that names the one worktree slot, and create it.
+    fn write_slot_request(root: &Path, directory: &Directory) -> PathBuf {
+        let submission = crate::tests::input();
+        let project = ProjectId::from_bytes([3; 16]);
+        let worktree = root.join("bound-worktree");
+        let mut request = submission.request;
+        request.task.writer = Some(provenant_records::run::WriterRequest {
+            extra: Default::default(),
+            custody_project: Some(project),
+            project: root.to_path_buf(),
+            worktree: worktree.clone(),
+        });
+        let bytes = crate::db::bytes(&request).expect("encode request");
+        crate::artifacts::seal(directory, "request.json", &bytes, crate::RECORD_LIMIT)
+            .expect("seal request");
+        let slot = root
+            .join("worktrees")
+            .join(project.to_string())
+            .join(state_dir_name(&worktree));
+        std::fs::create_dir_all(&slot).expect("create slot");
+        slot
     }
 
     #[test]
@@ -209,6 +288,7 @@ mod tests {
         std::fs::create_dir_all(&attempt).expect("attempt dir");
         let directory = Directory::open_anchor(&attempt).expect("attempt anchor");
         write_ownership(&directory, true, Some(holder));
+        let slot = write_slot_request(root.path(), &directory);
 
         let changed = migrate_store(root.path()).expect("migrate");
         assert!(changed.iter().any(|path| path.ends_with("lease.json")));
@@ -216,9 +296,11 @@ mod tests {
             !attempt.join("writer-owned.json").exists(),
             "old ownership record was replaced"
         );
-        let bytes = crate::artifacts::read_sealed(&directory, "lease.json", crate::RECORD_LIMIT)
-            .expect("read lease")
-            .expect("lease exists");
+        assert!(
+            !attempt.join("lease.json").exists(),
+            "no second lease is written into the attempt directory"
+        );
+        let bytes = std::fs::read(slot.join(LEASE_FILE)).expect("slot lease exists");
         let lease: WorktreeLease = serde_json::from_slice(&bytes).expect("decode lease");
         assert_eq!(lease.holder, holder);
         assert_eq!(lease.since, owner(Some(holder)).created_at);
@@ -248,7 +330,7 @@ mod tests {
 
     #[test]
     fn unsupported_version_pair_is_refused() {
-        let record = WriterOwnership {
+        let record = LegacyWriterOwnership {
             extra: Default::default(),
             schema_version: WRITER_OWNERSHIP_VERSION,
             lane_owned: true,

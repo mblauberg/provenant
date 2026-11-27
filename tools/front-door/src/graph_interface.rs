@@ -1383,7 +1383,7 @@ fn validate_set_path(key: &str) -> Result<(), Box<provenant_records::diagnostic:
         )),
         "host" | "account" | "confidential" | "provider_timeout" | "capabilities"
         | "capability" | "build_heavy" | "build_weight" | "write_roots" | "write_root"
-        | "ci_scope" | "pr" | "preset" | "isolation" | "receipts" | "sandbox" | "policy_inputs"
+        | "ci_scope" | "pr" | "preset" | "receipts" | "sandbox" | "policy_inputs"
         | "token_budget" | "on_budget" | "budget_grace" => Ok(()),
         _ if path.starts_with("mode.") => {
             Err(cli_input_error("use --mode for attempt access mode"))

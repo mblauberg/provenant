@@ -3774,6 +3774,9 @@ impl RunStore {
     ) -> Result<()> {
         let attempt = self.attempt_dir(record.attempt_id, false)?;
         if crate::writer::read_handover(&attempt)?.is_some() {
+            // A replay must still name the successor at the slot path, even if
+            // a previous pass sealed the receipt before the lease transfer.
+            self.transfer_slot_lease(record, tree, call.clock.wall_now()?)?;
             return Ok(());
         }
         let head = holder.head.or_else(|| {
@@ -3783,14 +3786,19 @@ impl RunStore {
                 .and_then(|head| provenant_core::GitOid::parse(&head).ok())
         });
         let uncommitted = crate::writer::uncommitted_worktree_paths(tree)?;
+        let at = call.clock.wall_now()?;
         let handover = provenant_records::custody::Handover {
             from: holder.attempt_id,
             to: record.attempt_id,
-            at: call.clock.wall_now()?,
+            at,
             head,
             uncommitted: uncommitted.clone(),
         };
         crate::writer::seal_handover(&attempt, &handover)?;
+        // The receipt names the prior lane; the durable lease must name the
+        // successor, or the next admission would read a holder that already
+        // finished. Both live at the one slot path confinement reads.
+        self.transfer_slot_lease(record, tree, at)?;
         let files = if uncommitted.is_empty() {
             "none".to_owned()
         } else {
@@ -3807,6 +3815,55 @@ impl RunStore {
             ),
             holder.attempt_id,
         ));
+        Ok(())
+    }
+
+    /// Rewrite the worktree slot lease so later admissions observe the
+    /// successor as holder. The launch admission site already holds the slot's
+    /// writer lock; a stand-alone continuation takes it here when free. The
+    /// publication is an atomic replace of the one lease file.
+    fn transfer_slot_lease(
+        &self,
+        record: &AttemptRecord,
+        tree: &provenant_confinement::VerifiedWorktree,
+        at: provenant_core::WallTime,
+    ) -> Result<()> {
+        use provenant_confinement::worktrees::LEASE_FILE;
+        use provenant_os::fs::{LockMode, PublishMode};
+        use std::ffi::OsStr;
+
+        let slot_path = self
+            .writer_registry
+            .join("worktrees")
+            .join(record.project_id.to_string())
+            .join(provenant_confinement::worktrees::state_dir_name(
+                tree.repo().root_path(),
+            ));
+        let slot = provenant_os::fs::Directory::open_anchor(&slot_path)?;
+        let _guard = slot
+            .try_lock(OsStr::new("writer.lock"), LockMode::Exclusive)
+            .ok();
+        let name = OsStr::new(LEASE_FILE);
+        let sharing = slot
+            .read_stable(name, 4096)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+            .and_then(|value| {
+                serde_json::from_value::<provenant_records::custody::Sharing>(
+                    value["sharing"].clone(),
+                )
+                .ok()
+            })
+            .unwrap_or_default();
+        let lease = provenant_records::custody::WorktreeLease {
+            holder: record.attempt_id,
+            since: at,
+            sharing,
+        };
+        let bytes = serde_json::to_vec(&lease)
+            .map_err(|_| RunError::Validation("worktree lease could not be encoded"))?;
+        slot.atomic_write(name, ".lease-", &bytes, PublishMode::Replace)?
+            .require_durable()?;
         Ok(())
     }
 

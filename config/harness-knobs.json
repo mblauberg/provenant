@@ -25,7 +25,6 @@
       "lanes.read_source_fetch_first",
       "lanes.writer_base",
       "lanes.gh_budget",
-      "lanes.isolation",
       "lanes.receipts",
       "lanes.history.rebase",
       "lanes.history.unrooted_tip",
@@ -820,7 +819,6 @@
       "policy.GRAPH_PR_EXCLUSIVE": {"type": "enum", "allowed": "warn, off, refuse", "default": "warn", "effect": "Graph-level and node PR delivery both set: the node setting is ignored with a warning. The setting source is named in each warning; refuse selects a configured stop, not an immutable boundary."},
       "policy.GRAPH_HOST_NATIVE_FALLBACK": {"type": "enum", "allowed": "warn, off, refuse", "default": "warn", "effect": "A host-native route without a fallback warns. The setting source is named in each warning; refuse selects a configured stop, not an immutable boundary."},
       "policy.SECRET_SHAPED_INPUT": {"type": "enum", "allowed": "warn, off", "default": "warn", "effect": "Secret-shaped input warns with its field path and proceeds; exact credential values are handled at their owning boundary. The setting source is named in each warning."},
-      "policy.DIRTY_WRITER": {"type": "enum", "allowed": "warn, off, refuse", "default": "warn", "effect": "A writer worktree with uncommitted edits launches and records the dirty state; checked-out and detached writers stay refused. The setting source is named in each warning; refuse selects a configured stop, not an immutable boundary."},
       "policy.SOURCE_TREE_ENTRY_OMITTED": {"type": "enum", "allowed": "warn, off, refuse", "default": "warn", "effect": "A gitlink, unsupported object or oversized entry is omitted from the read-only view with a warning naming it. The setting source is named in each warning; refuse selects a configured stop, not an immutable boundary."},
       "policy.QUOTA_READINESS_STALE": {"type": "enum", "allowed": "warn, off, refuse", "default": "warn", "effect": "Expired quota readiness warns; an exhausted allowance still skips the route. The setting source is named in each warning; refuse selects a configured stop, not an immutable boundary."},
       "policy.QUOTA_IDENTITY_UNKNOWN": {"type": "enum", "allowed": "warn, off, refuse", "default": "warn", "effect": "An unknown quota identity warns. The setting source is named in each warning; refuse selects a configured stop, not an immutable boundary."},
@@ -1336,15 +1334,6 @@
       "reader": "tools/front-door/crates/run/src/limits.rs, tools/front-door/crates/providers/src/lane.rs",
       "effect": "Advisory gh invocation budget per lane. The lane's gh wrapper counts each gh command; at the budget and each multiple of it the wrapper prints one warning and the command still runs. The count is recorded at settlement; the budget and its source appear in run --explain, the receipt and status. 0 turns the warning off; the count is still recorded.",
       "trade_off": "Never stops a lane and is not an API request cap: one paginated gh call is one invocation, and direct API clients or the real gh path bypass the count. Lower values warn sooner about quota-heavy polling."
-    },
-    "lanes.isolation": {
-      "type": "enum",
-      "values": ["private", "shared"],
-      "default": "private",
-      "status": "wired",
-      "reader": "tools/front-door/src/fabric/owner.rs",
-      "effect": "Whether an unpinned read-only graph node reads its bound checkout live (shared). A read-only lane pinned to a commit always gets an immutable source view, under every setting. Writers always keep one writer per worktree, so shared is refused on a writer node. Set per graph node with `attempt.isolation` or the `light` preset (`attempt.preset`),.",
-      "trade_off": "shared starts faster but the lane sees edits made while it runs. Secret redaction and object integrity are unchanged."
     },
     "lanes.receipts": {
       "type": "enum",
