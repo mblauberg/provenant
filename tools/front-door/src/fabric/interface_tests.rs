@@ -4230,6 +4230,85 @@ fn peer_placed_writer_explain_is_proposed_on_the_peer() -> Result {
 }
 
 #[test]
+// Spec: docs/specs/agent-native.md#32-checks-warn-by-default — explain plans a
+// peer-placed writer on the peer. Its worktree comes from the peer's managed
+// layout for the declared branch, never from the caller's checkout.
+fn explain_plans_peer_writer_on_peer() -> Result {
+    let rig = TestRig::new()?;
+    let remote_host = provenant_core::HostId::from_bytes([3; 16]);
+    let roots = crate::roots::child(&rig.home, &rig.project, rig.state.clone())?;
+    let mut context = Context::open_inspection(roots, &rig.home, &rig.project)?;
+    context.in_lane = false;
+    context.config.peers.insert(
+        "workshop".into(),
+        provenant_fabric_runtime::config::Peer {
+            host: remote_host,
+            destination: "workshop".into(),
+            remote_executable: None,
+            connect_timeout_seconds: 10,
+        },
+    );
+    let factory = Factory {
+        context,
+        project_attribution: false,
+        clock: SystemClock,
+        backoff: ThreadPause,
+        executor: SystemExecutor::new(1)?,
+        home: rig.home.clone(),
+        cwd: rig.project.clone(),
+        assets: rig.project.clone(),
+        host_launch: None,
+        workers: &Workers,
+    };
+    let budget = WaitBudget::cli(factory.clock.mono_now(), 10)?;
+    let preview = factory.graph_document(
+        json!({"op":"run","template":"smoke","host":"workshop",
+            "branch":"smoke/peer", "base":"HEAD", "explain":true}),
+        budget,
+        &CancelToken::new(),
+    )?;
+    let rows = preview["source_admission"]
+        .as_array()
+        .ok_or("source admission rows")?;
+    assert!(
+        rows.iter().all(|row| row["status"] != "refused"),
+        "the peer plan must not refuse a writer against the caller root: {preview}"
+    );
+    let writer = rows
+        .iter()
+        .find(|row| {
+            row["node"]
+                .as_str()
+                .is_some_and(|node| node.ends_with("write"))
+        })
+        .ok_or("writer admission row")?;
+    assert_eq!(writer["status"], json!("pending_registration"), "{preview}");
+    assert_eq!(writer["host"], json!("workshop"), "{preview}");
+    assert_eq!(
+        writer["credential_admission"],
+        json!("pending_route"),
+        "{preview}"
+    );
+    // The path is the peer's plan for this branch: the managed worktree layout
+    // under the peer's label, with no caller checkout path anywhere in it.
+    let relative = factory
+        .context
+        .port_table
+        .managed_writer_path("smoke/verify")
+        .map_err(|error| format!("managed writer path: {error}"))?;
+    let planned = PathBuf::from("workshop").join(relative);
+    assert_eq!(writer["path"], json!(planned), "{preview}");
+    assert!(
+        !writer["path"]
+            .as_str()
+            .ok_or("planned path")?
+            .contains(&rig.project.to_string_lossy().to_string()),
+        "the caller checkout reached the peer plan: {preview}"
+    );
+    Ok(())
+}
+
+#[test]
 fn explanation_and_preparation_share_worktree_admission() -> Result {
     use provenant_cli::run::{SourceAdmissionMode, admit_source_root};
     let rig = crate::worktree_tests::repository()?;
