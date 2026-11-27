@@ -422,6 +422,12 @@ pub const VERIFICATION_BRIEF_OVERRIDES: WarningCode = WarningCode("VERIFICATION_
 /// A route model is a full `ADAPTER/ID` that the effective catalogue does not
 /// know. The declared spelling is preserved; the warning names it.
 pub const ROUTE_MODEL_NOT_CATALOGUED: WarningCode = WarningCode("ROUTE_MODEL_NOT_CATALOGUED");
+/// A route identifier exceeded the host identifier byte cap. The route is
+/// retained verbatim; the warning names the field to correct.
+pub const ROUTE_IDENTIFIER_TOO_LONG: WarningCode = WarningCode("ROUTE_IDENTIFIER_TOO_LONG");
+/// A route identifier contained control characters. The route is retained
+/// verbatim; the warning names the field to correct.
+pub const ROUTE_IDENTIFIER_CONTROL_CHAR: WarningCode = WarningCode("ROUTE_IDENTIFIER_CONTROL_CHAR");
 /// An overlay entry or adapter selector could not be applied to the capability
 /// matrix; the matrix still reports the compiled facts.
 pub const ADAPTER_CAPABILITIES_OVERLAY: WarningCode = WarningCode("ADAPTER_CAPABILITIES_OVERLAY");
