@@ -138,6 +138,7 @@ compiled table so later slices bind to a name rather than inventing one:
 | `WRITER_HEAD_MOVED` | none | custody | A continuation whose predecessor head moved re-pins to the current head and warns; it names the prior lane, its terminal state and last head, and keeps uncommitted files. |
 | `GITDIR_REGISTRATION_STALE_NONE` | none | git | A stale worktree registration whose backlink names this path and which no live lease names another holder is repaired with git worktree repair, re-verified, and warned; only a registration a live lane's lease names refuses. |
 | `SOURCE_IDENTITY_MISMATCH` | operation | - | A checkout that is missing or replaced cannot be pinned to its recorded identity, so the source cannot be prepared; this typed operation error names the expected and observed identity. |
+| `LIVE_TREE_EXPOSED` | none | confinement | An overlapping grant that cannot be re-rooted into the pinned view reads the live tree and warns; it is an advisory claim and destroys no other lane's work. `policy.confinement = refuse` stops instead. |
 | `GITDIR_LAYOUT_INVALID` | operation | - | A fabricated Git layout or a backlink that does not name this worktree cannot be repaired into a valid registration; this typed operation error names the layout. |
 | `UNREADABLE_PREDECESSOR` | operation | - | A writer continuation whose predecessor record cannot be read has no pinned commit or owner to inherit, so it is a typed operation error naming the predecessor. |
 
