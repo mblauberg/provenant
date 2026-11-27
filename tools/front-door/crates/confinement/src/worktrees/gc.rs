@@ -10,6 +10,9 @@ use provenant_records::custody::{
 use provenant_records::warning::{self, FORGE_CONTEXT_UNRESOLVED, Warning};
 use std::collections::{BTreeSet, HashSet};
 use std::fmt;
+use std::path::Component;
+
+use super::custody::{guard_destructive_worktree, live_writer_holder};
 
 /// One budget covers every output candidate in a preview. Applied collection
 /// continues to use the full proof before mutation.
@@ -179,6 +182,137 @@ pub struct OutputEntry {
     pub path: PathBuf,
     pub removed: bool,
     pub reason: String,
+}
+
+/// Where GC keeps a lapsed holder's uncommitted files before removing its
+/// worktree. Keyed by attempt so a later handoff can find them again.
+pub fn retained_uncommitted_dir(state_root: &Path, attempt: provenant_core::AttemptId) -> PathBuf {
+    state_root.join("retained").join(attempt.to_string())
+}
+
+/// A holder whose attempt is terminal (or unreachable past its grace) is
+/// lapsed: no destruction guard fires, and its uncommitted files are retained.
+/// A live holder resolves to `None` here so the guard can refuse instead.
+pub(crate) fn retention_holder(
+    context: &WorktreeContext<'_>,
+    path: &Path,
+) -> Option<provenant_core::AttemptId> {
+    lapsed_holder(
+        live_writer_holder(context.project_state, path),
+        writer_holder(context.project_state, path),
+    )
+}
+
+/// Pure core of [`retention_holder`]: only a recorded holder that is not a
+/// live lease keeps its uncommitted files.
+fn lapsed_holder(
+    live: Option<(provenant_core::AttemptId, bool)>,
+    recorded: Option<provenant_core::AttemptId>,
+) -> Option<provenant_core::AttemptId> {
+    live.is_none().then_some(recorded).flatten()
+}
+
+/// Copy a lapsed holder's uncommitted working files into the retained store,
+/// then clear them from the tree so removal sees a clean worktree. Nothing is
+/// followed outside the worktree: a non-regular path is left in place, which
+/// keeps the tree dirty and therefore keeps it from being removed.
+pub(crate) fn retain_lapsed_uncommitted(
+    context: &WorktreeContext<'_>,
+    verified: &VerifiedWorktree,
+    holder: provenant_core::AttemptId,
+    cancel: &CancelToken,
+) -> Result<usize, WorktreeError> {
+    let outcome = run_git(
+        context,
+        verified.repo(),
+        GitRead::StatusIncludingIgnored,
+        cancel,
+    )?;
+    if exit_code(&outcome)? != 0 {
+        return Err(WorktreeError::InvalidOutput);
+    }
+    let records =
+        parse_porcelain_v2_z(&outcome.stdout.bytes).map_err(|_| WorktreeError::InvalidOutput)?;
+    let mut relative_paths: Vec<PathBuf> = Vec::new();
+    for record in records
+        .iter()
+        .filter(|record| record.kind != StatusKind::Ignored)
+    {
+        for bytes in std::iter::once(&record.path).chain(record.original_path.iter()) {
+            let relative = Path::new(OsStr::from_bytes(bytes));
+            if relative.as_os_str().is_empty()
+                || relative
+                    .components()
+                    .any(|component| !matches!(component, Component::Normal(_)))
+            {
+                return Err(WorktreeError::InvalidRequest);
+            }
+            relative_paths.push(relative.to_path_buf());
+        }
+    }
+    if relative_paths.is_empty() {
+        return Ok(0);
+    }
+    let root = retained_uncommitted_dir(&context.host_state()?, holder);
+    std::fs::create_dir_all(&root).map_err(|_| WorktreeError::InvalidOutput)?;
+    let worktree = verified.path();
+    let mut retained = Vec::new();
+    for relative in relative_paths {
+        let source = worktree.join(&relative);
+        // Never retain a link target: only a regular file's own bytes move.
+        let Ok(metadata) = std::fs::symlink_metadata(&source) else {
+            continue;
+        };
+        if !metadata.is_file() {
+            continue;
+        }
+        let destination = root.join(&relative);
+        if let Some(parent) = destination.parent()
+            && std::fs::create_dir_all(parent).is_err()
+        {
+            continue;
+        }
+        if std::fs::copy(&source, &destination).is_err() {
+            continue;
+        }
+        if std::fs::remove_file(&source).is_err() {
+            // A copied file that cannot be cleared leaves the tree dirty, and
+            // the ordinary cleanliness verdict then retains the worktree.
+            continue;
+        }
+        retained.push(relative);
+    }
+    if retained.is_empty() {
+        return Ok(0);
+    }
+    let manifest = serde_json::json!({
+        "holder": holder.to_string(),
+        "paths": retained
+            .iter()
+            .map(|path| path.to_string_lossy().into_owned())
+            .collect::<Vec<_>>(),
+    });
+    if let Ok(bytes) = serde_json::to_vec(&manifest) {
+        let _ = std::fs::write(root.join("retained.json"), bytes);
+    }
+    Ok(retained.len())
+}
+
+/// The explicit gc-side destruction fence. The lifecycle removal path holds
+/// the final guard under the worktree lease; this one makes the gc decision
+/// visible before retirement begins, in both worktree and landing cleanup.
+pub(crate) fn guard_gc_removal(
+    context: &WorktreeContext<'_>,
+    path: &Path,
+) -> Result<(), WorktreeError> {
+    if let Some((holder, live)) = live_writer_holder(context.project_state, path) {
+        let subject = Subject {
+            kind: SubjectKind::Worktree,
+            id: path.to_string_lossy().into_owned(),
+        };
+        guard_destructive_worktree("worktree remove", &subject, live, Some(holder))?;
+    }
+    Ok(())
 }
 
 pub fn branch_candidate(
@@ -2186,6 +2320,13 @@ fn collect_impl(
                         .push(branch.short_name().into());
                 }
             } else {
+                // Move a lapsed holder's uncommitted files aside while the
+                // writer lease is still held, before lifecycle's cleanliness
+                // verdict. Landing cleanup re-runs this inside `precheck`;
+                // the second pass is a no-op once the files are retained.
+                if let Some(holder) = retention_holder(context, &lane.path) {
+                    retain_lapsed_uncommitted(context, &locked.verified, holder, cancel)?;
+                }
                 let port = policy
                     .retirement_port
                     .ok_or(WorktreeError::RegistrationUnconfirmed)?;
@@ -2212,6 +2353,7 @@ fn collect_impl(
                         if canonicalize(path)? != canonicalize(&lane.path)? {
                             return Err(WorktreeError::IdentityChanged);
                         }
+                        guard_gc_removal(context, path)?;
                         if let SelectedRetirement::Subsumed(evidence) = &action {
                             validate_removal_evidence(context, lane.head, evidence, &refs, cancel)?;
                             if let Some(branch) = branch.as_ref() {
@@ -3229,4 +3371,43 @@ fn protect_nonignored(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod lapsed_retention_tests {
+    use super::*;
+
+    fn holder(byte: u8) -> provenant_core::AttemptId {
+        provenant_core::AttemptId::from_bytes([byte; 16])
+    }
+
+    #[test]
+    fn gc_retains_lapsed_uncommitted_files_not_live_work() {
+        let lapsed = holder(1);
+        // A terminal holder has a recorded reservation but no live observation.
+        assert_eq!(lapsed_holder(None, Some(lapsed)), Some(lapsed));
+        // An unreachable holder also lapses once its grace has expired.
+        assert_eq!(lapsed_holder(None, Some(holder(2))), Some(holder(2)));
+        // A live lease is guarded instead; nothing is retained behind its back.
+        assert_eq!(lapsed_holder(Some((lapsed, true)), Some(lapsed)), None);
+        // No reservation means no prior holder to retain for.
+        assert_eq!(lapsed_holder(None, None), None);
+    }
+
+    #[test]
+    fn retained_files_are_keyed_by_attempt_under_state() {
+        let root = Path::new("/host/state");
+        let attempt = holder(3);
+        let expected = format!("/host/state/retained/{attempt}");
+        assert_eq!(
+            retained_uncommitted_dir(root, attempt),
+            PathBuf::from(&expected)
+        );
+        // A different holder has a disjoint retained directory, so a handover
+        // never overwrites the files kept from a prior attempt.
+        assert_ne!(
+            retained_uncommitted_dir(root, holder(4)),
+            retained_uncommitted_dir(root, attempt)
+        );
+    }
 }
