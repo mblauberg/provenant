@@ -479,11 +479,26 @@ mod tests {
     }
 
     #[test]
+    fn refusal_lines_use_latest_attempt_outcome_not_advance_code() {
+        let checkpoint = json!({"nodes":[
+            {"id":"refused", "advance_code":"route_refused", "advance_note":"route unavailable",
+             "attempts":[{"outcome":{"preparation_refused":"route_resolution_refused"}}]},
+            {"id":"launched", "advance_code":"route_refused", "advance_note":"other failure",
+             "attempts":[{"outcome":{"preparation_refused":"route_resolution_refused"}},
+                         {"outcome":"failed"}]}
+        ]});
+        assert_eq!(
+            refusal_lines(&checkpoint),
+            "refused refused: route unavailable\n"
+        );
+    }
+
+    #[test]
     fn run_receipt_is_bounded_and_ends_in_one_next_command() {
         let nodes: Vec<_> = (0..40)
             .map(|n| {
-                json!({"id":format!("n{n}"), "state":"failed", "advance_code":"preparation_refused",
-                "advance_note":"x".repeat(1000), "attempts":[]})
+                json!({"id":format!("n{n}"), "state":"failed", "advance_code":"route_refused",
+                "advance_note":"x".repeat(1000), "attempts":[{"outcome":{"preparation_refused":"route_resolution_refused"}}]})
             })
             .collect();
         for (status, command, why) in [

@@ -134,7 +134,8 @@
     "source": "default",
     "backend": {
       "kind": "builtin"
-    }
+    },
+    "review_gate_contexts": []
   },
   "worktree_layout": {
     "source": "default",

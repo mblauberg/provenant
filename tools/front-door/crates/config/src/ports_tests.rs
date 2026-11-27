@@ -2,6 +2,30 @@ use super::*;
 use provenant_records::warning::capture;
 
 #[test]
+fn ci_observation_declares_review_gate_contexts() {
+    let mut table = PortTable::builtin();
+    assert!(
+        table.ci_observation.review_gate_contexts.is_empty(),
+        "a port that declares no gates names none"
+    );
+    let declared: CiObservationPort = serde_json::from_value(serde_json::json!({
+        "source": "project",
+        "backend": {"kind": "builtin"},
+        "review_gate_contexts": ["verdict"]
+    }))
+    .unwrap();
+    assert_eq!(declared.review_gate_contexts, ["verdict"]);
+    let as_port: Port = (&declared).into();
+    assert_eq!(as_port.source, declared.source);
+    table.ci_observation = declared;
+    let value = serde_json::to_value(&table).unwrap();
+    assert_eq!(
+        value["ci_observation"]["review_gate_contexts"][0],
+        "verdict"
+    );
+}
+
+#[test]
 fn declared_port_rows_and_backend_shapes_round_trip() {
     let table = PortTable::builtin();
     let value = serde_json::to_value(&table).unwrap();

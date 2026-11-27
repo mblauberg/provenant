@@ -2781,6 +2781,7 @@ fn record_observed_attempt<R: AttemptOwner, J: GraphJournal>(
     let fallback_evidence_retry = match &observation {
         AttemptObservation::Terminal {
             attempt_ref: Some(reference),
+            stop,
             outcome,
             launched: false,
             ..
@@ -2796,6 +2797,7 @@ fn record_observed_attempt<R: AttemptOwner, J: GraphJournal>(
                 node,
                 route_index,
                 *outcome,
+                *stop,
                 false,
                 next_step::FallbackEvidence {
                     preparation: fallback_evidence,

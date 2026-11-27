@@ -744,7 +744,8 @@ fn detached_writer_reports_branch_requirement() -> Result<(), Box<dyn std::error
     let node = &run.checkpoint.nodes[0];
     // The fixture route is unresolved, so the reader stops at route selection
     // with an explicit preparation cause after source admission succeeds.
-    assert_eq!(node.advance_code.as_deref(), Some("preparation_refused"), "{node:#?}");
+    // The sealed stop cause owns the advance code, not the generic label.
+    assert_eq!(node.advance_code.as_deref(), Some("route_refused"), "{node:#?}");
     let attempt = node.attempts.first().ok_or("review attempt missing")?;
     assert_eq!(attempt.outcome, Some(provenant_fabric_runtime::graph::GraphAttemptOutcome::PreparationRefused(provenant_records::run::CauseKind::RouteResolutionRefused)), "{node:#?}");
     assert!(!attempt.launched, "{node:#?}");

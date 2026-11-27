@@ -100,6 +100,11 @@ pub trait Forge {
         Ok(provenant_records::landing::Capabilities::default())
     }
     fn set_project_path(&mut self, _path: &std::path::Path) {}
+    /// Commit-status contexts that are a review gate, not CI, as declared in
+    /// the project's `ci_observation` port. No adapter hand-lists them.
+    fn review_gate_contexts(&self) -> &[String] {
+        &[]
+    }
     /// `Some` fixes polling for this landing; `None` leaves adapter cadence in control.
     fn set_poll_interval_override(&mut self, _interval: Option<std::time::Duration>) {}
     fn pull_request(&mut self, number: u64) -> Result<PullRequestInfo, LandingError>;

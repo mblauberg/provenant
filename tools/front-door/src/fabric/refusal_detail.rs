@@ -7,13 +7,13 @@ const MAX_DETAIL_CHARS: usize = 1024;
 
 impl Factory {
     /// Append the recorded route, account and reason to each node's
-    /// `preparation_refused` message in a graph reply.
+    /// preparation refusal message in a graph reply.
     pub(crate) fn name_refusal_causes(&self, result: &mut Value) {
         let Some(nodes) = result["checkpoint"]["nodes"].as_array_mut() else {
             return;
         };
         for node in nodes {
-            if node["advance_code"] != "preparation_refused" {
+            if !crate::graph_interface::is_preparation_refusal(node) {
                 continue;
             }
             let Some(reference) = node["attempts"]

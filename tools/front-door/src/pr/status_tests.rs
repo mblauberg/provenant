@@ -4,6 +4,7 @@ fn row(number: u64, head: &str, error: Option<&str>) -> super::Line {
         number,
         state: "OPEN".into(),
         head: head.into(),
+        completion: None,
         draft: false,
         checks_passed: Some(1),
         checks_total: Some(1),
@@ -98,7 +99,7 @@ fn completion_report_retains_every_failed_check_and_link() {
         check("one", "fail", "https://ci/one"),
         check("two", "cancel", "https://ci/two"),
     ];
-    let line = super::status_line(1668, view, Some(&checks));
+    let line = super::status_line(1668, view, Some(&checks), &[]);
     assert_eq!(
         line.failure_lines(),
         [
@@ -137,7 +138,7 @@ fn pending_check_names_survive_the_status_line_and_render() {
         check("lint", "pending"),
         check("deploy", "pending"),
     ];
-    let line = super::status_line(7, view, Some(&checks));
+    let line = super::status_line(7, view, Some(&checks), &[]);
     assert_eq!(line.pending_checks, ["lint", "deploy"]);
     let text = line.text();
     assert!(text.contains("pending=2"), "{text}");
@@ -268,7 +269,7 @@ fn a_batch_row_renders_its_members_and_per_file_attribution() {
 }
 
 #[test]
-fn complete_wait_keeps_failures_pending_until_all_checks_finish() {
+fn complete_wait_holds_failures_until_checks_finish_but_merged_is_terminal() {
     let mut line = row(1668, "head", None);
     line.checks_failed = Some(1);
     line.checks_pending = Some(1);
@@ -285,7 +286,7 @@ fn complete_wait_keeps_failures_pending_until_all_checks_finish() {
     line.state = "MERGED".into();
     line.active_workflows = Some(true);
     assert_eq!(line.wait_verdict(false), Some(true));
-    assert_eq!(line.wait_verdict(true), None);
+    assert_eq!(line.wait_verdict(true), Some(true));
     line.active_workflows = Some(false);
     assert_eq!(line.wait_verdict(true), Some(true));
     line.await_head("new");
@@ -322,7 +323,7 @@ fn a_head_with_only_a_pending_selector_waits_for_the_aggregate_check() {
         }])
     };
     let read = |checks: &[super::super::observer::Check], policy: super::Requirement| {
-        super::status_line_with(7, view(), Some(checks), policy)
+        super::status_line_with(7, view(), Some(checks), policy, &[])
     };
     let selector = check("Select CI suites", "pending");
     let passed_selector = check("Select CI suites", "pass");
@@ -353,6 +354,46 @@ fn a_head_with_only_a_pending_selector_waits_for_the_aggregate_check() {
     let unreadable = read(&[aggregate], super::Requirement::Unreadable);
     assert_eq!(unreadable.verdict(), None);
     assert_eq!(unreadable.wait_verdict(true), None);
+}
+
+#[test]
+fn a_declared_review_gate_is_not_a_required_ci_check() {
+    let check = |name: &str, bucket: &str| super::super::observer::Check {
+        head: "head".into(),
+        name: name.into(),
+        job_id: None,
+        bucket: bucket.into(),
+        app: None,
+        app_slug: None,
+        conclusion: None,
+        registered: None,
+        url: None,
+        excerpt: String::new(),
+    };
+    let view = super::View {
+        state: "OPEN".into(),
+        head: "head".into(),
+        merge: "clean".into(),
+        review: None,
+        draft: false,
+        url: "https://github.com/owner/repo/pull/7".into(),
+    };
+    let gates = ["verdict".to_owned()];
+    let line = super::status_line_with(
+        7,
+        view,
+        Some(&[check("build", "pass"), check("verdict", "pending")]),
+        super::Requirement::Known(vec![super::Required {
+            name: "verdict".into(),
+            app: None,
+        }]),
+        &gates,
+    );
+
+    assert!(line.required_checks.is_empty());
+    assert!(line.required_pending.is_empty());
+    assert_eq!(line.verdict(), Some(true));
+    assert_eq!(line.wait_verdict(true), Some(true));
 }
 
 #[test]

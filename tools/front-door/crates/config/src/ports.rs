@@ -267,6 +267,27 @@ pub struct Port {
     pub backend: PortBackend,
 }
 
+/// The one declaration of how CI is observed. `review_gate_contexts` names
+/// commit-status contexts that are a review gate, not CI: a pending verdict is
+/// not a running check and must not hold a wait open. The project declares the
+/// names; no code hand-lists them. Empty means every context is CI.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CiObservationPort {
+    pub source: Layer,
+    pub backend: PortBackend,
+    #[serde(default)]
+    pub review_gate_contexts: Vec<String>,
+}
+
+impl From<&CiObservationPort> for Port {
+    fn from(port: &CiObservationPort) -> Self {
+        Self {
+            source: port.source,
+            backend: port.backend.clone(),
+        }
+    }
+}
+
 /// The one declaration of the Git context every forge operation shares.
 ///
 /// An empty `remote`, `default_branch` or `protected` means "detect":
@@ -1254,6 +1275,20 @@ impl PortEntry for Port {
         self.backend.valid()
     }
 }
+impl PortEntry for CiObservationPort {
+    fn source(&self) -> Layer {
+        self.source
+    }
+    fn set_source(&mut self, source: Layer) {
+        self.source = source;
+    }
+    fn backend_kind(&self) -> PortBackendKind {
+        self.backend.kind()
+    }
+    fn valid(&self) -> bool {
+        self.backend.valid()
+    }
+}
 impl PortEntry for GitPort {
     fn source(&self) -> Layer {
         self.source
@@ -1480,7 +1515,7 @@ declare_ports! {
     git: GitPort,
     verify: VerifyPort,
     land: LandPort,
-    ci_observation: Port,
+    ci_observation: CiObservationPort,
     worktree_layout: WorktreeLayoutPort,
     naming: Port,
     post_create: Port,

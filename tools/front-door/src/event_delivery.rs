@@ -754,6 +754,7 @@ fn poll_one(
         subscription.head.as_deref(),
         request,
         Duration::ZERO,
+        &crate::pr::status::gate_contexts(path, roots.state.as_path()),
     )?;
     let detail = poll_detail(subscription, &status, &checks)?;
     project_poll(roots, project, subscription, progress, detail)

@@ -1,0 +1,220 @@
+{
+  "head": "18173986a786cef51f87517201f63911a902dae6",
+  "runs": [
+    {
+      "total_count": 24,
+      "check_runs": [
+        {
+          "head_sha": "18173986a786cef51f87517201f63911a902dae6",
+          "name": "warm-master",
+          "status": "completed",
+          "conclusion": "skipped",
+          "started_at": "2026-11-26T00:00:00Z",
+          "completed_at": "2026-11-26T00:01:00Z"
+        },
+        {
+          "head_sha": "18173986a786cef51f87517201f63911a902dae6",
+          "name": "quick",
+          "status": "completed",
+          "conclusion": "skipped",
+          "started_at": "2026-11-26T00:00:00Z",
+          "completed_at": "2026-11-26T00:01:00Z"
+        },
+        {
+          "head_sha": "18173986a786cef51f87517201f63911a902dae6",
+          "name": "quick-plan",
+          "status": "completed",
+          "conclusion": "skipped",
+          "started_at": "2026-11-26T00:00:00Z",
+          "completed_at": "2026-11-26T00:01:00Z"
+        },
+        {
+          "head_sha": "18173986a786cef51f87517201f63911a902dae6",
+          "name": "rust",
+          "status": "completed",
+          "conclusion": "skipped",
+          "started_at": "2026-11-26T00:00:00Z",
+          "completed_at": "2026-11-26T00:01:00Z"
+        },
+        {
+          "head_sha": "18173986a786cef51f87517201f63911a902dae6",
+          "name": "rust",
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-11-26T00:00:00Z",
+          "completed_at": "2026-11-26T00:01:00Z"
+        },
+        {
+          "head_sha": "18173986a786cef51f87517201f63911a902dae6",
+          "name": "quick",
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-11-26T00:00:00Z",
+          "completed_at": "2026-11-26T00:01:00Z"
+        },
+        {
+          "head_sha": "18173986a786cef51f87517201f63911a902dae6",
+          "name": "warm-master",
+          "status": "completed",
+          "conclusion": "skipped",
+          "started_at": "2026-11-26T00:00:00Z",
+          "completed_at": "2026-11-26T00:01:00Z"
+        },
+        {
+          "head_sha": "18173986a786cef51f87517201f63911a902dae6",
+          "name": "quick-plan",
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-11-26T00:00:00Z",
+          "completed_at": "2026-11-26T00:01:00Z"
+        },
+        {
+          "head_sha": "18173986a786cef51f87517201f63911a902dae6",
+          "name": "cache-prune",
+          "status": "completed",
+          "conclusion": "skipped",
+          "started_at": "2026-11-26T00:00:00Z",
+          "completed_at": "2026-11-26T00:01:00Z"
+        },
+        {
+          "head_sha": "18173986a786cef51f87517201f63911a902dae6",
+          "name": "verify (${{ matrix.shard }})",
+          "status": "completed",
+          "conclusion": "skipped",
+          "started_at": "2026-11-26T00:00:00Z",
+          "completed_at": "2026-11-26T00:01:00Z"
+        },
+        {
+          "head_sha": "18173986a786cef51f87517201f63911a902dae6",
+          "name": "kani",
+          "status": "completed",
+          "conclusion": "skipped",
+          "started_at": "2026-11-26T00:00:00Z",
+          "completed_at": "2026-11-26T00:01:00Z"
+        },
+        {
+          "head_sha": "18173986a786cef51f87517201f63911a902dae6",
+          "name": "rust-test",
+          "status": "completed",
+          "conclusion": "skipped",
+          "started_at": "2026-11-26T00:00:00Z",
+          "completed_at": "2026-11-26T00:01:00Z"
+        },
+        {
+          "head_sha": "18173986a786cef51f87517201f63911a902dae6",
+          "name": "verify",
+          "status": "completed",
+          "conclusion": "skipped",
+          "started_at": "2026-11-26T00:00:00Z",
+          "completed_at": "2026-11-26T00:01:00Z"
+        },
+        {
+          "head_sha": "18173986a786cef51f87517201f63911a902dae6",
+          "name": "infra-validate",
+          "status": "completed",
+          "conclusion": "skipped",
+          "started_at": "2026-11-26T00:00:00Z",
+          "completed_at": "2026-11-26T00:01:00Z"
+        },
+        {
+          "head_sha": "18173986a786cef51f87517201f63911a902dae6",
+          "name": "mutants",
+          "status": "completed",
+          "conclusion": "skipped",
+          "started_at": "2026-11-26T00:00:00Z",
+          "completed_at": "2026-11-26T00:01:00Z"
+        },
+        {
+          "head_sha": "18173986a786cef51f87517201f63911a902dae6",
+          "name": "capture-book",
+          "status": "completed",
+          "conclusion": "skipped",
+          "started_at": "2026-11-26T00:00:00Z",
+          "completed_at": "2026-11-26T00:01:00Z"
+        },
+        {
+          "head_sha": "18173986a786cef51f87517201f63911a902dae6",
+          "name": "rust-lint",
+          "status": "completed",
+          "conclusion": "skipped",
+          "started_at": "2026-11-26T00:00:00Z",
+          "completed_at": "2026-11-26T00:01:00Z"
+        },
+        {
+          "head_sha": "18173986a786cef51f87517201f63911a902dae6",
+          "name": "ci-status",
+          "status": "completed",
+          "conclusion": "skipped",
+          "started_at": "2026-11-26T00:00:00Z",
+          "completed_at": "2026-11-26T00:01:00Z"
+        },
+        {
+          "head_sha": "18173986a786cef51f87517201f63911a902dae6",
+          "name": "rust-postgres (${{ matrix.group }})",
+          "status": "completed",
+          "conclusion": "skipped",
+          "started_at": "2026-11-26T00:00:00Z",
+          "completed_at": "2026-11-26T00:01:00Z"
+        },
+        {
+          "head_sha": "18173986a786cef51f87517201f63911a902dae6",
+          "name": "rust-build",
+          "status": "completed",
+          "conclusion": "skipped",
+          "started_at": "2026-11-26T00:00:00Z",
+          "completed_at": "2026-11-26T00:01:00Z"
+        },
+        {
+          "head_sha": "18173986a786cef51f87517201f63911a902dae6",
+          "name": "plan",
+          "status": "completed",
+          "conclusion": "skipped",
+          "started_at": "2026-11-26T00:00:00Z",
+          "completed_at": "2026-11-26T00:01:00Z"
+        },
+        {
+          "head_sha": "18173986a786cef51f87517201f63911a902dae6",
+          "name": "coverage",
+          "status": "completed",
+          "conclusion": "skipped",
+          "started_at": "2026-11-26T00:00:00Z",
+          "completed_at": "2026-11-26T00:01:00Z"
+        },
+        {
+          "head_sha": "18173986a786cef51f87517201f63911a902dae6",
+          "name": "scope",
+          "status": "completed",
+          "conclusion": "skipped",
+          "started_at": "2026-11-26T00:00:00Z",
+          "completed_at": "2026-11-26T00:01:00Z"
+        },
+        {
+          "head_sha": "18173986a786cef51f87517201f63911a902dae6",
+          "name": "verdict",
+          "status": "completed",
+          "conclusion": "success",
+          "started_at": "2026-11-26T00:00:00Z",
+          "completed_at": "2026-11-26T00:01:00Z"
+        }
+      ]
+    }
+  ],
+  "statuses": [
+    [
+      {
+        "context": "verdict",
+        "state": "pending",
+        "description": "No verdict for this head",
+        "created_at": "2026-11-26T00:00:00Z",
+        "updated_at": "2026-11-26T00:02:00Z"
+      },
+      {
+        "context": "verdict",
+        "state": "pending",
+        "description": "Evaluating verdict comments",
+        "created_at": "2026-11-26T00:00:00Z",
+        "updated_at": "2026-11-26T00:02:00Z"
+      }
+    ]
+  ]
+}

@@ -79,6 +79,9 @@ pub(crate) struct Line {
     number: u64,
     state: String,
     pub(crate) head: String,
+    /// Shared CI decision for this head, omitted from status JSON.
+    #[serde(skip)]
+    completion: Option<CiCompletion>,
     #[serde(default, deserialize_with = "display_default")]
     draft: bool,
     #[serde(default, deserialize_with = "display_default")]
@@ -166,6 +169,7 @@ impl Line {
     /// Keep this reading pending until GitHub reports the head being watched.
     pub(crate) fn await_head(&mut self, head: &str) {
         self.awaiting = Some(head.to_owned());
+        self.completion = None;
         self.checks_passed = None;
         self.checks_total = None;
         self.checks_failed = None;
@@ -208,7 +212,9 @@ impl Line {
             } else {
                 "closed"
             }
-        } else if self.checks_failed.unwrap_or(0) > 0 {
+        } else if self.completion == Some(CiCompletion::Failed)
+            || (self.completion.is_none() && self.checks_failed.unwrap_or(0) > 0)
+        {
             "failing"
         } else if matches!(
             self.review.as_str(),
@@ -218,7 +224,11 @@ impl Line {
         } else if self.required_unreadable
             || !self.required_pending.is_empty()
             || self.checks_pending.unwrap_or(0) > 0
-            || self.checks_total.is_none()
+            || matches!(
+                self.completion,
+                Some(CiCompletion::Pending | CiCompletion::Unavailable)
+            )
+            || (self.completion.is_none() && self.checks_total.is_none())
         {
             "pending"
         } else if self.draft {
@@ -251,11 +261,19 @@ impl Line {
             .collect();
         self.checks_failed = Some(self.failed_check_details.len());
         self.batch_uncertain = None;
+        self.completion = None;
     }
     /// What a waiter takes from this pull request: `Some(true)` once it
     /// merged or its checks passed, `Some(false)` once they failed or it
     /// closed unmerged, and `None` while checks run or the read failed.
     pub(crate) fn verdict(&self) -> Option<bool> {
+        if let Some(completion) = self.completion {
+            return match completion {
+                CiCompletion::Green => Some(true),
+                CiCompletion::Failed => Some(false),
+                CiCompletion::Pending | CiCompletion::Unavailable => None,
+            };
+        }
         match self.class() {
             "merged" => Some(true),
             "closed" | "failing" => Some(false),
@@ -266,7 +284,10 @@ impl Line {
     }
     /// Complete waits retain failures as pending until the other checks finish.
     pub(crate) fn wait_verdict(&self, complete: bool) -> Option<bool> {
-        if complete && (self.checks_pending.unwrap_or(0) > 0 || self.active_workflows == Some(true))
+        if self.state != "OPEN" {
+            self.verdict()
+        } else if complete
+            && (self.checks_pending.unwrap_or(0) > 0 || self.active_workflows == Some(true))
         {
             None
         } else {
@@ -593,13 +614,38 @@ pub(crate) enum CiCompletion {
     Unavailable,
 }
 
-/// Decide whether CI is complete and green for exactly `head`.
-pub(super) fn ci_completion(head: &str, checks: &[CiCheck], required: &[Required]) -> CiCompletion {
+/// Decide whether CI is complete and green for exactly `head`. This is the one
+/// completion definition for `wait --until complete`, `pr status` and landing.
+/// A terminal pull request settles before any pending check: a merged or closed
+/// PR is no longer waiting for CI. Review-gate contexts come from the project's
+/// `ci_observation` port; they are not CI and cannot hold a wait open.
+pub(super) fn ci_completion(
+    state: &str,
+    head: &str,
+    checks: &[CiCheck],
+    required: &[Required],
+    review_gate_contexts: &[String],
+) -> CiCompletion {
+    let required: Vec<&Required> = required
+        .iter()
+        .filter(|need| !is_review_gate_context(&need.name, review_gate_contexts))
+        .collect();
+    let checks: Vec<&CiCheck> = checks
+        .iter()
+        .filter(|check| !is_review_gate_context(&check.name, review_gate_contexts))
+        .collect();
+    if state == "MERGED" {
+        return CiCompletion::Green;
+    }
+    if state != "OPEN" {
+        return CiCompletion::Failed;
+    }
     if checks.iter().any(|check| check.head != head) {
         return CiCompletion::Unavailable;
     }
-    let selected: Vec<_> = checks
+    let selected: Vec<&CiCheck> = checks
         .iter()
+        .copied()
         .filter(|check| {
             required.is_empty()
                 || required
@@ -633,6 +679,16 @@ pub(super) fn ci_completion(head: &str, checks: &[CiCheck], required: &[Required
         return CiCompletion::Unavailable;
     }
     CiCompletion::Green
+}
+
+fn is_review_gate_context(name: &str, review_gate_contexts: &[String]) -> bool {
+    review_gate_contexts.iter().any(|gate| gate == name)
+}
+
+pub(crate) fn gate_contexts(project: &Path, state: &Path) -> Vec<String> {
+    provenant_config::ports::PortTable::read_for(Some(project), state)
+        .map(|ports| ports.ci_observation.review_gate_contexts)
+        .unwrap_or_default()
 }
 
 pub(super) struct Policy {
@@ -949,7 +1005,15 @@ pub(crate) fn wait_line_observed(
 ) -> Result<Line> {
     use super::observer::Observer;
     let mut observer = Observer::open(state, project, repository, request)?;
-    let mut line = poll_line(&mut observer, number, None, request, max_age)?.0;
+    let mut line = poll_line(
+        &mut observer,
+        number,
+        None,
+        request,
+        max_age,
+        &gate_contexts(project, state),
+    )?
+    .0;
     match observer.active_workflows(&line.head, max_age, request) {
         Ok(Some(active)) => line.active_workflows = Some(active),
         Ok(None) => provenant_records::warning::warn(
@@ -1035,6 +1099,7 @@ pub(crate) fn poll_line<F: provenant_config::Forge, C: super::observer::Clock>(
     head_override: Option<&str>,
     request: &provenant_config::ports::Request,
     max_age: std::time::Duration,
+    review_gate_contexts: &[String],
 ) -> Result<(Line, Vec<super::observer::Check>)> {
     let value = observer.resource(
         &format!("pulls/{number}"),
@@ -1063,7 +1128,13 @@ pub(crate) fn poll_line<F: provenant_config::Forge, C: super::observer::Clock>(
         url: pull.html_url,
     };
     let checks = observer.checks(head_override.unwrap_or(&view.head), max_age, request)?;
-    let mut line = status_line_with(number, view, Some(&checks), requirement);
+    let mut line = status_line_with(
+        number,
+        view,
+        Some(&checks),
+        requirement,
+        review_gate_contexts,
+    );
     if checks.is_empty() {
         // Mergeability is read (and an UNKNOWN reread) only when it can change
         // the diagnosis: a head with checks needs no cause.
@@ -1116,13 +1187,29 @@ pub(crate) fn wait_line(
         Err(ObserveError::Unavailable(_)) => None,
         Err(error) => return Err(error.to_string().into()),
     };
-    Ok(status_line(number, view, checks.as_deref()))
+    Ok(status_line(
+        number,
+        view,
+        checks.as_deref(),
+        &gate_contexts(project, state),
+    ))
 }
 
 /// One row from the pull request view and its observed checks, for display
 /// paths that did not read the branch's required policy.
-fn status_line(number: u64, view: View, checks: Option<&[super::observer::Check]>) -> Line {
-    status_line_with(number, view, checks, Requirement::NotConsulted)
+fn status_line(
+    number: u64,
+    view: View,
+    checks: Option<&[super::observer::Check]>,
+    review_gate_contexts: &[String],
+) -> Line {
+    status_line_with(
+        number,
+        view,
+        checks,
+        Requirement::NotConsulted,
+        review_gate_contexts,
+    )
 }
 
 /// One row from the pull request view, its observed checks and the branch's
@@ -1133,11 +1220,51 @@ fn status_line_with(
     view: View,
     checks: Option<&[super::observer::Check]>,
     requirement: Requirement,
+    review_gate_contexts: &[String],
 ) -> Line {
-    let checks = checks.filter(|checks| !checks.is_empty());
+    let observed: Vec<&super::observer::Check> = checks
+        .unwrap_or(&[])
+        .iter()
+        .filter(|check| !is_review_gate_context(&check.name, review_gate_contexts))
+        .collect();
+    let readable = checks.filter(|_| !observed.is_empty());
+    let completion = match view.state.as_str() {
+        "MERGED" | "CLOSED" => Some(ci_completion(
+            &view.state,
+            &view.head,
+            &[],
+            &[],
+            review_gate_contexts,
+        )),
+        _ => match (&requirement, checks) {
+            (Requirement::Unreadable, _) | (_, None) => Some(CiCompletion::Unavailable),
+            (requirement, Some(checks)) => {
+                let required = match requirement {
+                    Requirement::Known(required) => required.as_slice(),
+                    Requirement::NotConsulted | Requirement::Unreadable => &[],
+                };
+                let normalized: Vec<CiCheck> = checks
+                    .iter()
+                    .map(|check| CiCheck {
+                        head: check.head.clone(),
+                        name: check.name.clone(),
+                        bucket: check.bucket.clone(),
+                        app: check.app,
+                    })
+                    .collect();
+                Some(ci_completion(
+                    &view.state,
+                    &view.head,
+                    &normalized,
+                    required,
+                    review_gate_contexts,
+                ))
+            }
+        },
+    };
     let count = |buckets: &[&str]| {
-        checks.map(|checks| {
-            checks
+        readable.map(|_| {
+            observed
                 .iter()
                 .filter(|check| buckets.contains(&check.bucket.as_str()))
                 .count()
@@ -1154,9 +1281,14 @@ fn status_line_with(
         Requirement::NotConsulted => (Vec::new(), Vec::new(), false),
         Requirement::Unreadable => (Vec::new(), Vec::new(), true),
         Requirement::Known(needs) => {
-            let names = needs.iter().map(|need| need.name.clone()).collect();
+            let names = needs
+                .iter()
+                .filter(|need| !is_review_gate_context(&need.name, review_gate_contexts))
+                .map(|need| need.name.clone())
+                .collect();
             let pending = needs
                 .iter()
+                .filter(|need| !is_review_gate_context(&need.name, review_gate_contexts))
                 .filter(|need| {
                     !checks
                         .unwrap_or(&[])
@@ -1170,25 +1302,23 @@ fn status_line_with(
     };
     Line {
         number,
+        completion,
         checks_passed: count(&["pass", "skipping"]),
-        checks_total: checks.map(<[_]>::len),
+        checks_total: readable.map(|_| observed.len()),
         checks_failed: count(&["fail", "cancel"]),
         checks_pending: count(&["pending"]),
         active_workflows: None,
-        failing_checks: checks
-            .unwrap_or(&[])
+        failing_checks: observed
             .iter()
             .filter(|check| matches!(check.bucket.as_str(), "fail" | "cancel"))
             .map(|check| display_check_name(&check.name))
             .collect(),
-        pending_checks: checks
-            .unwrap_or(&[])
+        pending_checks: observed
             .iter()
             .filter(|check| check.bucket == "pending")
             .map(|check| display_check_name(&check.name))
             .collect(),
-        failed_check_details: checks
-            .unwrap_or(&[])
+        failed_check_details: observed
             .iter()
             .filter(|check| matches!(check.bucket.as_str(), "fail" | "cancel"))
             .map(|check| FailedCheck {
@@ -1217,6 +1347,29 @@ fn status_line_with(
     }
 }
 
+#[cfg(test)]
+pub(super) fn line_for(
+    number: u64,
+    state: &str,
+    head: &str,
+    checks: Option<&[super::observer::Check]>,
+    review_gate_contexts: &[String],
+) -> Line {
+    status_line(
+        number,
+        View {
+            state: state.to_owned(),
+            head: head.to_owned(),
+            merge: "CLEAN".into(),
+            review: None,
+            draft: false,
+            url: format!("https://github.com/owner/repo/pull/{number}"),
+        },
+        checks,
+        review_gate_contexts,
+    )
+}
+
 /// The `pr status` class of an open, approved pull request whose head has
 /// `checks`.
 #[cfg(test)]
@@ -1230,12 +1383,13 @@ pub(super) fn class_of(head: &str, checks: &[super::observer::Check]) -> &'stati
         draft: false,
         url: "https://github.com/owner/repo/pull/1".into(),
     };
-    status_line(1, view, Some(checks)).class()
+    status_line(1, view, Some(checks), &[]).class()
 }
 
 fn snapshot(project: &Path, state: &Path, numbers: &[u64]) -> Vec<Line> {
     // One GraphQL query answers every pull request when it can; the per-PR
     // REST reads remain the fallback when the batch transport cannot.
+    let review_gate_contexts = gate_contexts(project, state);
     let batch = batch::snapshot(state, project, numbers);
     let batch_limited = matches!(batch, batch::Batch::RateLimited(_));
     let entries = match batch {
@@ -1244,7 +1398,12 @@ fn snapshot(project: &Path, state: &Path, numbers: &[u64]) -> Vec<Line> {
     };
     let mut lines: Vec<(_, Line)> = entries
         .iter()
-        .map(|entry| (entry.number, batch::line_from_entry(entry)))
+        .map(|entry| {
+            (
+                entry.number,
+                batch::line_from_entry(entry, &review_gate_contexts),
+            )
+        })
         .collect();
     // A rollup too large for one page is not evidence; re-read it exactly.
     for entry in &entries {
@@ -1271,7 +1430,16 @@ fn snapshot(project: &Path, state: &Path, numbers: &[u64]) -> Vec<Line> {
         if answered.contains(&number) {
             continue;
         }
-        lines.push((number, rest_line(project, state, number, !batch_limited)));
+        lines.push((
+            number,
+            rest_line(
+                project,
+                state,
+                number,
+                !batch_limited,
+                &review_gate_contexts,
+            ),
+        ));
     }
     let order: std::collections::BTreeMap<u64, usize> = numbers
         .iter()
@@ -1287,7 +1455,13 @@ fn snapshot(project: &Path, state: &Path, numbers: &[u64]) -> Vec<Line> {
 /// The per-PR REST read, falling back to one GraphQL query when REST itself
 /// runs out of quota. `batch_limited` is false only while the GraphQL quota
 /// may still answer, so a PR never loops between the two transports.
-fn rest_line(project: &Path, state: &Path, number: u64, try_graphql: bool) -> Line {
+fn rest_line(
+    project: &Path,
+    state: &Path,
+    number: u64,
+    try_graphql: bool,
+    review_gate_contexts: &[String],
+) -> Line {
     let request = provenant_config::ports::Request::within(std::time::Duration::from_secs(60));
     match wait_line(project, state, number, &request, std::time::Duration::ZERO) {
         Ok(line) => line,
@@ -1298,12 +1472,13 @@ fn rest_line(project: &Path, state: &Path, number: u64, try_graphql: bool) -> Li
                 && let Some(entry) = entries.first()
                 && !entry.truncated
             {
-                return batch::line_from_entry(entry);
+                return batch::line_from_entry(entry, review_gate_contexts);
             }
             Line {
                 number,
                 state: "UNAVAILABLE".into(),
                 head: "unknown".into(),
+                completion: None,
                 draft: false,
                 checks_passed: None,
                 checks_total: None,

@@ -370,6 +370,15 @@ fn run_headline(
     format!("{graph} {state} {model} {worktree}")
 }
 
+/// A preparation refusal is identified by the latest attempt outcome; the
+/// advance code may instead name the sealed stop cause.
+pub(crate) fn is_preparation_refusal(node: &Value) -> bool {
+    node["attempts"]
+        .as_array()
+        .and_then(|attempts| attempts.last())
+        .is_some_and(|attempt| attempt["outcome"]["preparation_refused"].is_string())
+}
+
 /// One line per node the owner refused before admission, within the receipt's
 /// row budget. A run that launched cleanly prints none.
 fn refusal_lines(checkpoint: &Value) -> String {
@@ -378,7 +387,7 @@ fn refusal_lines(checkpoint: &Value) -> String {
         .as_array()
         .map_or(&[][..], Vec::as_slice)
         .iter()
-        .filter(|node| node["advance_code"] == "preparation_refused")
+        .filter(|node| is_preparation_refusal(node))
         .filter_map(|node| {
             let message = node["advance_note"].as_str()?;
             let line = format!(

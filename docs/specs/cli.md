@@ -630,6 +630,12 @@ GraphQL and REST when either is unavailable or rate limited. A wait's
 conditional observation reports `review=unknown` because the REST response has no
 review decision; CI settlement alone decides the verdict.
 
+Contexts declared as review gates in the `ci_observation` port are excluded
+from observed CI and from required-check evaluation, even when branch policy
+also lists the same context. Wait, status and landing therefore share one
+completion result for that overlap. Batched status rows and the single-row
+GraphQL fallback apply the same declared gate contexts as REST status rows.
+
 Review-subject selection reads the same observer. When its REST core quota is
 spent, a batched GraphQL row with valid base and head subject fields and a usable
 PR URL serves the launch even if its check rollup is truncated; rollup completeness
@@ -656,8 +662,11 @@ observed history: it adds no refusal and changes no landing decision.
 
 `wait --pr NUMBER` is the one way to block on a pull request. A failed check
 settles it at once; `--until complete` waits for every observed check and every
-active Actions run of the head. A head with no Actions run yet cannot settle a
-wait, because a push's workflows start after the push: a reading that would
+active Actions run of the head. A merged pull request settles successfully and a
+closed unmerged pull request settles unsuccessfully before pending checks are
+considered. An open pull request with no observed CI checks remains pending; an
+empty check list is not a passing result. A head with no Actions run yet cannot
+settle a wait, because a push's workflows start after the push: a reading that would
 settle stays pending for `domains.wait.actions_grace_seconds`, though a failure
 still settles a default wait at once. `--head SHA` pins the wait to one head:
 until GitHub reports that SHA the reading stays pending, so a push's predecessor

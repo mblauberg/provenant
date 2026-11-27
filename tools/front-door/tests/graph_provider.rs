@@ -5325,7 +5325,7 @@ fn graph_preparation_refusal_retains_non_adapter_cause() -> Result {
     let settled = rig.run_and_wait(&["--file", "preparation-refusal.json"], "5s")?;
     let response = json!({"data": {"checkpoint": settled.checkpoint.clone()}});
     assert_eq!(settled.exit(), 1, "{response}");
-    for (index, routes) in routes.iter().enumerate() {
+    for (index, _) in routes.iter().enumerate() {
         let node = response["data"]["checkpoint"]["nodes"]
             .as_array()
             .ok_or("nodes")?
@@ -5334,7 +5334,11 @@ fn graph_preparation_refusal_retains_non_adapter_cause() -> Result {
             .ok_or("node")?;
         assert_eq!(
             node["attempts"].as_array().ok_or("attempts")?.len(),
-            routes.as_array().ok_or("routes")?.len(),
+            1,
+            "{node}"
+        );
+        assert_eq!(
+            node["attempts"][0]["stop"], "unregistered_account",
             "{node}"
         );
         assert_eq!(node["state"], "failed", "{response}");
@@ -5344,7 +5348,7 @@ fn graph_preparation_refusal_retains_non_adapter_cause() -> Result {
             json!({"preparation_refused": "unregistered_account"}),
             "{node}"
         );
-        assert_eq!(node["advance_code"], "preparation_refused", "{node}");
+        assert_eq!(node["advance_code"], "unregistered_account", "{node}");
         assert_eq!(
             node["advance_note"],
             provenant_records::run::CauseKind::UnregisteredAccount.detail(),

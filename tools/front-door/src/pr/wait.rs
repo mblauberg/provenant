@@ -269,7 +269,7 @@ mod tests {
                 app: check.app,
             })
             .collect();
-        ci_completion(head, &normalized, required)
+        ci_completion("OPEN", head, &normalized, required, &[])
     }
     fn state(checks: &[Check], required: &[Required]) -> CiCompletion {
         let head = checks.first().map_or("", |check| check.head.as_str());
@@ -337,6 +337,63 @@ mod tests {
 
         let green = parse("all_green").expect("green rollup");
         assert_eq!(state_for(head, &green, &required), CiCompletion::Green);
+    }
+
+    /// The cached 18173986 reading: 24 success/skipped check runs and a
+    /// pending `verdict` commit status. Wait, status and landing share the
+    /// one completion: terminal state settles first, and a declared review
+    /// gate is not CI.
+    #[test]
+    fn a_merged_pr_with_pending_review_gate_settles_a_complete_wait() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("fixtures/ci-18173986.json")).expect("fixture");
+        let head = fixture["head"].as_str().expect("head");
+        let runs = fixture["runs"].as_array().expect("runs");
+        let statuses = fixture["statuses"].as_array().expect("statuses");
+        let checks = super::super::observer::parse_pages(runs, statuses, head)
+            .expect("cached observation parses");
+        assert!(
+            checks
+                .iter()
+                .any(|check| check.name == "verdict" && check.bucket == "pending"),
+            "the cached reading holds a pending review gate"
+        );
+        let normalized: Vec<CiCheck> = checks
+            .iter()
+            .map(|check| CiCheck {
+                head: check.head.clone(),
+                name: check.name.clone(),
+                bucket: check.bucket.clone(),
+                app: check.app,
+            })
+            .collect();
+
+        // No gate declared: the pending status is counted as CI; an open PR
+        // waits, but MERGED settles even a complete wait.
+        assert_eq!(
+            ci_completion("OPEN", head, &normalized, &[], &[]),
+            CiCompletion::Pending
+        );
+        let open = super::super::status::line_for(18173986, "OPEN", head, Some(&checks), &[]);
+        assert_eq!(open.wait_verdict(false), None);
+        assert_eq!(open.wait_verdict(true), None);
+        let merged = super::super::status::line_for(18173986, "MERGED", head, Some(&checks), &[]);
+        assert_eq!(merged.verdict(), Some(true));
+        assert_eq!(merged.wait_verdict(false), Some(true));
+        assert_eq!(merged.wait_verdict(true), Some(true));
+
+        // The port declares `verdict` as a review gate: it is not CI, so the
+        // open head is green and both waits settle.
+        let gates = ["verdict".to_owned()];
+        let required_gate = [need("verdict")];
+        assert_eq!(
+            ci_completion("OPEN", head, &normalized, &required_gate, &gates),
+            CiCompletion::Green
+        );
+        let declared =
+            super::super::status::line_for(18173986, "OPEN", head, Some(&checks), &gates);
+        assert_eq!(declared.wait_verdict(false), Some(true));
+        assert_eq!(declared.wait_verdict(true), Some(true));
     }
 
     #[test]

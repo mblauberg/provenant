@@ -75,6 +75,7 @@ pub(super) fn custody_release_pending(
     node: &PlannedNode,
     route_index: usize,
     outcome: GraphAttemptOutcome,
+    stop: Option<provenant_records::StopCause>,
     launched: bool,
     mut facts: FallbackEvidence<'_>,
 ) -> bool {
@@ -106,8 +107,8 @@ pub(super) fn custody_release_pending(
     facts.preparation = Some(evidence);
     facts.unreadable = false;
     matches!(
-        next_step::settlement_fallback_decision(node, route_index, outcome, launched, facts),
-        SettlementFallback::Continue
+        next_step::settlement_fallback_decision(node, route_index, outcome, stop, launched, facts),
+        SettlementFallback::Continue | SettlementFallback::ContinueSameRoute
     )
 }
 
@@ -460,7 +461,7 @@ pub(crate) fn fallback_candidate(
 
 /// The stop class that decides a route fallback. A host refusal before launch
 /// is a route that cannot serve the node, whatever refused it.
-fn fallback_cause(outcome: GraphAttemptOutcome) -> Option<provenant_records::StopCause> {
+pub(super) fn fallback_cause(outcome: GraphAttemptOutcome) -> Option<provenant_records::StopCause> {
     use provenant_records::StopCause;
     match outcome {
         GraphAttemptOutcome::AuthRequired => Some(StopCause::AuthRequired),
@@ -786,6 +787,7 @@ pub(super) fn next_attempt_transition(
                 node,
                 usize::from(last.key.route_index),
                 outcome,
+                last.stop,
                 last.launched,
                 FallbackEvidence {
                     preparation: fallback.evidence,
@@ -801,12 +803,12 @@ pub(super) fn next_attempt_transition(
                     skipped_accounts: &[],
                 },
             ) {
-                SettlementFallback::Continue => {}
+                SettlementFallback::Continue => usize::from(last.key.route_index).saturating_add(1),
+                SettlementFallback::ContinueSameRoute => usize::from(last.key.route_index),
                 SettlementFallback::Fail { code, message } => {
                     return NextAttemptDecision::Ready(NextAttempt::Fail { code, message });
                 }
             }
-            usize::from(last.key.route_index).saturating_add(1)
         }
         Some(_) => return NextAttemptDecision::Ready(NextAttempt::None),
     };
@@ -908,6 +910,7 @@ pub(super) fn decide_next_attempt<R: AttemptOwner>(
                         node,
                         usize::from(last.key.route_index),
                         last.outcome.unwrap_or(GraphAttemptOutcome::Unclassified),
+                        last.stop,
                         last.launched,
                         FallbackEvidence {
                             preparation: evidence,
@@ -1058,6 +1061,38 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn fallback_evidence_retry_respects_the_sealed_stop_cause() {
+        let node = planned(serde_json::json!({
+            "id": "n", "prompt": "p", "access": "worktree_write", "worktree": "/w",
+            "routes": [{"adapter": "a", "model": "a/m"}, {"adapter": "b", "model": "b/m"}]
+        }));
+        let facts = || FallbackEvidence {
+            preparation: None,
+            unreadable: false,
+            review_limit_reached: false,
+            cause: None,
+            skipped_accounts: &[],
+        };
+
+        assert!(custody_release_pending(
+            &node,
+            0,
+            GraphAttemptOutcome::AuthRequired,
+            None,
+            false,
+            facts(),
+        ));
+        assert!(!custody_release_pending(
+            &node,
+            0,
+            GraphAttemptOutcome::AuthRequired,
+            Some(provenant_records::StopCause::PermissionDenied),
+            false,
+            facts(),
+        ));
+    }
+
     fn at(seconds: i64) -> provenant_core::WallTime {
         provenant_core::WallTime::from_micros(1_800_000_000_000_000 + seconds * 1_000_000).unwrap()
     }
@@ -1184,6 +1219,7 @@ mod tests {
             &single,
             0,
             GraphAttemptOutcome::AuthRequired,
+            None,
             false,
             FallbackEvidence {
                 preparation: None,
@@ -1218,6 +1254,7 @@ mod tests {
             &single,
             0,
             GraphAttemptOutcome::UsageLimited,
+            None,
             false,
             FallbackEvidence {
                 preparation: None,
