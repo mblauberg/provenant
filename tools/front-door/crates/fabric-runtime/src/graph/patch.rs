@@ -393,6 +393,265 @@ pub fn admit_patch(
     admit_patch_for_retry(graph, parent, patch, context, None)
 }
 
+/// Continue a succeeded split adjudicator in place when later evidence for the
+/// same item and pinned head settles. The prior attempt remains immutable in
+/// history and its compact receipt; only the node's current inputs and verdict
+/// are replaced. This is intentionally narrower than `replace`, which refuses
+/// all started nodes.
+pub(super) fn continue_adjudicator(
+    graph: &mut LiveGraph<'_>,
+    item: &str,
+    node_id: &str,
+    panels: &[String],
+    head: Option<&str>,
+    expected_revision: u64,
+    limits: &crate::config::GraphLimits,
+    budget: &crate::config::GraphBudget,
+) -> Result<Admitted, PatchError> {
+    let current = revision(graph.checkpoint);
+    if expected_revision != current {
+        return Err(PatchError::new(
+            "stale_revision",
+            format!(
+                "adjudicator continuation expects revision {expected_revision}, graph is at {current}"
+            ),
+        ));
+    }
+    let mut expanded = plans::expand(
+        graph.document,
+        &graph.checkpoint.extensions,
+        &graph.checkpoint.expansions,
+        limits,
+    )?;
+    candidate::resolve_review_policies(&mut expanded, &graph.checkpoint.review_policy())
+        .map_err(|error| PatchError::invalid(error.to_string()))?;
+    let mut target = expanded
+        .nodes
+        .iter()
+        .find(|node| node.id == node_id)
+        .cloned()
+        .ok_or_else(|| PatchError::invalid(format!("unknown adjudicator {node_id}")))?;
+    if target.kind != Some(NodeKind::Adjudicate)
+        || target.access != AccessMode::ReadOnly
+        || target.parent_node.is_none()
+        || target.route.is_none()
+        || target.routes.is_some()
+    {
+        return Err(PatchError::new(
+            "conflict",
+            format!("node {node_id} is not a parented read-only adjudicator"),
+        ));
+    }
+    match (&target.source, head) {
+        (Some(SourceBinding::Commit { commit }), Some(head)) if commit == head => {}
+        (None, None) => {}
+        _ => {
+            return Err(PatchError::new(
+                "conflict",
+                format!("adjudicator {node_id} is not pinned to the requested head"),
+            ));
+        }
+    }
+    let progress = graph
+        .checkpoint
+        .nodes
+        .iter()
+        .find(|progress| progress.id == node_id)
+        .ok_or_else(|| PatchError::invalid(format!("unknown adjudicator progress {node_id}")))?;
+    if progress.source_commit.as_deref() != head {
+        return Err(PatchError::new(
+            "conflict",
+            format!("adjudicator {node_id} progress is not pinned to the requested head"),
+        ));
+    }
+    let prior_outputs = progress
+        .outputs
+        .as_ref()
+        .ok_or_else(|| PatchError::new("conflict", "succeeded adjudicator has no outputs"))?;
+    let attempt = progress
+        .attempts
+        .last()
+        .filter(|attempt| attempt.state == AttemptState::Terminal)
+        .ok_or_else(|| PatchError::new("conflict", "adjudicator has no terminal attempt"))?;
+    if progress.state != NodeState::Succeeded
+        || attempt.outcome != Some(GraphAttemptOutcome::Succeeded)
+        || prior_outputs.verdict.as_deref().is_none_or(str::is_empty)
+    {
+        return Err(PatchError::new(
+            "conflict",
+            format!("adjudicator {node_id} is not a succeeded, receipted attempt"),
+        ));
+    }
+    let pinned_head = head.map(str::to_owned);
+
+    let mut union: Vec<String> = target
+        .inputs
+        .iter()
+        .map(|input| input.node.clone())
+        .collect();
+    union.extend(panels.iter().cloned());
+    union.sort();
+    union.dedup();
+    let previous: BTreeSet<String> = target
+        .inputs
+        .iter()
+        .map(|input| input.node.clone())
+        .collect();
+    let added: Vec<String> = union
+        .iter()
+        .filter(|panel| !previous.contains(*panel))
+        .cloned()
+        .collect();
+    if added.is_empty() {
+        return Ok(Admitted {
+            revision: current,
+            replayed: true,
+            added: Vec::new(),
+        });
+    }
+    for panel in &added {
+        let panel_progress = graph
+            .checkpoint
+            .nodes
+            .iter()
+            .find(|progress| progress.id == *panel)
+            .ok_or_else(|| PatchError::invalid(format!("unknown split panel {panel}")))?;
+        if panel_progress.state != NodeState::Succeeded || panel_progress.outputs.is_none() {
+            return Err(PatchError::new(
+                "conflict",
+                format!("split panel {panel} has not settled with complete evidence"),
+            ));
+        }
+    }
+
+    let parent = target.parent_node.clone().expect("validated parent");
+    let next_revision = current
+        .checked_add(1)
+        .ok_or_else(|| PatchError::invalid("patch revision exhausted"))?;
+    let digest = CanonicalV1::record_digest(
+        "review-adjudicator-continuation",
+        1,
+        &(item, node_id, &pinned_head, &union, current),
+    )
+    .map_err(|error| PatchError::invalid(format!("continuation is not canonical: {error}")))?
+    .to_string();
+    let key = format!("adjudicate-continuation:{digest}");
+    if let Some(record) = graph
+        .checkpoint
+        .expansions
+        .iter()
+        .filter_map(|expansion| expansion.patch.as_ref())
+        .find(|record| record.key.as_deref() == Some(key.as_str()))
+    {
+        return if record.digest == digest {
+            Ok(Admitted {
+                revision: record.revision,
+                replayed: true,
+                added: Vec::new(),
+            })
+        } else {
+            Err(PatchError::new(
+                "idempotency_conflict",
+                "adjudicator continuation key was used for a different input union",
+            ))
+        };
+    }
+
+    target.inputs = union
+        .iter()
+        .map(|panel| GraphInput {
+            extra: Default::default(),
+            node: panel.clone(),
+            outputs: vec![OutputKind::Verdict, OutputKind::Findings],
+            required_outputs: Vec::new(),
+        })
+        .collect();
+    target.after_settled.extend(added.iter().cloned());
+    target.after_settled.sort();
+    target.after_settled.dedup();
+    let output_digest = CanonicalV1::record_digest("review-adjudication-output", 1, prior_outputs)
+        .map_err(|error| PatchError::invalid(format!("prior output is not canonical: {error}")))?
+        .to_string();
+    let receipt = ReviewAdjudicationReceipt {
+        head: pinned_head,
+        panels: previous.into_iter().collect(),
+        attempt_key: attempt.key.clone(),
+        attempt_ref: attempt.attempt_ref.clone(),
+        verdict: prior_outputs.verdict.clone().expect("checked verdict"),
+        output_digest,
+    };
+    let expansion = Expansion {
+        extra: Default::default(),
+        delivery_review_disposition: None,
+        delivery_review_node: None,
+        retired: None,
+        retry_generation: None,
+        final_result: false,
+        final_fragment: false,
+        floor_warnings: Vec::new(),
+        source: parent.clone(),
+        nodes: Vec::new(),
+        uses: Vec::new(),
+        patch: Some(PatchRecord {
+            extra: Default::default(),
+            child_receipt: None,
+            revision: next_revision,
+            digest,
+            key: Some(key),
+            parent: Some(parent),
+            reason: Some("later split panel on the same review item and head".into()),
+            skipped: Vec::new(),
+            replaced: vec![target],
+            journaled: false,
+            restart: None,
+        }),
+    };
+    let mut prospective = graph.checkpoint.clone();
+    let progress_index = prospective
+        .nodes
+        .iter()
+        .position(|progress| progress.id == node_id)
+        .ok_or_else(|| PatchError::invalid(format!("unknown adjudicator progress {node_id}")))?;
+    let mut reset = reset_progress(&prospective.nodes[progress_index], false)?;
+    reset.review_adjudication_receipts.push(receipt);
+    prospective.nodes[progress_index] = reset;
+    prospective.expansions.push(expansion.clone());
+    asks::refresh_wake(&mut prospective);
+    let admitted = candidate::admit_candidate_with_review_policy(
+        graph.document,
+        Some(&prospective),
+        &[],
+        limits,
+        budget,
+        None,
+        &prospective.review_policy(),
+    )
+    .map_err(|error| {
+        let mut refusal = PatchError::invalid(error.to_string());
+        refusal.cause = match &error {
+            CandidateError::Structural(limit) | CandidateError::NodeStructural { limit, .. } => {
+                Some(PlanFailureFact::Structural(*limit))
+            }
+            CandidateError::Envelope(limit) => Some(PlanFailureFact::Envelope(*limit)),
+            _ => None,
+        };
+        refusal.candidate = Some(Box::new(error));
+        refusal
+    })?;
+    let preview = admitted.expanded;
+    let plan = admitted.plan;
+    loops::reconcile(&mut prospective, &plan);
+    composites::reconcile_checkpoint(&plan, &mut prospective);
+    plans::remaining(&mut prospective, &preview, limits);
+    asks::refresh_wake(&mut prospective);
+    *graph.checkpoint = prospective;
+    Ok(Admitted {
+        revision: next_revision,
+        replayed: false,
+        added: Vec::new(),
+    })
+}
+
 /// Admit a chair disposition for one complete review result at one exact head.
 /// This uses the graph's ordinary expansion revision and idempotency journal,
 /// while leaving the reviewer's original output untouched.
@@ -1393,6 +1652,7 @@ fn reset_progress(old: &NodeProgress, container: bool) -> Result<NodeProgress, P
                 | "source_commit"
                 | "review_base"
                 | "review_retry"
+                | "review_adjudication_receipts"
                 | "round"
                 | "title"
         )

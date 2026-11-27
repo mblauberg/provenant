@@ -2394,6 +2394,10 @@ pub struct NodeProgress {
         with = "typed_finding_ledger_blob"
     )]
     pub finding_ledger: Option<FindingLedger>,
+    /// Prior adjudication receipts retained when the stable lane is continued
+    /// with newly settled same-head panels.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub review_adjudication_receipts: Vec<ReviewAdjudicationReceipt>,
     /// Scope verified against the producer's Git ancestry before staging.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review_round_scope: Option<ReviewRoundScope>,
@@ -2596,6 +2600,10 @@ pub struct FindingHead {
     pub findings: Vec<Finding>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub unresolved: Vec<Finding>,
+    /// Structural source identity for each displayed finding ID. Retaining
+    /// this map keeps IDs stable when later rounds add a colliding raw ID.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub finding_origins: std::collections::BTreeMap<String, FindingOrigin>,
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub dispositions: std::collections::BTreeMap<String, String>,
     /// Lenses that completed against this head.
@@ -2607,6 +2615,25 @@ pub struct FindingHead {
     /// Invariant name to the lenses that covered it.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub invariant_coverage: std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
+}
+
+/// Immutable structural origin for one materialised finding identity.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FindingOrigin {
+    pub source: String,
+    pub id: String,
+}
+
+/// Bounded identity and digest for a superseded adjudication attempt. The full
+/// output remains available from its immutable attempt reference.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReviewAdjudicationReceipt {
+    pub head: Option<String>,
+    pub panels: Vec<String>,
+    pub attempt_key: AttemptKey,
+    pub attempt_ref: Option<String>,
+    pub verdict: String,
+    pub output_digest: String,
 }
 
 /// Timing breakdown for a lane launch, in milliseconds.

@@ -1776,6 +1776,26 @@ enum Staged {
     Ready(Option<StagedInputs>),
 }
 
+fn review_artifact_unavailable(node: &PlannedNode) -> (&'static str, String) {
+    if node.kind == Some(NodeKind::Adjudicate) {
+        (
+            "review_adjudication_evidence_unavailable",
+            format!(
+                "node {}: complete split-panel evidence could not be staged within the {} byte input limit; the adjudicator will not launch with incomplete evidence",
+                node.id, NODE_INPUT_FILE_BYTES
+            ),
+        )
+    } else {
+        (
+            "review_ledger_artifact_unavailable",
+            format!(
+                "node {}: the full review-chain ledger could not be staged within the {} byte input limit; the reviewer will not launch with a summary only",
+                node.id, NODE_INPUT_FILE_BYTES
+            ),
+        )
+    }
+}
+
 /// The attempt content the launch reads: its prompt and recorded identity.
 struct AttemptInput {
     stored_ref: Option<String>,
@@ -2228,17 +2248,11 @@ fn stage_attempt<R: AttemptOwner, J: GraphJournal>(
     } else {
         owner.materialise_inputs(key, &requests, NODE_INPUT_FILE_BYTES)
     };
-    if outputs::review_ledger_artifact_required(node, plan, checkpoint, positions)
-        && !outputs::complete_review_ledger_artifact(&requests, materialised.as_ref())
+    if outputs::complete_review_artifact_required(node, plan, checkpoint, positions)
+        && !outputs::complete_review_artifact(node, &requests, materialised.as_ref())
     {
-        transitions::fail_with(
-            &mut checkpoint.nodes[node_index],
-            "review_ledger_artifact_unavailable",
-            format!(
-                "node {}: the full review-chain ledger could not be staged within the {} byte input limit; the reviewer will not launch with a summary only",
-                node.id, NODE_INPUT_FILE_BYTES
-            ),
-        );
+        let (code, detail) = review_artifact_unavailable(node);
+        transitions::fail_with(&mut checkpoint.nodes[node_index], code, detail);
         journal.save(&*checkpoint).map_err(GraphError::Journal)?;
         return Ok(Staged::Wait);
     }
@@ -2353,6 +2367,13 @@ fn attempt_input<R: AttemptOwner, J: GraphJournal>(
         } else {
             owner.materialise_inputs(key, &requests, NODE_INPUT_FILE_BYTES)
         };
+        if !accepted
+            && outputs::complete_review_artifact_required(node, plan, checkpoint, positions)
+            && !outputs::complete_review_artifact(node, &requests, materialised.as_ref())
+        {
+            let (_, detail) = review_artifact_unavailable(node);
+            return Err(GraphError::Refused(detail));
+        }
         (requests, materialised)
     };
     if let Some(materialised) = &materialised {

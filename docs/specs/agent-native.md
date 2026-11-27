@@ -267,7 +267,7 @@ Session-stream host reads carry their JSON lines as an ordered `stream` array in
 
 ### 3.7 Review convergence (#4017 wiring, #4108, #4109)
 
-**Finding ledger.** `FindingLedger` is stored per queue item and keyed by head. It holds unresolved findings, their dispositions, coverage per lens and per invariant, and `last_reviewed_head`. Every round reads and writes it, and the adjudicator writes its verdict and findings into it. Repair always reads the ledger, never one reviewer's output.
+**Finding ledger.** `FindingLedger` is stored per queue item and keyed by head. It holds findings, unresolved findings, their dispositions, coverage per lens and per invariant, and `last_reviewed_head`. Each displayed finding ID retains its structural source identity so a later colliding raw ID cannot rename or merge an existing ledger item. Every round reads and writes it, and the adjudicator writes its verdict and findings into it. Repair always reads the ledger, never one reviewer's output.
 
 **Severity.** `Severity {Nit, Low, Medium, High, Blocking}` decodes the existing string field (`model/finding.rs:51`):
 - `critical|blocker|blocking` → Blocking;
@@ -282,12 +282,21 @@ An unresolved finding whose existing blocking class is set blocks acceptance reg
 | Key | Scope | Default | Meaning |
 |---|---|---|---|
 | `domains.review.later_rounds` | T/H/P/L | `delta` | Round 2 onwards reviews `last_reviewed_head..head`, plus the ledger's unresolved findings and invariants. Only the lenses with open findings run again. A moved base, an unattributable delta, or an invariant whose only lens was unavailable widens to `full`. |
-| `domains.review.adjudicator_route` | T/H/P/R/L | `principal` | A split on one head (a PASS beside a FAIL, or contradictory blocking findings) gets one `review.adjudicate` lane, keyed by (item, head). It uses no round. |
+| `domains.review.adjudicator_route` | T/H/P/R/L | `principal` | Distinct member verdicts on one head, including approval beside inconclusive, or contradictory blocking findings, get one `review.adjudicate` lane keyed by (review-chain item, head). It uses no round. |
 | `domains.review.accept_below` | T/H/P/L | `high` | Accept when CI is green on the exact head, no blocking-class finding is open, and every open finding is below this severity. The lower findings are posted. |
 | `domains.review.evidence_retries` | T/H/P/L | 2 | Missing or malformed evidence re-runs the same lens on the same route. It never leads to repair. |
 | `domains.review.lens_retry` | T/H/P/R | 1 | A lens that ends `blocked_environment` or `model_unavailable` reruns on the next eligible route, then becomes `Unavailable`. |
 | `min_successful` (panel) | T | lenses − 1, at least 1 | Reduce over the completed lenses and post with `coverage_gaps`. An invariant with no completed lens is uncovered, which makes the round `INCONCLUSIVE`. |
 | `routing.pin` | H/P/R/L | `family` | Fallback on `model_unavailable` stays within the tier, the family, or nothing (`exact`), and records `fallback{from,to,cause}`. Only `exact` refuses. |
+
+When a later panel for the same review-chain item and head settles with a split
+after its adjudicator has succeeded, continue that same adjudicator node with
+the union of known split panels. Retain the old attempt and a receipt of its
+pinned head, prior verdict, output digest and newly added panel IDs; journalled
+expansions retain each attempt's full input union. Clear the old verdict before
+retrying, and require fresh adjudication before downstream gates proceed.
+Journal the continuation so replay reuses the same node and evidence union;
+never accept the superseded verdict.
 
 `domains.routing.review.*` keeps lens selection, which is routing. `domains.review.*` holds review behaviour.
 

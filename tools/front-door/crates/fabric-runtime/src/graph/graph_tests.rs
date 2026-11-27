@@ -1081,6 +1081,34 @@ fn terminal(outcome: GraphAttemptOutcome) -> AttemptObservation {
     }
 }
 
+fn fully_materialise_inputs(requests: &[InputRequest]) -> MaterialisedInputs {
+    MaterialisedInputs {
+        directory: Some(std::path::PathBuf::from("/fixture/inputs")),
+        entries: requests
+            .iter()
+            .map(|request| MaterialisedInput::File {
+                label: request.label.clone(),
+                path: std::path::PathBuf::from(format!("/fixture/inputs/{}.json", request.label)),
+                bytes: 1,
+                omitted: 0,
+            })
+            .collect(),
+        ..Default::default()
+    }
+}
+
+fn cap_materialised_inputs(requests: &[InputRequest]) -> MaterialisedInputs {
+    MaterialisedInputs {
+        entries: requests
+            .iter()
+            .map(|request| MaterialisedInput::Capped {
+                label: request.label.clone(),
+            })
+            .collect(),
+        ..Default::default()
+    }
+}
+
 fn preparation_refusal(reference: &str, outcome: GraphAttemptOutcome) -> AttemptObservation {
     AttemptObservation::Terminal {
         attempt_ref: Some(reference.into()),

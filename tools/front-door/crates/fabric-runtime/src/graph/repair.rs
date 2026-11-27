@@ -381,7 +381,7 @@ pub(super) fn panel_adjudicator<'a>(
     checkpoint: &'a GraphCheckpoint,
 ) -> Option<&'a GraphNode> {
     let key = split_adjudication_key(item, head);
-    checkpoint
+    let original = checkpoint
         .expansions
         .iter()
         .find(|expansion| {
@@ -400,7 +400,15 @@ pub(super) fn panel_adjudicator<'a>(
                         _ => false,
                     }
             })
-        })
+        })?;
+    let id = original.id.as_str();
+    checkpoint
+        .expansions
+        .iter()
+        .rev()
+        .filter_map(|expansion| expansion.patch.as_ref())
+        .find_map(|record| record.replaced.iter().find(|node| node.id == id))
+        .or(Some(original))
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -410,6 +418,8 @@ pub(super) struct SplitAdjudication {
     pub(super) panels: Vec<String>,
     pub(super) head: Option<String>,
     pub(super) revision: u64,
+    /// Existing stable node to continue with the unioned panel evidence.
+    pub(super) existing_node_id: Option<String>,
 }
 
 /// A panel can synthesise its verdict after a nested lens group split.
@@ -504,13 +514,35 @@ pub(super) fn split_adjudication(
         panels.sort();
         panels.dedup();
         if let Some(adjudicator) = panel_adjudicator(item, head.as_deref(), checkpoint) {
-            if panels
+            let mut union: Vec<_> = adjudicator
+                .inputs
                 .iter()
-                .any(|panel| !adjudicator.inputs.iter().any(|input| input.node == *panel))
-            {
-                return Err(
-                    "existing adjudicator does not cover every split panel on this item and head",
-                );
+                .map(|input| input.node.clone())
+                .collect();
+            union.extend(panels);
+            union.sort();
+            union.dedup();
+            let missing = union
+                .iter()
+                .any(|panel| !adjudicator.inputs.iter().any(|input| input.node == *panel));
+            let settled = checkpoint
+                .nodes
+                .iter()
+                .find(|progress| progress.id == adjudicator.id)
+                .is_some_and(|progress| progress.state == NodeState::Succeeded);
+            if missing || !settled {
+                let parent = adjudicator
+                    .parent_node
+                    .clone()
+                    .unwrap_or_else(|| parent.clone());
+                return Ok(Some(SplitAdjudication {
+                    item: item.clone(),
+                    parent,
+                    panels: union,
+                    head: head.clone(),
+                    revision: patch::revision(checkpoint),
+                    existing_node_id: Some(adjudicator.id.clone()),
+                }));
             }
             continue;
         }
@@ -520,6 +552,7 @@ pub(super) fn split_adjudication(
             panels,
             head: head.clone(),
             revision: patch::revision(checkpoint),
+            existing_node_id: None,
         }));
     }
     Ok(None)
@@ -1659,6 +1692,7 @@ mod tests {
                 panels: vec!["panel".into()],
                 head: None,
                 revision: patch::revision(&checkpoint),
+                existing_node_id: None,
             })
         );
         checkpoint.expansions.push(
@@ -1666,14 +1700,49 @@ mod tests {
                 "source":"panel", "patch":{"revision":2,"digest":"split-digest",
                     "key":split_adjudication_key("panel", None),"parent":"gate"},
                 "nodes":[{"id":"panel--adjudicate", "kind":"adjudicate",
-                    "parent_node":"panel", "access":"read_only", "prompt":"resolve"}]
+                    "parent_node":"panel", "access":"read_only", "prompt":"resolve",
+                    "inputs":[{"node":"panel","outputs":["findings","verdict"]}]}]
             }))
             .unwrap(),
         );
+        assert_eq!(
+            split_adjudication(&plan.nodes[1], &plan, &checkpoint)
+                .unwrap()
+                .map(|state| state.existing_node_id),
+            Some(Some("panel--adjudicate".into())),
+            "a pending complete-input adjudicator must not expose a stale verdict"
+        );
+        let mut adjudicator_progress = checkpoint.nodes[0].clone();
+        adjudicator_progress.id = "panel--adjudicate".into();
+        adjudicator_progress.outputs = Some(NodeOutputs::default());
+        adjudicator_progress.state = NodeState::Succeeded;
+        checkpoint.nodes.push(adjudicator_progress);
         assert!(
             split_adjudication(&plan.nodes[1], &plan, &checkpoint)
                 .unwrap()
                 .is_none()
+        );
+        checkpoint.expansions.push(
+            serde_json::from_value(serde_json::json!({
+                "source":"panel", "patch":{"revision":3,"digest":"continuation-digest",
+                    "key":"split-adjudicate-continuation:2","parent":"panel",
+                    "replaced":[{"id":"panel--adjudicate","kind":"adjudicate",
+                        "parent_node":"panel","access":"read_only","prompt":"resolve",
+                        "inputs":[
+                            {"node":"panel","outputs":["findings","verdict"]},
+                            {"node":"second-panel","outputs":["findings","verdict"]}
+                        ]}]
+                }, "nodes":[]
+            }))
+            .unwrap(),
+        );
+        assert_eq!(
+            panel_adjudicator("panel", None, &checkpoint)
+                .unwrap()
+                .inputs
+                .len(),
+            2,
+            "the stable adjudicator resolves to its latest unioned inputs"
         );
     }
     // Spec: docs/specs/fabric.md#fix-round-invariants-and-split-verdict-adjudication

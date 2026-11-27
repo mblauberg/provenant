@@ -893,43 +893,11 @@ fn outputs(
         };
         review::validate_ledger_blob(&ledger)?;
         let base = settlement.base.map(|oid| oid.to_string());
-        let previous_base = ledger
-            .last_reviewed_head
-            .as_deref()
-            .and_then(|last| ledger.heads.get(last))
-            .and_then(|entry| entry.dispositions.get("base"))
-            .map(String::as_str);
-        let later_rounds = plan.nodes[boundary]
-            .effective_review_policy
-            .as_ref()
-            .map(|policy| policy.later_rounds.value)
-            .unwrap_or_else(|| checkpoint.review_policy().later_rounds.value);
-        let mode = if later_rounds == ReviewRounds::Delta
-            && plan.nodes[boundary]
-                .round
-                .as_ref()
-                .is_some_and(|round| round.round >= 1)
-        {
-            review::RoundMode::Delta
-        } else {
-            review::RoundMode::Full
-        };
-        let scope = review::round_scope(
-            &ledger,
-            &head,
-            base.as_deref().unwrap_or(""),
-            previous_base,
-            mode,
-        );
-        let mut ledger_findings = ledger
-            .heads
-            .get(&head)
-            .map_or_else(Vec::new, |entry| entry.unresolved.clone());
-        if let review::RoundScope::Delta { .. } = scope {
-            let carried = review::carried_findings(
-                &ledger,
-                ledger.last_reviewed_head.as_deref().unwrap_or(""),
-            );
+        let scope = sealed_composite_scope(boundary, &head, plan, checkpoint, positions);
+        let previous_head = ledger.last_reviewed_head.clone();
+        let mut carried = Vec::new();
+        if let review::RoundScope::Delta { base, .. } = &scope {
+            carried = review::carried_findings(&ledger, base);
             for finding in &carried {
                 if !selected
                     .findings
@@ -939,12 +907,11 @@ fn outputs(
                     selected.findings.push(finding.clone());
                 }
             }
-            for finding in carried {
-                if !ledger_findings.contains(&finding) {
-                    ledger_findings.push(finding);
-                }
-            }
         }
+        let ledger_findings = ledger
+            .heads
+            .get(&head)
+            .map_or_else(Vec::new, |entry| entry.unresolved.clone());
         let existing = ledger.heads.get(&head).cloned().unwrap_or_default();
         review::record_head(
             &mut ledger,
@@ -954,6 +921,20 @@ fn outputs(
             existing.covered_lenses,
             existing.invariant_coverage,
         );
+        if let (Some(previous_head), review::RoundScope::Delta { base, .. }) =
+            (previous_head.as_deref(), &scope)
+        {
+            review::merge_carried_findings(&mut ledger, &head, base, &carried);
+            debug_assert_eq!(previous_head, base);
+        }
+        if !selected.partial
+            && let Some(entry) = ledger.heads.get(&head)
+        {
+            // The ledger carries the canonical structural IDs across the full
+            // review input. Keep this panel projection aligned with its durable
+            // evidence, including IDs preserved from the previous head.
+            selected.findings.clone_from(&entry.findings);
+        }
         if let Some(entry) = ledger.heads.get_mut(&head)
             && let Some(verdict) = selected
                 .verdict
@@ -1228,6 +1209,69 @@ fn outputs(
         });
     }
     Ok((selected, truncation_cause, finding_ledger))
+}
+
+/// A composite carries a delta only when every review member has a persisted
+/// host-verified scope for the same head. Missing or disagreeing seals widen
+/// the whole panel to Full.
+fn sealed_composite_scope(
+    boundary: usize,
+    head: &str,
+    plan: &PlannedGraph,
+    checkpoint: &GraphCheckpoint,
+    positions: &BTreeMap<String, usize>,
+) -> review::RoundScope {
+    let Some(round) = plan
+        .nodes
+        .get(boundary)
+        .and_then(|node| node.round.as_ref())
+    else {
+        return review::RoundScope::Full {
+            head: head.to_owned(),
+        };
+    };
+    if round.round == 0 {
+        return review::RoundScope::Full {
+            head: head.to_owned(),
+        };
+    }
+    let prefix = format!("{}--", plan.nodes[boundary].id);
+    let members: Vec<_> = plan
+        .nodes
+        .iter()
+        .enumerate()
+        .filter(|(_, node)| {
+            node.id.starts_with(&prefix)
+                && node.round.as_ref().is_some_and(|candidate| {
+                    candidate.loop_id == round.loop_id && candidate.round == round.round
+                })
+                && template::review_node(node)
+        })
+        .map(|(index, _)| schedule::review_round_scope(index, plan, checkpoint, positions))
+        .collect();
+    let Some(Some(first)) = members.first() else {
+        return review::RoundScope::Full {
+            head: head.to_owned(),
+        };
+    };
+    if members.iter().any(|scope| scope.as_ref() != Some(first)) {
+        return review::RoundScope::Full {
+            head: head.to_owned(),
+        };
+    }
+    match first {
+        review::RoundScope::Delta {
+            head: sealed_head, ..
+        }
+        | review::RoundScope::Full { head: sealed_head }
+            if sealed_head == head =>
+        {
+            first.clone()
+        }
+        _ => review::RoundScope::Full {
+            head: head.to_owned(),
+        },
+    }
 }
 
 /// Reserve each member's strongest finding when all such reservations fit,
@@ -2033,6 +2077,10 @@ mod tests {
         adjudicator.parent_node = Some("current".into());
         adjudicator.review_lens = None;
         adjudicator.round = None;
+        adjudicator.inputs = serde_json::from_value(serde_json::json!([{
+            "node":"current", "outputs":["findings", "verdict"]
+        }]))
+        .unwrap();
         adjudicator.source = Some(SourceBinding::Commit {
             commit: current_head.clone(),
         });
@@ -2058,6 +2106,7 @@ mod tests {
             "kind": "adjudicate",
             "access": "read_only",
             "parent_node": "current",
+            "inputs": [{"node":"current", "outputs":["findings", "verdict"]}],
             "source": {"type": "commit", "commit": current_head}
         }))
         .unwrap();
@@ -2111,6 +2160,8 @@ mod tests {
             &positions,
         )
         .unwrap();
+        checkpoint.nodes[current_boundary].outputs = Some(projected.clone());
+        checkpoint.nodes[current_boundary].state = NodeState::Succeeded;
         assert_eq!(
             persisted.as_ref().map(|(owner, _)| owner.as_str()),
             Some("cycle-a")
@@ -2148,7 +2199,7 @@ mod tests {
         assert_eq!(
             current
                 .dispositions
-                .get("finding_disposition:current:current:F0")
+                .get("finding_disposition:current:F0")
                 .map(String::as_str),
             Some("rejected")
         );
@@ -2238,6 +2289,354 @@ mod tests {
                 .map(|finding| finding.id.as_str())
                 .collect::<Vec<_>>(),
             vec!["current:newer"]
+        );
+    }
+
+    #[test]
+    fn outer_adjudicator_updates_nested_identity_and_keeps_unmatched_for_repair() {
+        let lens = |id: &str, name: &str| {
+            serde_json::json!({
+                "id": id, "access": "read_only", "prompt": "review",
+                "review_behaviour": "lens", "review_lens": name,
+                "route": {"alias": "fixture"}
+            })
+        };
+        let document: GraphDocument = serde_json::from_value(serde_json::json!({
+            "schema_version": 2,
+            "graph_id": "nested-review-ledger",
+            "nodes": [{
+                "id": "current", "kind": "composite", "access": "read_only",
+                "composite": {
+                    "reduce_verdict": true,
+                    "nodes": [{
+                        "id": "nested", "kind": "composite", "access": "read_only",
+                        "composite": {
+                            "reduce_verdict": true,
+                            "nodes": [lens("lens-a", "correctness"), lens("lens-b", "tests")],
+                            "exports": [
+                                {"node": "lens-a", "outputs": ["verdict", "findings"]},
+                                {"node": "lens-b", "outputs": ["verdict", "findings"]}
+                            ]
+                        }
+                    }],
+                    "exports": [{"node": "nested", "outputs": ["verdict", "findings"]}]
+                }
+            }]
+        }))
+        .unwrap();
+        let limits = crate::config::GraphLimits::default();
+        let expanded = plans::expand(&document, &[], &[], &limits).unwrap();
+        let (mut plan, mut positions) = validate_flat_plan(&expanded, &limits).unwrap();
+        let mut checkpoint =
+            transitions::initial_checkpoint(&expanded, &plan, "digest".into(), None, None, None);
+        let head = "4".repeat(40);
+        let make_finding = |id: &str, file: &str, summary: &str, severity: &str| {
+            serde_json::from_value::<Finding>(serde_json::json!({
+                "id": id, "severity": severity, "file": file, "line": 3,
+                "summary": summary, "status": "open"
+            }))
+            .unwrap()
+        };
+        let blocker = make_finding("F1", "src/a.rs", "nested blocker", "blocking");
+        let second_lens = make_finding("F1", "src/b.rs", "same raw ID from another lens", "high");
+        let omitted = make_finding("F2", "src/a.rs", "unmatched evidence remains open", "high");
+        let set_review = |checkpoint: &mut GraphCheckpoint,
+                          index: usize,
+                          findings: Vec<Finding>,
+                          attempt: u8| {
+            let progress = &mut checkpoint.nodes[index];
+            let mut output = outputs::make_outputs(None, None, None, None, None);
+            output.verdict = Some("VERDICT: FAIL".into());
+            output.findings_available = Some(true);
+            output.full_artifact_findings = Some(findings.clone());
+            output.findings = findings;
+            progress.outputs = Some(output);
+            progress.state = NodeState::Succeeded;
+            progress.review_settlement = Some(ReviewSettlement {
+                attempt_id: provenant_core::AttemptId::from_bytes([attempt; 16]),
+                head: provenant_core::GitOid::parse(&head).unwrap(),
+                base: None,
+                verdict: provenant_records::workflow::ReviewVerdict::RequestChanges,
+                independent: true,
+            });
+        };
+        let leaf_a = positions["current--nested--lens-a"];
+        let leaf_b = positions["current--nested--lens-b"];
+        let mut first_findings = vec![blocker.clone(), omitted];
+        first_findings.extend((3..=42).map(|number| {
+            make_finding(
+                &format!("F{number}"),
+                "src/a.rs",
+                &format!("unmatched capped evidence {number}"),
+                "high",
+            )
+        }));
+        set_review(&mut checkpoint, leaf_a, first_findings, 1);
+        set_review(&mut checkpoint, leaf_b, vec![second_lens], 2);
+
+        let mut adjudicator = plan.nodes[leaf_a].clone();
+        adjudicator.id = "current--adjudicate".into();
+        adjudicator.kind = Some(NodeKind::Adjudicate);
+        adjudicator.parent_node = Some("current".into());
+        adjudicator.review_lens = None;
+        adjudicator.source = Some(SourceBinding::Commit {
+            commit: head.clone(),
+        });
+        adjudicator.inputs = serde_json::from_value(serde_json::json!([{
+            "node":"current", "outputs":["findings", "verdict"]
+        }]))
+        .unwrap();
+        let adjudicator_index = plan.nodes.len();
+        positions.insert(adjudicator.id.clone(), adjudicator_index);
+        plan.nodes.push(adjudicator.clone());
+        let mut progress = checkpoint.nodes[leaf_a].clone();
+        progress.id.clone_from(&adjudicator.id);
+        progress.outputs = None;
+        progress.review_settlement = None;
+        progress.state = NodeState::Pending;
+        checkpoint.nodes.push(progress);
+        checkpoint.expansions.push(Expansion {
+            extra: Default::default(),
+            delivery_review_disposition: None,
+            delivery_review_node: None,
+            retired: None,
+            retry_generation: None,
+            final_result: false,
+            final_fragment: false,
+            floor_warnings: Vec::new(),
+            source: "current".into(),
+            nodes: vec![
+                serde_json::from_value(serde_json::json!({
+                    "id": adjudicator.id, "kind": "adjudicate", "access": "read_only",
+                    "parent_node": "current", "source": {"type":"commit", "commit":head},
+                    "inputs": [{"node":"current", "outputs":["findings", "verdict"]}]
+                }))
+                .unwrap(),
+            ],
+            uses: Vec::new(),
+            patch: None,
+        });
+
+        // First materialise both composite boundaries so the adjudicator input
+        // resolver sees the same qualified IDs as a live panel. The nested
+        // aggregate exceeds its projection cap; the adjudicator must account
+        // for full member artifacts and preserve every unmatched source row.
+        reconcile_checkpoint(&plan, &mut checkpoint);
+        let nested_boundary = positions["current--nested"];
+        assert_eq!(
+            checkpoint.nodes[nested_boundary]
+                .outputs
+                .as_ref()
+                .and_then(|output| output.findings_available),
+            Some(false)
+        );
+        assert!(
+            checkpoint.nodes[nested_boundary]
+                .outputs
+                .as_ref()
+                .is_some_and(|output| output
+                    .warnings
+                    .iter()
+                    .any(|warning| warning.contains("composite findings truncated")))
+        );
+        let mut adjudicated = blocker.clone();
+        adjudicated.id = "current--nested--lens-a:F1".into();
+        adjudicated.disposition = Some("rejected".into());
+        let mut output = outputs::make_outputs(None, None, None, None, None);
+        output.verdict = Some("VERDICT: PASS".into());
+        output.findings_available = Some(true);
+        output.findings = vec![adjudicated.clone()];
+        output.full_artifact_findings = Some(vec![adjudicated]);
+        checkpoint.nodes[adjudicator_index].outputs = Some(output);
+        checkpoint.nodes[adjudicator_index].state = NodeState::Succeeded;
+        reconcile_checkpoint(&plan, &mut checkpoint);
+
+        let boundary = positions["current"];
+        let ledger = checkpoint.nodes[boundary]
+            .finding_ledger
+            .as_ref()
+            .expect("outer composite persists its chain ledger");
+        let reviewed = &ledger.heads[&head];
+        assert_eq!(reviewed.findings.len(), 43);
+        assert_ne!(reviewed.findings[0].id, reviewed.findings[1].id);
+        assert_eq!(reviewed.unresolved.len(), 42);
+        assert!(
+            reviewed
+                .unresolved
+                .iter()
+                .any(|finding| finding.summary == "same raw ID from another lens")
+        );
+        assert!(
+            reviewed
+                .unresolved
+                .iter()
+                .any(|finding| finding.summary == "unmatched evidence remains open")
+        );
+        assert_eq!(
+            reviewed
+                .unresolved
+                .iter()
+                .filter(|finding| finding.summary.starts_with("unmatched capped evidence"))
+                .count(),
+            40,
+            "all findings hidden by the nested aggregate projection remain available to the ledger"
+        );
+        assert!(
+            reviewed
+                .unresolved
+                .iter()
+                .all(|finding| finding.summary != "nested blocker")
+        );
+        assert_eq!(reviewed.finding_origins.len(), 3);
+
+        let repair = repair::ledger_findings(&plan.nodes[boundary], &plan, &checkpoint).unwrap();
+        assert_eq!(repair.len(), 42);
+        assert!(
+            repair
+                .iter()
+                .all(|finding| finding.summary != "nested blocker")
+        );
+    }
+
+    #[test]
+    fn later_collision_keeps_prior_ledger_display_id_for_same_origin() {
+        let panel: GraphDocument = serde_json::from_value(serde_json::json!({
+            "schema_version": 2,
+            "graph_id": "review-id-collision-rounds",
+            "nodes": [{
+                "id":"panel", "kind":"composite", "access":"read_only",
+                "composite": {
+                    "reduce_verdict": true,
+                    "nodes": [
+                        {"id":"lens-a", "access":"read_only", "prompt":"review",
+                            "review_behaviour":"lens", "review_lens":"correctness",
+                            "route":{"alias":"fixture"}},
+                        {"id":"lens-b", "access":"read_only", "prompt":"review",
+                            "review_behaviour":"lens", "review_lens":"tests",
+                            "route":{"alias":"fixture"}}
+                    ],
+                    "exports": [
+                        {"node":"lens-a", "outputs":["verdict", "findings"]},
+                        {"node":"lens-b", "outputs":["verdict", "findings"]}
+                    ]
+                }
+            }]
+        }))
+        .unwrap();
+        let limits = crate::config::GraphLimits::default();
+        let expanded = plans::expand(&panel, &[], &[], &limits).unwrap();
+        let (plan, positions) = validate_flat_plan(&expanded, &limits).unwrap();
+        let mut checkpoint =
+            transitions::initial_checkpoint(&expanded, &plan, "digest".into(), None, None, None);
+        let head = "5".repeat(40);
+        let finding = |file: &str| {
+            serde_json::from_value::<Finding>(serde_json::json!({
+                "id":"F1", "severity":"high", "file":file, "summary":"duplicate ID",
+                "status":"open"
+            }))
+            .unwrap()
+        };
+        let set_review =
+            |checkpoint: &mut GraphCheckpoint, index: usize, file: &str, attempt: u8| {
+                let mut output = outputs::make_outputs(None, None, None, None, None);
+                let finding = finding(file);
+                output.verdict = Some("VERDICT: FAIL".into());
+                output.findings_available = Some(true);
+                output.findings = vec![finding.clone()];
+                output.full_artifact_findings = Some(vec![finding]);
+                let progress = &mut checkpoint.nodes[index];
+                progress.outputs = Some(output);
+                progress.state = NodeState::Succeeded;
+                progress.review_settlement = Some(ReviewSettlement {
+                    attempt_id: provenant_core::AttemptId::from_bytes([attempt; 16]),
+                    head: provenant_core::GitOid::parse(&head).unwrap(),
+                    base: None,
+                    verdict: provenant_records::workflow::ReviewVerdict::RequestChanges,
+                    independent: true,
+                });
+            };
+        let panel_index = positions["panel"];
+        let first_lens = positions["panel--lens-a"];
+        let second_lens = positions["panel--lens-b"];
+        set_review(&mut checkpoint, first_lens, "src/a.rs", 1);
+        let first = review::ledger_from_checkpoint(&plan, &checkpoint, panel_index, &head);
+        let stored = &first.heads[&head];
+        assert_eq!(stored.findings[0].id, "F1");
+        assert_eq!(stored.finding_origins["F1"].source, "panel--lens-a");
+        checkpoint.nodes[panel_index].finding_ledger = Some(first);
+
+        set_review(&mut checkpoint, second_lens, "src/b.rs", 2);
+        let second = review::ledger_from_checkpoint(&plan, &checkpoint, panel_index, &head);
+        let stored = &second.heads[&head];
+        assert_eq!(stored.finding_origins["F1"].source, "panel--lens-a");
+        assert!(stored.findings.iter().any(|finding| finding.id == "F1"));
+        assert!(
+            stored
+                .findings
+                .iter()
+                .any(|finding| finding.id == "panel--lens-b:F1")
+        );
+        assert_eq!(stored.finding_origins.len(), 2);
+    }
+
+    #[test]
+    fn delta_carry_keeps_prior_identity_when_new_head_adds_raw_id_collision() {
+        let finding = |id: &str, file: &str, summary: &str| {
+            serde_json::from_value::<Finding>(serde_json::json!({
+                "id": id,
+                "severity": "high",
+                "file": file,
+                "summary": summary,
+                "status": "open"
+            }))
+            .unwrap()
+        };
+        let previous_head = "6".repeat(40);
+        let current_head = "7".repeat(40);
+        let prior = finding("F1", "src/old.rs", "carried source");
+        let current = finding("F1", "src/new.rs", "new colliding source");
+        let origin = |source: &str| FindingOrigin {
+            source: source.into(),
+            id: "F1".into(),
+        };
+        let mut ledger = FindingLedger::default();
+        ledger.heads.insert(
+            previous_head.clone(),
+            FindingHead {
+                findings: vec![prior.clone()],
+                unresolved: vec![prior],
+                finding_origins: BTreeMap::from([("F1".into(), origin("panel--lens-a"))]),
+                ..Default::default()
+            },
+        );
+        ledger.heads.insert(
+            current_head.clone(),
+            FindingHead {
+                findings: vec![current],
+                unresolved: vec![finding("F1", "src/new.rs", "new colliding source")],
+                finding_origins: BTreeMap::from([("F1".into(), origin("panel--lens-b"))]),
+                ..Default::default()
+            },
+        );
+        ledger.last_reviewed_head = Some(previous_head.clone());
+
+        let carried = review::carried_findings(&ledger, &previous_head);
+        review::merge_carried_findings(&mut ledger, &current_head, &previous_head, &carried);
+
+        let current = &ledger.heads[&current_head];
+        assert_eq!(current.unresolved.len(), 2);
+        assert_eq!(current.finding_origins["F1"].source, "panel--lens-a");
+        assert_eq!(
+            current.finding_origins["panel--lens-b:F1"].source,
+            "panel--lens-b"
+        );
+        assert_eq!(
+            current
+                .unresolved
+                .iter()
+                .find(|finding| finding.summary == "carried source")
+                .map(|finding| finding.id.as_str()),
+            Some("F1")
         );
     }
 

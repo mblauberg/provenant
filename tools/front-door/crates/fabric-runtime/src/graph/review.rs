@@ -834,6 +834,84 @@ pub(super) fn carried_findings(ledger: &FindingLedger, head: &str) -> Vec<Findin
         .map_or_else(Vec::new, |entry| entry.unresolved.clone())
 }
 
+/// Merge a later-round delta with unresolved findings from its sealed base.
+/// Structural origins survive across heads, so a newly introduced raw-ID
+/// collision cannot rename an existing carried finding or close it by ID.
+pub(super) fn merge_carried_findings(
+    ledger: &mut FindingLedger,
+    head: &str,
+    previous_head: &str,
+    carried: &[Finding],
+) {
+    if carried.is_empty() || head == previous_head {
+        return;
+    }
+    let prior = ledger.heads.get(previous_head).cloned().unwrap_or_default();
+    let Some(current) = ledger.heads.get(head).cloned() else {
+        return;
+    };
+
+    let mut current_by_origin = BTreeMap::<outputs::RootIdentity, Finding>::new();
+    for finding in &current.findings {
+        let origin = current
+            .finding_origins
+            .get(&finding.id)
+            .map(|origin| (origin.source.clone(), origin.id.clone()))
+            .unwrap_or_else(|| (format!("legacy:{head}"), finding.id.clone()));
+        current_by_origin.insert(origin, finding.clone());
+    }
+
+    let mut previous_ids = BTreeMap::<outputs::RootIdentity, String>::new();
+    for finding in carried {
+        let origin = prior
+            .finding_origins
+            .get(&finding.id)
+            .map(|origin| (origin.source.clone(), origin.id.clone()))
+            .unwrap_or_else(|| (format!("legacy:{previous_head}"), finding.id.clone()));
+        previous_ids
+            .entry(origin.clone())
+            .or_insert_with(|| finding.id.clone());
+        current_by_origin
+            .entry(origin)
+            .or_insert_with(|| finding.clone());
+    }
+
+    let mut identified = current_by_origin.into_iter().collect::<Vec<_>>();
+    outputs::qualify_finding_origins(&mut identified, &previous_ids);
+    let Some(entry) = ledger.heads.get_mut(head) else {
+        return;
+    };
+    entry.findings = identified
+        .iter()
+        .map(|(_, finding)| finding.clone())
+        .collect();
+    entry.unresolved = identified
+        .iter()
+        .filter(|(_, finding)| ledger_unresolved(finding))
+        .map(|(_, finding)| finding.clone())
+        .collect();
+    entry.finding_origins.clear();
+    entry
+        .dispositions
+        .retain(|key, _| !key.starts_with("finding_disposition:"));
+    for (origin, finding) in identified {
+        entry.finding_origins.insert(
+            finding.id.clone(),
+            FindingOrigin {
+                source: origin.0,
+                id: origin.1,
+            },
+        );
+        entry.dispositions.insert(
+            format!("finding_disposition:{}", finding.id),
+            finding
+                .disposition
+                .clone()
+                .unwrap_or_else(|| finding.status.clone()),
+        );
+    }
+}
+
 /// Coverage gaps for a panel: lenses that never completed and invariants that
 /// no completed lens covered. An uncovered invariant makes the round
 /// INCONCLUSIVE rather than an agreed PASS.
@@ -867,13 +945,10 @@ pub(super) fn coverage_gaps(
 pub(super) fn split_needs_adjudicator(
     verdicts: &[provenant_records::workflow::ReviewVerdict],
 ) -> bool {
-    use provenant_records::workflow::ReviewVerdict;
-    verdicts.iter().any(|verdict| {
-        matches!(
-            verdict,
-            ReviewVerdict::Approve | ReviewVerdict::ApproveWithNits
-        )
-    }) && verdicts.contains(&ReviewVerdict::RequestChanges)
+    let Some(first) = verdicts.first() else {
+        return false;
+    };
+    verdicts.iter().any(|verdict| verdict != first)
 }
 
 /// Conflicting judgements about the same blocking finding require adjudication.
@@ -926,6 +1001,17 @@ pub(super) fn ledger_from_checkpoint(
         .unwrap_or_default();
     let previous_last_reviewed_head = ledger.last_reviewed_head.clone();
     let stored_current = ledger.heads.remove(current_head);
+    let previous_ids = stored_current
+        .as_ref()
+        .map(|head| {
+            head.finding_origins
+                .iter()
+                .map(|(display, origin)| {
+                    ((origin.source.clone(), origin.id.clone()), display.clone())
+                })
+                .collect::<BTreeMap<_, _>>()
+        })
+        .unwrap_or_default();
     let positions: BTreeMap<_, _> = plan
         .nodes
         .iter()
@@ -1096,46 +1182,25 @@ pub(super) fn ledger_from_checkpoint(
             record.head.dispositions.insert("base".to_owned(), base);
         }
         record.head.dispositions.insert(verdict_key, verdict);
+        if adjudicator {
+            record.adjudicated_panel_ids.extend(adjudicator_panel_ids(
+                node, plan, checkpoint, &positions, &panel_ids,
+            ));
+        }
 
-        let findings = outputs::materialised_findings(index, plan, checkpoint, &positions);
-        for finding in &findings {
-            let disposition = finding
-                .disposition
-                .clone()
-                .unwrap_or_else(|| finding.status.clone());
+        let findings = outputs::materialised_finding_origins(index, plan, checkpoint, &positions);
+        for (origin, finding) in findings {
             if adjudicator {
                 record
-                    .adjudicated_dispositions
-                    .entry(panel_id.clone())
-                    .or_default()
-                    .insert(finding.id.clone(), disposition);
-                record
                     .adjudicated_records
-                    .entry(panel_id.clone())
-                    .or_default()
-                    .insert(finding.id.clone(), finding.clone());
+                    .push((panel_id.clone(), origin, finding));
             } else {
-                record
-                    .member_dispositions
-                    .entry(panel_id.clone())
-                    .or_default()
-                    .insert(finding.id.clone(), disposition);
                 record
                     .member_records
                     .entry(panel_id.clone())
                     .or_default()
-                    .insert(finding.id.clone(), finding.clone());
-            }
-            if ledger_unresolved(finding) {
-                let by_panel = if adjudicator {
-                    &mut record.adjudicated_findings
-                } else {
-                    &mut record.member_findings
-                };
-                let panel_findings = by_panel.entry(panel_id.clone()).or_default();
-                if !panel_findings.contains(finding) {
-                    panel_findings.push(finding.clone());
-                }
+                    .entry(origin)
+                    .or_insert(finding);
             }
         }
         if !adjudicator && let Some(lens) = node.review_lens.as_deref() {
@@ -1166,39 +1231,53 @@ pub(super) fn ledger_from_checkpoint(
     }
 
     for (head, mut record) in heads {
-        // An adjudicator resolves its panel's split. Its disposition replaces
-        // that panel's reviewer findings; other panels in the same round stay.
-        let mut findings = record.member_findings;
-        for (panel, adjudicated) in record.adjudicated_findings {
-            findings.insert(panel, adjudicated);
-        }
-        for panel_findings in findings.into_values() {
-            for finding in panel_findings {
-                if !record.head.unresolved.contains(&finding) {
-                    record.head.unresolved.push(finding);
-                }
+        // An adjudicator updates only identities represented by its declared
+        // input closure. Keep unmatched member records: an omitted finding is
+        // still unresolved evidence, including when an aggregate was capped.
+        let covered_origins = record
+            .member_records
+            .iter()
+            .filter(|(panel, _)| record.adjudicated_panel_ids.contains(*panel))
+            .flat_map(|(_, findings)| findings.keys().cloned())
+            .collect::<BTreeSet<_>>();
+        let mut records = BTreeMap::<outputs::RootIdentity, Finding>::new();
+        for findings in record.member_records.into_values() {
+            for (origin, finding) in findings {
+                records.entry(origin).or_insert(finding);
             }
         }
-        let mut dispositions = record.member_dispositions;
-        for (panel, adjudicated) in record.adjudicated_dispositions {
-            dispositions.insert(panel, adjudicated);
-        }
-        for (panel, findings) in dispositions {
-            for (id, disposition) in findings {
-                record
-                    .head
-                    .dispositions
-                    .insert(format!("finding_disposition:{panel}:{id}"), disposition);
+        for (panel, origin, finding) in record.adjudicated_records {
+            if !record.adjudicated_panel_ids.contains(&panel) {
+                continue;
+            }
+            if covered_origins.contains(&origin) || !records.contains_key(&origin) {
+                records.insert(origin, finding);
             }
         }
-        let mut records = record.member_records;
-        for (panel, adjudicated) in record.adjudicated_records {
-            records.insert(panel, adjudicated);
+        let mut identified = records.into_iter().collect::<Vec<_>>();
+        outputs::qualify_finding_origins(&mut identified, &previous_ids);
+        record.head.finding_origins.clear();
+        for (origin, finding) in &identified {
+            record.head.finding_origins.insert(
+                finding.id.clone(),
+                FindingOrigin {
+                    source: origin.0.clone(),
+                    id: origin.1.clone(),
+                },
+            );
+            let disposition = finding
+                .disposition
+                .clone()
+                .unwrap_or_else(|| finding.status.clone());
+            record
+                .head
+                .dispositions
+                .insert(format!("finding_disposition:{}", finding.id), disposition);
+            if ledger_unresolved(finding) {
+                record.head.unresolved.push(finding.clone());
+            }
         }
-        record.head.findings = records
-            .into_values()
-            .flat_map(|values| values.into_values())
-            .collect();
+        record.head.findings = identified.into_iter().map(|(_, finding)| finding).collect();
         ledger.heads.insert(head, record.head);
     }
     if !ledger.heads.contains_key(current_head)
@@ -1228,12 +1307,50 @@ pub(super) fn ledger_from_checkpoint(
 struct ReviewHeadBuilder {
     round: usize,
     head: FindingHead,
-    member_records: BTreeMap<String, BTreeMap<String, Finding>>,
-    adjudicated_records: BTreeMap<String, BTreeMap<String, Finding>>,
-    member_findings: BTreeMap<String, Vec<Finding>>,
-    adjudicated_findings: BTreeMap<String, Vec<Finding>>,
-    member_dispositions: BTreeMap<String, BTreeMap<String, String>>,
-    adjudicated_dispositions: BTreeMap<String, BTreeMap<String, String>>,
+    member_records: BTreeMap<String, BTreeMap<outputs::RootIdentity, Finding>>,
+    adjudicated_records: Vec<(String, outputs::RootIdentity, Finding)>,
+    adjudicated_panel_ids: BTreeSet<String>,
+}
+
+fn adjudicator_panel_ids(
+    adjudicator: &PlannedNode,
+    plan: &PlannedGraph,
+    checkpoint: &GraphCheckpoint,
+    positions: &BTreeMap<String, usize>,
+    panel_ids: &[String],
+) -> BTreeSet<String> {
+    let roots: Vec<_> = if adjudicator.inputs.is_empty() {
+        adjudicator.parent_node.as_deref().into_iter().collect()
+    } else {
+        adjudicator
+            .inputs
+            .iter()
+            .map(|input| input.node.as_str())
+            .collect()
+    };
+    let mut closure = BTreeSet::new();
+    for root in roots {
+        add_review_closure(Some(root), plan, checkpoint, positions, &mut closure);
+    }
+    let covered: BTreeSet<_> = panel_ids
+        .iter()
+        .filter(|panel| {
+            positions
+                .get(panel.as_str())
+                .is_some_and(|index| closure.contains(index))
+        })
+        .cloned()
+        .collect();
+    if covered.is_empty() {
+        adjudicator
+            .inputs
+            .iter()
+            .map(|input| input.node.clone())
+            .chain(adjudicator.parent_node.iter().cloned())
+            .collect()
+    } else {
+        covered
+    }
 }
 
 fn add_review_closure(
@@ -1713,13 +1830,21 @@ mod convergence_tests {
             ReviewVerdict::Approve,
             ReviewVerdict::Approve
         ]));
-        assert!(!split_needs_adjudicator(&[
+        assert!(split_needs_adjudicator(&[
             ReviewVerdict::Approve,
             ReviewVerdict::Inconclusive
         ]));
         assert!(split_needs_adjudicator(&[
             ReviewVerdict::ApproveWithNits,
             ReviewVerdict::RequestChanges
+        ]));
+        assert!(split_needs_adjudicator(&[
+            ReviewVerdict::Inconclusive,
+            ReviewVerdict::RequestChanges
+        ]));
+        assert!(!split_needs_adjudicator(&[
+            ReviewVerdict::Inconclusive,
+            ReviewVerdict::Inconclusive
         ]));
         assert!(!split_needs_adjudicator(&[]));
     }

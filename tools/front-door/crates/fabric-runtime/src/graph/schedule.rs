@@ -872,38 +872,70 @@ fn advance_gate<R: AttemptOwner, J: GraphJournal>(
         panels,
         head,
         revision,
+        existing_node_id,
     })) = split
     {
+        if existing_node_id.as_ref().is_some_and(|id| {
+            checkpoint
+                .nodes
+                .iter()
+                .find(|progress| progress.id == *id)
+                .is_some_and(|progress| {
+                    matches!(progress.state, NodeState::Pending | NodeState::Running)
+                })
+        }) {
+            // Let the existing adjudicator's scheduled attempt settle first;
+            // its old verdict cannot be consumed by this gate while split
+            // evidence remains uncovered.
+            return Ok(GateStep::Next);
+        }
         let library = template::TemplateLibrary::bundled();
         let resolvers = Default::default();
         let adjudicator_route = effective_adjudicator_route(&parent, plan, checkpoint, positions);
-        let change = repair::split_verdict_patch(
-            &item,
-            &parent,
-            &panels,
-            head.as_deref(),
-            revision,
-            &adjudicator_route,
-        );
         let result = (|| -> Result<_, String> {
             let mut prospective = checkpoint.clone();
-            patch::admit_patch(
-                &mut patch::LiveGraph {
-                    document,
-                    checkpoint: &mut prospective,
-                },
-                Some(&parent),
-                &change,
-                &patch::PatchContext {
-                    catalogue: None,
-                    library: &library,
-                    resolvers: &resolvers,
-                    journal: None,
+            if let Some(node_id) = existing_node_id.as_deref() {
+                patch::continue_adjudicator(
+                    &mut patch::LiveGraph {
+                        document,
+                        checkpoint: &mut prospective,
+                    },
+                    &item,
+                    node_id,
+                    &panels,
+                    head.as_deref(),
+                    revision,
                     limits,
-                    worktree_layout: worktree_layout.clone(),
-                },
-            )
-            .map_err(|error| error.message)?;
+                    effective_budget,
+                )
+                .map_err(|error| error.message)?;
+            } else {
+                let change = repair::split_verdict_patch(
+                    &item,
+                    &parent,
+                    &panels,
+                    head.as_deref(),
+                    revision,
+                    &adjudicator_route,
+                );
+                patch::admit_patch(
+                    &mut patch::LiveGraph {
+                        document,
+                        checkpoint: &mut prospective,
+                    },
+                    Some(&parent),
+                    &change,
+                    &patch::PatchContext {
+                        catalogue: None,
+                        library: &library,
+                        resolvers: &resolvers,
+                        journal: None,
+                        limits,
+                        worktree_layout: worktree_layout.clone(),
+                    },
+                )
+                .map_err(|error| error.message)?;
+            }
             let mut preview = plans::expand(
                 document,
                 &prospective.extensions,

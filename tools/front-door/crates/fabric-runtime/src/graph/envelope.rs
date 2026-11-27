@@ -558,6 +558,7 @@ fn node_bound(
         delivery_park,
         conflict: None,
         finding_ledger: None,
+        review_adjudication_receipts: Vec::new(),
         review_round_scope: None,
         extra: Default::default(),
         children: node.composite_members.clone(),
@@ -807,6 +808,29 @@ fn node_bound(
             "head": "1".repeat(64), "base": "2".repeat(64),
             "verdict": "approve_with_nits", "independent": false,
         }}));
+    }
+    if node.kind == Some(NodeKind::Adjudicate) {
+        // A sequential same-head split can reopen this stable node once per
+        // newly admitted panel. Receipts store only newly added panel IDs and
+        // a digest/reference, so the admitted graph node count caps history.
+        let mut receipt_attempt_key = worst_attempt_key.clone();
+        receipt_attempt_key.previous_attempt_ref = Some("x".repeat(OUTPUT_FIELD_BYTES));
+        let receipt_bytes = canonical_len(&ReviewAdjudicationReceipt {
+            head: Some("1".repeat(64)),
+            panels: Vec::new(),
+            attempt_key: receipt_attempt_key,
+            attempt_ref: Some("x".repeat(OUTPUT_FIELD_BYTES)),
+            verdict: "VERDICT: INCONCLUSIVE".into(),
+            output_digest: "1".repeat(64),
+        });
+        bytes = bytes
+            .saturating_add(receipt_bytes.saturating_mul(plan.nodes.len()))
+            .saturating_add(
+                plan.nodes
+                    .iter()
+                    .map(|candidate| candidate.id.len() + 3)
+                    .sum(),
+            );
     }
     if node
         .plan

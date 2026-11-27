@@ -603,6 +603,15 @@ chain or head gets its own. The adjudicator receives the chain's conflicting
 verdicts and findings. Once admitted, it must succeed with a verdict before its
 panel can pass; the original panel verdict cannot substitute for a failed or
 missing result.
+If another split panel for the same chain and head settles after that
+adjudicator succeeds, continue the same adjudicator node with the union of its
+known panels. Preserve the prior attempt history and an immutable receipt for
+its pinned head, prior verdict, output digest and newly added panel IDs; the
+journalled expansion history retains each attempt's full input union. Clear its
+current output and verdict before the new attempt. Downstream gates wait for
+that fresh adjudication; they cannot consume the superseded verdict. The
+continuation is a journalled revision so replay resumes the same node and input
+union.
 A split in a nested lens group remains visible when a panel synthesises its output;
 the adjudicator receives the outer panel's synthesised findings.
 A panel whose members have different pinned heads cannot be adjudicated as one

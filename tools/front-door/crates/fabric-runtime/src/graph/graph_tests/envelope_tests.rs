@@ -337,6 +337,35 @@ fn filled_checkpoint(document: &GraphDocument, plan: &PlannedGraph) -> GraphChec
                 delivery_park: None,
                 conflict: None,
                 finding_ledger: None,
+                review_adjudication_receipts: if node.kind == Some(NodeKind::Adjudicate) {
+                    (0..plan.nodes.len())
+                        .map(|index| {
+                            let attempt_key = AttemptKey {
+                                extra: Default::default(),
+                                retry_generation: Some(u64::MAX),
+                                previous_attempt_ref: Some("x".repeat(OUTPUT_FIELD_BYTES)),
+                                graph_id: plan.graph_id.clone(),
+                                node_id: node.id.clone(),
+                                attempt: u32::MAX,
+                                route_index: u16::MAX,
+                            };
+                            ReviewAdjudicationReceipt {
+                                head: Some("1".repeat(64)),
+                                panels: if index == 0 {
+                                    plan.nodes.iter().map(|candidate| candidate.id.clone()).collect()
+                                } else {
+                                    Vec::new()
+                                },
+                                attempt_key,
+                                attempt_ref: Some("x".repeat(OUTPUT_FIELD_BYTES)),
+                                verdict: "VERDICT: INCONCLUSIVE".into(),
+                                output_digest: "1".repeat(64),
+                            }
+                        })
+                        .collect()
+                } else {
+                    Vec::new()
+                },
                 review_round_scope: Some(ReviewRoundScope::Delta {
                     base: "1".repeat(64),
                     head: "2".repeat(64),

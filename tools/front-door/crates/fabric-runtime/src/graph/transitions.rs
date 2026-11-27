@@ -1016,6 +1016,7 @@ pub(super) fn initial_checkpoint(
                 blocked: false,
                 decisions: Vec::new(),
                 review_settlement: None,
+                review_adjudication_receipts: Vec::new(),
                 review_retry: None,
                 finding_ledger: None,
                 review_round_scope: None,

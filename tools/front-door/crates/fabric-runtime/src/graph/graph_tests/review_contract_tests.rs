@@ -1489,6 +1489,145 @@ fn repair_writer_prompt_uses_full_chain_ledger_and_stages_overflow() {
 }
 
 #[test]
+fn unaccepted_replayed_repair_attempt_refuses_a_capped_ledger_artifact() {
+    let mut source = node("source", route("fixture"));
+    source.access = AccessMode::ReadOnly;
+    let mut writer = node("fix", route("fixture"));
+    writer.repair_writer = true;
+    writer.depends_on = vec!["source".into()];
+    writer.inputs = vec![GraphInput {
+        extra: Default::default(),
+        required_outputs: vec![OutputKind::Findings],
+        node: "source".into(),
+        outputs: vec![OutputKind::Findings],
+    }];
+    let mut document = graph(vec![source, writer]);
+    document.schema_version = 2;
+    let limits = crate::config::GraphLimits::default();
+    let admitted = candidate::admit_candidate_with_review_policy(
+        &document,
+        None,
+        &[],
+        &limits,
+        &Default::default(),
+        None,
+        &ReviewPolicy::default(),
+    )
+    .unwrap();
+    let (plan, positions) = validate_flat_plan(admitted.expanded(), &limits).unwrap();
+    let digest = plan_digest(&plan).unwrap().to_string();
+    let mut checkpoint = transitions::initial_checkpoint(
+        &document,
+        &plan,
+        digest,
+        None,
+        None,
+        None,
+    );
+    checkpoint.review_policy = Some(ReviewPolicy::default());
+    let source_key = AttemptKey {
+        extra: Default::default(),
+        retry_generation: None,
+        previous_attempt_ref: None,
+        graph_id: document.graph_id.clone(),
+        node_id: "source".into(),
+        route_index: 0,
+        attempt: 1,
+    };
+    transitions::begin_attempt(
+        positions["source"],
+        &plan,
+        &mut checkpoint,
+        &positions,
+        &source_key,
+        &plan.nodes[positions["source"]].routes[0],
+        transitions::LaunchFacts {
+            input_cap: limits.node_prompt_bytes,
+            placement_host_id: None,
+            launch_actor: "fixture".into(),
+            input_cap_source: provenant_records::Layer::Detected,
+            timing: None,
+        },
+    );
+    let source_attempt = checkpoint.nodes[positions["source"]]
+        .attempts
+        .last_mut()
+        .unwrap();
+    source_attempt.state = AttemptState::Terminal;
+    source_attempt.attempt_ref = Some("host-a/source".into());
+    source_attempt.outcome = Some(GraphAttemptOutcome::Succeeded);
+    checkpoint.nodes[positions["source"]].state = NodeState::Succeeded;
+    checkpoint.nodes[positions["source"]].outputs = Some(NodeOutputs {
+        findings_available: Some(true),
+        ..Default::default()
+    });
+    let mut large = finding();
+    large["id"] = json!("F-LARGE-REPLAY");
+    large["evidence"] = json!("FULL-LEDGER-EVIDENCE-".repeat(900));
+    let large: Finding = serde_json::from_value(large).unwrap();
+    let head = "a".repeat(40);
+    checkpoint.nodes[positions["fix"]].finding_ledger = Some(FindingLedger {
+        heads: std::collections::BTreeMap::from([(
+            head.clone(),
+            FindingHead {
+                findings: vec![large.clone()],
+                unresolved: vec![large],
+                ..Default::default()
+            },
+        )]),
+        last_reviewed_head: Some(head),
+    });
+    let key = AttemptKey {
+        extra: Default::default(),
+        retry_generation: None,
+        previous_attempt_ref: None,
+        graph_id: document.graph_id.clone(),
+        node_id: "fix".into(),
+        route_index: 0,
+        attempt: 1,
+    };
+    transitions::begin_attempt(
+        positions["fix"],
+        &plan,
+        &mut checkpoint,
+        &positions,
+        &key,
+        &plan.nodes[positions["fix"]].routes[0],
+        transitions::LaunchFacts {
+            input_cap: limits.node_prompt_bytes,
+            placement_host_id: None,
+            launch_actor: "fixture".into(),
+            input_cap_source: provenant_records::Layer::Detected,
+            timing: None,
+        },
+    );
+    let checkpoint: GraphCheckpoint =
+        serde_json::from_value(serde_json::to_value(checkpoint).unwrap()).unwrap();
+    let mut journal = MemoryJournal(Some(checkpoint));
+
+    let mut first_owner = FakeOwner {
+        materialise: Some(fully_materialise_inputs),
+        ..Default::default()
+    };
+    assert!(matches!(
+        advance(&document, &mut first_owner, &mut journal),
+        Err(GraphError::Run(_))
+    ));
+    assert_eq!(first_owner.calls.len(), 1);
+
+    let mut replay_owner = FakeOwner {
+        materialise: Some(cap_materialised_inputs),
+        ..Default::default()
+    };
+    let replay = advance(&document, &mut replay_owner, &mut journal);
+    assert!(matches!(replay, Err(GraphError::Refused(reason)) if reason.contains("full review-chain ledger")));
+    assert!(replay_owner.calls.is_empty(), "the unaccepted attempt must not launch");
+    assert!(replay_owner.file_requests[0]
+        .iter()
+        .any(|request| request.label == "review_ledger"));
+}
+
+#[test]
 // Spec: docs/specs/fabric.md#fix-round-invariants-and-split-verdict-adjudication
 fn round_two_missing_invariant_is_refused_at_graph_settlement() {
     let document: GraphDocument = serde_json::from_value(json!({

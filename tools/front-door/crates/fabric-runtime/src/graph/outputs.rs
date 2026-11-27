@@ -1079,20 +1079,20 @@ pub(super) fn materialise_checkpoint_findings(
     Ok(())
 }
 
-type FindingOrigin = (String, String);
+pub(super) type RootIdentity = (String, String);
 
 #[derive(Clone)]
 pub(super) struct ResolvedFinding {
     source: String,
     stored_id: String,
     finding: Finding,
-    root: FindingOrigin,
+    root: RootIdentity,
 }
 
 /// Reserve unique stored IDs before qualifying colliding roots.
 fn display_ids(
-    roots: &std::collections::BTreeSet<FindingOrigin>,
-) -> std::collections::BTreeMap<FindingOrigin, String> {
+    roots: &std::collections::BTreeSet<RootIdentity>,
+) -> std::collections::BTreeMap<RootIdentity, String> {
     use std::collections::{BTreeMap, BTreeSet};
     let mut counts = BTreeMap::new();
     for (_, id) in roots {
@@ -1121,6 +1121,209 @@ fn display_ids(
         ids.insert((node.clone(), id.clone()), display);
     }
     ids
+}
+
+/// Materialise one node's complete findings with their structural source
+/// identities. Propagated findings keep the root resolved by the same input
+/// machinery used by settlement; new findings originate at the producing
+/// node. Ledger callers qualify collisions across the whole head afterwards.
+pub(super) fn materialised_finding_origins(
+    index: usize,
+    plan: &PlannedGraph,
+    checkpoint: &GraphCheckpoint,
+    positions: &std::collections::BTreeMap<String, usize>,
+) -> Vec<(RootIdentity, Finding)> {
+    let Some(node) = plan.nodes.get(index) else {
+        return Vec::new();
+    };
+    let upstream = if node.kind == Some(NodeKind::Adjudicate) {
+        fully_resolved_findings(node, plan, checkpoint, positions)
+    } else {
+        resolved_inputs(node, plan, checkpoint, positions, true)
+    };
+    materialised_findings(index, plan, checkpoint, positions)
+        .into_iter()
+        .map(|finding| {
+            let propagated = finding
+                .propagates
+                .as_deref()
+                .and_then(|marker| marker_root(marker, &upstream));
+            let exact = upstream
+                .iter()
+                .filter(|item| item.finding.id == finding.id)
+                .map(|item| item.root.clone())
+                .collect::<std::collections::BTreeSet<_>>();
+            let origin = propagated
+                .or_else(|| {
+                    (exact.len() == 1)
+                        .then(|| exact.into_iter().next())
+                        .flatten()
+                })
+                .unwrap_or_else(|| (node.id.clone(), finding.id.clone()));
+            (origin, finding)
+        })
+        .collect()
+}
+
+#[derive(Clone)]
+struct FullFinding {
+    origin: RootIdentity,
+    projected_id: String,
+    finding: Finding,
+}
+
+/// Resolve an adjudicator's declared finding inputs through member
+/// materialisation, bypassing capped composite projections while preserving
+/// the same source prefixes and root identities used by ordinary inputs.
+fn fully_resolved_findings(
+    node: &PlannedNode,
+    plan: &PlannedGraph,
+    checkpoint: &GraphCheckpoint,
+    positions: &std::collections::BTreeMap<String, usize>,
+) -> Vec<ResolvedFinding> {
+    let mut selected = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+    for input in &node.inputs {
+        if !input.outputs.contains(&OutputKind::Findings) || !seen.insert(&input.node) {
+            continue;
+        }
+        let Some(index) = positions.get(&input.node).copied() else {
+            continue;
+        };
+        for full in fully_materialised_origins(index, plan, checkpoint, positions) {
+            let mut finding = full.finding;
+            finding.id.clone_from(&full.projected_id);
+            selected.push(ResolvedFinding {
+                source: input.node.clone(),
+                stored_id: full.projected_id,
+                finding,
+                root: full.origin,
+            });
+        }
+    }
+    let roots = selected
+        .iter()
+        .map(|item| item.root.clone())
+        .collect::<std::collections::BTreeSet<_>>();
+    let ids = display_ids(&roots);
+    for item in &mut selected {
+        if let Some(id) = ids.get(&item.root) {
+            item.finding.id.clone_from(id);
+        }
+    }
+    selected
+}
+
+fn fully_materialised_origins(
+    index: usize,
+    plan: &PlannedGraph,
+    checkpoint: &GraphCheckpoint,
+    positions: &std::collections::BTreeMap<String, usize>,
+) -> Vec<FullFinding> {
+    let Some(node) = plan.nodes.get(index) else {
+        return Vec::new();
+    };
+    if let Some(spec) = node.composite.as_ref() {
+        let mut findings = Vec::new();
+        let partial = spec.min_successful.is_some() || spec.reduce_verdict;
+        for export in &spec.exports {
+            if !export.outputs.contains(&OutputKind::Findings) {
+                continue;
+            }
+            let Some(member_index) = positions.get(&export.node).copied() else {
+                continue;
+            };
+            if repair::intentionally_skipped_lens(member_index, plan, checkpoint) {
+                continue;
+            }
+            let member = &checkpoint.nodes[member_index];
+            if partial
+                && member.state != NodeState::Succeeded
+                && !review::retained_findings(&plan.nodes[member_index], member)
+            {
+                continue;
+            }
+            if member.outputs.is_none() {
+                continue;
+            }
+            findings.extend(
+                fully_materialised_origins(member_index, plan, checkpoint, positions)
+                    .into_iter()
+                    .map(|mut full| {
+                        full.projected_id = format!("{}:{}", export.node, full.projected_id);
+                        full
+                    }),
+            );
+        }
+        return findings;
+    }
+    let upstream = fully_resolved_findings(node, plan, checkpoint, positions);
+    materialised_findings(index, plan, checkpoint, positions)
+        .into_iter()
+        .map(|finding| {
+            let exact = upstream
+                .iter()
+                .filter(|item| item.finding.id == finding.id)
+                .map(|item| item.root.clone())
+                .collect::<std::collections::BTreeSet<_>>();
+            let origin = finding
+                .propagates
+                .as_deref()
+                .and_then(|marker| marker_root(marker, &upstream))
+                .or_else(|| {
+                    (exact.len() == 1)
+                        .then(|| exact.into_iter().next())
+                        .flatten()
+                })
+                .unwrap_or_else(|| (node.id.clone(), finding.id.clone()));
+            FullFinding {
+                origin,
+                projected_id: finding.id.clone(),
+                finding,
+            }
+        })
+        .collect()
+}
+
+/// Apply the canonical output identity scheme to a complete finding set.
+pub(super) fn qualify_finding_origins(
+    findings: &mut [(RootIdentity, Finding)],
+    previous: &std::collections::BTreeMap<RootIdentity, String>,
+) {
+    let roots = findings
+        .iter()
+        .map(|(origin, _)| origin.clone())
+        .collect::<std::collections::BTreeSet<_>>();
+    let canonical = display_ids(&roots);
+    let mut ids = std::collections::BTreeMap::new();
+    let mut used = std::collections::BTreeSet::new();
+    for (origin, id) in previous {
+        if roots.contains(origin) && used.insert(id.clone()) {
+            ids.insert(origin.clone(), id.clone());
+        }
+    }
+    for origin in &roots {
+        if ids.contains_key(origin) {
+            continue;
+        }
+        let base = canonical
+            .get(origin)
+            .cloned()
+            .unwrap_or_else(|| origin.1.clone());
+        let mut candidate = base.clone();
+        let mut suffix = 1usize;
+        while used.contains(&candidate) {
+            candidate = format!("{}:{}:{suffix}", origin.0, origin.1);
+            suffix += 1;
+        }
+        used.insert(candidate.clone());
+        ids.insert(origin.clone(), candidate);
+    }
+    for (origin, finding) in findings {
+        if let Some(id) = ids.get(origin) {
+            finding.id.clone_from(id);
+        }
+    }
 }
 
 /// Resolve markers only against actual inputs, following each match to its root.
@@ -1231,8 +1434,8 @@ fn resolved_inputs_inner(
 
 /// The declared marker form is `<input>:<id>`. A propagator that drops the input
 /// prefix still names one finding when that shorter form leads to a single root.
-fn marker_root(marker: &str, upstream: &[ResolvedFinding]) -> Option<FindingOrigin> {
-    let roots = |named: &dyn Fn(&str) -> bool| -> std::collections::BTreeSet<FindingOrigin> {
+fn marker_root(marker: &str, upstream: &[ResolvedFinding]) -> Option<RootIdentity> {
+    let roots = |named: &dyn Fn(&str) -> bool| -> std::collections::BTreeSet<RootIdentity> {
         upstream
             .iter()
             .filter(|item| {
@@ -1401,6 +1604,57 @@ pub(super) fn review_ledger_artifact_required(
             .unwrap_or_default()
     };
     findings.len() > MAX_FINDINGS || canonical_len(&findings) > FINDINGS_BYTES
+}
+
+pub(super) fn complete_review_artifact_required(
+    node: &PlannedNode,
+    plan: &PlannedGraph,
+    checkpoint: &GraphCheckpoint,
+    positions: &std::collections::BTreeMap<String, usize>,
+) -> bool {
+    node.kind == Some(NodeKind::Adjudicate)
+        || review_ledger_artifact_required(node, plan, checkpoint, positions)
+}
+
+pub(super) fn complete_review_artifact(
+    node: &PlannedNode,
+    requests: &[InputRequest],
+    materialised: Option<&MaterialisedInputs>,
+) -> bool {
+    if node.kind != Some(NodeKind::Adjudicate) {
+        return complete_review_ledger_artifact(requests, materialised);
+    }
+    let required: Vec<_> = requests
+        .iter()
+        .filter(|request| request.attempt_ref.is_some() || request.inline_findings.is_some())
+        .collect();
+    let Some(materialised) = materialised else {
+        return required.is_empty();
+    };
+    let complete_file = |request: &InputRequest, entry: &MaterialisedInput| {
+        matches!(entry, MaterialisedInput::File { label, omitted: 0, bytes, .. }
+            if label == &request.label && *bytes as usize <= NODE_INPUT_FILE_BYTES)
+    };
+    if requests.iter().any(|request| {
+        materialised.entries.iter().any(|entry| match entry {
+            MaterialisedInput::File { label, .. }
+            | MaterialisedInput::Capped { label }
+            | MaterialisedInput::Unavailable { label, .. }
+                if label == &request.label =>
+            {
+                !complete_file(request, entry)
+            }
+            _ => false,
+        })
+    }) {
+        return false;
+    }
+    required.iter().all(|request| {
+        materialised
+            .entries
+            .iter()
+            .any(|entry| complete_file(request, entry))
+    })
 }
 
 pub(super) fn complete_review_ledger_artifact(
@@ -1916,7 +2170,11 @@ pub(super) fn upstream_results(
         let Some(outputs) = progress.outputs.as_ref() else {
             return;
         };
-        let inline_findings = (include_findings && outputs.result.is_none())
+        let checkpoint_artifact = outputs.full_artifact_findings.is_some()
+            || outputs.full_disposition_findings.is_some()
+            || outputs.artifact_findings.is_some();
+        let inline_findings = (include_findings
+            && (outputs.result.is_none() || checkpoint_artifact))
             .then(|| materialised_findings(index, plan, checkpoint, positions))
             .filter(|findings| !findings.is_empty());
         if outputs.result.is_none() && inline_findings.is_none() {
@@ -2493,6 +2751,31 @@ mod alias_tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn later_collision_preserves_prior_display_identity() {
+        let first = ("lens-a".to_owned(), "F1".to_owned());
+        let second = ("lens-b".to_owned(), "F1".to_owned());
+        let roots = std::collections::BTreeSet::from([first.clone(), second.clone()]);
+        let previous = std::collections::BTreeMap::from([(first.clone(), "F1".to_owned())]);
+        let mut findings =
+            vec![
+            (first.clone(), serde_json::from_value(serde_json::json!({
+                "id":"F1", "severity":"high", "file":"a.rs", "summary":"first", "status":"open"
+            })).unwrap()),
+            (second.clone(), serde_json::from_value(serde_json::json!({
+                "id":"F1", "severity":"high", "file":"b.rs", "summary":"second", "status":"open"
+            })).unwrap()),
+        ];
+        assert_eq!(display_ids(&roots)[&first], "lens-a:F1");
+        qualify_finding_origins(&mut findings, &previous);
+        let actual = findings
+            .into_iter()
+            .map(|(origin, finding)| (origin, finding.id))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        assert_eq!(actual[&first], "F1");
+        assert_eq!(actual[&second], "lens-b:F1");
     }
 
     #[test]
