@@ -81,7 +81,7 @@ libtest threads, and a test pins the two together.
 - Why: one named size keeps production workers and test harness threads from
   drifting apart.
 - Owner: `crates/fabric-runtime/src/graph.rs` (`GRAPH_STACK_BYTES`),
-  `src/check_providers.rs`, `.cargo/config.toml`
+  `src/check_providers.rs`, `src/status_wait.rs`, `.cargo/config.toml`
 
 ## One owner per mechanism
 

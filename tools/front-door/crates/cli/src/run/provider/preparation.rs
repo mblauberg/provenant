@@ -4106,7 +4106,23 @@ pub(super) fn prepare_candidates_inner(
                             &reason_resources,
                         )?;
                         for (adapter, plan_error) in &plan_errors {
-                            if !checks.iter().any(|check| check.route == *adapter) {
+                            let mut matched = false;
+                            for check in &mut checks {
+                                if check.route == *adapter
+                                    || check
+                                        .route
+                                        .strip_prefix(*adapter)
+                                        .is_some_and(|tail| tail.starts_with('/'))
+                                {
+                                    let facts = plan_error.skipped(&check.route);
+                                    check.plan_error = facts.plan_error;
+                                    check.guard_boundary = facts.guard_boundary;
+                                    check.guard_resource = facts.guard_resource;
+                                    check.confinement_guard = facts.confinement_guard;
+                                    matched = true;
+                                }
+                            }
+                            if !matched {
                                 checks.push(plan_error.skipped(adapter));
                             }
                         }

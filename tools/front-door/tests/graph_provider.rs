@@ -2971,7 +2971,9 @@ fn pending_graph_reports_pre_attempt_writer_failure() -> Result {
             let waited = rig.command(&["wait", "mixed-failure", "--timeout", "1s", "--json"])?;
             assert_ne!(code(&waited), 0, "{waited:?}");
         }
-        assert_eq!(response["status"], "waiting", "{response}");
+        // Composite launches return an accepted handle while the graph runs.
+        assert_eq!(response["status"], "ok", "{response}");
+        assert_eq!(response["data"]["status"], "pending", "{response}");
         let nodes = response["data"]["checkpoint"]["nodes"]
             .as_array()
             .ok_or("nodes")?;
@@ -2984,6 +2986,22 @@ fn pending_graph_reports_pre_attempt_writer_failure() -> Result {
             "{response}"
         );
         assert_eq!(writer["attempts"], json!([]), "{response}");
+        assert!(
+            !writer["writer_binding_pending"].as_bool().unwrap_or(false),
+            "{response}"
+        );
+        let slow = nodes
+            .iter()
+            .find(|node| node["id"] == "slow")
+            .ok_or("slow")?;
+        assert_eq!(slow["state"], "running", "{response}");
+        assert!(
+            slow["warnings"].as_array().is_some_and(|warnings| warnings
+                .iter()
+                .any(|warning| warning["code"] == "SETTING_LAYER_IGNORED"
+                    && warning["source"]["layer"] == "detected")),
+            "{response}"
+        );
         assert_eq!(
             response["error"]["code"],
             writer["advance_owner_code"]

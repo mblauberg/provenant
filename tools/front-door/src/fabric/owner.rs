@@ -151,7 +151,7 @@ pub(crate) struct BoundGraphOwner<'a> {
     pub(crate) admission_timeout: Option<WaitBudget>,
     pub(crate) factory: &'a Factory,
     pub(crate) repo_facts: provenant_confinement::worktrees::RepoFacts,
-    pub(crate) launch_warnings: Vec<String>,
+    pub(crate) launch_warnings: Vec<Warning>,
     // Both immutable graph bases travel together through every host owner.
     pub(crate) integration_base: Option<GraphBaseBinding>,
     pub(crate) integration_branch: Option<String>,
@@ -3187,13 +3187,14 @@ impl BoundGraphOwner<'_> {
                 &exclude,
                 &self.factory.context.roots,
             ) {
-                warn(Warning::new(
+                let warning = Warning::new(
                     provenant_records::warning::EXCLUSION_ADVISORY,
-                    warning.clone(),
+                    warning,
                     provenant_records::warning::detected_source(
                         provenant_records::warning::EXCLUSION_ADVISORY,
                     ),
-                ));
+                );
+                warn(warning.clone());
                 self.launch_warnings.push(warning);
             }
         }
@@ -3457,11 +3458,12 @@ impl BoundGraphOwner<'_> {
                 &provenant_cli::run::ReadSourceChoice::automatic(),
             )
         {
-            warn(Warning::new(
+            let warning = Warning::new(
                 SETTING_LAYER_IGNORED,
-                warning.clone(),
+                warning,
                 provenant_records::warning::detected_source(SETTING_LAYER_IGNORED),
-            ));
+            );
+            warn(warning.clone());
             self.launch_warnings.push(warning);
         }
         if !accepted {
@@ -3511,16 +3513,15 @@ impl BoundGraphOwner<'_> {
                 "model {} is not in the catalogue; {repair}; the provider will check it",
                 model.as_str()
             );
-            warn(
-                Warning::new(
+            let warning = Warning::new(
+                provenant_records::warning::MODEL_SEGMENT_ADVISORY,
+                warning,
+                provenant_records::warning::detected_source(
                     provenant_records::warning::MODEL_SEGMENT_ADVISORY,
-                    warning.clone(),
-                    provenant_records::warning::detected_source(
-                        provenant_records::warning::MODEL_SEGMENT_ADVISORY,
-                    ),
-                )
-                .subject(model.as_str()),
-            );
+                ),
+            )
+            .subject(model.as_str());
+            warn(warning.clone());
             self.launch_warnings.push(warning);
         }
         let receipt = owner.submit_with_access(

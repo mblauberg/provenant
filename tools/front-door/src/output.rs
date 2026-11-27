@@ -328,7 +328,7 @@ pub(crate) fn command_seam() -> provenant_cli::CommandSeam {
         remember: remember_warnings,
         give_back: return_warnings,
         display_warnings: display_held_warnings,
-        report: |result| write_report(result).map(|path| path.to_string_lossy().into_owned()),
+        report: write_report,
         streams: || (Box::new(io::stdout().lock()), Box::new(io::stderr().lock())),
     }
 }
@@ -564,6 +564,7 @@ fn emit_with_writers_and_tty<T: Serialize, Wout: Write, Werr: Write>(
         strip_ansi(human)
     };
     let mut warnings = take_warnings();
+    let mut report = None;
     // An oversized result also gets a private report; its path travels on the
     // cap warning so both the human line and the JSON envelope name it.
     if let Ok(data) = serde_json::to_value(&result.data)
@@ -578,12 +579,14 @@ fn emit_with_writers_and_tty<T: Serialize, Wout: Write, Werr: Write>(
             warnings: warnings.clone(),
             next: result.next.clone(),
         };
-        if let Some(path) = write_report(&envelope) {
+        let path = write_report(&envelope);
+        if let Some(path) = &path {
             warnings.push(provenant_cli::report_warning(
                 &result.command,
                 &path.to_string_lossy(),
             ));
         }
+        report = Some(path);
     }
     if !globals.json {
         let sink = COMMAND_SINK
@@ -669,7 +672,12 @@ fn emit_with_writers_and_tty<T: Serialize, Wout: Write, Werr: Write>(
         mode,
         stdout,
         stderr,
-        |value| overflow::publish(value, globals),
+        |value| match report {
+            Some(Some(path)) => provenant_records::AbsolutePath::new(&path)
+                .map_err(|_| io::Error::other("invalid report path")),
+            Some(None) => Err(io::Error::other("cannot write oversized report")),
+            None => overflow::publish(value, globals),
+        },
         // A published overflow keeps the result's status in its envelope,
         // so the exit code matches it; only a real render/IO failure exits 3.
         OverflowPolicy::Proceed,

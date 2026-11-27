@@ -470,7 +470,29 @@ fn oversized_show_returns_a_bounded_envelope_and_filter_remains_usable() -> Resu
     assert!(out.stdout.bytes.len() < provenant_records::command_result::COMMAND_RESULT_MAX_BYTES);
     let value: serde_json::Value = serde_json::from_slice(&out.stdout.bytes)?;
     assert!(value["error"].is_null(), "{value}");
-    assert!(value["data"]["artifact"].as_str().is_some(), "{value}");
+    let artifact: provenant_records::AbsolutePath =
+        serde_json::from_value(value["data"]["artifact"].clone())?;
+    let artifact = artifact.to_path_buf()?;
+    assert_eq!(artifact.parent(), Some(rig.state.join("reports").as_path()));
+    assert!(artifact.is_file(), "{artifact:?}");
+    assert_eq!(fs::metadata(&artifact)?.permissions().mode() & 0o777, 0o600);
+    let artifact_text = artifact.to_str().ok_or("report path encoding")?;
+    assert!(
+        artifact
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with("quota-") && name.ends_with(".json"))
+    );
+    assert!(
+        value["warnings"]
+            .as_array()
+            .is_some_and(|warnings| warnings.iter().any(|warning| warning["code"]
+                == "RESULT_TOO_LARGE"
+                && warning["message"]
+                    .as_str()
+                    .is_some_and(|message| message.contains(artifact_text)))),
+        "{value}"
+    );
     assert!(
         value["warnings"].as_array().is_some_and(|warnings| warnings
             .iter()

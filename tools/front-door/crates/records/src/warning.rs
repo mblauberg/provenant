@@ -77,6 +77,8 @@ pub const NAME_ALIAS_USED: WarningCode = WarningCode("NAME_ALIAS_USED");
 pub const CROSS_PROJECT_TARGET_FOUND: WarningCode = WarningCode("CROSS_PROJECT_TARGET_FOUND");
 /// The lane's branch is behind its base and will be updated.
 pub const BRANCH_BEHIND_BASE: WarningCode = WarningCode("BRANCH_BEHIND_BASE");
+/// A branch exists but its ownership could not be recorded.
+pub const REF_OWNERSHIP_UNRECORDED: WarningCode = WarningCode("REF_OWNERSHIP_UNRECORDED");
 /// An existing worktree was adopted although it had uncommitted changes.
 pub const WORKTREE_ADOPTED_DIRTY: WarningCode = WarningCode("WORKTREE_ADOPTED_DIRTY");
 /// This release reads and writes a different live-record format.

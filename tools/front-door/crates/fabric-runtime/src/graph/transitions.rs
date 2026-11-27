@@ -131,11 +131,10 @@ pub(super) fn apply_gate_result(
 pub(super) fn apply_launch_metadata(
     checkpoint: &mut GraphCheckpoint,
     node_index: usize,
-    warnings: Vec<String>,
+    warnings: Vec<provenant_records::Warning>,
 ) {
     if !warnings.is_empty() {
-        checkpoint.nodes[node_index].warnings =
-            warnings.into_iter().map(super::legacy_warning).collect();
+        checkpoint.nodes[node_index].warnings = warnings;
     }
 }
 
@@ -1033,6 +1032,7 @@ pub(super) fn fail_with(progress: &mut NodeProgress, code: &str, message: String
 }
 
 pub(super) fn writer_binding_failed(progress: &mut NodeProgress, _id: &str, reason: &str) {
+    progress.writer_binding_pending = false;
     fail_with(progress, "writer_binding_unavailable", reason.to_owned());
 }
 

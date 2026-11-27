@@ -1933,7 +1933,17 @@ impl Factory {
             let mut owner = BoundGraphOwner {
                 writer_launch_budget: None,
                 admission_timeout,
-                launch_warnings: ledger_warning.into_iter().collect(),
+                launch_warnings: ledger_warning
+                    .into_iter()
+                    .map(|message| {
+                        let code = provenant_records::warning::REF_OWNERSHIP_UNRECORDED;
+                        provenant_records::Warning::new(
+                            code,
+                            message,
+                            provenant_records::warning::detected_source(code),
+                        )
+                    })
+                    .collect(),
                 repo_facts: facts.clone(),
                 factory: rebound.as_ref().unwrap_or(self),
                 integration_base: GraphBaseBinding::new(review_base, integration_base),

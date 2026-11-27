@@ -231,7 +231,7 @@ Session-stream host reads carry their JSON lines as an ordered `stream` array in
 
 - **Collapse.** The existing warning sink and the bounded renderer (`src/output.rs`, `crates/cli/src/render.rs`) collapse warnings by `(code, setting.key, message template)`. The line reads `warning [CODE] ×7: <first> (first: <subject>) — --full lists all`. JSON keeps up to 64 instances plus `warnings_omitted`. The key is `domains.cli.collapse_warnings` (H/L, default `on`).
 - **Pool-selection warning.** `apply_route` (`graph/transitions.rs:141-176`) checks only identifier fields against `HOST_ID_BYTES`.
-- **Typed graph warnings.** `NodeProgress.warnings` becomes `Vec<Warning>`, which affects the model, journal, relay and renderers. The graph-store transform migrates it (§3.10).
+- **Typed graph warnings.** `NodeProgress.warnings` becomes `Vec<Warning>`, which affects the model, journal, relay and renderers. Launch warnings retain their registered code and source; the graph-store transform migrates older strings (§3.10).
 - **Exits.** The existing table is unchanged (`Outcome::exit_code`):
 
 | Case | Outcome | Exit |
@@ -242,7 +242,7 @@ Session-stream host reads carry their JSON lines as an ordered `stream` array in
 | A silent lane | Stalled | 6 |
 | An oversized result | The real outcome is kept, plus `RESULT_TOO_LARGE` | unchanged |
 
-- **Oversized results.** A quota show result that exceeds the envelope cap is paged with its original successful outcome and a `RESULT_TOO_LARGE` warning; filtering remains available. `RESULT_TOO_LARGE` is a warning on its code paths; `docs/specs/cli.md:162` is corrected to match. The full result is also written to `<state>/reports/<verb>-<ts>.json` (mode 0600, the same redaction as the envelope, pruned by gc after 7 days), and the warning carries the path.
+- **Oversized results.** A quota show result that exceeds the envelope cap is paged with its original successful outcome and a `RESULT_TOO_LARGE` warning; filtering remains available. `RESULT_TOO_LARGE` is a warning on its code paths; `docs/specs/cli.md:162` is corrected to match. The full result is also written to `<state>/reports/<verb>-<ts>.json` (mode 0600, the same redaction as the envelope, pruned by gc after 7 days), and the warning carries the path. The bounded envelope's `data.artifact` is an `AbsolutePath` wire object naming that same report.
 - **Compact gc and upgrade.** `gc` prints per-class aggregates (under 32 KiB) and `--full` adds per-candidate rows. `upgrade` prints one release line, and `--full` adds the file counts and notices.
 - **Reclaim.** `trait Reclaimable {class, scan(cursor, deadline), apply(plan, deadline)}` lives in `crates/run/src/reclaim.rs`.
   - Its cursor is `ReclaimCursor{page_start_seq, page_end_seq, visited}`, and a resume finishes the current page before it advances (#4099).

@@ -130,19 +130,6 @@ use budget::*;
 pub use journal::*;
 pub use model::*;
 
-/// Preserve the text of warnings from graph producers that have not yet been
-/// assigned a dedicated catalogue code.
-pub(crate) fn legacy_warning(message: impl Into<String>) -> provenant_records::Warning {
-    provenant_records::Warning::new(
-        provenant_records::warning::LEGACY_WARNING,
-        message,
-        provenant_records::provenance::Source {
-            layer: provenant_records::Layer::Detected,
-            origin: Some("legacy graph warning".to_owned()),
-        },
-    )
-}
-
 /// Shared recovery guidance for a pull request that conflicts with its base.
 pub const CONFLICT_GUIDANCE: &str =
     "merge the base into the branch; never rebase pushed history; then push";
@@ -821,7 +808,7 @@ pub trait AttemptOwner {
     }
 
     /// Submit-time warnings retained in graph status for every transport.
-    fn take_launch_warnings(&mut self) -> Vec<String> {
+    fn take_launch_warnings(&mut self) -> Vec<provenant_records::Warning> {
         Vec::new()
     }
 

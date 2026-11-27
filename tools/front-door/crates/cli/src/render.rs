@@ -40,7 +40,7 @@ pub struct CommandSeam {
     pub display_warnings: fn(&[Warning]),
     /// Write the full oversized result to a private report, naming its path in
     /// the cap warning. The edge resolves the state root; this crate only asks.
-    pub report: fn(&CommandResult<serde_json::Value>) -> Option<String>,
+    pub report: fn(&CommandResult<serde_json::Value>) -> Option<std::path::PathBuf>,
     /// The edge's standard output and error, the only writers a command
     /// surface renders to.
     pub streams: fn() -> Streams,
@@ -71,7 +71,8 @@ pub fn render_command_result<T: Serialize>(
 ) -> Result<Outcome, RenderError> {
     let seam = COMMAND_SEAM.get();
     result.warnings = seam.map(|seam| (seam.take)()).unwrap_or_default();
-    // An oversized result gets a private report beside the published artefact.
+    let mut report = None;
+    // An oversized result gets a private report.
     // The warning naming the path is added before rendering so both the human
     // line and the JSON array carry it.
     if let Some(seam) = seam
@@ -87,9 +88,13 @@ pub fn render_command_result<T: Serialize>(
             warnings: result.warnings.clone(),
             next: result.next.clone(),
         };
-        if let Some(path) = (seam.report)(&envelope) {
-            result.warnings.push(report_warning(&result.command, &path));
+        let path = (seam.report)(&envelope);
+        if let Some(path) = &path {
+            result
+                .warnings
+                .push(report_warning(&result.command, &path.to_string_lossy()));
         }
+        report = Some(path);
     }
     // JSON carries warnings as data; a human reader sees the collapsed set once
     // through the same seam the binary edge installed.
@@ -107,7 +112,19 @@ pub fn render_command_result<T: Serialize>(
         Some(seam) => (seam.streams)(),
         None => (Box::new(io::sink()), Box::new(io::sink())),
     };
-    let rendered = render_or_publish(result, mode, &mut out, &mut err, publish, policy);
+    let rendered = render_or_publish(
+        result,
+        mode,
+        &mut out,
+        &mut err,
+        |value| match report {
+            Some(Some(path)) => provenant_records::AbsolutePath::new(&path)
+                .map_err(|_| io::Error::other("invalid report path")),
+            Some(None) => Err(io::Error::other("cannot write oversized report")),
+            None => publish(value),
+        },
+        policy,
+    );
     drop((out, err));
     if let Some(seam) = seam {
         if rendered.is_ok() && matches!(mode, RenderMode::Json) {

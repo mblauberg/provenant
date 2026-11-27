@@ -532,6 +532,8 @@ pub(in crate::graph) fn validate_checkpoint<R: Error + 'static, J: Error + 'stat
             && plans::writer(node)
             && !peer_owned_writer(node.access, node.worktree.as_deref(), node.attempt.as_ref())
             && !progress.writer_binding_pending
+            && !(progress.state == NodeState::Failed
+                && progress.advance_code.as_deref() == Some("writer_binding_unavailable"))
         {
             return Err(bad("writer must retain its binding"));
         }

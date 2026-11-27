@@ -2287,7 +2287,10 @@ pub(crate) fn run(
                     fallback_reason.as_deref(),
                 );
             }
-            scope.spawn(move || {
+            // Graph reads can advance and launch nodes; use the shared graph stack.
+            std::thread::Builder::new()
+                .stack_size(provenant_fabric_runtime::graph::GRAPH_STACK_BYTES)
+                .spawn_scoped(scope, move || {
                 let mut journal = graph_subscription.and_then(|(roots, project, cursor)|
                     crate::event_delivery::Journal::resume_graphs(roots, project, cursor).ok());
                 let mut last_graph_reconcile = Instant::now();
@@ -2495,7 +2498,8 @@ pub(crate) fn run(
                         next_remote_poll = Instant::now() + interval;
                     }
                 }
-            });
+                })
+                .expect("spawn graph wait worker");
         }
         for (index, source) in sources.iter().enumerate() {
             if !matches!(source, Source::Pr { .. })

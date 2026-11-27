@@ -439,7 +439,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             .map(|base| Some(base.to_string()))
     }
 
-    fn take_launch_warnings(&mut self) -> Vec<String> {
+    fn take_launch_warnings(&mut self) -> Vec<Warning> {
         std::mem::take(&mut self.launch_warnings)
     }
 
@@ -493,19 +493,18 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
                 let warning = format!(
                     "ignoring --base {reference} for --branch {branch}; using remote tip {tip}"
                 );
-                warn(
-                    Warning::new(
-                        BRANCH_BEHIND_BASE,
-                        warning.clone(),
-                        provenant_records::warning::detected_source(BRANCH_BEHIND_BASE),
-                    )
-                    .subject(branch.to_string())
-                    .source(provenant_records::Source {
-                        layer: provenant_records::Layer::Detected,
-                        origin: Some(format!("git remote tip {tip}")),
-                    })
-                    .repair(format!("use --base {tip}")),
-                );
+                let warning = Warning::new(
+                    BRANCH_BEHIND_BASE,
+                    warning,
+                    provenant_records::warning::detected_source(BRANCH_BEHIND_BASE),
+                )
+                .subject(branch.to_string())
+                .source(provenant_records::Source {
+                    layer: provenant_records::Layer::Detected,
+                    origin: Some(format!("git remote tip {tip}")),
+                })
+                .repair(format!("use --base {tip}"));
+                warn(warning.clone());
                 self.launch_warnings.push(warning);
             }
             return Ok(Some(tip.to_string()));
@@ -534,13 +533,14 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             )
             .map_err(git_facts::repository_fact_error)?;
             for warning in warnings {
-                warn(Warning::new(
+                let warning = Warning::new(
                     provenant_records::warning::BASE_FALLBACK_ADVISORY,
-                    warning.clone(),
+                    warning,
                     provenant_records::warning::detected_source(
                         provenant_records::warning::BASE_FALLBACK_ADVISORY,
                     ),
-                ));
+                );
+                warn(warning.clone());
                 self.launch_warnings.push(warning);
             }
             return Ok(Some(base.to_string()));
