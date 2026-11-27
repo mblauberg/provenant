@@ -4,6 +4,7 @@ use provenant_cli::brief::{BriefSource, read_brief, select_brief_source};
 use provenant_cli::{Edit, Globals, GraphRunArgs, Templates};
 use provenant_confinement::worktrees::WorkerObserver;
 use provenant_core::{CancelToken, Clock, WaitBudget};
+use provenant_fabric_runtime::graph::root_cause::is_upstream_blocked;
 use provenant_records::{
     CommandResult, Outcome,
     warning::{Warning, warn},
@@ -41,6 +42,12 @@ fn response_outcome(command: &str, data: &Value) -> Outcome {
 fn launch_error_node(data: &Value, outcome: Outcome) -> Option<&Value> {
     data["checkpoint"]["nodes"].as_array()?.iter().find(|node| {
         node["advance_note"].is_string()
+            // A dependant blocked by an upstream failure is not a launch
+            // error; the shared cause rule keeps `run` from naming it (#4102).
+            && !is_upstream_blocked(
+                node["advance_code"].as_str(),
+                node["advance_note"].as_str(),
+            )
             && node["attempts"].as_array().is_some_and(Vec::is_empty)
             && (matches!(outcome, Outcome::Failed | Outcome::Refused)
                 || node["state"] == "failed"
@@ -991,6 +998,24 @@ mod tests {
         request: GraphRunArgs,
     ) -> Result<Value, Box<provenant_records::diagnostic::Diagnostic>> {
         run_input(request, &provenant_routing::Catalogue::bundled().unwrap())
+    }
+
+    #[test]
+    fn run_launch_error_skips_upstream_blocked_dependant() {
+        // `run` names the pre-attempt launch failure, never the dependant that
+        // the failed node blocked. This uses the shared cause predicate.
+        let data = json!({"status":"failed", "checkpoint":{"nodes":[
+            {"id":"dependant", "state":"blocked", "attempts":[],
+             "advance_code":"upstream_blocked",
+             "advance_note":"blocked by writer (Failed)"},
+            {"id":"writer", "state":"failed", "attempts":[],
+             "advance_code":"launch_refused",
+             "advance_owner_code":"command_unavailable",
+             "advance_note":"configure the fixture provider command"}
+        ]}});
+        let node = launch_error_node(&data, Outcome::Failed).expect("a launch error remains");
+        assert_eq!(node["id"], "writer");
+        assert_eq!(node["advance_owner_code"], "command_unavailable");
     }
 
     #[test]

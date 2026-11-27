@@ -465,10 +465,11 @@ pub(super) fn graph_snapshot(
     } else {
         GraphStatus::Pending
     };
-    let advance_note = checkpoint
-        .nodes
-        .iter()
-        .find_map(|node| node.advance_note.clone());
+    // Name the node that actually failed rather than the first dependant
+    // blocked by an upstream failure. The walk is shared with `wait`, `run`
+    // and `upgrade --verify` (#4102).
+    let advance_note =
+        provenant_fabric_runtime::graph::root_cause(&checkpoint).map(|cause| cause.message);
     GraphRun {
         status,
         outcome: (status == GraphStatus::Complete).then(|| checkpoint.outcome()),
@@ -479,6 +480,32 @@ pub(super) fn graph_snapshot(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn graph_snapshot_names_the_cause_not_the_blocked_dependant() {
+        // `status` and `wait` both project a graph through this snapshot. A
+        // dependant blocked by an upstream failure must not bury the cause.
+        let checkpoint =
+            serde_json::from_value::<provenant_fabric_runtime::graph::GraphCheckpoint>(
+                serde_json::json!({
+                    "schema_version": 2, "graph_id": "g", "plan_digest": "d",
+                    "nodes": [
+                        {"id":"dependant", "state":"blocked", "worktree":null,
+                         "advance_code":"upstream_blocked",
+                         "advance_note":"blocked by cause (Failed)", "attempts":[]},
+                        {"id":"cause", "state":"failed", "worktree":null,
+                         "advance_code":"launch_refused",
+                         "advance_owner_code":"confinement_refused",
+                         "advance_note":"peer_project_unprojectable", "attempts":[]}
+                    ]
+                }),
+            )
+            .expect("fixture is a valid checkpoint");
+        let run = super::graph_snapshot(checkpoint);
+        let note = run.advance_note.expect("the graph names its cause");
+        assert_eq!(note, "peer_project_unprojectable");
+        assert!(!note.contains("blocked by"), "{note}");
+    }
+
     #[test]
     fn lane_state_uses_one_vocabulary_for_live_attempts_and_prelaunch_work() {
         // Spec: docs/specs/cli.md#status-selection
