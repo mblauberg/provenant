@@ -688,21 +688,69 @@ pub(crate) fn tick_graphs(
     resolved: &crate::roots::Resolved,
     now: provenant_core::WallTime,
     workers: &'static dyn WorkerObserver,
+    deadline: provenant_core::Deadline,
 ) -> Result<crate::tick::Graphs, Box<dyn std::error::Error>> {
     use provenant_fabric_runtime::graph::{FileJournal, GraphJournal};
     let mut report = super::queue_scheduler::reconcile_controls_before_tick(resolved, workers);
+    let directory =
+        provenant_config::private_directory(&resolved.roots.state.as_path().join("tick"), true)?;
+    let mut cursor =
+        crate::tick::read_cursor(&directory, "graphs").map_err(std::io::Error::other)?;
+    let config = provenant_cli::config_reads::read_for(&resolved.roots, "tick")?;
+    let subject_budget = config
+        .knobs
+        .get("domains.tick.subject_budget_seconds")
+        .and_then(|entry| entry.value.as_u64())
+        .unwrap_or(10);
+    let subject_budget = provenant_core::DurationMicros::from_seconds(subject_budget)
+        .unwrap_or(provenant_core::DurationMicros::ZERO);
+    let mut subjects = Vec::new();
     for binding in provenant_config::registered_projects(&resolved.roots)? {
+        let project = binding.project_id();
+        match FileJournal::pending_graph_ids(&resolved.roots.state, project) {
+            Ok(ids) => subjects.extend(
+                ids.into_iter()
+                    .map(|id| (format!("{project}/{id}"), binding.clone(), id)),
+            ),
+            Err(error) => report.errors.push(format!("{project}: {error}")),
+        }
+    }
+    let due: Vec<String> = subjects.iter().map(|(key, _, _)| key.clone()).collect();
+    let order = cursor.order(&due);
+    subjects.sort_by_key(|(key, _, _)| {
+        order
+            .iter()
+            .position(|item| item == key)
+            .unwrap_or(usize::MAX)
+    });
+    for (key, binding, id) in subjects {
+        if deadline.is_expired(SystemClock::new().mono_now()) {
+            break;
+        }
+        let subject_deadline = deadline.child(SystemClock::new().mono_now(), subject_budget);
+        let retry_subject = std::cell::Cell::new(false);
+        macro_rules! skip_subject {
+            () => {{
+                cursor.advance(&key, false);
+                if let Err(error) =
+                    crate::tick::publish(&directory, "cursor-graphs.json", "tick-cursor", &cursor)
+                {
+                    report.warnings.push(format!("cursor: {error}"));
+                }
+                continue;
+            }};
+        }
         let project = binding.project_id();
         // A retired project keeps its registration but is fenced out of all
         // scheduling until `provenant adopt project:ID` removes the fence.
         match provenant_config::project_is_retired(&resolved.roots, project) {
-            Ok(true) => continue,
+            Ok(true) => skip_subject!(),
             Ok(false) => {}
             Err(error) => {
                 report.errors.push(format!(
                     "{project}: project disposition fence unavailable: {error}"
                 ));
-                continue;
+                skip_subject!();
             }
         }
         // One presence classification for all scheduling. A permission or I/O
@@ -718,7 +766,7 @@ pub(crate) fn tick_graphs(
                     report
                         .errors
                         .push(format!("{project}: project presence unavailable: {error}"));
-                    continue;
+                    skip_subject!();
                 }
             };
         match presence {
@@ -738,7 +786,7 @@ pub(crate) fn tick_graphs(
                     .subject(incarnation.key())
                     .once_per_change(),
                 );
-                continue;
+                skip_subject!();
             }
             provenant_config::ProjectPresence::Absent { since } => {
                 provenant_records::warning::warn(
@@ -752,193 +800,205 @@ pub(crate) fn tick_graphs(
                     .subject(incarnation.key())
                     .once_per_change(),
                 );
-                continue;
+                skip_subject!();
             }
             // Present, or an unreachable checkout whose retry window elapsed:
             // probe its pending graphs again this pass.
             provenant_config::ProjectPresence::Present
             | provenant_config::ProjectPresence::Unreachable { .. } => {}
         }
-        let ids = match FileJournal::pending_graph_ids(&resolved.roots.state, project) {
-            Ok(ids) => ids,
-            Err(error) => {
-                report.errors.push(format!("{project}: {error}"));
-                continue;
-            }
-        };
-        for id in ids {
-            let result = (|| -> Result<bool, Box<dyn std::error::Error>> {
-                let checkpoint =
-                    FileJournal::read_checkpoint_for_tick(&resolved.roots.state, project, &id)?;
-                let Some(checkpoint) = checkpoint else {
-                    // An absent checkpoint, or a corrupt one already quarantined
-                    // by an earlier tick, reaches this branch. The strict read
-                    // matches Ok(None) only for the absent case (a corrupt
-                    // record stays an error there), so the pending marker is
-                    // retired only for a genuinely absent checkpoint.
-                    if matches!(
-                        FileJournal::read_checkpoint(&resolved.roots.state, project, &id),
-                        Ok(None)
-                    ) {
-                        let clock = SystemClock::new();
-                        let cancel = CancelToken::new();
-                        match FileJournal::open(
-                            &resolved.roots.state,
-                            project,
-                            &id,
-                            WaitBudget::nonblocking(clock.mono_now()),
-                            &cancel,
-                            &clock,
-                        ) {
-                            Ok(mut journal) => journal.clear_stale_pending()?,
-                            Err(error) if error.is_lock_timeout() => {}
-                            Err(error) => return Err(error.into()),
-                        }
-                    }
-                    return Ok(false);
-                };
-                let due_at_start = checkpoint.cancelled || graph_wake_due(&checkpoint, now);
-                let clock = SystemClock::new();
-                let cancel = CancelToken::new();
-                let mut journal = match FileJournal::open(
-                    &resolved.roots.state,
-                    project,
-                    &id,
-                    WaitBudget::nonblocking(clock.mono_now()),
-                    &cancel,
-                    &clock,
+        let result = (|| -> Result<bool, Box<dyn std::error::Error>> {
+            let checkpoint =
+                FileJournal::read_checkpoint_for_tick(&resolved.roots.state, project, &id)?;
+            let Some(checkpoint) = checkpoint else {
+                // An absent checkpoint, or a corrupt one already quarantined
+                // by an earlier tick, reaches this branch. The strict read
+                // matches Ok(None) only for the absent case (a corrupt
+                // record stays an error there), so the pending marker is
+                // retired only for a genuinely absent checkpoint.
+                if matches!(
+                    FileJournal::read_checkpoint(&resolved.roots.state, project, &id),
+                    Ok(None)
                 ) {
-                    Ok(journal) => journal,
-                    Err(error) if error.is_lock_timeout() => return Ok(false),
-                    Err(error) => return Err(error.into()),
-                };
-                let Some(mut checkpoint) = journal.load(&id)? else {
+                    let clock = SystemClock::new();
+                    let cancel = CancelToken::new();
+                    match FileJournal::open(
+                        &resolved.roots.state,
+                        project,
+                        &id,
+                        WaitBudget::nonblocking(clock.mono_now()),
+                        &cancel,
+                        &clock,
+                    ) {
+                        Ok(mut journal) => journal.clear_stale_pending()?,
+                        Err(error) if error.is_lock_timeout() => {}
+                        Err(error) => return Err(error.into()),
+                    }
+                }
+                return Ok(false);
+            };
+            let due_at_start = checkpoint.cancelled || graph_wake_due(&checkpoint, now);
+            let clock = SystemClock::new();
+            let cancel = CancelToken::new();
+            let mut journal = match FileJournal::open(
+                &resolved.roots.state,
+                project,
+                &id,
+                WaitBudget::nonblocking(clock.mono_now()),
+                &cancel,
+                &clock,
+            ) {
+                Ok(journal) => journal,
+                Err(error) if error.is_lock_timeout() => {
+                    retry_subject.set(true);
                     return Ok(false);
-                };
-                // Execution can be rebound to another worktree by a manual
-                // resume, so resolve it only after acquiring journal custody.
-                let Some(execution) =
-                    FileJournal::pending_execution(&resolved.roots.state, project, &id)?
-                else {
-                    journal.clear_stale_pending()?;
-                    return Ok(false);
-                };
-                match std::fs::metadata(&execution.directory) {
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                        if graph_auto_settle::settle_removed_worktree(
-                            &resolved.roots.state,
-                            project,
-                            &id,
-                            &mut checkpoint,
-                            &mut journal,
-                            &clock,
-                            &cancel,
-                        )? {
-                            report.warnings.push(format!(
-                                "graph {id}: settled: {}",
-                                graph_auto_settle::AUTO_SETTLE_REASON
-                            ));
-                            return Ok(false);
-                        }
-                        let reason = format!(
-                            "graph {id}: worktree is missing; restore it or run `provenant stop NAME`"
-                        );
-                        if FileJournal::read_advance_note(&resolved.roots.state, project, &id)?
-                            .as_deref()
-                            != Some(reason.as_str())
-                        {
-                            FileJournal::set_advance_note(
-                                &resolved.roots.state,
-                                project,
-                                &id,
-                                Some(&reason),
-                            )?;
-                            report.warnings.push(reason);
-                        }
+                }
+                Err(error) => return Err(error.into()),
+            };
+            let Some(mut checkpoint) = journal.load(&id)? else {
+                return Ok(false);
+            };
+            // Execution can be rebound to another worktree by a manual
+            // resume, so resolve it only after acquiring journal custody.
+            let Some(execution) =
+                FileJournal::pending_execution(&resolved.roots.state, project, &id)?
+            else {
+                journal.clear_stale_pending()?;
+                return Ok(false);
+            };
+            match std::fs::metadata(&execution.directory) {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    if graph_auto_settle::settle_removed_worktree(
+                        &resolved.roots.state,
+                        project,
+                        &id,
+                        &mut checkpoint,
+                        &mut journal,
+                        &clock,
+                        &cancel,
+                    )? {
+                        report.warnings.push(format!(
+                            "graph {id}: settled: {}",
+                            graph_auto_settle::AUTO_SETTLE_REASON
+                        ));
                         return Ok(false);
                     }
-                    Err(error) => return Err(error.into()),
-                    Ok(_) => {}
-                }
-                if !due_at_start || !graph_wake_due(&checkpoint, clock.wall_now()?) {
-                    return Ok(false);
-                }
-                drop(journal);
-                let context =
-                    Context::open(resolved.roots.clone(), &resolved.home, &execution.directory)?;
-                if context.identity.project != project || context.in_lane {
-                    return Err(EdgeError::Invalid.into());
-                }
-                let seconds = match provenant_config::read_knobs(&resolved.roots) {
-                    Ok(config) => config
-                        .knobs
-                        .get("domains.tick.subject_budget_seconds")
-                        .and_then(|knob| knob.value.as_u64())
-                        .unwrap_or(10),
-                    Err(error) => {
-                        report.warnings.push(format!(
-                            "tick subject budget unavailable: {error}; using default 10 seconds"
-                        ));
-                        10
-                    }
-                };
-                let budget = WaitBudget::up_to(
-                    clock.mono_now(),
-                    provenant_core::DurationMicros::from_micros(seconds.saturating_mul(1_000_000)),
-                );
-                let mut factory = Factory {
-                    project_attribution: crate::usage::attribution_enabled(&context.roots),
-                    context,
-                    clock: SystemClock::new(),
-                    backoff: ThreadPause,
-                    executor: SystemExecutor::new(4)?,
-                    home: resolved.home.clone(),
-                    cwd: execution.directory.clone(),
-                    assets: resolved.assets.clone(),
-                    host_launch: None,
-                    workers,
-                };
-                match super::unified::graph_wait::wake_in_host(
-                    &mut factory,
-                    budget,
-                    &cancel,
-                    super::progress::WakeSubjectRef::Graph {
-                        project,
-                        id: id.clone(),
-                    },
-                    super::progress::WakeReason::Tick,
-                ) {
-                    super::progress::WakeOutcome::Advanced { .. } => Ok(true),
-                    super::progress::WakeOutcome::Skipped { code } => {
-                        Err(std::io::Error::other(code).into())
-                    }
-                    _ => Ok(false),
-                }
-            })();
-            match result {
-                Ok(true) => {
-                    report.advanced += 1;
-                    if let Err(error) =
-                        FileJournal::set_advance_note(&resolved.roots.state, project, &id, None)
+                    let reason = format!(
+                        "graph {id}: worktree is missing; restore it or run `provenant stop NAME`"
+                    );
+                    if FileJournal::read_advance_note(&resolved.roots.state, project, &id)?
+                        .as_deref()
+                        != Some(reason.as_str())
                     {
-                        report.errors.push(format!("{project}/{id}: {error}"));
-                    }
-                }
-                Ok(false) => {}
-                Err(error) => {
-                    let reason = error.to_string();
-                    if !error.is::<provenant_fabric_runtime::graph::UnreadableCheckpointNotice>() {
-                        let _ = FileJournal::set_advance_note(
+                        FileJournal::set_advance_note(
                             &resolved.roots.state,
                             project,
                             &id,
                             Some(&reason),
-                        );
+                        )?;
+                        report.warnings.push(reason);
                     }
-                    report.errors.push(format!("{project}/{id}: {reason}"));
+                    return Ok(false);
+                }
+                Err(error) => return Err(error.into()),
+                Ok(_) => {}
+            }
+            if !due_at_start || !graph_wake_due(&checkpoint, clock.wall_now()?) {
+                return Ok(false);
+            }
+            drop(journal);
+            let context =
+                Context::open(resolved.roots.clone(), &resolved.home, &execution.directory)?;
+            if context.identity.project != project || context.in_lane {
+                return Err(EdgeError::Invalid.into());
+            }
+            let seconds = match provenant_config::read_knobs(&resolved.roots) {
+                Ok(config) => config
+                    .knobs
+                    .get("domains.tick.subject_budget_seconds")
+                    .and_then(|knob| knob.value.as_u64())
+                    .unwrap_or(10),
+                Err(error) => {
+                    report.warnings.push(format!(
+                        "tick subject budget unavailable: {error}; using default 10 seconds"
+                    ));
+                    10
+                }
+            };
+            let budget = WaitBudget::up_to(
+                clock.mono_now(),
+                provenant_core::DurationMicros::from_micros(seconds.saturating_mul(1_000_000)),
+            )
+            .cap_at(subject_deadline.as_mono_time());
+            let mut factory = Factory {
+                project_attribution: crate::usage::attribution_enabled(&context.roots),
+                context,
+                clock: SystemClock::new(),
+                backoff: ThreadPause,
+                executor: SystemExecutor::new(4)?,
+                home: resolved.home.clone(),
+                cwd: execution.directory.clone(),
+                assets: resolved.assets.clone(),
+                host_launch: None,
+                workers,
+            };
+            match super::unified::graph_wait::wake_in_host(
+                &mut factory,
+                budget,
+                &cancel,
+                super::progress::WakeSubjectRef::Graph {
+                    project,
+                    id: id.clone(),
+                },
+                super::progress::WakeReason::Tick,
+            ) {
+                super::progress::WakeOutcome::Advanced { .. } => Ok(true),
+                super::progress::WakeOutcome::Skipped { code } => {
+                    Err(std::io::Error::other(code).into())
+                }
+                super::progress::WakeOutcome::Busy { .. }
+                | super::progress::WakeOutcome::OverBudget { .. } => {
+                    retry_subject.set(true);
+                    Ok(false)
+                }
+                _ => Ok(false),
+            }
+        })();
+        match result {
+            Ok(true) => {
+                report.advanced += 1;
+                if let Err(error) =
+                    FileJournal::set_advance_note(&resolved.roots.state, project, &id, None)
+                {
+                    report.errors.push(format!("{project}/{id}: {error}"));
                 }
             }
+            Ok(false) => {}
+            Err(error) => {
+                let reason = error.to_string();
+                if !error.is::<provenant_fabric_runtime::graph::UnreadableCheckpointNotice>() {
+                    let _ = FileJournal::set_advance_note(
+                        &resolved.roots.state,
+                        project,
+                        &id,
+                        Some(&reason),
+                    );
+                }
+                report.errors.push(format!("{project}/{id}: {reason}"));
+            }
         }
+        if subject_deadline.is_expired(SystemClock::new().mono_now()) {
+            retry_subject.set(true);
+        }
+        cursor.advance(&key, retry_subject.get());
+        if let Err(error) =
+            crate::tick::publish(&directory, "cursor-graphs.json", "tick-cursor", &cursor)
+        {
+            report.warnings.push(format!("cursor: {error}"));
+        }
+    }
+    if deadline.is_expired(SystemClock::new().mono_now()) {
+        return Ok(report);
     }
     let queue_report = super::queue_scheduler::tick_queues(resolved, now, workers);
     report.advanced += queue_report.advanced;

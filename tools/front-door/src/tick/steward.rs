@@ -210,8 +210,12 @@ pub(super) fn run(
     settings: &Settings,
     resolved: &crate::roots::Resolved,
     workers: &'static dyn WorkerObserver,
+    deadline: Deadline,
 ) -> Task {
     task(settings, |repository| {
+        if deadline.is_expired(SystemClock.mono_now()) {
+            return Err("tick steward deadline elapsed".into());
+        }
         let globals = Globals {
             project: Some(repository.directory.clone()),
             state_dir: Some(resolved.roots.state.as_path().to_owned()),

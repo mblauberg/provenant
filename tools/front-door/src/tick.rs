@@ -18,7 +18,8 @@ use std::{
 
 mod registry;
 mod steward;
-pub(super) use registry::{Cursor, TaskDef, TaskLeases};
+pub(crate) use registry::Cursor;
+pub(super) use registry::{TaskDef, TaskLeases};
 
 const DAY_SECONDS: u64 = 86_400;
 /// An unfinished scheduled collection retries after this delay, then after
@@ -83,8 +84,10 @@ impl TaskResult {
             extra: Default::default(),
             state: "busy".into(),
             at,
-            error: Some(format!("single-flight lease held by {holder}")),
-            diagnostic: None,
+            error: None,
+            diagnostic: Some(format!(
+                "TICK_TASK_LEASE_BUSY: single-flight lease unavailable: {holder}"
+            )),
             failures: 0,
         }
     }
@@ -94,10 +97,10 @@ impl TaskResult {
             extra: Default::default(),
             state: "over_budget".into(),
             at,
-            error: Some(format!(
-                "domains.tick.tasks.{task}.budget_seconds elapsed before the worker ended"
+            error: None,
+            diagnostic: Some(format!(
+                "TICK_TASK_OVERRUN: domains.tick.tasks.{task}.budget_seconds elapsed before the worker ended"
             )),
-            diagnostic: None,
             failures: 0,
         }
     }
@@ -121,7 +124,7 @@ fn test_wall() -> WallTime {
         .expect("a fixed in-range wall time for task registry tests")
 }
 
-fn publish<T: Serialize>(
+pub(crate) fn publish<T: Serialize>(
     directory: &Directory,
     file: &str,
     purpose: &str,
@@ -721,7 +724,7 @@ fn result_from_task(task: Task, at: WallTime) -> TaskResult {
     }
 }
 
-fn read_cursor(directory: &Directory, task: &str) -> Result<Cursor, String> {
+pub(crate) fn read_cursor(directory: &Directory, task: &str) -> Result<Cursor, String> {
     let name = format!("cursor-{task}.json");
     match directory.read_bounded(name.as_ref(), 64 * 1024) {
         Ok(bytes) => serde_json::from_slice(&bytes).map_err(|error| error.to_string()),
@@ -730,39 +733,12 @@ fn read_cursor(directory: &Directory, task: &str) -> Result<Cursor, String> {
     }
 }
 
-/// Order pending graph subjects from the last visit and persist the new
-/// cursor. The subject-scoped wake driver performs the advance; this pass
-/// records each visit so the next pass starts at the cursor and retries the
-/// subjects that were busy or over budget first.
-fn advance_graph_cursor(
-    resolved: &crate::roots::Resolved,
-    directory: &Directory,
-) -> Result<(), String> {
-    use provenant_fabric_runtime::graph::FileJournal;
-    let mut cursor = read_cursor(directory, "graphs")?;
-    let mut subjects = Vec::new();
-    for binding in
-        provenant_config::registered_projects(&resolved.roots).map_err(|error| error.to_string())?
-    {
-        let project = binding.project_id();
-        match FileJournal::pending_graph_ids(&resolved.roots.state, project) {
-            Ok(ids) => {
-                for id in ids {
-                    subjects.push(format!("{project}/{id}"));
-                }
-            }
-            Err(error) => return Err(format!("{project}: {error}")),
-        }
-    }
-    for key in cursor.order(&subjects) {
-        cursor.advance(&key, false);
-    }
-    publish(directory, "cursor-graphs.json", "tick-cursor", &cursor)
-}
-
 /// Recovery is independent of graph journals: even an orphaned attempt must
 /// eventually settle. Share one host census across all registered projects.
-fn reap_projects(resolved: &crate::roots::Resolved) -> Result<&'static str, String> {
+fn reap_projects(
+    resolved: &crate::roots::Resolved,
+    deadline: Deadline,
+) -> Result<&'static str, String> {
     use provenant_supervisor::census::{MAX_CENSUS_ENTRIES, SystemProcessObserver};
     let census = SystemProcessObserver.census(MAX_CENSUS_ENTRIES).ok();
     let clock = SystemClock;
@@ -775,6 +751,9 @@ fn reap_projects(resolved: &crate::roots::Resolved) -> Result<&'static str, Stri
     for binding in
         provenant_config::registered_projects(&resolved.roots).map_err(|e| e.to_string())?
     {
+        if deadline.is_expired(clock.mono_now()) {
+            break;
+        }
         // A vanished checkout or common directory has nothing to settle. Report
         // it once with the unregister command rather than failing every tick.
         if crate::project_root::absent(&binding) {
@@ -879,16 +858,17 @@ fn tick(
     let selected = |name: &str| only.is_empty() || only.iter().any(|entry| entry == name);
     let holder = format!("tick:{}", std::process::id());
     let graphs = Arc::new(Mutex::new(Graphs::default()));
-    let mut tasks: Vec<TaskDef<'_>> = Vec::new();
+    let mut tasks: Vec<TaskDef> = Vec::new();
 
     if selected("settlement") {
+        let resolved = resolved.clone();
         tasks.push(TaskDef::new(
             "settlement",
             enabled("settlement"),
             budget("settlement", 30),
             move |ctx| {
                 result_from_task(
-                    Task::run("settlement", || reap_projects(&resolved)),
+                    Task::run("settlement", || reap_projects(&resolved, ctx.deadline)),
                     ctx.wall,
                 )
             },
@@ -896,32 +876,18 @@ fn tick(
     }
     if selected("graphs") {
         let graphs_out = Arc::clone(&graphs);
+        let resolved = resolved.clone();
         tasks.push(TaskDef::new(
             "graphs",
             enabled("graphs"),
             budget("graphs", 60),
             move |ctx| {
-                let mut cursor_error = None;
-                match provenant_config::private_directory(
-                    &resolved.roots.state.as_path().join("tick"),
-                    true,
-                ) {
-                    Ok(directory) => {
-                        if let Err(error) = advance_graph_cursor(&resolved, &directory) {
-                            cursor_error = Some(format!("cursor: {error}"));
-                        }
-                    }
-                    Err(error) => cursor_error = Some(format!("cursor directory: {error}")),
-                }
-                // Graph tick includes queue-owned replay, pending-item claims
-                // and lease reconciliation.
-                let mut report = crate::fabric::tick_graphs(&resolved, ctx.wall, workers)
+                let report = crate::fabric::tick_graphs(&resolved, ctx.wall, workers, ctx.deadline)
                     .unwrap_or_else(|error| Graphs {
                         advanced: 0,
                         errors: vec![error.to_string()],
                         warnings: Vec::new(),
                     });
-                report.warnings.extend(cursor_error);
                 let state = if report.errors.is_empty() {
                     "advanced"
                 } else {
@@ -940,6 +906,7 @@ fn tick(
         ));
     }
     if selected("forge_events") {
+        let resolved = resolved.clone();
         tasks.push(TaskDef::new(
             "forge_events",
             enabled("forge_events"),
@@ -947,7 +914,7 @@ fn tick(
             move |ctx| {
                 result_from_task(
                     Task::run("forge_events", || {
-                        crate::event_delivery::tick(&resolved)
+                        crate::event_delivery::tick(&resolved, ctx.deadline)
                             .map(|()| "observed")
                             .map_err(|error| error.to_string())
                     }),
@@ -957,6 +924,7 @@ fn tick(
         ));
     }
     if selected("gc") {
+        let resolved = resolved.clone();
         // GC cadence is serialised across manual ticks and launchd invocations,
         // separately from each graph's journal custody.
         tasks.push(TaskDef::new(
@@ -966,6 +934,9 @@ fn tick(
             move |ctx| {
                 result_from_task(
                     Task::gc(|| -> Result<GcReport, String> {
+                        if ctx.deadline.is_expired(SystemClock.mono_now()) {
+                            return Ok(GcReport::state("over budget; next tick retries"));
+                        }
                         let directory = provenant_config::private_directory(
                             &resolved.roots.state.as_path().join("tick"),
                             true,
@@ -1000,13 +971,17 @@ fn tick(
         ));
     }
     if selected("steward") {
+        let resolved = resolved.clone();
+        let steward_enabled = enabled("steward");
+        let steward_budget = budget("steward", 30);
+        let steward_config = config.domains.steward;
         tasks.push(TaskDef::new(
             "steward",
-            enabled("steward"),
-            budget("steward", 30),
+            steward_enabled,
+            steward_budget,
             move |ctx| {
                 result_from_task(
-                    steward::run(&config.domains.steward, &resolved, workers),
+                    steward::run(&steward_config, &resolved, workers, ctx.deadline),
                     ctx.wall,
                 )
             },
@@ -1016,7 +991,7 @@ fn tick(
     let outcomes = registry::run_tasks(
         tasks,
         concurrency,
-        &TaskLeases::default(),
+        &TaskLeases::new(resolved.roots.state.as_path().to_owned()),
         &clock,
         now,
         &holder,
@@ -1030,15 +1005,19 @@ fn tick(
             diagnostic: outcome.result.diagnostic,
         })
         .collect();
-    let graphs = Arc::try_unwrap(graphs)
-        .ok()
-        .expect("the graph task joined")
-        .into_inner()
-        .expect("the graph output lock is intact");
+    let graphs = std::mem::take(&mut *graphs.lock().expect("the graph output lock is intact"));
     Ok(Tick {
         graphs,
         tasks: task_rows,
     })
+}
+
+fn task_summary(tasks: &[Task]) -> String {
+    tasks
+        .iter()
+        .map(|task| format!("{}={}", task.task, task.state))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 pub(crate) fn run_selected(
@@ -1050,19 +1029,12 @@ pub(crate) fn run_selected(
         Ok(data) => {
             let failed = !data.graphs.errors.is_empty()
                 || data.tasks.iter().any(|task| task.error.is_some());
-            let task_state = |name: &str| {
-                data.tasks
-                    .iter()
-                    .find(|task| task.task == name)
-                    .map_or("skipped", |task| task.state.as_str())
-            };
+            let states = task_summary(&data.tasks);
             let mut human = format!(
-                "tick: graphs={} errors={} gc={} steward={} settlement={}\n",
+                "tick: graphs_advanced={} errors={} {}\n",
                 data.graphs.advanced,
                 data.graphs.errors.len(),
-                task_state("gc"),
-                task_state("steward"),
-                task_state("settlement")
+                states
             );
             for warning in &data.graphs.warnings {
                 human.push_str(&format!("warning: {warning}\n"));
@@ -1086,7 +1058,7 @@ pub(crate) fn run_selected(
                 .chain(data.tasks.iter().filter_map(|task| {
                     task.diagnostic
                         .as_ref()
-                        .map(|diagnostic| format!("note: {}: {diagnostic}", task.task))
+                        .map(|diagnostic| format!("warning: {}: {diagnostic}", task.task))
                 }))
                 .collect();
             let summary = provenant_cli::Summary::new(human.trim(), rows);
@@ -1173,7 +1145,10 @@ mod tests {
             claude_config: None,
             codex_home: None,
         };
-        assert_eq!(reap_projects(&resolved).unwrap(), "queued");
+        assert_eq!(
+            reap_projects(&resolved, Deadline::at(MonoTime::from_micros(u64::MAX))).unwrap(),
+            "queued"
+        );
     }
 
     // Spec: docs/specs/supervisor.md#tick-driven-settlement
@@ -1223,7 +1198,9 @@ mod tests {
             claude_config: None,
             codex_home: None,
         };
-        let (result, warnings) = provenant_records::warning::capture(|| reap_projects(&resolved));
+        let (result, warnings) = provenant_records::warning::capture(|| {
+            reap_projects(&resolved, Deadline::at(MonoTime::from_micros(u64::MAX)))
+        });
         assert_eq!(
             result.unwrap(),
             "queued",

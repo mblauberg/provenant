@@ -1230,7 +1230,7 @@ fn settlement_and_tick_read_only_owned_or_pending_graphs() -> Result<(), Box<dyn
         claude_config: None,
         codex_home: None,
     };
-    let report = tick_graphs(&resolved, clock.wall_now()?, &FreeWorkers)?;
+    let report = tick_graphs(&resolved, clock.wall_now()?, &FreeWorkers, provenant_core::Deadline::at(provenant_core::MonoTime::from_micros(u64::MAX)))?;
     assert!(report.errors.is_empty(), "{:?}", report.errors);
     let reads = graph::take_checkpoint_read_ids();
     assert!(!reads.is_empty());
@@ -1344,7 +1344,7 @@ fn an_attempt_keyed_to_another_graph_is_refused_not_adopted()
         claude_config: None,
         codex_home: None,
     };
-    let report = tick_graphs(&resolved, clock.wall_now()?, &FreeWorkers)?;
+    let report = tick_graphs(&resolved, clock.wall_now()?, &FreeWorkers, provenant_core::Deadline::at(provenant_core::MonoTime::from_micros(u64::MAX)))?;
     assert!(
         report
             .errors
