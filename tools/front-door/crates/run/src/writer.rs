@@ -2930,7 +2930,7 @@ impl WriterLaunch {
         scope: provenant_records::custody::Scope,
         policy: &provenant_records::policy::Policy,
     ) -> Result<()> {
-        seal_writer_ownership(attempt, &self.worktree)?;
+        seal_worktree_lease(self.custody.as_ref(), &self.worktree, scope)?;
         let utility = runtime(state)?;
         let head = self
             .worktree
@@ -4225,56 +4225,45 @@ pub(crate) fn read_handover(
     crate::db::decode(&raw).map(Some)
 }
 
-/// Preserve sealed current launch ownership evidence on replay.
-pub(crate) fn seal_writer_ownership(
-    attempt: &Directory,
+/// Launch writes the one worktree-slot lease confinement reads. Only the
+/// holder and start time are replaced; the owning lane's sharing decision is
+/// preserved so `lane share` survives a relaunch.
+pub(crate) fn seal_worktree_lease(
+    custody: Option<&(Directory, WriterBinding)>,
     tree: &provenant_confinement::VerifiedWorktree,
+    scope: provenant_records::custody::Scope,
 ) -> Result<()> {
-    let owner = worktrees::load_owner(tree)?;
-    let owned = owner
-        .as_ref()
-        .is_some_and(|owner| owner.origin == worktrees::WorktreeOrigin::Lane);
-    let ownership = WriterOwnership {
-        extra: Default::default(),
-        schema_version: 1,
-        lane_owned: owned,
-        owner,
+    let Some((slot, _)) = custody else {
+        return Ok(());
     };
-    if let Some(raw) =
-        crate::artifacts::read_sealed(attempt, "writer-owned.json", crate::RECORD_LIMIT)?
-    {
-        let prior: WriterOwnership = crate::db::decode(&raw)?;
-        if prior.schema_version != 1
-            || prior.lane_owned != ownership.lane_owned
-            || prior.owner != ownership.owner
-        {
-            return Err(RunError::Conflict);
-        }
-        Ok(())
-    } else {
-        crate::artifacts::seal(
-            attempt,
-            "writer-owned.json",
-            &crate::db::bytes(&ownership)?,
-            crate::RECORD_LIMIT,
-        )
-    }
+    let name = OsStr::new(worktrees::LEASE_FILE);
+    let sharing = slot
+        .read_stable(name, 4096)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+        .and_then(|value| {
+            serde_json::from_value::<provenant_records::custody::Sharing>(value["sharing"].clone())
+                .ok()
+        })
+        .unwrap_or_default();
+    let since = worktrees::load_owner(tree)?
+        .map_or_else(provenant_core::WallTime::MAX, |owner| owner.created_at);
+    let lease = provenant_records::custody::WorktreeLease {
+        holder: scope.attempt,
+        since,
+        sharing,
+    };
+    let bytes = serde_json::to_vec(&lease)
+        .map_err(|_| RunError::Validation("worktree lease could not be encoded"))?;
+    slot.atomic_write(
+        name,
+        ".lease-",
+        &bytes,
+        provenant_os::fs::PublishMode::Replace,
+    )?
+    .require_durable()?;
+    Ok(())
 }
-
-/// Launch-time lifecycle evidence, sealed while writer custody is held.
-#[derive(serde::Serialize, serde::Deserialize)]
-pub(crate) struct WriterOwnership {
-    #[serde(default, flatten)]
-    pub extra: provenant_records::ExtraFields,
-    pub schema_version: u64,
-    pub lane_owned: bool,
-    #[serde(deserialize_with = "serde::Deserialize::deserialize")]
-    pub owner: Option<worktrees::WorktreeOwner>,
-}
-
-#[cfg(test)]
-#[path = "writer_ownership_shape_tests.rs"]
-mod writer_ownership_shape_tests;
 
 #[cfg(test)]
 #[path = "writer_custody_admission_tests.rs"]

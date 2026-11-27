@@ -5095,7 +5095,7 @@ fn nested_writer_fixture_child() -> Result {
             "graph_id": "nested-graph",
             "nodes": [{"id":"writer", "prompt":"fixture writer shell", "access":"worktree_write",
                 "worktree":".worktrees/nested-writer", "delivery":"push",
-                "attempt":{"preset":"light","isolation":"private"},
+                "attempt":{"preset":"light"},
                 "route":{"adapter":"codex","model":"gpt-6-luna","effort":"low"}}]
         }))?,
     )?;
@@ -5513,7 +5513,7 @@ fn light_graph_delivers_and_applies_preset_per_node() -> Result {
         &document,
         serde_json::to_vec(
             &json!({"schema_version":support::GRAPH_DOCUMENT_SCHEMA_VERSION,"graph_id":"light-graph","nodes":[
-                {"id":"writer","prompt":"fixture writer shell","access":"worktree_write","worktree":".worktrees/light-writer","delivery":"push","attempt":{"preset":"light","isolation":"private"},"route":route},
+                {"id":"writer","prompt":"fixture writer shell","access":"worktree_write","worktree":".worktrees/light-writer","delivery":"push","attempt":{"preset":"light"},"route":route},
                 {"id":"reader","prompt":"fixture read only","access":"read_only","route":route}
             ]}),
         )?,
@@ -5814,7 +5814,7 @@ fn writer_shell_edits_instructions_and_keeps_private_logs(adapter: &str) -> Resu
         let mut node = json!({
             "id":"writer", "prompt":"fixture writer shell", "access":"worktree_write",
             "worktree":".worktrees/shell-evidence", "delivery":"none",
-            "attempt":{"preset":"light", "isolation":"private"},
+            "attempt":{"preset":"light"},
             "route": if adapter == "claude" {
                 json!({"adapter":"claude","model":"claude-sonnet-5-5","effort":"medium"})
             } else {

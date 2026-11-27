@@ -1502,6 +1502,17 @@ use provenant_records::warning::{Warning, WarningCode, detected_source, warn};
 /// The single setting that selects live-worktree sharing behaviour.
 pub const WORKTREE_SHARING_KEY: &str = "lanes.worktree.sharing";
 
+/// The one file name of a worktree slot's lease. Launch, handover, migration
+/// and the confinement reader all write and read this one entry.
+pub const LEASE_FILE: &str = "lease.json";
+
+/// The one path at which a worktree slot's lease lives. `slot` is the slot
+/// directory below `<state>/worktrees/<project>/`; every writer of the lease
+/// derives its target from this function so no second spelling survives.
+pub fn lease_path(slot: &std::path::Path) -> std::path::PathBuf {
+    slot.join(LEASE_FILE)
+}
+
 /// Read the host-layer `lanes.worktree.sharing` knob. Project, launch and
 /// owning-lane overrides are passed explicitly by the caller so that one
 /// decision point resolves all four scopes. An absent or malformed knob reads
@@ -1627,7 +1638,7 @@ pub(crate) fn owner_lease_sharing(project_state: &Directory, path: &Path) -> Sha
     let Ok(slot) = project_state.open_verified_directory(&state_dir_name(path)) else {
         return Sharing::Inherit;
     };
-    let Ok(bytes) = slot.read_stable(OsStr::new("lease.json"), 4096) else {
+    let Ok(bytes) = slot.read_stable(OsStr::new(LEASE_FILE), 4096) else {
         return Sharing::Inherit;
     };
     let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) else {

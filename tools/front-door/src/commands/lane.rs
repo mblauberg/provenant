@@ -8,6 +8,7 @@
 //! `lanes.worktree.sharing`.
 use crate::commands::{Call, Domain, Verb};
 use provenant_cli::Command;
+use provenant_confinement::worktrees::LEASE_FILE;
 use provenant_core::consumer_env::Stability;
 use provenant_records::custody::{Sharing, WorktreeLease};
 use provenant_records::{CommandError, Outcome};
@@ -153,7 +154,7 @@ fn share(inv: &Call, mode: &str) -> Result<Outcome, CommandError> {
     // Preserve holder and start time from an existing lease in their wire
     // form; only the owning lane's sharing decision is changed here.
     let lease: WorktreeLease = slot
-        .read_bounded(std::ffi::OsStr::new("lease.json"), 4096)
+        .read_bounded(std::ffi::OsStr::new(LEASE_FILE), 4096)
         .ok()
         .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
         .and_then(|mut value| {
@@ -174,7 +175,7 @@ fn share(inv: &Call, mode: &str) -> Result<Outcome, CommandError> {
     })?;
     let publication = slot
         .atomic_write(
-            std::ffi::OsStr::new("lease.json"),
+            std::ffi::OsStr::new(LEASE_FILE),
             ".lease-",
             &bytes,
             provenant_os::fs::PublishMode::Replace,

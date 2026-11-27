@@ -1,7 +1,11 @@
 use super::*;
 use provenant_confinement::worktrees::{self, WorktreeCreate, WorktreeOrigin, WorktreeOwner};
-use provenant_core::Clock;
+use provenant_confinement::worktrees::{LEASE_FILE, lease_path};
+use provenant_core::{Clock, WallTime};
 use provenant_os::fixture::run_git;
+use provenant_os::fs::{Directory, PublishMode};
+use provenant_records::custody::{Sharing, WorktreeLease};
+use std::ffi::OsStr;
 use std::os::unix::fs::DirBuilderExt;
 use std::path::Path;
 
@@ -219,6 +223,34 @@ fn stopped_lane_branch_continues_with_handover_warning()
     assert_eq!(fact.from, prior);
     assert_eq!(fact.to, child.attempt_id);
     assert_eq!(fact.head, Some(predecessor));
+
+    // The handover also rewrote the slot lease: a later admission for C reads
+    // B as the holder at the one path confinement reads, not the terminal A.
+    let slot = store.writer_slot(&writer)?;
+    let lease: WorktreeLease = serde_json::from_slice(&std::fs::read(lease_path(&slot))?)?;
+    assert_eq!(lease.holder, child.attempt_id);
+    let observation = provenant_records::custody::LeaseObservation {
+        lease,
+        state: provenant_records::custody::LeaseState::Live {
+            attempt_state: "nonterminal".into(),
+        },
+    };
+    let subject = provenant_records::custody::Subject::worktree(
+        info.path.display().to_string(),
+        "generation",
+    );
+    assert!(
+        matches!(
+            provenant_records::custody::admit_writer(
+                &subject,
+                Some(&observation),
+                Sharing::Refuse
+            ),
+            provenant_records::custody::Admit::Refuse { holder: Some(holder) }
+                if holder == child.attempt_id
+        ),
+        "C must observe B as the slot holder after handover"
+    );
 
     // A resumed graph attempt has retry_of as well as a graph predecessor.
     // It must still verify the graph's sealed source rather than taking the
@@ -441,13 +473,11 @@ fn resume_preserves_explicit_worktrees_and_settled_lane_ownership()
                     reference: None,
                 },
             )?;
-            assert!(matches!(
-                crate::writer::seal_writer_ownership(
-                    &store.attempt_dir(prior, false)?,
-                    &launch.worktree
-                ),
-                Err(RunError::Conflict)
-            ));
+            // An adopted checkout has no ownership record to conflict with; the
+            // slot lease written at launch still names this attempt.
+            let bytes = std::fs::read(lease_path(&store.writer_slot(&writer)?))?;
+            let current: WorktreeLease = serde_json::from_slice(&bytes)?;
+            assert_eq!(current.holder, prior);
             std::fs::remove_file(
                 launch
                     .worktree
@@ -457,30 +487,36 @@ fn resume_preserves_explicit_worktrees_and_settled_lane_ownership()
             )?;
         }
         if origin == Some(WorktreeOrigin::Lane) {
-            let attempt = store.attempt_dir(prior, false)?;
-            let snapshot = attempt.current_path()?.join("writer-owned.json");
-            let unobserved = crate::db::bytes(&crate::writer::WriterOwnership {
-                extra: Default::default(),
-                schema_version: 1,
-                lane_owned: true,
-                owner: None,
-            })?;
-            std::fs::write(&snapshot, &unobserved)?;
+            let slot = store.writer_slot(&writer)?;
+            let destination = lease_path(&slot);
+            let stale = WorktreeLease {
+                holder: AttemptId::from_bytes([124; 16]),
+                since: WallTime::from_micros(1)?,
+                sharing: Sharing::Refuse,
+            };
+            let stale_bytes = serde_json::to_vec(&stale)?;
+            Directory::open_anchor(&slot)?
+                .atomic_write(
+                    OsStr::new(LEASE_FILE),
+                    ".lease-",
+                    &stale_bytes,
+                    PublishMode::Replace,
+                )?
+                .require_durable()?;
             let launch = crate::prepare_writer(&writer, &store.writer_registry, project_id)?;
-            assert!(matches!(
-                crate::writer::seal_writer_ownership(&attempt, &launch.worktree),
-                Err(RunError::Conflict)
-            ));
-            assert_eq!(std::fs::read(&snapshot)?, unobserved);
-            // The sealed ownership record is advisory now; the worktree owner
-            // and the holder's attempt state decide admission.
+            crate::writer::seal_worktree_lease(
+                launch.custody.as_ref(),
+                &launch.worktree,
+                RunStore::scope(&record),
+            )?;
+            let current: WorktreeLease = serde_json::from_slice(&std::fs::read(&destination)?)?;
+            assert_eq!(current.holder, prior, "launch took the slot lease");
+            assert_eq!(current.sharing, Sharing::Refuse, "owner decision preserved");
             assert!(
                 store
                     .check_writer_lineage(&record, &launch.worktree, &call)?
                     .is_some()
             );
-            std::fs::remove_file(snapshot)?;
-            crate::writer::seal_writer_ownership(&attempt, &launch.worktree)?;
         }
         std::fs::write(info.path.join("pending.txt"), "keep these edits")?;
         if !prior_terminalized {
