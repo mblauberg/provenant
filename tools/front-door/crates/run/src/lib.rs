@@ -30,6 +30,7 @@ mod launch;
 pub use launch::{LaunchPhase, LaunchTimer, LaunchTimings, OwnCommit, commit_own_paths};
 pub mod worktree_carry;
 pub use worktree_carry::{CarryError, CarrySnapshot, carry};
+pub mod lease_migrate;
 mod ledger;
 mod objects;
 mod overview;
