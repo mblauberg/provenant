@@ -420,6 +420,8 @@ pub const FORGE_SOURCE_UNRESOLVED: WarningCode = WarningCode("FORGE_SOURCE_UNRES
 pub const FORWARDER_UNAVAILABLE: WarningCode = WarningCode("FORWARDER_UNAVAILABLE");
 /// Retry admission skipped ambient credentials outside the bounded exact matcher.
 pub const RETRY_CREDENTIALS_SKIPPED: WarningCode = WarningCode("RETRY_CREDENTIALS_SKIPPED");
+/// A registered project's root has vanished; scheduled tasks skip it.
+pub const PROJECT_ROOT_VANISHED: WarningCode = WarningCode("PROJECT_ROOT_VANISHED");
 
 /// A route model is a full `ADAPTER/ID` that the effective catalogue does not
 /// know. The declared spelling is preserved; the warning names it.

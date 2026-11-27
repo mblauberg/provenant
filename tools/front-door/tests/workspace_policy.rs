@@ -2197,8 +2197,9 @@ fn production_files_stay_within_their_line_ceilings() -> Result<(), Box<dyn Erro
         // report and node-sourced panel helpers, #4066's authored repair writer
         // resolution and per-node route preview, and the #4062 adapter
         // capability integration's queue-knob sealing, observation seam and
-        // capability-gap reporting grew this owner to 4504 lines. 4750 is the
-        // next 250-line band above size + 100.
+        // capability-gap reporting grew this owner to 4504 lines; #4107 supplied
+        // structured warning sources. 4750 is the next 250-line band above size
+        // + 100.
         ("src/fabric/interface.rs", 4750),
         // Peer fixture transport and writer boundary coverage (#3979).
         ("src/fabric/owner.rs", 6000),

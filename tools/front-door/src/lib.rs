@@ -45,6 +45,7 @@ mod pr;
 #[cfg(any(test, feature = "fixture"))]
 mod pr_land_tests;
 mod process_tree;
+mod project_root;
 mod provider_retention;
 mod release_smoke;
 #[cfg(test)]
