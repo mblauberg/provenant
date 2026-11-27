@@ -217,6 +217,7 @@ error [PEER_PROJECT_UNLOCATABLE] smoke-7f3a/task--read#1 on workshop: project is
 `CommonArgs { host: Vec<HostArg>, timeout: Option<DurationArg> }` is flattened into these verbs: `status`, `output`, `result`, `wait`, `events`, `gc`, `run`, `upgrade`, `ci`, `retire` and `queue`. `--json` and `--full` stay global. The exempt verbs are `help`, `hook`, `internal`, `declare`, `notes` and `config`; that list lives in the catalogue test.
 
 Peer host-read and GC responses carry the full command envelope in `data`, alongside the `result` variant tag; this keeps the tag distinct from the payload and preserves command outcomes across hosts.
+Session-stream host reads carry their JSON lines as an ordered `stream` array in the command data; invalid JSON fails the read.
 
 | Flag | Meaning |
 |---|---|

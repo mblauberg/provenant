@@ -208,7 +208,7 @@ pub(crate) fn route(params: RouteParams<'_>) -> u8 {
         }
 
         if follow && budget.remaining(clock.mono_now()).as_micros() == 0 {
-            let readings = cursors
+            let readings: Vec<_> = cursors
                 .iter_mut()
                 .map(|host| {
                     if host.active {

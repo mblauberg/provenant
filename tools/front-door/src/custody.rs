@@ -7,7 +7,6 @@ use provenant_os::clock::SystemClock;
 use provenant_records::{CommandResult, Outcome, custody::*};
 use serde_json::json;
 use std::{
-    io::Write,
     path::Path,
     time::{Duration, Instant},
 };

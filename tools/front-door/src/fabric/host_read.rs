@@ -378,7 +378,12 @@ fn read_host(
             input,
             operations.globals,
             operations.workers,
-            operations.budget.remaining(operations.clock.mono_now()),
+            std::time::Duration::from_micros(
+                operations
+                    .budget
+                    .remaining(operations.clock.mono_now())
+                    .as_micros(),
+            ),
         )
     }
 }
@@ -680,6 +685,13 @@ mod tests {
     use std::ffi::OsString;
 
     #[test]
+    fn session_stream_preserves_json_rows_and_rejects_invalid_rows() {
+        let rows = session_stream_rows(b"{\"id\":1}\n\n{\"id\":2}\n").unwrap();
+        assert_eq!(rows, json!([{ "id": 1 }, { "id": 2 }]));
+        assert!(session_stream_rows(b"{invalid}\n").is_err());
+    }
+
+    #[test]
     fn parsed_status_all_dispatches_to_per_host_aggregation() {
         let provenant_cli::ParseOutcome::Invocation(invocation) = provenant_cli::parse(
             ["status", "--host", "all", "--all", "--limit", "7"].map(OsString::from),
@@ -787,11 +799,7 @@ pub(crate) fn execute(
                 let (mut reply, stream) = with_edge_and_stream(&globals, |edge, out| {
                     provenant_cli::run::status_session_stream(command.clone(), edge, out)
                 })?;
-                reply.result.data["stream"] = stream
-                    .split(|byte| *byte == b'\n')
-                    .filter(|line| !line.is_empty())
-                    .map(serde_json::from_slice)
-                    .collect::<Result<Vec<Value>, _>>()?;
+                reply.result.data["stream"] = session_stream_rows(&stream)?;
                 return Ok(reply.result);
             }
             if *mine || *adoptable {
@@ -864,6 +872,15 @@ pub(crate) fn execute(
             ))
         }
     }
+}
+
+fn session_stream_rows(stream: &[u8]) -> Result<Value, serde_json::Error> {
+    stream
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+        .map(serde_json::from_slice)
+        .collect::<Result<Vec<Value>, _>>()
+        .map(Value::Array)
 }
 
 fn with_edge(
