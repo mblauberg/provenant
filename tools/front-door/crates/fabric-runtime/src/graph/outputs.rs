@@ -1165,6 +1165,24 @@ pub(super) fn materialised_finding_origins(
         .collect()
 }
 
+/// Resolve every full finding input for an adjudicator, bypassing capped panel
+/// projections while retaining the same qualified identity mapping used by
+/// staged input materialisation.
+pub(super) fn adjudication_input_findings(
+    index: usize,
+    plan: &PlannedGraph,
+    checkpoint: &GraphCheckpoint,
+    positions: &std::collections::BTreeMap<String, usize>,
+) -> Vec<(String, Finding)> {
+    let Some(node) = plan.nodes.get(index) else {
+        return Vec::new();
+    };
+    fully_resolved_findings(node, plan, checkpoint, positions)
+        .into_iter()
+        .map(|finding| (finding.source, finding.finding))
+        .collect()
+}
+
 #[derive(Clone)]
 struct FullFinding {
     origin: RootIdentity,

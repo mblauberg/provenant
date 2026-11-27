@@ -1625,6 +1625,18 @@ fn unaccepted_replayed_repair_attempt_refuses_a_capped_ledger_artifact() {
     assert!(replay_owner.file_requests[0]
         .iter()
         .any(|request| request.label == "review_ledger"));
+
+    // A resumed unaccepted attempt must not launch with a clipped inline
+    // prompt, even when the full staged ledger is otherwise available.
+    journal.0.as_mut().unwrap().nodes[positions["fix"]]
+        .attempts.last_mut().unwrap().input_cap = Some(64);
+    let mut small_cap_owner = FakeOwner {
+        materialise: Some(fully_materialise_inputs),
+        ..Default::default()
+    };
+    let replay = advance(&document, &mut small_cap_owner, &mut journal);
+    assert!(matches!(replay, Err(GraphError::Refused(reason)) if reason.contains("selected upstream data")));
+    assert!(small_cap_owner.calls.is_empty());
 }
 
 #[test]

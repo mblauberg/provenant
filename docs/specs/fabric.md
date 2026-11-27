@@ -606,12 +606,21 @@ missing result.
 If another split panel for the same chain and head settles after that
 adjudicator succeeds, continue the same adjudicator node with the union of its
 known panels. Preserve the prior attempt history and an immutable receipt for
-its pinned head, prior verdict, output digest and newly added panel IDs; the
-journalled expansion history retains each attempt's full input union. Clear its
-current output and verdict before the new attempt. Downstream gates wait for
+its pinned head, prior verdict, output digest, the panels consumed by that
+verdict, the newly added panel IDs and the complete prior output snapshot as
+separate fields; the journalled expansion history retains each attempt's full
+input union. Keep the snapshot even when the provider supplies no immutable
+attempt reference, and enforce the existing 32 MiB prompt-store blob cap. Clear
+its current output and verdict before the new attempt. Downstream gates wait for
 that fresh adjudication; they cannot consume the superseded verdict. The
 continuation is a journalled revision so replay resumes the same node and input
 union.
+
+Before admission, every split panel must have succeeded with a usable verdict,
+complete findings and no partial output. The adjudicator must return every full
+input finding under its qualified identity with an explicit disposition. PASS
+is invalid while a blocking finding remains, including boundary and data-loss
+findings until evidence falsifies them.
 A split in a nested lens group remains visible when a panel synthesises its output;
 the adjudicator receives the outer panel's synthesised findings.
 A panel whose members have different pinned heads cannot be adjudicated as one

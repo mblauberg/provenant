@@ -445,6 +445,19 @@ fn panel_has_split(parent: &NodeProgress, checkpoint: &GraphCheckpoint) -> bool 
     false
 }
 
+fn panel_adjudication_evidence_complete(progress: &NodeProgress) -> bool {
+    progress.state == NodeState::Succeeded
+        && progress.outputs.as_ref().is_some_and(|outputs| {
+            !outputs.partial
+                && outputs.findings_available == Some(true)
+                && outputs
+                    .verdict
+                    .as_deref()
+                    .and_then(provenant_records::workflow::ReviewVerdict::from_token)
+                    .is_some()
+        })
+}
+
 /// A gate only adjudicates split panels whose verdicts it consumes.
 pub(super) fn split_adjudication(
     gate: &PlannedNode,
@@ -496,6 +509,9 @@ pub(super) fn split_adjudication(
         if parent.state != NodeState::Succeeded || !panel_has_split(parent, checkpoint) {
             continue;
         }
+        if !panel_adjudication_evidence_complete(parent) {
+            return Err("split panel has partial or incomplete verdict/findings evidence");
+        }
         let head = split_panel_head(&parent.id, checkpoint)?;
         let item = review_item_for_panel(&parent.id, plan);
         let panel = (item, parent.id.clone(), head.map(str::to_owned));
@@ -522,6 +538,18 @@ pub(super) fn split_adjudication(
             union.extend(panels);
             union.sort();
             union.dedup();
+            for panel in &union {
+                let progress = checkpoint
+                    .nodes
+                    .iter()
+                    .find(|progress| progress.id == *panel)
+                    .ok_or("split adjudicator input panel is unavailable")?;
+                if !panel_adjudication_evidence_complete(progress) {
+                    return Err(
+                        "split adjudicator input panel lacks complete verdict/findings evidence",
+                    );
+                }
+            }
             let missing = union
                 .iter()
                 .any(|panel| !adjudicator.inputs.iter().any(|input| input.node == *panel));
@@ -1681,9 +1709,24 @@ mod tests {
         );
         checkpoint.nodes[0].state = NodeState::Succeeded;
         checkpoint.nodes[0].outputs = Some(NodeOutputs {
+            verdict: Some("VERDICT: FAIL".into()),
+            findings_available: Some(true),
             warnings: vec!["review_split_verdict: conflicting verdicts on one head".into()],
             ..Default::default()
         });
+        let incomplete_cases: [fn(&mut NodeOutputs); 3] = [
+            |outputs: &mut NodeOutputs| outputs.partial = true,
+            |outputs: &mut NodeOutputs| outputs.findings_available = Some(false),
+            |outputs: &mut NodeOutputs| outputs.verdict = None,
+        ];
+        for make_incomplete in incomplete_cases {
+            let mut incomplete = checkpoint.clone();
+            make_incomplete(incomplete.nodes[0].outputs.as_mut().unwrap());
+            assert!(
+                split_adjudication(&plan.nodes[1], &plan, &incomplete).is_err(),
+                "a split warning cannot admit partial or unusable panel evidence"
+            );
+        }
         assert_eq!(
             split_adjudication(&plan.nodes[1], &plan, &checkpoint).unwrap(),
             Some(SplitAdjudication {

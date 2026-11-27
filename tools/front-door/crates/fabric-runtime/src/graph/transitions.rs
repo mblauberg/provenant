@@ -274,7 +274,12 @@ pub(super) fn apply_attempt_observation(
         review_range,
     } = facts;
     // Synthesis retains qualified evidence even without a disposition contract.
-    let upstream_findings: Vec<Finding> = if node.dispositions.is_empty()
+    let upstream_findings: Vec<Finding> = if node.kind == Some(NodeKind::Adjudicate) {
+        outputs::adjudication_input_findings(node_index, plan, checkpoint, positions)
+            .into_iter()
+            .map(|(source, finding)| upstream_finding(node, &source, finding))
+            .collect()
+    } else if node.dispositions.is_empty()
         && node.kind != Some(NodeKind::Synthesise)
         && !template::review_verifier(node)
         && !repair_writer(node)

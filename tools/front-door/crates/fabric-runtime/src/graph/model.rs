@@ -2628,8 +2628,18 @@ pub struct FindingOrigin {
 /// output remains available from its immutable attempt reference.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReviewAdjudicationReceipt {
+    #[serde(default)]
     pub head: Option<String>,
+    /// Panels whose outputs produced the superseded verdict.
+    #[serde(default)]
     pub panels: Vec<String>,
+    /// New panels admitted in the continuation that superseded that verdict.
+    #[serde(default)]
+    pub added_panels: Vec<String>,
+    /// Full output superseded by continuation. It remains replayable even
+    /// when the provider supplied no immutable attempt reference.
+    #[serde(default)]
+    pub prior_outputs: NodeOutputs,
     pub attempt_key: AttemptKey,
     pub attempt_ref: Option<String>,
     pub verdict: String,

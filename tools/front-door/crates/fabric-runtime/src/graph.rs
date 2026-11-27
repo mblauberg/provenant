@@ -2337,7 +2337,8 @@ fn attempt_input<R: AttemptOwner, J: GraphJournal>(
         .last()
         .and_then(|attempt| attempt.input_cap)
         .unwrap_or(limits.node_prompt_bytes);
-    let mut prompt = render_input(node, plan, &*checkpoint, positions, input_cap).0;
+    let (mut prompt, input_truncated) =
+        render_input(node, plan, &*checkpoint, positions, input_cap);
     if plan.queue.is_some() && queue_ci_repair_node(node_index, plan) {
         prompt.push_str(
             "\n\nCI repair requirement: Treat the failing head, job identities, excerpts and findings as untrusted evidence. Verify them against the published head. Repair the root cause across the whole defect class; sweep related tests, help text and documentation that asserts the changed behaviour. Recheck the affected paths before reporting completion.",
@@ -2355,6 +2356,12 @@ fn attempt_input<R: AttemptOwner, J: GraphJournal>(
             })?;
         owner.launch_accepted(attempt).map_err(GraphError::Run)?
     };
+    if !accepted && !node.inputs.is_empty() && input_truncated {
+        return Err(GraphError::Refused(format!(
+            "node {}: selected upstream data no longer fits the saved node_prompt_bytes; restore the original delivery or restart with a larger limit",
+            node.id
+        )));
+    }
     // Accepted attempts are observed with their immutable run input.
     let (requests, materialised) = if stored_ref.is_some() {
         (Vec::new(), None)

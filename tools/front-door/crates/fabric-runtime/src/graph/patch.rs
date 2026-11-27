@@ -482,6 +482,22 @@ pub(super) fn continue_adjudicator(
             format!("adjudicator {node_id} is not a succeeded, receipted attempt"),
         ));
     }
+    let prior_output_bytes = serde_json::to_vec(prior_outputs)
+        .map_err(|error| {
+            PatchError::invalid(format!(
+                "prior adjudication output is not serialisable: {error}"
+            ))
+        })?
+        .len();
+    if prior_output_bytes > MAX_CHECKPOINT_BYTES as usize {
+        return Err(PatchError::new(
+            "review_adjudication_snapshot_unavailable",
+            format!(
+                "prior adjudication output exceeds the {} byte blob cap",
+                MAX_CHECKPOINT_BYTES
+            ),
+        ));
+    }
     let pinned_head = head.map(str::to_owned);
 
     let mut union: Vec<String> = target
@@ -575,6 +591,8 @@ pub(super) fn continue_adjudicator(
     let receipt = ReviewAdjudicationReceipt {
         head: pinned_head,
         panels: previous.into_iter().collect(),
+        added_panels: added,
+        prior_outputs: prior_outputs.clone(),
         attempt_key: attempt.key.clone(),
         attempt_ref: attempt.attempt_ref.clone(),
         verdict: prior_outputs.verdict.clone().expect("checked verdict"),

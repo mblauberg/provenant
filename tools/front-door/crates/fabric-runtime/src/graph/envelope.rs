@@ -811,25 +811,47 @@ fn node_bound(
     }
     if node.kind == Some(NodeKind::Adjudicate) {
         // A sequential same-head split can reopen this stable node once per
-        // newly admitted panel. Receipts store only newly added panel IDs and
-        // a digest/reference, so the admitted graph node count caps history.
+        // newly admitted panel. Every receipt can retain the prior union and
+        // the added IDs separately; reserve both arrays across the full bounded
+        // receipt history, whose length is capped by the admitted node count.
         let mut receipt_attempt_key = worst_attempt_key.clone();
         receipt_attempt_key.previous_attempt_ref = Some("x".repeat(OUTPUT_FIELD_BYTES));
         let receipt_bytes = canonical_len(&ReviewAdjudicationReceipt {
             head: Some("1".repeat(64)),
             panels: Vec::new(),
+            added_panels: Vec::new(),
+            prior_outputs: NodeOutputs::default(),
             attempt_key: receipt_attempt_key,
             attempt_ref: Some("x".repeat(OUTPUT_FIELD_BYTES)),
             verdict: "VERDICT: INCONCLUSIVE".into(),
             output_digest: "1".repeat(64),
         });
+        // Reserve one complete bounded output projection and its external
+        // artifact pointers for every retained receipt. Full typed finding
+        // blobs are externalised and separately refused above the 32 MiB read
+        // cap when the continuation is admitted.
+        let prior_output_bytes = 256
+            + 80
+            + 256
+            + REMAINING_BYTES
+            + 256
+            + 3 * OUTPUT_FIELD_BYTES
+            + 64
+            + DISPOSITION_FINDINGS_BYTES
+            + 2 * OUTPUT_FIELD_BYTES
+            + MAX_WARNINGS * (WARNING_BYTES + 3)
+            + 2048;
+        let receipt_slot_bytes = receipt_bytes.saturating_add(prior_output_bytes);
+        let receipt_count = plan.nodes.len();
+        let panel_id_bytes = plan.nodes.iter().fold(0usize, |bytes, candidate| {
+            bytes.saturating_add(candidate.id.len().saturating_add(3))
+        });
         bytes = bytes
-            .saturating_add(receipt_bytes.saturating_mul(plan.nodes.len()))
+            .saturating_add(receipt_slot_bytes.saturating_mul(receipt_count))
             .saturating_add(
-                plan.nodes
-                    .iter()
-                    .map(|candidate| candidate.id.len() + 3)
-                    .sum(),
+                panel_id_bytes
+                    .saturating_mul(receipt_count)
+                    .saturating_mul(2),
             );
     }
     if node

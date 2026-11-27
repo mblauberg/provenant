@@ -292,9 +292,19 @@ An unresolved finding whose existing blocking class is set blocks acceptance reg
 When a later panel for the same review-chain item and head settles with a split
 after its adjudicator has succeeded, continue that same adjudicator node with
 the union of known split panels. Retain the old attempt and a receipt of its
-pinned head, prior verdict, output digest and newly added panel IDs; journalled
-expansions retain each attempt's full input union. Clear the old verdict before
-retrying, and require fresh adjudication before downstream gates proceed.
+pinned head, prior verdict, output digest, the panels consumed by that verdict,
+the newly added panel IDs, and the complete prior output snapshot as separate
+fields; journalled expansions retain each attempt's full input union. The
+snapshot remains in the receipt even when the provider gives no immutable
+attempt reference, and its content-addressed evidence uses the checkpoint's
+32 MiB blob cap. Clear the old verdict before retrying, and require fresh
+adjudication before downstream gates proceed.
+
+Before admission, every split panel must have succeeded with a usable verdict,
+complete findings and no partial output. The adjudicator must return each full
+input finding under its qualified identity with an explicit disposition. PASS
+is invalid while a blocking finding remains, including boundary and data-loss
+findings until evidence falsifies them.
 Journal the continuation so replay reuses the same node and evidence union;
 never accept the superseded verdict.
 

@@ -165,9 +165,11 @@ pub(super) fn contract_error(
     threshold: AcceptBelow,
 ) -> Option<(&'static str, String)> {
     let repair_triage = node.repair_triage;
+    let adjudicator = node.kind == Some(NodeKind::Adjudicate);
     if template::review_behaviour(node).is_none()
         && node.delivery_review.is_none()
         && !repair_triage
+        && !adjudicator
     {
         return None;
     }
@@ -197,14 +199,36 @@ pub(super) fn contract_error(
     if outputs.findings_available != Some(true) {
         return Some(("review_findings_invalid", "review findings are missing, malformed or incomplete; retained findings remain available as partial evidence".into()));
     }
+    if adjudicator && outputs.partial {
+        return Some((
+            "review_adjudication_incomplete",
+            "adjudicator output is partial; complete input dispositions are required".into(),
+        ));
+    }
+    let reviewed_findings = if adjudicator {
+        outputs
+            .full_disposition_findings
+            .as_deref()
+            .or(outputs.full_artifact_findings.as_deref())
+            .unwrap_or(outputs.findings.as_slice())
+    } else {
+        outputs.findings.as_slice()
+    };
     let mut ids = std::collections::BTreeSet::new();
-    for finding in &outputs.findings {
-        if upstream.iter().any(|source| source.id == finding.id) {
+    for finding in reviewed_findings {
+        let source_finding = upstream.iter().any(|source| source.id == finding.id);
+        if adjudicator && !ids.insert(&finding.id) {
+            return Some((
+                "review_adjudication_incomplete",
+                format!("adjudicator repeats input identity {}", finding.id),
+            ));
+        }
+        if source_finding {
             // Identity-only decisions inherit the source evidence. Copies from
             // multiple verifiers are checked by their disposition contract.
             continue;
         }
-        if !ids.insert(&finding.id) {
+        if !adjudicator && !ids.insert(&finding.id) {
             return Some((
                 "review_findings_invalid",
                 format!("finding {} repeats an independent id", finding.id),
@@ -227,13 +251,39 @@ pub(super) fn contract_error(
             }
         }
     }
+    if adjudicator {
+        for source in upstream {
+            let Some(dispositioned) = reviewed_findings
+                .iter()
+                .find(|finding| finding.id == source.id)
+            else {
+                return Some((
+                    "review_adjudication_incomplete",
+                    format!("adjudicator omitted input finding {}", source.id),
+                ));
+            };
+            if dispositioned
+                .disposition
+                .as_deref()
+                .is_none_or(|disposition| disposition.trim().is_empty())
+            {
+                return Some((
+                    "review_adjudication_incomplete",
+                    format!(
+                        "adjudicator omitted a disposition for input finding {}",
+                        source.id
+                    ),
+                ));
+            }
+        }
+    }
     if repair_triage
         || matches!(
             template::review_behaviour(node),
             Some(template::ReviewBehaviour::Verify | template::ReviewBehaviour::Synthesis)
         )
     {
-        for finding in &outputs.findings {
+        for finding in reviewed_findings {
             let valid = finding.triage().is_some_and(|triage| {
                 matches!(triage.decision.as_str(), "confirmed" | "rejected")
                     && !triage.reason.trim().is_empty()
@@ -255,7 +305,7 @@ pub(super) fn contract_error(
         }
     }
     if outputs.verdict.as_deref() == Some("VERDICT: PASS")
-        && outputs.findings.iter().any(|finding| {
+        && reviewed_findings.iter().any(|finding| {
             (repair::blocks_acceptance_for(finding, threshold)
                 && !(upstream.iter().any(|source| source.id == finding.id)
                     && finding.verification.as_deref() == Some("falsified")

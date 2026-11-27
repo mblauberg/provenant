@@ -322,6 +322,23 @@ fn filled_checkpoint(document: &GraphDocument, plan: &PlannedGraph) -> GraphChec
         .map(|node| node.id.clone())
         .max_by_key(String::len)
         .unwrap();
+    let prior_finding = serde_json::from_value::<Finding>(serde_json::json!({
+        "id": "prior:F1",
+        "severity": "high",
+        "file": "src/lib.rs",
+        "line": 1,
+        "summary": "prior adjudication disposition",
+        "status": "resolved",
+        "disposition": "accepted"
+    }))
+    .unwrap();
+    let mut prior_outputs = NodeOutputs::default();
+    prior_outputs.schema_version = 2;
+    prior_outputs.verdict = Some("VERDICT: INCONCLUSIVE".into());
+    prior_outputs.findings_available = Some(true);
+    prior_outputs.findings = vec![prior_finding.clone()];
+    prior_outputs.full_artifact_findings = Some(vec![prior_finding.clone()]);
+    prior_outputs.full_disposition_findings = Some(vec![prior_finding]);
     let nodes = plan
         .nodes
         .iter()
@@ -339,7 +356,7 @@ fn filled_checkpoint(document: &GraphDocument, plan: &PlannedGraph) -> GraphChec
                 finding_ledger: None,
                 review_adjudication_receipts: if node.kind == Some(NodeKind::Adjudicate) {
                     (0..plan.nodes.len())
-                        .map(|index| {
+                        .map(|_| {
                             let attempt_key = AttemptKey {
                                 extra: Default::default(),
                                 retry_generation: Some(u64::MAX),
@@ -351,11 +368,9 @@ fn filled_checkpoint(document: &GraphDocument, plan: &PlannedGraph) -> GraphChec
                             };
                             ReviewAdjudicationReceipt {
                                 head: Some("1".repeat(64)),
-                                panels: if index == 0 {
-                                    plan.nodes.iter().map(|candidate| candidate.id.clone()).collect()
-                                } else {
-                                    Vec::new()
-                                },
+                                panels: plan.nodes.iter().map(|candidate| candidate.id.clone()).collect(),
+                                added_panels: plan.nodes.iter().map(|candidate| candidate.id.clone()).collect(),
+                                prior_outputs: prior_outputs.clone(),
                                 attempt_key,
                                 attempt_ref: Some("x".repeat(OUTPUT_FIELD_BYTES)),
                                 verdict: "VERDICT: INCONCLUSIVE".into(),
