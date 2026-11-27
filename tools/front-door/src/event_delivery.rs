@@ -401,10 +401,8 @@ pub(crate) fn tick(resolved: &crate::roots::Resolved) -> Result<()> {
                 Err(provenant_os::fs::FsError::LockTimeout { .. }) => return Ok(()),
                 Err(error) => return Err(error.into()),
             };
-            continue_after_index(
+            fetch_then_index(
                 project,
-                || index_graphs(&resolved.roots, project),
-                || index_notes(&resolved.roots, project),
                 || {
                     let mut inputs = provenant_core::RootInputs::new(
                         resolved.home.clone(),
@@ -574,6 +572,8 @@ pub(crate) fn tick(resolved: &crate::roots::Resolved) -> Result<()> {
                     }
                     Ok(())
                 },
+                || index_graphs(&resolved.roots, project),
+                || index_notes(&resolved.roots, project),
             )
         })();
         if let Err(error) = result {
@@ -681,14 +681,16 @@ fn poll_repository(
     Ok(())
 }
 
-/// Indexing is replayable enrichment. A broken local journal must not stop the
-/// host from discovering repositories or polling their authoritative source.
-fn continue_after_index<T>(
-    project: ProjectId,
+/// The network page fetch runs first; local, replayable indexing follows in
+/// the same task. A broken local journal never stops the authoritative fetch,
+/// and a slow page delays only the `forge_events` task.
+fn fetch_then_index<T>(
+    project: impl std::fmt::Display,
+    forge: impl FnOnce() -> Result<T>,
     graphs: impl FnOnce() -> Result<()>,
     notes: impl FnOnce() -> Result<()>,
-    forge: impl FnOnce() -> Result<T>,
 ) -> Result<T> {
+    let fetched = forge();
     if let Err(error) = graphs() {
         let quarantined = error.is::<provenant_fabric_runtime::graph::UnreadableCheckpointNotice>();
         warn(
@@ -721,7 +723,7 @@ fn continue_after_index<T>(
             .subject(project.to_string()),
         );
     }
-    forge()
+    fetched
 }
 
 fn poll_one(
@@ -1308,8 +1310,12 @@ mod tests {
         let note_calls = std::cell::Cell::new(0);
         let forge_calls = std::cell::Cell::new(0);
         let tick = || {
-            continue_after_index(
+            fetch_then_index(
                 project,
+                || {
+                    forge_calls.set(forge_calls.get() + 1);
+                    Ok(())
+                },
                 || {
                     graph_calls.set(graph_calls.get() + 1);
                     Err("corrupt graph checkpoint".into())
@@ -1318,16 +1324,35 @@ mod tests {
                     note_calls.set(note_calls.get() + 1);
                     Err("corrupt note file".into())
                 },
-                || {
-                    forge_calls.set(forge_calls.get() + 1);
-                    Ok(())
-                },
             )
         };
         tick().unwrap();
         assert_eq!(graph_calls.get(), 1);
         assert_eq!(note_calls.get(), 1);
         assert_eq!(forge_calls.get(), 1);
+    }
+
+    #[test]
+    fn page_fetch_precedes_local_indexing() {
+        let order = std::cell::RefCell::new(Vec::new());
+        let value = fetch_then_index(
+            "p",
+            || {
+                order.borrow_mut().push("fetch");
+                Ok(7)
+            },
+            || {
+                order.borrow_mut().push("graphs");
+                Ok(())
+            },
+            || {
+                order.borrow_mut().push("notes");
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(value, 7);
+        assert_eq!(order.into_inner(), vec!["fetch", "graphs", "notes"]);
     }
 
     // Spec: docs/specs/lane-contracts.md#observation-events

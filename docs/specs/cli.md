@@ -124,11 +124,15 @@ budget; if the wait ends pending, it reports the last failed reading. A peer
 read failure also projects the attempt as unknown in status; that projection
 does not erase the failure from wait history.
 
-Graph advancement is a separate pass in `tick` and completes before forge
-polling starts, so a slow forge page cannot put graph settlement behind a long
-poll. The wait's terminal-remote recovery covers the remaining case where the
-scheduled tick itself is delayed by that poll: a waiting client settles the
-graph on its own next reread.
+Graph and forge tasks in `tick` run concurrently, each under its own deadline,
+so a slow forge page delays only `forge_events` and a slow graph delays only
+`graphs`. Tasks run under a host-configured concurrency cap and hold a
+single-flight lease until the worker actually ends: a worker that outlives its
+budget reports `over_budget`, and a second tick that finds the lease held
+reports `busy` rather than running the task twice. A fairness cursor orders
+due subjects with busy or over-budget visits first on the next pass. `tick
+--task` limits a pass to named tasks; `notice_batch_flush` and `quota_refresh`
+are no longer reported.
 
 - Why: terminal remote work must settle as soon as its home endpoint can be
   reached again, without requiring a second wait or a manual advance.
