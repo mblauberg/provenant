@@ -73,43 +73,80 @@ pub enum SeverityClass {
 /// One vocabulary map: each severity word an external reviewer may use, its
 /// doctrine class and its relative rank for bounded export. No module keeps a
 /// separate severity list.
-pub const SEVERITY_VOCABULARY: &[(&str, SeverityClass, u8)] = &[
-    ("critical", SeverityClass::Blocking, 0),
-    ("blocker", SeverityClass::Blocking, 0),
-    ("blocking", SeverityClass::Blocking, 0),
-    ("p0", SeverityClass::Blocking, 0),
-    ("high", SeverityClass::Blocking, 1),
-    ("error", SeverityClass::Blocking, 1),
-    ("p1", SeverityClass::Blocking, 1),
-    ("medium", SeverityClass::ShouldFix, 2),
-    ("moderate", SeverityClass::ShouldFix, 2),
-    ("should-fix", SeverityClass::ShouldFix, 2),
-    ("p2", SeverityClass::ShouldFix, 2),
-    ("low", SeverityClass::Note, 3),
-    ("warning", SeverityClass::Note, 3),
-    ("p3", SeverityClass::Note, 3),
-    ("info", SeverityClass::Note, 4),
-    ("informational", SeverityClass::Note, 4),
-    ("note", SeverityClass::Note, 4),
-    ("p4", SeverityClass::Note, 4),
+pub const SEVERITY_VOCABULARY: &[(&str, SeverityClass, u8, Option<Severity>)] = &[
+    (
+        "critical",
+        SeverityClass::Blocking,
+        0,
+        Some(Severity::Blocking),
+    ),
+    (
+        "blocker",
+        SeverityClass::Blocking,
+        0,
+        Some(Severity::Blocking),
+    ),
+    (
+        "blocking",
+        SeverityClass::Blocking,
+        0,
+        Some(Severity::Blocking),
+    ),
+    ("p0", SeverityClass::Blocking, 0, None),
+    ("major", SeverityClass::Blocking, 1, Some(Severity::High)),
+    ("high", SeverityClass::Blocking, 1, Some(Severity::High)),
+    ("error", SeverityClass::Blocking, 1, None),
+    ("p1", SeverityClass::Blocking, 1, None),
+    (
+        "medium",
+        SeverityClass::ShouldFix,
+        2,
+        Some(Severity::Medium),
+    ),
+    (
+        "moderate",
+        SeverityClass::ShouldFix,
+        2,
+        Some(Severity::Medium),
+    ),
+    ("should-fix", SeverityClass::ShouldFix, 2, None),
+    ("p2", SeverityClass::ShouldFix, 2, None),
+    ("minor", SeverityClass::Note, 3, Some(Severity::Low)),
+    ("low", SeverityClass::Note, 3, Some(Severity::Low)),
+    ("warning", SeverityClass::Note, 3, None),
+    ("p3", SeverityClass::Note, 3, None),
+    ("nit", SeverityClass::Note, 4, Some(Severity::Nit)),
+    ("info", SeverityClass::Note, 4, Some(Severity::Nit)),
+    ("style", SeverityClass::Note, 4, Some(Severity::Nit)),
+    ("informational", SeverityClass::Note, 4, None),
+    ("note", SeverityClass::Note, 4, None),
+    ("p4", SeverityClass::Note, 4, None),
 ];
 
-fn severity_word(word: &str) -> Option<(&'static str, SeverityClass, u8)> {
+fn severity_word(word: &str) -> Option<(&'static str, SeverityClass, u8, Option<Severity>)> {
     let word = word.trim().to_ascii_lowercase();
     SEVERITY_VOCABULARY
         .iter()
         .copied()
-        .find(|(known, _, _)| *known == word.as_str())
+        .find(|(known, _, _, _)| *known == word.as_str())
 }
 
-/// Translate a reviewer's severity word once. An unknown word is not blocking.
+/// Decode the acceptance vocabulary; unrecognised words are high and warned.
+pub fn decode_severity(word: &str) -> (Severity, bool) {
+    match severity_word(word).and_then(|(_, _, _, severity)| severity) {
+        Some(severity) => (severity, false),
+        None => (Severity::High, true),
+    }
+}
+
+/// Translate the existing repair doctrine's vocabulary.
 pub fn severity_class(word: &str) -> Option<SeverityClass> {
-    severity_word(word).map(|(_, class, _)| class)
+    severity_word(word).map(|(_, class, _, _)| class)
 }
 
 /// Relative order for bounded export; unknown words sort last.
 pub fn severity_rank(word: &str) -> u8 {
-    severity_word(word).map_or(5, |(_, _, rank)| rank)
+    severity_word(word).map_or(5, |(_, _, rank, _)| rank)
 }
 
 /// Evidence checked by verification or synthesis before a repair writer starts.
@@ -155,6 +192,17 @@ impl Finding {
         self.class
             .as_deref()
             .filter(|value| !value.trim().is_empty())
+    }
+
+    /// A declared blocking class remains binding even without a trigger.
+    pub fn has_blocking_class(&self) -> bool {
+        self.boundary_or_data_loss()
+            || self.triage.as_ref().is_some_and(|triage| {
+                matches!(
+                    triage.blocking_class.as_str(),
+                    "acceptance" | "default_path_defect"
+                )
+            })
     }
 
     pub fn boundary_or_data_loss(&self) -> bool {

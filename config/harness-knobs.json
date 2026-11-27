@@ -1541,10 +1541,10 @@
     },
     "domains.review.accept_below": {
       "type": "enum",
-      "values": ["nit", "low", "medium", "high", "blocking"],
+      "values": ["off", "nit", "low", "medium", "high", "blocking"],
       "default": "high",
       "status": "declared",
-      "effect": "Highest severity of an open finding that can be accepted after exact-head CI and review requirements pass."
+      "effect": "Exclusive severity ceiling for open findings after exact-head CI and review requirements pass; off accepts no open finding."
     },
     "domains.review.evidence_retries": {
       "type": "int",

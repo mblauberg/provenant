@@ -828,15 +828,13 @@ fn outputs(
         // adjudication node resolves it. Flag the split so a reduced verdict
         // is never silently treated as an agreed changes-request.
         // Spec: docs/specs/fabric.md#fix-round-invariants-and-split-verdict-adjudication
-        split = review::split_needs_adjudicator(&verdicts);
+        split = review::split_needs_adjudicator(&verdicts)
+            || review::contradictory_blocking_findings(&selected.findings);
         let verdict = verdicts.into_iter().max_by_key(|verdict| rank(*verdict));
         selected.verdict = verdict.map(|verdict| format!("VERDICT: {}", verdict.as_token()));
         selected.verdict_error = None;
     }
-    let review_members = spec
-        .exports
-        .iter()
-        .any(|export| template::review_behaviour(&plan.nodes[positions[&export.node]]).is_some());
+    let review_members = review::composite_review(spec, plan, positions);
     if (!unavailable.is_empty() && review_members)
         || !missing_review_lenses.is_empty()
         || review::partial(&selected)
@@ -845,19 +843,34 @@ fn outputs(
     }
     // Batch 1 slice 27: every review round reads and writes one finding ledger
     // for the exact head. Scope, carry-forward and coverage all come from it.
-    if review_members && checkpoint.nodes[boundary].review_settlement.is_some() {
-        let ledger = review::ledger_from_checkpoint(plan, checkpoint);
-        let boundary_progress = &checkpoint.nodes[boundary];
-        let head = boundary_progress
-            .review_settlement
-            .as_ref()
-            .map(|settlement| settlement.head.to_string())
-            .unwrap_or_default();
-        let base = boundary_progress
-            .review_settlement
-            .as_ref()
-            .and_then(|settlement| settlement.base)
-            .map(|oid| oid.to_string());
+    let mut pending: Vec<_> = spec
+        .exports
+        .iter()
+        .map(|export| positions[&export.node])
+        .collect();
+    let mut settlements = Vec::new();
+    while let Some(index) = pending.pop() {
+        let progress = &checkpoint.nodes[index];
+        if progress.state != NodeState::Succeeded {
+            continue;
+        }
+        if let Some(settlement) = progress.review_settlement.as_ref() {
+            settlements.push(settlement);
+        }
+        if let Some(child) = plan.nodes[index].composite.as_ref() {
+            pending.extend(child.exports.iter().map(|export| positions[&export.node]));
+        }
+    }
+    if review_members && let Some(settlement) = settlements.first() {
+        if settlements
+            .iter()
+            .any(|member| member.head != settlement.head)
+        {
+            return Err("review members settled against different heads".into());
+        }
+        let head = settlement.head.to_string();
+        let mut ledger = review::ledger_from_checkpoint(plan, checkpoint, boundary, &head);
+        let base = settlement.base.map(|oid| oid.to_string());
         let previous_base = ledger
             .last_reviewed_head
             .as_deref()
@@ -895,14 +908,14 @@ fn outputs(
                 }
             }
         }
-        let mut updated = ledger.clone();
+        let existing = ledger.heads.get(&head).cloned().unwrap_or_default();
         review::record_head(
-            &mut updated,
+            &mut ledger,
             &head,
             &selected.findings,
-            BTreeMap::new(),
-            BTreeSet::new(),
-            BTreeMap::new(),
+            existing.dispositions,
+            existing.covered_lenses,
+            existing.invariant_coverage,
         );
         let mut required_invariants = Vec::new();
         for finding in &selected.findings {
@@ -914,7 +927,7 @@ fn outputs(
                 required_invariants.push(invariant.to_owned());
             }
         }
-        let gaps = updated.heads.get(&head).map_or_else(Vec::new, |entry| {
+        let gaps = ledger.heads.get(&head).map_or_else(Vec::new, |entry| {
             review::coverage_gaps(
                 &entry.covered_lenses,
                 &spec.required_review_lenses,
@@ -929,7 +942,12 @@ fn outputs(
                     WARNING_BYTES,
                 ));
             }
-            if selected.verdict.as_deref() == Some("VERDICT: PASS") {
+            if selected
+                .verdict
+                .as_deref()
+                .and_then(provenant_records::workflow::ReviewVerdict::from_token)
+                == Some(provenant_records::workflow::ReviewVerdict::Approve)
+            {
                 selected.verdict = Some("VERDICT: INCONCLUSIVE".into());
             }
         }
@@ -1716,6 +1734,56 @@ pub(super) fn validate_progress(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn covered_review_pass_survives_replay() {
+        let document: GraphDocument = serde_json::from_value(serde_json::json!({
+            "schema_version": 2, "graph_id": "covered-review", "nodes": [{
+                "id": "panel", "kind": "composite", "access": "read_only",
+                "composite": {
+                    "reduce_verdict": true, "required_review_lenses": ["correctness"],
+                    "nodes": [{"id": "lens", "access": "read_only", "prompt": "review",
+                        "review_behaviour": "lens", "review_lens": "correctness",
+                        "route": {"alias": "fixture"}}],
+                    "exports": [{"node": "lens", "outputs": ["verdict", "findings"]}]
+                }
+            }]
+        }))
+        .unwrap();
+        let limits = crate::config::GraphLimits::default();
+        let expanded = plans::expand(&document, &[], &[], &limits).unwrap();
+        let (plan, positions) = validate_flat_plan(&expanded, &limits).unwrap();
+        let mut checkpoint =
+            transitions::initial_checkpoint(&expanded, &plan, "digest".into(), None, None, None);
+        let boundary = positions["panel"];
+        let spec = plan.nodes[boundary].composite.as_ref().unwrap();
+        let lens = positions[&spec.exports[0].node];
+        let mut member = outputs::make_outputs(None, None, None, None, None);
+        member.verdict = Some("VERDICT: APPROVE".into());
+        member.findings_available = Some(true);
+        checkpoint.nodes[lens].outputs = Some(member);
+        checkpoint.nodes[lens].state = NodeState::Succeeded;
+        checkpoint.nodes[lens].review_settlement = Some(ReviewSettlement {
+            attempt_id: provenant_core::AttemptId::from_bytes([1; 16]),
+            head: provenant_core::GitOid::parse(&"1".repeat(40)).unwrap(),
+            base: None,
+            verdict: provenant_records::workflow::ReviewVerdict::Approve,
+            independent: true,
+        });
+        let (first, _) = outputs(boundary, spec, &plan, &checkpoint, &positions).unwrap();
+        assert_eq!(first.verdict.as_deref(), Some("VERDICT: APPROVE"));
+        assert!(
+            !first
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("coverage_gaps"))
+        );
+        checkpoint.nodes[boundary].outputs = Some(first.clone());
+        let restored: GraphCheckpoint =
+            serde_json::from_value(serde_json::to_value(&checkpoint).unwrap()).unwrap();
+        let (replayed, _) = outputs(boundary, spec, &plan, &restored, &positions).unwrap();
+        assert_eq!(replayed, first);
+    }
 
     #[test]
     fn bounded_findings_reserves_members_then_prefers_severity() {
