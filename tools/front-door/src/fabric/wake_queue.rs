@@ -33,7 +33,7 @@ fn item_factory(factory: &Factory, directory: &str) -> Result<Factory, String> {
 }
 
 /// Reconcile the selected queue, run its normal capacity selection and launch
-/// every claimed item so no unrelated reservation is stranded by this wake.
+/// the selected item without claiming unrelated work.
 pub(super) fn select(
     factory: &Factory,
     queue_id: &str,
@@ -96,8 +96,14 @@ pub(super) fn select(
             )),
         }
     }
-    let schedule =
-        registry.claim_queue_with_parked(queue_id, &runnable, now, budget, cancel, clock)?;
+    let schedule = registry.claim_item_with_parked(
+        (queue_id, item_id),
+        &runnable,
+        now,
+        budget,
+        cancel,
+        clock,
+    )?;
     for warning in &schedule.warnings {
         super::interface::warn_operator(warning);
     }
