@@ -1648,6 +1648,34 @@ fn reservation_observation(context: &WorktreeContext<'_>, path: &Path) -> Option
     Some(LeaseObservation { lease, state })
 }
 
+/// Translate a shared writer-occupancy refusal into the worktree contract.
+/// Contention names the durable slot holder when one is recorded; any other
+/// custody refusal stays typed with its own detail rather than collapsing
+/// into an unrelated filesystem failure.
+fn writer_occupancy_refusal(
+    error: provenant_supervisor::custody::CustodyError,
+    holder: Option<provenant_core::AttemptId>,
+    path: &Path,
+) -> WorktreeError {
+    use provenant_supervisor::custody::CustodyError;
+    match error {
+        CustodyError::Filesystem(FsError::LockTimeout { .. }) | CustodyError::Timeout => {
+            WorktreeError::WriterBusy { holder }
+        }
+        // A busy observation gate is contention evidence, not a configured
+        // refusal that names a writer holder.
+        CustodyError::Busy => WorktreeError::LockBusy,
+        CustodyError::Filesystem(FsError::Cancelled { .. }) | CustodyError::Cancelled => {
+            WorktreeError::Cancelled
+        }
+        CustodyError::Filesystem(error) => WorktreeError::Filesystem(error),
+        error => WorktreeError::UnknownOccupancy {
+            path: path.to_path_buf(),
+            detail: error.to_string(),
+        },
+    }
+}
+
 /// Acquire shared occupancy under the live-sharing policy. A held lease no
 /// longer maps unconditionally to `WriterBusy`: `allow`/`warn` proceed with a
 /// typed warning, while `refuse` returns the typed configured error. If slot
@@ -1665,12 +1693,8 @@ pub fn admitted_writer_guard(
             &CancelToken::new(),
             context.clock,
         )
-        .map_err(|error| match error {
-            FsError::LockTimeout { .. } => WorktreeError::WriterBusy {
-                holder: writer_holder(context.project_state, path),
-            },
-            FsError::Cancelled { .. } => WorktreeError::Cancelled,
-            error => WorktreeError::Filesystem(error),
+        .map_err(|error| {
+            writer_occupancy_refusal(error, writer_holder(context.project_state, path), path)
         })?;
         retained_import(&directory).map_err(|detail| WorktreeError::UnknownOccupancy {
             path: path.to_path_buf(),
@@ -1697,12 +1721,8 @@ pub fn admitted_writer_guard(
         &CancelToken::new(),
         context.clock,
     )
-    .map_err(|error| match error {
-        FsError::LockTimeout { .. } => WorktreeError::WriterBusy {
-            holder: writer_holder(context.project_state, path),
-        },
-        FsError::Cancelled { .. } => WorktreeError::Cancelled,
-        error => WorktreeError::Filesystem(error),
+    .map_err(|error| {
+        writer_occupancy_refusal(error, writer_holder(context.project_state, path), path)
     })?;
     // An unresolved import is an operation error regardless of sharing; a
     // reservation fence, however, is exactly what live sharing intentionally
@@ -1861,6 +1881,37 @@ mod sharing_tests {
             configured_sharing(absent, Path::new("/provenant/home"), Path::new("/project")).value,
             Sharing::Warn
         );
+    }
+
+    #[test]
+    fn writer_occupancy_contention_keeps_the_durable_holder() {
+        let path = Path::new("/fixture/lane/.provenant/state/writer.lock");
+        let owner = holder(7);
+        let timeout =
+            provenant_supervisor::custody::CustodyError::Filesystem(FsError::LockTimeout {
+                path: path.to_path_buf(),
+                timeout: std::time::Duration::from_secs(1),
+            });
+        assert!(
+            matches!(
+                writer_occupancy_refusal(timeout, Some(owner), path),
+                WorktreeError::WriterBusy { holder: Some(seen) } if seen == owner
+            ),
+            "a contended writer slot keeps the recorded holder"
+        );
+        let cancelled =
+            provenant_supervisor::custody::CustodyError::Filesystem(FsError::Cancelled {
+                path: path.to_path_buf(),
+            });
+        assert!(matches!(
+            writer_occupancy_refusal(cancelled, None, path),
+            WorktreeError::Cancelled
+        ));
+        let fenced = provenant_supervisor::custody::CustodyError::Fenced;
+        assert!(matches!(
+            writer_occupancy_refusal(fenced, None, path),
+            WorktreeError::UnknownOccupancy { .. }
+        ));
     }
 }
 

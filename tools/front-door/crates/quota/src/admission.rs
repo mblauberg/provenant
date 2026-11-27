@@ -1,6 +1,5 @@
 //! Admission checks use validated evidence, including persisted provider refusals.
 use crate::*;
-use provenant_records::Layer;
 use provenant_records::{ExtraFields, ResolvedRoute, RouteExclusionReason, RouteReadiness};
 use serde::{Deserialize, Serialize};
 
@@ -842,6 +841,8 @@ mod tests {
 
 #[cfg(test)]
 mod admission_tests {
+    use provenant_records::Layer;
+
     // Spec: docs/specs/fabric.md#bounded-graphs-and-route-fallback
     #[test]
     fn admission_context_keeps_project_policy() {

@@ -255,7 +255,7 @@ pub enum WorktreeError {
     },
     /// A typed refusal from the shared custody policy, preserved to the
     /// command result boundary with its setting source and next step.
-    #[error("error [{0}] {1}", .0.code, .0.message)]
+    #[error("error [{code}] {message}", code = .0.code, message = .0.message)]
     CustodyCommand(provenant_records::CommandError),
     #[error(
         "writer lease held by attempt {holder} (branch {branch}, worktree {}, reservation age {age}, live: {live})",

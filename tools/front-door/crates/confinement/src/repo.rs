@@ -210,6 +210,12 @@ impl RepoPath {
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct GitRefName(String);
 
+impl std::fmt::Display for GitRefName {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Error)]
 #[error("Git ref must be a valid local branch name")]
 pub struct GitRefError;
