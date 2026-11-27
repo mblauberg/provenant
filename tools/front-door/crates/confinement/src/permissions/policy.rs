@@ -7,7 +7,7 @@ use super::validation::{profile_path_representable, validate_absolute};
 use super::{NetworkAccess, PathGrant, PathScope, PermissionError};
 pub use host::{host_credential_declarations, host_credential_roots, host_github_roots};
 use provenant_core::{CredentialKind, CredentialRoots, CredentialScope};
-use provenant_records::{LaneAccess, LaneAccessReceipt, Layer};
+use provenant_records::{LaneAccess, LaneAccessReceipt, Layer, Source};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
@@ -617,13 +617,6 @@ pub(super) fn network_ceiling(left: NetworkAccess, right: NetworkAccess) -> Netw
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-#[serde(tag = "kind", content = "path", rename_all = "snake_case")]
-pub enum PolicySource {
-    Ambient,
-    Host(PathBuf),
-}
-
 /// Stable fields and codes, never rejected values (which may contain secrets).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct PolicyWarning {
@@ -635,7 +628,7 @@ pub struct PolicyWarning {
 pub struct LanePolicy {
     mandatory: MandatoryRoots,
     optional: OptionalPolicy,
-    source: PolicySource,
+    source: Source,
     warnings: Vec<PolicyWarning>,
 }
 
@@ -691,7 +684,7 @@ impl LanePolicy {
         Ok(())
     }
 
-    pub fn source(&self) -> &PolicySource {
+    pub fn source(&self) -> &Source {
         &self.source
     }
     pub fn warnings(&self) -> &[PolicyWarning] {
@@ -701,14 +694,13 @@ impl LanePolicy {
     /// The launch edge calls this once after resolution, before compiling.
     /// Rendering and explain paths inspect data without repeating output.
     pub fn report_launch(&self, output: &mut impl Write) -> std::io::Result<()> {
-        match &self.source {
-            PolicySource::Ambient => {
-                writeln!(output, "lane policy: ambient (optional policy open)")?
-            }
-            PolicySource::Host(path) => writeln!(
+        match self.source.layer {
+            Layer::Default => writeln!(output, "lane policy: ambient (optional policy open)")?,
+            layer => writeln!(
                 output,
-                "lane policy: host {} [domains.run.host_policy]",
-                path.display()
+                "lane policy: {} {} [domains.run.host_policy]",
+                layer.as_str(),
+                self.source.origin.as_deref().unwrap_or("config.toml")
             )?,
         }
         for warning in &self.warnings {
@@ -731,13 +723,16 @@ impl HostPolicySettings {
         let mut resolved = LanePolicy {
             mandatory,
             optional: OptionalPolicy::default(),
-            source: PolicySource::Ambient,
+            source: Source::default(),
             warnings: Vec::new(),
         };
         let Some(Self(value)) = settings else {
             return resolved;
         };
-        resolved.source = PolicySource::Host(state.join("config.toml"));
+        resolved.source = Source {
+            layer: Layer::Host,
+            origin: Some(state.join("config.toml").display().to_string()),
+        };
         let Some(table) = value.as_object() else {
             resolved.warnings.push(PolicyWarning {
                 field: "table".into(),

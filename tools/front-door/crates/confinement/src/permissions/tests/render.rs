@@ -9,6 +9,7 @@ use provenant_os::exec::SystemExecutor;
 use provenant_os::exec::{ExecOutcome, Executor, Termination};
 #[cfg(any(target_os = "macos", feature = "snapshot"))]
 use provenant_records::policy::Policy;
+use provenant_records::{Layer, Source};
 #[cfg(target_os = "macos")]
 use std::collections::BTreeMap;
 #[cfg(any(target_os = "macos", feature = "snapshot"))]
@@ -1660,7 +1661,7 @@ fn ambient_policy_renders_complete_mandatory_and_host_denials()
         resolved
             .sources()
             .iter()
-            .any(|source| matches!(source, ConfinementSource::Host(_)))
+            .any(|source| source.layer == Layer::Host)
     );
     assert!(rule_index(&rendered, RuleAction::Allow, "default", None).is_some());
     assert!(!rule_facts(&rendered).iter().any(|rule| {
@@ -1798,14 +1799,17 @@ fn renderer_applies_all_network_ceiling_pairs_and_offline_denial()
             assert_eq!(resolved.network(), NetworkPolicy::from(effective));
             assert_eq!(resolved.resolve_for(&plan), resolved);
             assert_eq!(
-                resolved.sources().contains(&ConfinementSource::Plan),
+                resolved.sources().contains(&Source {
+                    layer: Layer::Launch,
+                    origin: None
+                }),
                 request != NetworkAccess::Open
             );
             assert_eq!(
                 resolved
                     .sources()
                     .iter()
-                    .any(|source| matches!(source, ConfinementSource::Host(_))),
+                    .any(|source| source.layer == Layer::Host),
                 ceiling != NetworkAccess::Open
             );
             let rendered = render(&GrantSet::build(&plan, &profile, home, None)?)?;
@@ -1824,7 +1828,10 @@ fn renderer_applies_all_network_ceiling_pairs_and_offline_denial()
             profile.spec.confinement = profile.spec.confinement.clone().offline();
             let resolved = profile.spec.confinement.resolve_for(&plan);
             assert_eq!(resolved.network(), NetworkPolicy::Offline);
-            assert!(resolved.sources().contains(&ConfinementSource::Provider));
+            assert!(resolved.sources().contains(&Source {
+                layer: Layer::Route,
+                origin: None
+            }));
             assert!(!resolved.github_permitted());
             let offline = render(&GrantSet::build(&plan, &profile, home, None)?)?;
             let final_deny = offline.rfind("(deny network*)").expect("offline denial");
