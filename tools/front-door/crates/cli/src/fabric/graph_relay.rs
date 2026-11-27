@@ -1155,7 +1155,7 @@ fn merge_warnings(value: &mut Value, extra: &[Warning]) {
             all.push(rendered);
         }
     }
-    all.sort_by(|left, right| left.to_string().cmp(&right.to_string()));
+    all.sort_by_key(|value| value.to_string());
     value["warnings"] = json!(all);
 }
 
