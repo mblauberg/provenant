@@ -69,8 +69,8 @@ pub fn template_gaps(markdown: &str) -> Vec<String> {
 }
 
 /// A checkpoint split into its frontmatter, preamble and headed sections. Each
-/// section keeps its heading line and body; a repeated heading replaces the
-/// earlier one, so later text always wins when sections are merged.
+/// section keeps its heading line and body; repeated headings in one input
+/// share an entry so all their content survives a merge.
 fn split(markdown: &str) -> (Option<String>, String, Vec<(String, String)>) {
     let end = header_end(markdown).ok().flatten().unwrap_or(0);
     let frontmatter = (end > 0).then(|| markdown[..end].to_owned());
@@ -84,7 +84,6 @@ fn split(markdown: &str) -> (Option<String>, String, Vec<(String, String)>) {
         if is_h {
             let key = heading.trim_end_matches('\r').to_owned();
             if let Some(index) = sections.iter().position(|(name, _)| *name == key) {
-                sections[index].1.clear();
                 current = Some(index);
             } else {
                 sections.push((key, String::new()));
@@ -180,6 +179,18 @@ pub fn scaffold_checkpoint(previous: Option<&str>, input: &str) -> Result<String
         .iter()
         .find(|(name, _)| name.starts_with("# "))
         .map(|(name, _)| name.clone());
+    // A supplied title replaces the previous title even when its text changes.
+    if let Some(index) = sections
+        .iter()
+        .position(|(name, _)| name.starts_with("# "))
+        .filter(|&index| {
+            input_title
+                .as_ref()
+                .is_some_and(|title| sections[index].0 != *title)
+        })
+    {
+        sections.remove(index);
+    }
     for (name, text) in input_sections {
         if let Some((_, existing)) = sections.iter_mut().find(|(key, _)| *key == name) {
             *existing = text;
@@ -201,16 +212,13 @@ pub fn scaffold_checkpoint(previous: Option<&str>, input: &str) -> Result<String
     if !preamble.is_empty() {
         push_section(&mut out, preamble);
     }
-    let title = input_title
-        .as_deref()
-        .and_then(|key| section(&sections, key))
-        .or_else(|| {
-            sections
-                .iter()
-                .find(|(name, _)| name.starts_with("# "))
-                .map(|(_, text)| text.as_str())
-        });
-    if let Some(title) = title {
+    let title_key = input_title.as_deref().or_else(|| {
+        sections
+            .iter()
+            .find(|(name, _)| name.starts_with("# "))
+            .map(|(name, _)| name.as_str())
+    });
+    if let Some(title) = title_key.and_then(|key| section(&sections, key)) {
         push_section(&mut out, title);
     } else {
         out.push_str(TITLE);
@@ -226,7 +234,7 @@ pub fn scaffold_checkpoint(previous: Option<&str>, input: &str) -> Result<String
         }
     }
     for (name, text) in &sections {
-        if !name.starts_with("# ") && !TEMPLATE_HEADINGS.contains(&name.as_str()) {
+        if Some(name.as_str()) != title_key && !TEMPLATE_HEADINGS.contains(&name.as_str()) {
             push_section(&mut out, text);
         }
     }
@@ -330,6 +338,19 @@ mod tests {
         }
         for text in ["Previous preamble.", "Old goal.", "Old background."] {
             assert!(!merged.contains(text), "{merged}");
+        }
+        let repeated = scaffold_checkpoint(
+            None,
+            "# First title\nFirst title body.\n## Background\nFirst background.\n# Second title\nSecond title body.\n## Background\nSecond background.\n",
+        )
+        .unwrap();
+        for text in [
+            "First title body.",
+            "Second title body.",
+            "First background.",
+            "Second background.",
+        ] {
+            assert!(repeated.contains(text), "{repeated}");
         }
         let carried = scaffold_checkpoint(Some(previous), "## Goal\nUpdated.\n").unwrap();
         assert!(carried.contains("Previous preamble."), "{carried}");
