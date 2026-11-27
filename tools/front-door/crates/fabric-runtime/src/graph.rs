@@ -234,6 +234,21 @@ pub use patch::{
 pub use plans::{Expansion, PlanSpec, RemainingBudgets, RetiredExpansion};
 pub use template::{Compiler, Layer, Template, TemplateLibrary, TemplateParameter};
 
+impl GraphCheckpoint {
+    /// Set the graph pause as its one owner (#4106).
+    ///
+    /// Graph settlement, scheduler settlement and loop settlement can each
+    /// pause the graph. When a writer other than a plan expansion takes the
+    /// pause, every active expansion pause yields first: an active expansion
+    /// pause that does not own the graph pause is an invalid checkpoint, and
+    /// the tick quarantines it instead of resuming it. The plan-expansion owner
+    /// activates its own pause in `plans`, so it does not use this path.
+    pub(in crate::graph) fn set_graph_pause_owner(&mut self, cause: PauseCause, reason: &str) {
+        self.deactivate_expansion_pauses();
+        self.set_pause(cause, reason);
+    }
+}
+
 /// Review range resolved for an immutable attempt.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ReviewRange {
@@ -2990,7 +3005,7 @@ fn record_observed_attempt<R: AttemptOwner, J: GraphJournal>(
         checkpoint.nodes[node_index].state = NodeState::Blocked;
         checkpoint.nodes[node_index].advance_code = Some("steer_continuation_refused".into());
         checkpoint.nodes[node_index].advance_note = Some(reason.clone());
-        checkpoint.set_pause(
+        checkpoint.set_graph_pause_owner(
             provenant_records::pause::PauseCause::Stop(
                 provenant_records::StopCause::LaunchHandoffRefused,
             ),
@@ -3284,7 +3299,7 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
                 advance_note: None,
             });
         }
-        checkpoint.set_pause(PauseCause::StructuralLimit, &limit.to_string());
+        checkpoint.set_graph_pause_owner(PauseCause::StructuralLimit, &limit.to_string());
         journal.save(&checkpoint).map_err(GraphError::Journal)?;
         return Ok(transitions::graph_run(checkpoint));
     }
