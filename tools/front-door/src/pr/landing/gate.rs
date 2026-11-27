@@ -614,7 +614,13 @@ pub(super) fn require_delivery_queue_ci(
             app: check.app_id,
         })
         .collect();
-    match ci_completion(&pr.head, &checks, &required) {
+    match ci_completion(
+        "OPEN",
+        &pr.head,
+        &checks,
+        &required,
+        forge.review_gate_contexts(),
+    ) {
         CiCompletion::Green => Ok(()),
         CiCompletion::Failed => Err(LandingError::UnmetGate(format!(
             "required CI failed on current pull request head {}",

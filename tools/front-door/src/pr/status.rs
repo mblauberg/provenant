@@ -664,6 +664,12 @@ fn is_review_gate_context(name: &str, review_gate_contexts: &[String]) -> bool {
     review_gate_contexts.iter().any(|gate| gate == name)
 }
 
+pub(crate) fn gate_contexts(project: &Path, state: &Path) -> Vec<String> {
+    provenant_config::ports::PortTable::read_for(Some(project), state)
+        .map(|ports| ports.ci_observation.review_gate_contexts)
+        .unwrap_or_default()
+}
+
 pub(super) struct Policy {
     pub checks: Vec<Required>,
 }
@@ -1200,7 +1206,6 @@ fn status_line_with(
         .iter()
         .filter(|check| !is_review_gate_context(&check.name, review_gate_contexts))
         .collect();
-    let present = !observed.is_empty();
     let count = |buckets: &[&str]| {
         checks.map(|_| {
             observed

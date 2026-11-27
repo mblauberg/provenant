@@ -232,12 +232,7 @@ impl GhForge {
             budget: Duration::from_secs(120),
             deadline: None,
             reviews: Default::default(),
-            review_gate_contexts: provenant_config::ports::PortTable::read_for(
-                Some(project),
-                state,
-            )
-            .map(|ports| ports.ci_observation.review_gate_contexts)
-            .unwrap_or_default(),
+            review_gate_contexts: crate::pr::status::gate_contexts(project, state),
         }
     }
     fn pull_reviews(&mut self, number: u64) -> Result<&[serde_json::Value], LandingError> {
