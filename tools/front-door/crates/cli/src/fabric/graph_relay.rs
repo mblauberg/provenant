@@ -20,6 +20,7 @@ use provenant_records::custody::{
     WorktreeLease, admit_writer,
 };
 use provenant_records::policy::WORKTREE_SHARED;
+use provenant_records::progress::WakeSubjectRef;
 use provenant_records::warning::{Warning, WarningCode, warn};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -31,21 +32,6 @@ use serde_json::{Value, json};
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum GraphRelay {
     Wake { subject: WakeSubjectRef },
-}
-
-/// The wire shape of the binary's `progress::WakeSubject`.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum WakeSubjectRef {
-    Graph {
-        project: provenant_core::ProjectId,
-        id: String,
-    },
-    QueueItem {
-        project: provenant_core::ProjectId,
-        queue: String,
-        item: String,
-    },
 }
 
 /// Emit the shared-work warning from one admission decision. The code is the

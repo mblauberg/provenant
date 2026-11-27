@@ -1,7 +1,9 @@
 //! Cross-owner fixture for the agent-native slice 0 contracts.
 //! Spec: docs/specs/agent-native.md#2-unifying-model-five-primitives
 
-use crate::fabric::progress::{WakeOutcome, WakeReason, WakeSubject, wake_with};
+use crate::fabric::progress::{
+    WakeClaim, WakeOutcome, WakeReason, WakeSource, WakeSubjectRef, wake_subject,
+};
 use provenant_cli::{RenderMode, render};
 use provenant_core::{AttemptId, Deadline, DurationMicros, MonoTime, ProjectId, WallTime};
 use provenant_records::command_result::{ErrorClass, SettingRef};
@@ -33,19 +35,39 @@ fn fake_wake_handover_and_error_render_share_the_contract() -> Result<(), Box<dy
     let child = deadline.child(now, DurationMicros::from_micros(2_000));
     assert_eq!(child.remaining(now).as_micros(), 2_000);
     let project = ProjectId::from_bytes([1; 16]);
-    let outcome = wake_with(
-        WakeSubject::Graph {
+    struct FakeWake {
+        now: MonoTime,
+    }
+    impl WakeSource for FakeWake {
+        fn reconcile(&mut self, _: &WakeSubjectRef, _: WakeReason) -> Result<(), WakeOutcome> {
+            Ok(())
+        }
+        fn claim(&mut self, _: &WakeSubjectRef, _: Deadline) -> WakeClaim {
+            WakeClaim::Ready { revision: 1 }
+        }
+        fn live_revision(&self, _: &WakeSubjectRef) -> u64 {
+            1
+        }
+        fn advance(
+            &mut self,
+            subject: &WakeSubjectRef,
+            reason: WakeReason,
+            budget: Deadline,
+        ) -> WakeOutcome {
+            assert!(matches!(subject, WakeSubjectRef::Graph { id, .. } if id == "fake"));
+            assert_eq!(reason, WakeReason::Wait);
+            assert_eq!(budget.remaining(self.now).as_micros(), 2_000);
+            WakeOutcome::Advanced { transitions: 1 }
+        }
+    }
+    let outcome = wake_subject(
+        WakeSubjectRef::Graph {
             project,
             id: "fake".into(),
         },
         WakeReason::Wait,
         child,
-        |subject, reason, budget| {
-            assert!(matches!(subject, WakeSubject::Graph { id, .. } if id == "fake"));
-            assert_eq!(reason, WakeReason::Wait);
-            assert_eq!(budget.remaining(now).as_micros(), 2_000);
-            WakeOutcome::Advanced { transitions: 1 }
-        },
+        &mut FakeWake { now },
     );
     assert_eq!(outcome, WakeOutcome::Advanced { transitions: 1 });
 

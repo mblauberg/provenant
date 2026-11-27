@@ -689,7 +689,7 @@ pub(crate) fn tick_graphs(
     now: provenant_core::WallTime,
     workers: &'static dyn WorkerObserver,
 ) -> Result<crate::tick::Graphs, Box<dyn std::error::Error>> {
-    use provenant_fabric_runtime::graph::{FileJournal, GraphJournal, advance_with_budget};
+    use provenant_fabric_runtime::graph::{FileJournal, GraphJournal};
     let mut report = super::queue_scheduler::reconcile_controls_before_tick(resolved, workers);
     for binding in provenant_config::registered_projects(&resolved.roots)? {
         let project = binding.project_id();
@@ -863,15 +863,29 @@ pub(crate) fn tick_graphs(
                 if !due_at_start || !graph_wake_due(&checkpoint, clock.wall_now()?) {
                     return Ok(false);
                 }
+                drop(journal);
                 let context =
                     Context::open(resolved.roots.clone(), &resolved.home, &execution.directory)?;
                 if context.identity.project != project || context.in_lane {
                     return Err(EdgeError::Invalid.into());
                 }
-                // A tick has no caller wait: its launches, including writer
-                // binding, have the configured launch allowance.
-                let budget =
-                    WaitBudget::cli(clock.mono_now(), context.config.graph.launch_wait_seconds)?;
+                let seconds = match provenant_config::read_knobs(&resolved.roots) {
+                    Ok(config) => config
+                        .knobs
+                        .get("domains.tick.subject_budget_seconds")
+                        .and_then(|knob| knob.value.as_u64())
+                        .unwrap_or(10),
+                    Err(error) => {
+                        report.warnings.push(format!(
+                            "tick subject budget unavailable: {error}; using default 10 seconds"
+                        ));
+                        10
+                    }
+                };
+                let budget = WaitBudget::up_to(
+                    clock.mono_now(),
+                    provenant_core::DurationMicros::from_micros(seconds.saturating_mul(1_000_000)),
+                );
                 let mut factory = Factory {
                     project_attribution: crate::usage::attribution_enabled(&context.roots),
                     context,
@@ -884,52 +898,22 @@ pub(crate) fn tick_graphs(
                     host_launch: None,
                     workers,
                 };
-                let (admitted, warnings, waiting) = super::queue_scheduler::admit_graph_tick(
-                    &factory,
-                    &id,
-                    &execution,
-                    &checkpoint,
-                )
-                .map_err(std::io::Error::other)?;
-                report.warnings.extend(warnings);
-                report.warnings.extend(waiting);
-                if !admitted {
-                    return Ok(false);
-                }
-                report
-                    .warnings
-                    .extend(super::steer::dispatch_pending_steers(
-                        &mut factory,
-                        &mut journal,
-                        &mut checkpoint,
-                        budget,
-                        &cancel,
-                    )?);
-                let mut owner = BoundGraphOwner {
-                    writer_launch_budget: None,
-                    admission_timeout: None,
-                    launch_warnings: Vec::new(),
-                    repo_facts: Default::default(),
-                    factory: &factory,
-                    integration_base: checkpoint.bases,
-                    integration_branch: execution.document.integration_branch.clone(),
-                    network: graph_network(&execution.document),
-                    capability_overrides: graph_capability_overrides(&execution.document),
-                    exclude: graph_exclude(&execution.document),
+                match super::unified::graph_wait::wake_in_host(
+                    &mut factory,
                     budget,
-                    cancel: &cancel,
-                    prices: None,
-                    tick: true,
-                };
-                let config = &factory.context.config.graph;
-                advance_with_budget(
-                    &execution.document,
-                    &mut owner,
-                    &mut journal,
-                    &config.limits,
-                    &config.budget,
-                )?;
-                Ok(true)
+                    &cancel,
+                    super::progress::WakeSubjectRef::Graph {
+                        project,
+                        id: id.clone(),
+                    },
+                    super::progress::WakeReason::Tick,
+                ) {
+                    super::progress::WakeOutcome::Advanced { .. } => Ok(true),
+                    super::progress::WakeOutcome::Skipped { code } => {
+                        Err(std::io::Error::other(code).into())
+                    }
+                    _ => Ok(false),
+                }
             })();
             match result {
                 Ok(true) => {

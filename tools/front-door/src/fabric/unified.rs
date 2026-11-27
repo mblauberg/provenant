@@ -14,7 +14,7 @@ use target_faults::{
     TargetFault, command_target_fault, is_target_not_found, outside_project_fault, target_fault,
 };
 
-mod graph_wait;
+pub(super) mod graph_wait;
 use graph_wait::missing_graph_context;
 pub(crate) use graph_wait::{
     check_targets, final_status_rows, read_lane_graph, read_status_rows,
@@ -1804,12 +1804,30 @@ fn validate_retry_brief_target(
 /// resolves the target (cli.md "Targets"), so the read needs neither host
 /// configuration nor state, which a confined lane cannot open.
 fn lane_graph_read(input: Value) -> Result<Value, FacadeError> {
-    provenant_cli::fabric::graph_relay::from_lane(
-        &provenant_fabric_runtime::graph::relay::RelayOp::Read { input },
-        &CancelToken::new(),
-        std::time::Duration::from_secs(55),
-    )
-    .map_err(super::interface::relay_error)
+    let cancel = CancelToken::new();
+    let within = std::time::Duration::from_secs(55);
+    let read = || {
+        provenant_cli::fabric::graph_relay::from_lane(
+            &provenant_fabric_runtime::graph::relay::RelayOp::Read {
+                input: input.clone(),
+            },
+            &cancel,
+            within,
+        )
+        .map_err(super::interface::relay_error)
+    };
+    let value = read()?;
+    if input["op"] == "status"
+        && !input["id"].as_str().unwrap_or("").is_empty()
+        && matches!(
+            super::progress::wake_lane_reading(&value, super::progress::WakeReason::Status, within),
+            super::progress::WakeOutcome::Advanced { .. }
+        )
+    {
+        read()
+    } else {
+        Ok(value)
+    }
 }
 
 /// What a graph command reports before it is emitted: data, human text, the
@@ -2035,6 +2053,18 @@ pub(crate) fn unified_graph_command(
                 reader.clock.mono_now(),
                 reader.context.config.graph.launch_wait_seconds,
             )?;
+            if matches!(command, GraphCommand::Status)
+                && !selector.is_empty()
+                && let Some(target) = reader.graph_target(&selector)?
+            {
+                let _ = graph_wait::wake_graph_for_reader(
+                    reader,
+                    &target.graph,
+                    super::progress::WakeReason::Status,
+                    budget,
+                    &cancel,
+                );
+            }
             let mut data = reader.graph_document(input, budget, &cancel)?;
             if let Some(binding) = owner {
                 let notice = cross_project_notice(&selector, binding);
@@ -3667,7 +3697,15 @@ pub(crate) fn unified_graph_result(
     edge: &provenant_cli::run::Edge<'_>,
 ) -> provenant_cli::run::Reply {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(55);
-    let rows = match read_status_rows(target, edge, &mut None, deadline, &CancelToken::new()) {
+    let rows = match read_status_rows_with_recovery(
+        target,
+        edge,
+        &mut None,
+        deadline,
+        &CancelToken::new(),
+        &provenant_confinement::worktrees::SystemWorkerObserver,
+        super::progress::WakeReason::Result,
+    ) {
         Ok(rows) => rows,
         Err(error) => return output_error(error.as_ref()),
     };
@@ -3927,6 +3965,15 @@ pub(crate) fn unified_graph_output(
                 factory.clock.mono_now(),
                 factory.context.config.graph.launch_wait_seconds,
             )?;
+            if let Ok(Some(target)) = factory.graph_target(&command.target.to_string()) {
+                let _ = graph_wait::wake_graph_for_reader(
+                    &factory,
+                    &target.graph,
+                    super::progress::WakeReason::Output,
+                    budget,
+                    &CancelToken::new(),
+                );
+            }
             host_graph_output(
                 command,
                 edge,

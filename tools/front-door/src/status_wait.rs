@@ -863,7 +863,13 @@ fn read(
         Source::Graph(target) => {
             match provenant_sqlite::with_busy_timeout(Duration::ZERO, || {
                 crate::fabric::read_status_rows_with_recovery(
-                    target, edge, session, deadline, cancel, workers,
+                    target,
+                    edge,
+                    session,
+                    deadline,
+                    cancel,
+                    workers,
+                    crate::fabric::progress::WakeReason::Wait,
                 )
             }) {
                 Ok(rows) => classify_rows(&label, &rows),

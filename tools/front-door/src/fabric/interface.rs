@@ -14,8 +14,8 @@ use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
 pub(super) mod observation;
+use observation::wait_graph_updates;
 pub(super) use observation::wait_submission;
-use observation::{launch_retry_due, observation_clock_error, wait_graph_updates};
 
 /// A `wait_seconds` that is not a usable wait budget.
 fn wait_seconds_invalid() -> FacadeError {
@@ -3411,7 +3411,7 @@ impl Factory {
         let (run, wait_observation, observation_wait, remote_read_allowed) = if replayed {
             (run, None, None, true)
         } else {
-            self.wait_document(run, input, budget, cancel, &path, &scratch)?
+            self.wait_document(run, input, budget, cancel)?
         };
         let timed_out = !replayed
             && input.get("wait_seconds").and_then(Value::as_u64).is_some()
@@ -3988,8 +3988,6 @@ impl Factory {
         input: &Value,
         budget: WaitBudget,
         cancel: &CancelToken,
-        document: &Path,
-        scratch: &Path,
     ) -> Result<
         (
             provenant_fabric_runtime::graph::GraphRun,
@@ -4019,31 +4017,20 @@ impl Factory {
             &mut observation,
             Some(self.context.identity.host),
             |id| {
-                let observed = self.graph(
+                let _ = super::unified::graph_wait::wake_graph_for_reader(
+                    self,
+                    id,
+                    crate::fabric::progress::WakeReason::InlineRun,
+                    wait,
+                    cancel,
+                );
+                self.graph(
                     GraphInput::Status {
                         extra: Default::default(),
                         id: id.to_owned(),
                     },
                     wait,
                     cancel,
-                )?;
-                // A waited submission owns admission progress. Status itself remains
-                // read-only; only a due launch retry is advanced under the journal lock.
-                let due =
-                    launch_retry_due(&observed, &self.clock).map_err(observation_clock_error)?;
-                if !due || wait.remaining(self.clock.mono_now()).as_micros() == 0 {
-                    return Ok(observed);
-                }
-                self.graph_with_scratch(
-                    GraphInput::Run {
-                        extra: Default::default(),
-                        document: document.to_owned(),
-                    },
-                    wait,
-                    cancel,
-                    Some(scratch),
-                    None,
-                    None,
                 )
             },
             |run| {
