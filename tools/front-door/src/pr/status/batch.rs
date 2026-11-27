@@ -462,7 +462,7 @@ fn raw_check(node: &Value) -> Option<RawCheck> {
 }
 
 /// The status line an entry carries, sharing the REST reader's rendering.
-pub(crate) fn line_from_entry(entry: &Entry) -> Line {
+pub(crate) fn line_from_entry(entry: &Entry, review_gate_contexts: &[String]) -> Line {
     let checks: Vec<observer::Check> = entry
         .checks
         .iter()
@@ -490,6 +490,7 @@ pub(crate) fn line_from_entry(entry: &Entry) -> Line {
             url: entry.url.clone(),
         },
         (!entry.truncated && entry.state != "UNAVAILABLE").then_some(checks.as_slice()),
+        review_gate_contexts,
     );
     if entry.state == "UNAVAILABLE" {
         line.error = Some("pull request was missing from the batch response".into());
@@ -517,7 +518,7 @@ mod tests {
 
     #[test]
     fn missing_pull_rows_remain_unavailable() {
-        let line = line_from_entry(&entry(7, None));
+        let line = line_from_entry(&entry(7, None), &[]);
         assert_eq!(line.class(), "unavailable");
         assert_eq!(line.verdict(), None);
     }
@@ -574,10 +575,27 @@ mod tests {
             entry.checks[0].url.as_deref(),
             Some("https://github.com/owner/repo/actions/runs/1")
         );
-        let line = line_from_entry(&entry);
+        let line = line_from_entry(&entry, &[]);
         assert_eq!(line.class(), "failing");
         assert_eq!(line.failing_checks, ["test", "deploy", "coverage"]);
         assert!(line.text().contains("fail=3 names=test,deploy,coverage"));
+    }
+
+    #[test]
+    fn declared_review_gates_do_not_count_as_batch_ci() {
+        let checks = json!([
+            {"__typename":"CheckRun","name":"build","status":"COMPLETED","conclusion":"SUCCESS","detailsUrl":null},
+            {"__typename":"StatusContext","context":"verdict","state":"PENDING","targetUrl":null}
+        ]);
+        let entry = entry(
+            7,
+            Some(serde_json::from_value(pull("head", checks, 2)).unwrap()),
+        );
+        let line = line_from_entry(&entry, &["verdict".to_owned()]);
+
+        assert_eq!(line.checks_total, Some(1));
+        assert_eq!(line.checks_pending, Some(0));
+        assert_eq!(line.class(), "ready");
     }
 
     #[test]

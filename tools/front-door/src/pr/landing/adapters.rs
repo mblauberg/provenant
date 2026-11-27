@@ -196,6 +196,8 @@ pub struct GhForge {
     budget: Duration,
     deadline: Option<std::time::Instant>,
     reviews: std::collections::BTreeMap<u64, Vec<serde_json::Value>>,
+    /// Review-gate contexts declared in the project's ci_observation port.
+    review_gate_contexts: Vec<String>,
 }
 impl GhForge {
     /// Merge the pinned head, optionally with the owner's admin authority.
@@ -230,6 +232,7 @@ impl GhForge {
             budget: Duration::from_secs(120),
             deadline: None,
             reviews: Default::default(),
+            review_gate_contexts: crate::pr::status::gate_contexts(project, state),
         }
     }
     fn pull_reviews(&mut self, number: u64) -> Result<&[serde_json::Value], LandingError> {
@@ -610,6 +613,9 @@ fn encode_branch(branch: &str) -> String {
 }
 
 impl Forge for GhForge {
+    fn review_gate_contexts(&self) -> &[String] {
+        &self.review_gate_contexts
+    }
     fn capabilities(
         &mut self,
         target: &str,

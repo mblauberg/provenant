@@ -539,7 +539,21 @@ fn ci_outstanding(
             app: None,
         })
         .collect();
-    let pending = ci_completion(&pr.head, &checks, &required) == CiCompletion::Pending;
+    // The same completion definition wait and status use decides the gate. A
+    // terminal PR settles before a pending check, and contexts the project
+    // declares as a review gate are not CI.
+    let state = match forge.pull_request(pr.number)?.state {
+        super::ports::PullRequestState::Open => "OPEN",
+        super::ports::PullRequestState::Merged => "MERGED",
+        super::ports::PullRequestState::Closed => "CLOSED",
+    };
+    let pending = ci_completion(
+        state,
+        &pr.head,
+        &checks,
+        &required,
+        forge.review_gate_contexts(),
+    ) == CiCompletion::Pending;
     // `always` waits for a run to appear; `affected` waits only for runs that exist.
     Ok(
         pending
@@ -600,7 +614,13 @@ pub(super) fn require_delivery_queue_ci(
             app: check.app_id,
         })
         .collect();
-    match ci_completion(&pr.head, &checks, &required) {
+    match ci_completion(
+        "OPEN",
+        &pr.head,
+        &checks,
+        &required,
+        forge.review_gate_contexts(),
+    ) {
         CiCompletion::Green => Ok(()),
         CiCompletion::Failed => Err(LandingError::UnmetGate(format!(
             "required CI failed on current pull request head {}",
@@ -700,8 +720,23 @@ fn await_pr_ci_with(
 mod tests {
     use super::*;
     use crate::pr::landing::fakes::FakeForge;
+    use crate::pr::landing::ports::{Mergeability, PullRequestInfo, PullRequestState};
     use crate::pr::landing::test_support::LandingFixture;
     use std::cell::Cell;
+
+    fn open_info(number: u64, head: &str) -> PullRequestInfo {
+        PullRequestInfo {
+            number,
+            head: head.into(),
+            base_branch: "main".into(),
+            author: "author".into(),
+            state: PullRequestState::Open,
+            mergeability: Mergeability::Unknown,
+            merged_commit: None,
+            stack: None,
+            draft: false,
+        }
+    }
 
     fn validate_evidence(
         candidate: &Candidate,
@@ -819,10 +854,37 @@ mod tests {
     }
     fn pending_forge() -> FakeForge {
         let mut forge = FakeForge::default();
+        forge.pull_requests.insert(1, open_info(1, "h1"));
         forge
             .check_runs
             .insert("h1".into(), vec![evidence(GateResult::Pending, None)]);
         forge
+    }
+    #[test]
+    fn required_review_gate_does_not_hold_landing_ci_pending() {
+        use crate::pr::landing::ports::RequiredCiCheck;
+
+        let mut forge = FakeForge::default();
+        forge.pull_requests.insert(1, open_info(1, "h1"));
+        forge.required_ci_policies.insert(
+            "main".into(),
+            Some(vec![RequiredCiCheck {
+                name: "verdict".into(),
+                app_id: None,
+            }]),
+        );
+        forge.review_gate_contexts = vec!["verdict".into()];
+        let mut build = evidence(GateResult::Passed, None);
+        build.commit = "h1".into();
+        build.checks[0].name = "build".into();
+        let mut verdict = evidence(GateResult::Pending, None);
+        verdict.commit = "h1".into();
+        verdict.checks[0].name = "verdict".into();
+        forge.check_runs.insert("h1".into(), vec![build, verdict]);
+
+        let result = require_delivery_queue_ci(&mut forge, &pr(1, "h1"));
+
+        assert!(result.is_ok(), "a review gate listed as required is not CI");
     }
     // Spec: docs/specs/cli.md#landing-adds-no-merge-authority
     #[test]
@@ -934,6 +996,7 @@ mod tests {
     #[test]
     fn configured_check_that_has_not_reported_keeps_land_waiting() {
         let mut forge = FakeForge::default();
+        forge.pull_requests.insert(1, open_info(1, "h1"));
         let mut passing_other_check = evidence(GateResult::Passed, None);
         passing_other_check.commit = "h1".into();
         passing_other_check.checks[0].name = "optional".into();

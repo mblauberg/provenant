@@ -708,7 +708,12 @@ read-only attempt within its [retry](retry-owner.md) budget. The explicit
 the stalled provider before the graph advances, and the switch consumes that
 same retry budget. Its next route reuses the node's worktree so any partial
 effects remain visible to the retry. Fail-policy stalls and uncertain launches
-never switch.
+never switch. A sealed stop cause controls the next step for a pre-launch
+refusal too; the outcome supplies a fallback cause only when no stop was sealed. A held
+preparation refusal retains its `preparation_refused` advance code and actionable refusal detail.
+When a same-route continuation cause has no next route or explicit `on_stop`
+override, the graph starts a fresh attempt on that route; `fallback_route_pinned`
+is reserved for depleted causes.
 - Why: preserving a writer's partial work makes an explicit stall retry safe to
   inspect and continue, while the retry budget bounds route changes.
 

@@ -828,6 +828,7 @@ pub(super) fn validate_on_stop(node: &GraphNode) -> Result<(), String> {
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum SettlementFallback {
     Continue,
+    ContinueSameRoute,
     Fail {
         code: Option<&'static str>,
         message: Option<String>,
@@ -847,6 +848,7 @@ pub(super) fn settlement_fallback_decision(
     node: &PlannedNode,
     route_index: usize,
     outcome: GraphAttemptOutcome,
+    stop: Option<provenant_records::StopCause>,
     launched: bool,
     evidence: FallbackEvidence<'_>,
 ) -> SettlementFallback {
@@ -877,23 +879,20 @@ pub(super) fn settlement_fallback_decision(
     // takes the cause default, while an explicit, non-pinned node override
     // still controls the next step. Launched stops use the retry-aware rule
     // in decide(); there is no same-route retry to spend before launch.
-    let cause = match outcome {
-        GraphAttemptOutcome::AuthRequired => Some(StopCause::AuthRequired),
-        GraphAttemptOutcome::UsageLimited => Some(StopCause::UsageLimited),
-        GraphAttemptOutcome::ModelUnavailable => Some(StopCause::ModelUnavailable),
-        GraphAttemptOutcome::PreparationRefused(
-            provenant_records::run::CauseKind::SpawnFailure,
-        ) => Some(StopCause::SpawnFailure),
-        GraphAttemptOutcome::PreparationRefused(
-            provenant_records::run::CauseKind::PreparationRefused,
-        ) => Some(StopCause::PreparationRefused),
-        GraphAttemptOutcome::AdapterUnavailable | GraphAttemptOutcome::PreparationRefused(_) => {
-            Some(StopCause::AdapterUnavailable)
-        }
-        GraphAttemptOutcome::Unclassified => Some(StopCause::Unclassified),
-        _ => None,
-    };
+    let cause = stop.or_else(|| next_attempt::fallback_cause(outcome));
     let custody_released = live_fallback_allowed(outcome, launched, fallback_evidence);
+    // A launched attempt never carries released custody (that is preparation
+    // evidence), so a sealed same-route cause decides on its own: the node
+    // retries its route instead of reporting the provider's label.
+    if launched
+        && !review_limit_reached
+        && route_index + 1 == node.routes.len()
+        && cause.is_some_and(|cause| {
+            cause.continues_on_same_route() && node.on_stop.get(cause).is_none()
+        })
+    {
+        return SettlementFallback::ContinueSameRoute;
+    }
     let step = cause.map(|cause| {
         if !custody_released {
             NextStep::Chair
@@ -906,9 +905,19 @@ pub(super) fn settlement_fallback_decision(
         }
     });
     if custody_released && step != Some(NextStep::NewRoute) {
+        let (code, message) = match outcome {
+            GraphAttemptOutcome::PreparationRefused(refusal) => (
+                "preparation_refused",
+                bounded(refusal.detail(), MAX_ADVANCE_NOTE_BYTES),
+            ),
+            _ => (
+                "on_stop_held",
+                "on_stop keeps this stop off the next route; return to the chair".into(),
+            ),
+        };
         return SettlementFallback::Fail {
-            code: Some("on_stop_held"),
-            message: Some("on_stop keeps this stop off the next route; return to the chair".into()),
+            code: Some(code),
+            message: Some(message),
         };
     }
     let allowed = step == Some(NextStep::NewRoute);
@@ -964,6 +973,7 @@ pub(super) fn settlement_fallback_decision(
             && launched
             && node.access == AccessMode::ReadOnly
             && route.is_some_and(|r| r.account.is_some() || r.model.is_some())
+            && cause.is_some_and(|cause| cause.depleted())
         {
             advance_code = Some("fallback_route_pinned");
             advance_note = Some(

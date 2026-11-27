@@ -753,6 +753,7 @@ pub(super) fn apply_attempt_observation(
                             progress.state = NodeState::Running;
                             false
                         } else {
+                            let stop = attempt.stop;
                             let review_limit_reached =
                                 review_preparation_substitution(node, attempt)
                                     && progress
@@ -765,6 +766,7 @@ pub(super) fn apply_attempt_observation(
                                 node,
                                 route_index,
                                 outcome,
+                                stop,
                                 launched,
                                 FallbackEvidence {
                                     preparation: fallback_evidence,
@@ -774,7 +776,8 @@ pub(super) fn apply_attempt_observation(
                                     skipped_accounts: &skipped_accounts,
                                 },
                             ) {
-                                SettlementFallback::Continue => true,
+                                SettlementFallback::Continue
+                                | SettlementFallback::ContinueSameRoute => true,
                                 SettlementFallback::Fail { code, message } => {
                                     fail_node(progress, code.map(str::to_owned), message);
                                     false
@@ -794,6 +797,7 @@ pub(super) fn apply_attempt_observation(
                             node,
                             route_index,
                             outcome,
+                            stop,
                             launched,
                             FallbackEvidence {
                                 preparation: fallback_evidence,
@@ -803,7 +807,8 @@ pub(super) fn apply_attempt_observation(
                                 skipped_accounts: &skipped_accounts,
                             },
                         ) {
-                            SettlementFallback::Continue => true,
+                            SettlementFallback::Continue
+                            | SettlementFallback::ContinueSameRoute => true,
                             SettlementFallback::Fail { code, message } => {
                                 fail_node(progress, code.map(str::to_owned), message);
                                 false

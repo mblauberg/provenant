@@ -15,7 +15,7 @@ pub(crate) fn select_transport(
     })?;
     let policy = provenant_config::operation_policy(state, project, &ports);
     let mut forge = ForgePort::new(
-        ports.ci_observation,
+        (&ports.ci_observation).into(),
         "ci_observation",
         project,
         state,
