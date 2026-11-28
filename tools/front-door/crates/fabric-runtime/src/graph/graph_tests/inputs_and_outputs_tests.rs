@@ -1233,7 +1233,7 @@ fn checked_findings_group_before_writer_and_dispute_reaches_synthesis() {
     let writer_files = owner
         .file_requests
         .iter()
-        .find(|requests| requests.iter().any(|request| request.label == "review"))
+        .find(|requests| requests.iter().any(|request| request.label == "review_ledger"))
         .unwrap();
     assert!(
         writer_files
@@ -1250,7 +1250,7 @@ fn checked_findings_group_before_writer_and_dispute_reaches_synthesis() {
             .iter()
             .all(|finding| finding.summary != "REJECTED_DO_NOT_REPAIR")
     );
-    let (_, input) = owner.prompts[1].split_once("review findings: ").unwrap();
+    let (_, input) = owner.prompts[1].split_once("review_ledger findings: ").unwrap();
     let groups: serde_json::Value = serde_json::from_str(input.lines().next().unwrap()).unwrap();
     assert_eq!(groups.as_array().unwrap().len(), 1);
     assert_eq!(groups[0]["findings"].as_array().unwrap().len(), 2);

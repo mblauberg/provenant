@@ -105,7 +105,10 @@ fn projection_setting_uses_the_resolved_layer_and_origin() -> Result<(), Box<dyn
 
 #[test]
 fn review_policy_uses_effective_knob_values_and_their_sources() {
-    use provenant_fabric_runtime::{config::ReviewSettings, graph::AcceptBelow};
+    use provenant_fabric_runtime::{
+        config::ReviewSettings,
+        graph::{AcceptBelow, REVIEW_ACCEPT_BELOW_KEY, REVIEW_EVIDENCE_RETRIES_KEY},
+    };
     use provenant_records::{Layer, Source, Sourced};
 
     let settings = ReviewSettings::default();

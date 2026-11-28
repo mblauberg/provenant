@@ -1170,11 +1170,18 @@ fn renamed_composites_keep_their_behaviour_and_bindings() {
             .extend(extra.as_object().unwrap().clone());
         let mut renamed = original.clone();
         renamed["use"] = format!("copy-{name}").into();
-        assert_eq!(
-            compiler.compile(&original).unwrap(),
-            compiler.compile(&renamed).unwrap(),
-            "{name}"
-        );
+        let mut compiled = compiler.compile(&original).unwrap();
+        let mut copied = compiler.compile(&renamed).unwrap();
+        // A composite boundary records the template it came from, so the host
+        // can resolve that template's review policy. Provenance names the
+        // layer entry used; everything else must be identical.
+        if compiled.composite.is_some() {
+            assert_eq!(compiled.template.as_deref(), Some(name), "{name}");
+            assert_eq!(copied.template, Some(format!("copy-{name}")), "{name}");
+        }
+        compiled.template = None;
+        copied.template = None;
+        assert_eq!(compiled, copied, "{name}");
     }
 }
 
@@ -1182,7 +1189,7 @@ fn renamed_composites_keep_their_behaviour_and_bindings() {
 // Spec: docs/specs/fabric.md#fix-round-invariants-and-split-verdict-adjudication
 fn split_verdict_yields_one_adjudication_node_and_no_new_round() {
     let panels = ["panel".to_owned()];
-    let patch = super::repair::split_verdict_patch("item", "panel", &panels, None, 2, "principal");
+    let patch = super::repair::split_verdict_patch("item", &panels, None, 2, "principal");
     assert_eq!(
         patch.nodes.len(),
         1,
@@ -1203,8 +1210,14 @@ fn split_verdict_yields_one_adjudication_node_and_no_new_round() {
     );
     assert_eq!(
         patch.idempotency_key,
-        super::repair::split_verdict_patch("item", "another-panel", &panels, None, 3, "principal",)
-            .idempotency_key,
+        super::repair::split_verdict_patch(
+            "item",
+            &["another-panel".to_owned()],
+            None,
+            3,
+            "principal",
+        )
+        .idempotency_key,
         "split detection is idempotent per item and head"
     );
 }
@@ -2747,6 +2760,7 @@ fn delivery_settings_require_v2_and_validate_overrides() {
     );
     assert_eq!(
         DeliveryReviewSpec::default().accept_below,
-        AcceptBelow::Blocking
+        None,
+        "an unset ceiling inherits the resolved domains.review.accept_below"
     );
 }

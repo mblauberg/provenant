@@ -281,6 +281,7 @@ fn unaccepted_replayed_adjudicator_refuses_capped_panel_artifacts() {
     let mut adjudicator = node("adjudicate", route("fixture"));
     adjudicator.kind = Some(NodeKind::Adjudicate);
     adjudicator.require_findings = true;
+    adjudicator.depends_on = vec!["panel-a".into(), "panel-b".into()];
     adjudicator.inputs = ["panel-a", "panel-b"]
         .into_iter()
         .map(|input| GraphInput {
@@ -293,17 +294,8 @@ fn unaccepted_replayed_adjudicator_refuses_capped_panel_artifacts() {
     let mut document = graph(vec![source("panel-a"), source("panel-b"), adjudicator]);
     document.schema_version = 2;
     let limits = crate::config::GraphLimits::default();
-    let admitted = candidate::admit_candidate_with_review_policy(
-        &document,
-        None,
-        &[],
-        &limits,
-        &Default::default(),
-        None,
-        &ReviewPolicy::default(),
-    )
-    .unwrap();
-    let (plan, positions) = validate_flat_plan(admitted.expanded(), &limits).unwrap();
+    let expanded = plans::expand(&document, &[], &[], &limits).unwrap();
+    let (plan, positions) = validate_flat_plan(&expanded, &limits).unwrap();
     let digest = plan_digest(&plan).unwrap().to_string();
     let mut checkpoint = transitions::initial_checkpoint(
         &document,
@@ -352,7 +344,17 @@ fn unaccepted_replayed_adjudicator_refuses_capped_panel_artifacts() {
         attempt.outcome = Some(GraphAttemptOutcome::Succeeded);
         checkpoint.nodes[node_index].state = NodeState::Succeeded;
         checkpoint.nodes[node_index].outputs = Some(NodeOutputs {
-            result: Some(format!("complete panel result {verdict}")),
+            schema_version: 2,
+            result: Some({
+                let excerpt = format!("complete panel result {verdict}");
+                ResultOutput {
+                    extra: Default::default(),
+                    digest: CanonicalV1::file_digest(excerpt.as_bytes()).to_string(),
+                    truncated: false,
+                    excerpt,
+                    path: None,
+                }
+            }),
             findings: Vec::new(),
             findings_available: Some(true),
             verdict: Some(verdict.into()),
@@ -393,7 +395,10 @@ fn unaccepted_replayed_adjudicator_refuses_capped_panel_artifacts() {
     };
 
     let replay = advance(&document, &mut owner, &mut journal);
-    assert!(matches!(replay, Err(GraphError::Refused(reason)) if reason.contains("split-panel evidence")));
+    assert!(
+        matches!(&replay, Err(GraphError::Refused(reason)) if reason.contains("split-panel evidence")),
+        "{replay:?}"
+    );
     assert!(owner.calls.is_empty(), "the unaccepted adjudicator must not launch");
     assert!(owner.file_requests[0].iter().all(|request| request.attempt_ref.is_some()));
 }
@@ -482,16 +487,17 @@ fn separate_review_chains_on_the_same_head_get_separate_adjudicators() {
                 ]}
         })
     };
-    let gate = |id: &str, source: &str| serde_json::json!({
+    let gate = |id: &str, source: &str, expected: &str| serde_json::json!({
         "id": id, "kind": "gate", "access": "read_only", "depends_on": [source],
         "inputs": [{"node": source, "outputs": ["verdict"]}],
-        "condition": {"type": "verdict", "expected": "VERDICT: PASS", "threshold": "all"}
+        "condition": {"type": "verdict", "expected": expected, "threshold": "all"}
     });
+    // Each gate consumes its own chain's adjudicator verdict.
     let document: GraphDocument = serde_json::from_value(serde_json::json!({
         "schema_version": 1, "graph_id": "two-review-chains-same-head",
         "review_policy": {"adjudicator_route": "fixture"}, "nodes": [
-            panel("first", None), gate("first-gate", "first"),
-            panel("second", Some("first-gate")), gate("second-gate", "second")
+            panel("first", None), gate("first-gate", "first", "VERDICT: PASS"),
+            panel("second", Some("first-gate")), gate("second-gate", "second", "VERDICT: FAIL")
         ]
     })).unwrap();
     let mut owner = FakeOwner {
@@ -654,8 +660,12 @@ fn later_same_head_split_continues_one_adjudicator_and_replays_its_union() {
                 ]}
         })
     };
-    let gate = |id: &str, panels: &[&str]| serde_json::json!({
-        "id": id, "kind": "gate", "access": "read_only", "depends_on": panels,
+    // A later panel cannot depend on the gate that waits for the earlier
+    // adjudication: the continued adjudicator would then wait for its own
+    // dependent. The loop gate still follows the whole body through `after`.
+    let gate = |id: &str, panels: &[&str], after: &[&str]| serde_json::json!({
+        "id": id, "kind": "gate", "access": "read_only",
+        "depends_on": panels.iter().chain(after).collect::<Vec<_>>(),
         "inputs": panels.iter().map(|panel| serde_json::json!({
             "node": panel, "outputs": ["verdict"]
         })).collect::<Vec<_>>(),
@@ -666,22 +676,29 @@ fn later_same_head_split_continues_one_adjudicator_and_replays_its_union() {
         "nodes": [{
             "id": "review-chain", "kind": "loop", "access": "read_only",
             "loop": {"until": "second-gate", "max_rounds": 1, "body": [
-                panel("first", &[]), gate("first-gate", &["first"]),
-                panel("second", &["first-gate"]), gate("second-gate", &["first", "second"])
+                panel("first", &[]), gate("first-gate", &["first"], &[]),
+                panel("second", &[]), gate("second-gate", &["first", "second"], &["first-gate"])
             ]}
         }]
     })).unwrap();
-    let mut observations = ["FAIL", "PASS", "PASS", "FAIL", "PASS"]
-        .into_iter()
-        .enumerate()
-        .map(|(index, verdict)| {
-            if index == 2 {
-                terminal_with_result(GraphAttemptOutcome::Succeeded, &prior_adjudication)
-            } else {
-                terminal_with_result(GraphAttemptOutcome::Succeeded, &answer(verdict))
-            }
-        })
-        .collect::<VecDeque<_>>();
+    // The later panel runs beside the first and reports after the first
+    // split was adjudicated, so its lenses stay pending through one
+    // adjudication. (A panel ordered after the first gate could never join:
+    // the adjudicator would wait on its own dependent.)
+    let pending = |name: &str| AttemptObservation::Pending {
+        attempt_ref: Some(format!("run/second-{name}")),
+    };
+    let mut observations = VecDeque::from([
+        terminal_with_result(GraphAttemptOutcome::Succeeded, &answer("FAIL")),
+        terminal_with_result(GraphAttemptOutcome::Succeeded, &answer("PASS")),
+        pending("changes"),
+        pending("approve"),
+        pending("changes"),
+        pending("approve"),
+        terminal_with_result(GraphAttemptOutcome::Succeeded, &prior_adjudication),
+        terminal_with_result(GraphAttemptOutcome::Succeeded, &answer("FAIL")),
+        terminal_with_result(GraphAttemptOutcome::Succeeded, &answer("PASS")),
+    ]);
     observations.push_back(AttemptObservation::Pending {
         attempt_ref: Some("run/adjudicator-continuation".into()),
     });
@@ -691,8 +708,17 @@ fn later_same_head_split_continues_one_adjudicator_and_replays_its_union() {
         ..Default::default()
     };
 
-    let _first = advance(&document, &mut owner, &mut journal);
-    let checkpoint = journal.0.clone().expect("pending continuation was journalled");
+    let first = advance(&document, &mut owner, &mut journal);
+    let settled = journal.0.clone().unwrap_or_else(|| panic!("first advance journalled: {:?}", first.err()));
+    let first_adjudicator = settled
+        .nodes
+        .iter()
+        .find(|node| node.id.ends_with("--first--adjudicate"))
+        .unwrap();
+    assert_eq!(first_adjudicator.state, NodeState::Succeeded);
+    assert!(first_adjudicator.review_adjudication_receipts.is_empty());
+    let second = advance(&document, &mut owner, &mut journal);
+    let checkpoint = journal.0.clone().unwrap_or_else(|| panic!("continuation journalled: {:?}", second.err()));
     let adjudicators: Vec<_> = checkpoint
         .nodes
         .iter()
@@ -700,7 +726,16 @@ fn later_same_head_split_continues_one_adjudicator_and_replays_its_union() {
         .collect();
     assert_eq!(adjudicators.len(), 1, "continuation keeps the stable node ID");
     let pending = adjudicators[0];
-    assert_eq!(pending.state, NodeState::Running);
+    assert_eq!(
+        pending.state,
+        NodeState::Running,
+        "{:?}",
+        checkpoint
+            .nodes
+            .iter()
+            .map(|n| (&n.id, n.state, n.gate.as_ref().and_then(|g| g.reason.clone())))
+            .collect::<Vec<_>>()
+    );
     assert!(pending.outputs.is_none(), "the superseded verdict is cleared");
     assert!(pending.review_settlement.is_none());
     assert_eq!(pending.previous_attempts.len(), 1);
@@ -816,7 +851,10 @@ fn later_same_head_split_continues_one_adjudicator_and_replays_its_union() {
     assert_eq!(replay_owner.calls.len(), 1, "replay resumes the same attempt only");
     assert_eq!(replay_owner.calls[0].0.node_id, pending.id);
     assert_eq!(replay_owner.calls[0].0.retry_generation, Some(1));
-    let replay_inputs = &replay_owner.file_requests[0];
+    // The accepted attempt is observed with its immutable run input, so the
+    // union was staged once, when the continuation launched.
+    assert!(replay_owner.file_requests.is_empty(), "replay stages no new inputs");
+    let replay_inputs = owner.file_requests.last().unwrap();
     assert!(replay_inputs.iter().any(|request| request.label.contains("--first--")));
     assert!(replay_inputs.iter().any(|request| request.label.contains("--second--")));
     let adjudicator = replay
@@ -846,13 +884,21 @@ fn later_same_head_split_continues_one_adjudicator_and_replays_its_union() {
             .and_then(|outputs| outputs.verdict.as_deref()),
         Some("VERDICT: INCONCLUSIVE")
     );
-    let gate = replay
-        .checkpoint
-        .nodes
-        .iter()
-        .find(|node| node.id == "review-chain--r1--second-gate")
-        .unwrap();
-    assert!(gate.gate.as_ref().is_some_and(|gate| !gate.passed));
+    // The superseded PASS is never accepted: the earlier gate now fails on the
+    // fresh INCONCLUSIVE, and the later gate stays behind it.
+    let node = |id: &str| {
+        replay
+            .checkpoint
+            .nodes
+            .iter()
+            .find(|node| node.id == id)
+            .unwrap()
+    };
+    assert!(node("review-chain--r1--first-gate")
+        .gate
+        .as_ref()
+        .is_some_and(|gate| !gate.passed));
+    assert_eq!(node("review-chain--r1--second-gate").state, NodeState::Blocked);
 }
 
 // Spec: docs/specs/agent-native.md#37-review-convergence
@@ -891,8 +937,8 @@ fn adjudicator_empty_pass_cannot_omit_blocking_input_findings() {
     };
     let mut owner = FakeOwner {
         observations: VecDeque::from([
-            terminal_with_result(GraphAttemptOutcome::Succeeded, &answer("FAIL", evidence.clone())),
-            terminal_with_result(GraphAttemptOutcome::Succeeded, &answer("PASS", evidence)),
+            terminal_with_result(GraphAttemptOutcome::Succeeded, &answer("FAIL", evidence)),
+            terminal_with_result(GraphAttemptOutcome::Succeeded, &answer("PASS", serde_json::json!([]))),
             terminal_with_result(GraphAttemptOutcome::Succeeded, &answer("PASS", serde_json::json!([]))),
         ]),
         materialise: Some(fully_materialise_inputs),

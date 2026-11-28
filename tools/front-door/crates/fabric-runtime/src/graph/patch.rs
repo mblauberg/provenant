@@ -393,6 +393,18 @@ pub fn admit_patch(
     admit_patch_for_retry(graph, parent, patch, context, None)
 }
 
+/// The split evidence that continues one adjudicator: its review-chain item,
+/// node, the union of known split panels, the pinned head and the graph
+/// revision the caller read.
+#[derive(Clone, Copy)]
+pub(super) struct AdjudicatorContinuation<'a> {
+    pub(super) item: &'a str,
+    pub(super) node_id: &'a str,
+    pub(super) panels: &'a [String],
+    pub(super) head: Option<&'a str>,
+    pub(super) expected_revision: u64,
+}
+
 /// Continue a succeeded split adjudicator in place when later evidence for the
 /// same item and pinned head settles. The prior attempt remains immutable in
 /// history and its compact receipt; only the node's current inputs and verdict
@@ -400,14 +412,17 @@ pub fn admit_patch(
 /// all started nodes.
 pub(super) fn continue_adjudicator(
     graph: &mut LiveGraph<'_>,
-    item: &str,
-    node_id: &str,
-    panels: &[String],
-    head: Option<&str>,
-    expected_revision: u64,
+    request: &AdjudicatorContinuation<'_>,
     limits: &crate::config::GraphLimits,
     budget: &crate::config::GraphBudget,
 ) -> Result<Admitted, PatchError> {
+    let AdjudicatorContinuation {
+        item,
+        node_id,
+        panels,
+        head,
+        expected_revision,
+    } = *request;
     let current = revision(graph.checkpoint);
     if expected_revision != current {
         return Err(PatchError::new(
@@ -431,17 +446,22 @@ pub(super) fn continue_adjudicator(
         .find(|node| node.id == node_id)
         .cloned()
         .ok_or_else(|| PatchError::invalid(format!("unknown adjudicator {node_id}")))?;
-    if target.kind != Some(NodeKind::Adjudicate)
-        || target.access != AccessMode::ReadOnly
-        || target.parent_node.is_none()
-        || target.route.is_none()
-        || target.routes.is_some()
-    {
-        return Err(PatchError::new(
-            "conflict",
-            format!("node {node_id} is not a parented read-only adjudicator"),
-        ));
-    }
+    let parent = match target.parent_node.clone() {
+        Some(parent)
+            if target.kind == Some(NodeKind::Adjudicate)
+                && target.access == AccessMode::ReadOnly
+                && target.route.is_some()
+                && target.routes.is_none() =>
+        {
+            parent
+        }
+        _ => {
+            return Err(PatchError::new(
+                "conflict",
+                format!("node {node_id} is not a parented read-only adjudicator"),
+            ));
+        }
+    };
     match (&target.source, head) {
         (Some(SourceBinding::Commit { commit }), Some(head)) if commit == head => {}
         (None, None) => {}
@@ -473,15 +493,24 @@ pub(super) fn continue_adjudicator(
         .last()
         .filter(|attempt| attempt.state == AttemptState::Terminal)
         .ok_or_else(|| PatchError::new("conflict", "adjudicator has no terminal attempt"))?;
-    if progress.state != NodeState::Succeeded
-        || attempt.outcome != Some(GraphAttemptOutcome::Succeeded)
-        || prior_outputs.verdict.as_deref().is_none_or(str::is_empty)
+    let prior_verdict = match prior_outputs
+        .verdict
+        .clone()
+        .filter(|verdict| !verdict.is_empty())
     {
-        return Err(PatchError::new(
-            "conflict",
-            format!("adjudicator {node_id} is not a succeeded, receipted attempt"),
-        ));
-    }
+        Some(verdict)
+            if progress.state == NodeState::Succeeded
+                && attempt.outcome == Some(GraphAttemptOutcome::Succeeded) =>
+        {
+            verdict
+        }
+        _ => {
+            return Err(PatchError::new(
+                "conflict",
+                format!("adjudicator {node_id} is not a succeeded, receipted attempt"),
+            ));
+        }
+    };
     let prior_output_bytes = serde_json::to_vec(prior_outputs)
         .map_err(|error| {
             PatchError::invalid(format!(
@@ -540,7 +569,6 @@ pub(super) fn continue_adjudicator(
         }
     }
 
-    let parent = target.parent_node.clone().expect("validated parent");
     let next_revision = current
         .checked_add(1)
         .ok_or_else(|| PatchError::invalid("patch revision exhausted"))?;
@@ -595,7 +623,7 @@ pub(super) fn continue_adjudicator(
         prior_outputs: prior_outputs.clone(),
         attempt_key: attempt.key.clone(),
         attempt_ref: attempt.attempt_ref.clone(),
-        verdict: prior_outputs.verdict.clone().expect("checked verdict"),
+        verdict: prior_verdict,
         output_digest,
     };
     let expansion = Expansion {
@@ -658,6 +686,26 @@ pub(super) fn continue_adjudicator(
     })?;
     let preview = admitted.expanded;
     let plan = admitted.plan;
+    // Nothing downstream may keep accepting the superseded verdict: every
+    // node that already settled on the adjudicator waits for fresh evidence.
+    let mut stale = BTreeSet::from([node_id.to_owned()]);
+    loop {
+        let before = stale.len();
+        for node in &preview.nodes {
+            if node.dependencies().any(|parent| stale.contains(parent)) {
+                stale.insert(node.id.clone());
+            }
+        }
+        if stale.len() == before {
+            break;
+        }
+    }
+    stale.remove(node_id);
+    for progress in &mut prospective.nodes {
+        if stale.contains(&progress.id) && progress.state != NodeState::Pending {
+            *progress = reset_progress(progress, false)?;
+        }
+    }
     loops::reconcile(&mut prospective, &plan);
     composites::reconcile_checkpoint(&plan, &mut prospective);
     plans::remaining(&mut prospective, &preview, limits);
@@ -2382,6 +2430,9 @@ pub(super) fn prepare(
             comparable.round = target.round.clone();
             comparable.after_expansion = target.after_expansion.clone();
             comparable.composite_members = target.composite_members.clone();
+            // A retry may restate the route as its replacement route list.
+            comparable.route = target.route.clone();
+            comparable.routes = target.routes.clone();
             comparable == *target
                 && (target.composite.is_none() && target.loop_body.is_none()
                     || node.prompt == target.prompt)

@@ -520,10 +520,8 @@ pub(super) fn chain_owner_id(node_index: usize, plan: &PlannedGraph) -> String {
         .nodes
         .iter()
         .filter(|candidate| {
-            candidate.loop_body.as_ref().is_some_and(|loop_body| {
-                loop_body.previous_bindings.values().any(|binding| {
-                    evidence_dependency_closure(binding, plan, &positions).contains(&panel_index)
-                })
+            chain_bindings(candidate).iter().any(|binding| {
+                evidence_dependency_closure(binding, plan, &positions).contains(&panel_index)
             })
         })
         .map(|candidate| candidate.id.as_str())
@@ -538,6 +536,20 @@ pub(super) fn chain_owner_id(node_index: usize, plan: &PlannedGraph) -> String {
         // it begins; choosing the first loop would starve the others.
         panel
     }
+}
+
+/// The outer nodes whose review evidence a loop continues: its explicit
+/// previous-round bindings and, for a review-repair loop, the initial review
+/// the loop declares as an input.
+fn chain_bindings(node: &PlannedNode) -> Vec<String> {
+    let Some(loop_body) = node.loop_body.as_ref() else {
+        return Vec::new();
+    };
+    let mut bindings: Vec<String> = loop_body.previous_bindings.values().cloned().collect();
+    if loop_body.review_repair {
+        bindings.extend(node.inputs.iter().map(|input| input.node.clone()));
+    }
+    bindings
 }
 
 /// Follow only declared evidence-bearing inputs (plus their composite and
@@ -596,9 +608,9 @@ pub(super) fn initial_chain_ledger(
         .map(|(index, candidate)| (candidate.id.clone(), index))
         .collect();
     let loop_node = plan.nodes.iter().find(|node| node.id == loop_id)?;
-    let loop_body = loop_node.loop_body.as_ref()?;
+    let bindings = chain_bindings(loop_node);
     let mut panels = BTreeSet::new();
-    for binding in loop_body.previous_bindings.values() {
+    for binding in &bindings {
         let closure = evidence_dependency_closure(binding, plan, &positions);
         panels.extend(plan.nodes.iter().enumerate().filter_map(|(index, node)| {
             (closure.contains(&index)
@@ -637,15 +649,16 @@ pub(super) fn finding_severity(finding: &Finding) -> (Severity, bool) {
     model::decode_severity(&finding.severity)
 }
 
-/// A finding stays open until it is resolved, dispositioned or falsified with
-/// evidence. Only open findings take part in acceptance and carry-forward.
+/// A finding stays open until it is resolved, dismissed or falsified with
+/// evidence. An `accepted` disposition confirms the finding, so it stays open.
+/// Only open findings take part in acceptance and carry-forward.
 pub(super) fn is_open(finding: &Finding) -> bool {
     !matches!(finding.status.as_str(), "closed" | "resolved" | "fixed")
         && !finding.falsified_with_evidence()
         && finding
             .disposition
             .as_deref()
-            .is_none_or(|value| !matches!(value, "accepted" | "rejected" | "wont_fix"))
+            .is_none_or(|value| !matches!(value, "rejected" | "wont_fix"))
 }
 
 /// Boundary and data-loss risks stay in the persisted ledger until evidence
@@ -819,26 +832,7 @@ pub(super) fn round_scope(
     let base_moved = previous_base != Some(base_head);
     if mode == RoundMode::Delta && !base_moved && last.is_some_and(|last_head| last_head != head) {
         let previous = last.and_then(|last_head| ledger.heads.get(last_head));
-        let attributable = previous.is_some_and(|entry| {
-            entry.unresolved.iter().all(|finding| {
-                finding
-                    .lens
-                    .as_deref()
-                    .is_some_and(|lens| !lens.trim().is_empty())
-                    && finding.named_invariant().is_none_or(|invariant| {
-                        entry
-                            .invariant_coverage
-                            .get(invariant)
-                            .is_some_and(|lenses| {
-                                !lenses.is_empty()
-                                    && lenses
-                                        .iter()
-                                        .any(|lens| !entry.unavailable_lenses.contains(lens))
-                            })
-                    })
-            })
-        });
-        if attributable {
+        if previous.is_some_and(delta_attributable) {
             RoundScope::Delta {
                 base: last.unwrap_or("").to_owned(),
                 head: head.to_owned(),
@@ -853,6 +847,29 @@ pub(super) fn round_scope(
             head: head.to_owned(),
         }
     }
+}
+
+/// Whether every open finding of a reviewed head names the lens that raised it
+/// and, when it names an invariant, a covering lens that was available. Only
+/// then can a later round review the delta alone; the lens skip in repair uses
+/// the same test, so scope and lens selection never disagree.
+pub(super) fn delta_attributable(entry: &FindingHead) -> bool {
+    entry.unresolved.iter().all(|finding| {
+        finding
+            .lens
+            .as_deref()
+            .is_some_and(|lens| !lens.trim().is_empty())
+            && finding.named_invariant().is_none_or(|invariant| {
+                entry
+                    .invariant_coverage
+                    .get(invariant)
+                    .is_some_and(|lenses| {
+                        lenses
+                            .iter()
+                            .any(|lens| !entry.unavailable_lenses.contains(lens))
+                    })
+            })
+    })
 }
 
 /// Record the evidence for one exact head in the ledger.
@@ -1049,6 +1066,17 @@ pub(super) fn ledger_from_checkpoint(
         .and_then(|progress| progress.finding_ledger.clone())
         .or_else(|| initial_chain_ledger(&chain_owner, plan, checkpoint))
         .unwrap_or_default();
+    // Recording a head must not change what preceded it, so a head the ledger
+    // already holds is recomputed from the heads of earlier rounds, even after
+    // later rounds were recorded.
+    if let Some(round) = ledger.heads.get(current_head).map(|entry| entry.round) {
+        ledger.last_reviewed_head = ledger
+            .heads
+            .iter()
+            .filter(|(head, entry)| head.as_str() != current_head && entry.round < round)
+            .max_by_key(|(_, entry)| entry.round)
+            .map(|(head, _)| head.clone());
+    }
     let previous_last_reviewed_head = ledger.last_reviewed_head.clone();
     let stored_current = ledger.heads.remove(current_head);
     let previous_ids = stored_current
@@ -1083,10 +1111,9 @@ pub(super) fn ledger_from_checkpoint(
     let chain = owner.round.as_ref();
     if let Some(round) = chain
         && let Some(loop_index) = positions.get(round.loop_id.as_str())
-        && let Some(loop_spec) = plan.nodes[*loop_index].loop_body.as_ref()
     {
-        for initial in loop_spec.previous_bindings.values() {
-            add_review_closure(Some(initial), plan, checkpoint, &positions, &mut members);
+        for initial in chain_bindings(&plan.nodes[*loop_index]) {
+            add_review_closure(Some(&initial), plan, checkpoint, &positions, &mut members);
         }
     }
     if let Some(round) = chain {
@@ -1113,7 +1140,8 @@ pub(super) fn ledger_from_checkpoint(
                     .and_then(|parent| positions.get(parent))
                     .is_some_and(|parent| members.contains(parent))
         })
-        .filter_map(|node| positions.contains_key(&node.id).then(|| node.id.clone()))
+        .filter(|node| positions.contains_key(&node.id))
+        .map(|node| node.id.clone())
         .collect();
     for id in adjudicators {
         add_review_closure(Some(&id), plan, checkpoint, &positions, &mut members);
@@ -1239,6 +1267,8 @@ pub(super) fn ledger_from_checkpoint(
         }
 
         let findings = outputs::materialised_finding_origins(index, plan, checkpoint, &positions);
+        let (invariants, lenses) =
+            outputs::finding_coverage(findings.iter().map(|(_, finding)| finding));
         for (origin, finding) in findings {
             if adjudicator {
                 record
@@ -1256,7 +1286,6 @@ pub(super) fn ledger_from_checkpoint(
         if !adjudicator && let Some(lens) = node.review_lens.as_deref() {
             record.head.covered_lenses.insert(lens.to_owned());
         }
-        let (invariants, lenses) = outputs::finding_coverage(&findings);
         for (invariant, covered) in invariants {
             record
                 .head
@@ -1271,7 +1300,7 @@ pub(super) fn ledger_from_checkpoint(
         if head != current_head {
             let position = last_previous_head
                 .as_ref()
-                .map_or(true, |(last_round, last_index, _)| {
+                .is_none_or(|(last_round, last_index, _)| {
                     (round_number, index) >= (*last_round, *last_index)
                 });
             if position {
@@ -1475,524 +1504,9 @@ fn panel_review_settlement(
 }
 
 #[cfg(test)]
-mod convergence_tests {
-    use super::*;
-
-    fn finding(id: &str, severity: &str, status: &str) -> Finding {
-        serde_json::from_value(serde_json::json!({
-            "id": id,
-            "severity": severity,
-            "file": "a.rs",
-            "line": 1,
-            "summary": "defect",
-            "status": status
-        }))
-        .unwrap()
-    }
-
-    #[test]
-    fn initial_synthesis_binding_resolves_panel_owner_and_shared_seed_stays_unassigned() {
-        let document: GraphDocument = serde_json::from_value(serde_json::json!({
-            "schema_version": 1,
-            "graph_id": "synthesis-panel-owner",
-            "nodes": [
-                {
-                    "id": "initial-panel",
-                    "kind": "composite",
-                    "access": "read_only",
-                    "composite": {
-                        "reduce_verdict": true,
-                        "nodes": [{"id":"lens", "access":"read_only", "prompt":"review"}],
-                        "exports": [{"node":"lens", "outputs":["findings", "verdict"]}]
-                    }
-                },
-                {
-                    "id": "initial-synthesis",
-                    "access": "read_only",
-                    "prompt": "synthesise the panel",
-                    "inputs": [{"node":"initial-panel", "outputs":["findings", "verdict"]}]
-                },
-                {"id":"cycle-a", "access":"read_only", "prompt":"repair"}
-            ]
-        }))
-        .unwrap();
-        let limits = crate::config::GraphLimits::default();
-        let expanded = plans::expand(&document, &[], &[], &limits).unwrap();
-        let (mut plan, _) = validate_flat_plan(&expanded, &limits).unwrap();
-        let cycle = plan
-            .nodes
-            .iter_mut()
-            .find(|node| node.id == "cycle-a")
-            .unwrap();
-        cycle.loop_body = Some(
-            serde_json::from_value(serde_json::json!({
-                "body": [], "until": "accepted", "max_rounds": 2,
-                "previous_bindings": {"review": "initial-synthesis"}
-            }))
-            .unwrap(),
-        );
-        let panel = plan
-            .nodes
-            .iter()
-            .position(|node| node.id == "initial-panel")
-            .unwrap();
-        assert_eq!(chain_owner_id(panel, &plan), "cycle-a");
-
-        let mut second_cycle = plan.nodes[plan
-            .nodes
-            .iter()
-            .position(|node| node.id == "cycle-a")
-            .unwrap()]
-        .clone();
-        second_cycle.id = "cycle-b".into();
-        plan.nodes.push(second_cycle);
-        assert_eq!(
-            chain_owner_id(panel, &plan),
-            "initial-panel",
-            "a shared initial panel remains a standalone seed for both consumers"
-        );
-        let mut checkpoint = transitions::initial_checkpoint(
-            &document,
-            &plan,
-            "synthesis-panel-owner".into(),
-            None,
-            None,
-            None,
-        );
-        let mut seed = FindingLedger::default();
-        record_head(
-            &mut seed,
-            "1".repeat(40).as_str(),
-            &[finding("F1", "high", "open")],
-            BTreeMap::new(),
-            BTreeSet::from(["correctness".into()]),
-            BTreeMap::new(),
-        );
-        let seed_row = checkpoint
-            .nodes
-            .iter_mut()
-            .find(|progress| progress.id == "initial-panel")
-            .unwrap();
-        seed_row.finding_ledger = Some(seed.clone());
-        assert_eq!(
-            initial_chain_ledger("cycle-a", &plan, &checkpoint),
-            Some(seed.clone())
-        );
-        assert_eq!(
-            initial_chain_ledger("cycle-b", &plan, &checkpoint),
-            Some(seed)
-        );
-    }
-
-    #[test]
-    fn severity_aliases_decode() {
-        assert_eq!(
-            model::decode_severity("critical"),
-            (Severity::Blocking, false)
-        );
-        assert_eq!(
-            model::decode_severity("blocker"),
-            (Severity::Blocking, false)
-        );
-        assert_eq!(
-            model::decode_severity("blocking"),
-            (Severity::Blocking, false)
-        );
-        assert_eq!(model::decode_severity("major"), (Severity::High, false));
-        assert_eq!(model::decode_severity("high"), (Severity::High, false));
-        assert_eq!(model::decode_severity("medium"), (Severity::Medium, false));
-        assert_eq!(
-            model::decode_severity("moderate"),
-            (Severity::Medium, false)
-        );
-        assert_eq!(model::decode_severity("minor"), (Severity::Low, false));
-        assert_eq!(model::decode_severity("low"), (Severity::Low, false));
-        assert_eq!(model::decode_severity("nit"), (Severity::Nit, false));
-        assert_eq!(model::decode_severity("info"), (Severity::Nit, false));
-        assert_eq!(model::decode_severity("style"), (Severity::Nit, false));
-        assert_eq!(model::decode_severity("  HIGH  "), (Severity::High, false));
-        assert_eq!(
-            model::decode_severity("catastrophic"),
-            (Severity::High, true)
-        );
-        assert_eq!(
-            FINDING_SEVERITY_UNKNOWN.as_str(),
-            "FINDING_SEVERITY_UNKNOWN"
-        );
-    }
-
-    #[test]
-    fn accept_below_respects_blocking_class() {
-        let high = finding("F1", "high", "open");
-        assert!(!blocks_threshold(&high, AcceptBelow::Blocking));
-        assert!(blocks_threshold(&high, AcceptBelow::High));
-        assert_eq!(
-            acceptance_decision(std::slice::from_ref(&high), AcceptBelow::Blocking, true),
-            Acceptance::Accept
-        );
-        assert_eq!(
-            acceptance_decision(std::slice::from_ref(&high), AcceptBelow::High, true),
-            Acceptance::Reject("finding F1 severity High is not below High".into())
-        );
-        let boundary: Finding = serde_json::from_value(serde_json::json!({
-            "id":"F2", "severity":"nit", "file":"a.rs", "summary":"defect", "status":"open",
-            "triage": {
-                "decision":"confirmed", "reason":"r", "worth_fixing":true,
-                "root_cause":"c", "blocking_class":"boundary"
-            }
-        }))
-        .unwrap();
-        assert!(blocks_threshold(&boundary, AcceptBelow::Blocking));
-        assert!(matches!(
-            acceptance_decision(std::slice::from_ref(&boundary), AcceptBelow::Blocking, true),
-            Acceptance::Reject(_)
-        ));
-        let mut closed_boundary = boundary.clone();
-        closed_boundary.status = "closed".into();
-        closed_boundary.disposition = Some("accepted".into());
-        assert!(blocks_threshold(&closed_boundary, AcceptBelow::Blocking));
-        assert!(matches!(
-            acceptance_decision(&[closed_boundary], AcceptBelow::Blocking, true),
-            Acceptance::Reject(_)
-        ));
-        let mut falsified_boundary = boundary.clone();
-        falsified_boundary.verification = Some("falsified".into());
-        falsified_boundary.evidence = Some("counterexample disproved by test".into());
-        assert!(!blocks_threshold(
-            &falsified_boundary,
-            AcceptBelow::Blocking
-        ));
-        assert_eq!(
-            acceptance_decision(&[falsified_boundary], AcceptBelow::Blocking, true),
-            Acceptance::Accept
-        );
-        assert!(blocks_threshold(
-            &finding("F-off", "nit", "open"),
-            AcceptBelow::Off
-        ));
-        let mut no_trigger = finding("F3", "nit", "open");
-        no_trigger.triage = Some(FindingTriage {
-            decision: "confirmed".into(),
-            reason: "r".into(),
-            worth_fixing: true,
-            root_cause: "c".into(),
-            blocking_class: "acceptance".into(),
-            shared_flaw: false,
-        });
-        let mut closed = no_trigger.clone();
-        closed.status = "closed".into();
-        assert!(!blocks_threshold(&closed, AcceptBelow::Off));
-        assert!(!repair::blocks_acceptance_for(&closed, AcceptBelow::Off));
-        assert_eq!(
-            acceptance_decision(&[closed], AcceptBelow::Off, true),
-            Acceptance::Accept
-        );
-        assert!(matches!(
-            acceptance_decision(&[no_trigger], AcceptBelow::Blocking, true),
-            Acceptance::Reject(_)
-        ));
-        assert!(matches!(
-            acceptance_decision(&[], AcceptBelow::Off, true),
-            Acceptance::Accept
-        ));
-        assert!(matches!(
-            acceptance_decision(&[], AcceptBelow::High, false),
-            Acceptance::Reject(_)
-        ));
-    }
-
-    #[test]
-    fn delta_round_carries_open_findings() {
-        let mut ledger = FindingLedger::default();
-        let mut open = finding("F1", "high", "open");
-        open.lens = Some("correctness".into());
-        let fixed = finding("F2", "low", "fixed");
-        record_head(
-            &mut ledger,
-            "aaa",
-            &[open.clone(), fixed],
-            BTreeMap::new(),
-            BTreeSet::from(["correctness".to_owned()]),
-            BTreeMap::new(),
-        );
-        assert_eq!(ledger.last_reviewed_head.as_deref(), Some("aaa"));
-        assert_eq!(carried_findings(&ledger, "aaa"), vec![open]);
-        let scope = round_scope(&ledger, "bbb", "base1", Some("base1"), RoundMode::Delta);
-        assert_eq!(
-            scope,
-            RoundScope::Delta {
-                base: "aaa".into(),
-                head: "bbb".into()
-            }
-        );
-    }
-
-    #[test]
-    fn delta_widens_for_unattributable_findings_or_uncovered_invariants() {
-        let open = finding("F1", "high", "open");
-        let mut ledger = FindingLedger::default();
-        record_head(
-            &mut ledger,
-            "aaa",
-            &[open.clone()],
-            BTreeMap::new(),
-            BTreeSet::new(),
-            BTreeMap::new(),
-        );
-        assert_eq!(
-            round_scope(&ledger, "bbb", "base", Some("base"), RoundMode::Delta),
-            RoundScope::Full { head: "bbb".into() }
-        );
-
-        let mut attributable = open;
-        attributable.lens = Some("correctness".into());
-        attributable.class = Some("invariant-a".into());
-        record_head(
-            &mut ledger,
-            "aaa",
-            &[attributable],
-            BTreeMap::new(),
-            BTreeSet::from(["correctness".into()]),
-            BTreeMap::new(),
-        );
-        assert_eq!(
-            round_scope(&ledger, "bbb", "base", Some("base"), RoundMode::Delta),
-            RoundScope::Full { head: "bbb".into() }
-        );
-
-        // An invariant still has a usable prior lens, so one unrelated
-        // unavailable lens does not widen every later round.
-        ledger
-            .heads
-            .get_mut("aaa")
-            .unwrap()
-            .invariant_coverage
-            .get_mut("invariant-a")
-            .unwrap()
-            .insert("tests".into());
-        assert_eq!(
-            round_scope(&ledger, "bbb", "base", Some("base"), RoundMode::Delta),
-            RoundScope::Delta {
-                base: "aaa".into(),
-                head: "bbb".into()
-            }
-        );
-        // Without a pinned prior base the old delta cannot be attributed.
-        assert_eq!(
-            round_scope(&ledger, "bbb", "base", None, RoundMode::Delta),
-            RoundScope::Full { head: "bbb".into() }
-        );
-
-        let entry = ledger.heads.get_mut("aaa").unwrap();
-        entry
-            .invariant_coverage
-            .insert("invariant-a".into(), BTreeSet::from(["correctness".into()]));
-        entry.unavailable_lenses.insert("correctness".into());
-        assert_eq!(
-            round_scope(&ledger, "bbb", "base", Some("base"), RoundMode::Delta),
-            RoundScope::Full { head: "bbb".into() }
-        );
-    }
-
-    #[test]
-    fn delta_round_is_valid_when_no_findings_remain_open() {
-        let mut ledger = FindingLedger::default();
-        record_head(
-            &mut ledger,
-            "aaa",
-            &[finding("F1", "low", "fixed")],
-            BTreeMap::new(),
-            BTreeSet::from(["correctness".into()]),
-            BTreeMap::new(),
-        );
-        assert_eq!(
-            round_scope(&ledger, "bbb", "base", Some("base"), RoundMode::Delta),
-            RoundScope::Delta {
-                base: "aaa".into(),
-                head: "bbb".into()
-            }
-        );
-    }
-
-    #[test]
-    fn base_move_widens_to_full() {
-        let mut ledger = FindingLedger::default();
-        record_head(
-            &mut ledger,
-            "aaa",
-            &[finding("F1", "high", "open")],
-            BTreeMap::new(),
-            BTreeSet::new(),
-            BTreeMap::new(),
-        );
-        let moved = round_scope(&ledger, "bbb", "base2", Some("base1"), RoundMode::Delta);
-        assert_eq!(moved, RoundScope::Full { head: "bbb".into() });
-        let explicit = round_scope(&ledger, "bbb", "base1", Some("base1"), RoundMode::Full);
-        assert_eq!(explicit, RoundScope::Full { head: "bbb".into() });
-    }
-
-    #[test]
-    fn sole_unavailable_lens_leaves_invariant_uncovered() {
-        let gaps = coverage_gaps(
-            &BTreeSet::new(),
-            &["correctness".to_owned()],
-            &BTreeMap::new(),
-            &["invariant-A".to_owned()],
-        );
-        assert!(gaps.iter().any(|gap| gap.contains("invariant-A")));
-        assert!(gaps.iter().any(|gap| gap.contains("correctness")));
-        // An uncovered invariant is INCONCLUSIVE, never an agreed PASS.
-        assert!(!gaps.is_empty());
-    }
-
-    #[test]
-    fn contradictory_blocking_findings_split_even_with_matching_verdicts() {
-        let mut confirmed = finding("a:F1", "high", "open");
-        confirmed.class = Some("custody".into());
-        confirmed.triage = Some(FindingTriage {
-            decision: "confirmed".into(),
-            reason: "observed".into(),
-            worth_fixing: true,
-            root_cause: "race".into(),
-            blocking_class: "boundary".into(),
-            shared_flaw: false,
-        });
-        let mut rejected = confirmed.clone();
-        rejected.id = "b:F1".into();
-        rejected.triage.as_mut().unwrap().decision = "rejected".into();
-        assert!(contradictory_blocking_findings(&[
-            confirmed.clone(),
-            rejected.clone()
-        ]));
-        confirmed.triage.as_mut().unwrap().blocking_class = "none".into();
-        rejected.triage.as_mut().unwrap().blocking_class = "none".into();
-        assert!(contradictory_blocking_findings(&[confirmed, rejected]));
-    }
-
-    #[test]
-    fn split_goes_to_one_adjudicator_no_round() {
-        use provenant_records::workflow::ReviewVerdict;
-        assert!(split_needs_adjudicator(&[
-            ReviewVerdict::Approve,
-            ReviewVerdict::RequestChanges
-        ]));
-        assert!(!split_needs_adjudicator(&[
-            ReviewVerdict::Approve,
-            ReviewVerdict::Approve
-        ]));
-        assert!(split_needs_adjudicator(&[
-            ReviewVerdict::Approve,
-            ReviewVerdict::Inconclusive
-        ]));
-        assert!(split_needs_adjudicator(&[
-            ReviewVerdict::ApproveWithNits,
-            ReviewVerdict::RequestChanges
-        ]));
-        assert!(split_needs_adjudicator(&[
-            ReviewVerdict::Inconclusive,
-            ReviewVerdict::RequestChanges
-        ]));
-        assert!(!split_needs_adjudicator(&[
-            ReviewVerdict::Inconclusive,
-            ReviewVerdict::Inconclusive
-        ]));
-        assert!(!split_needs_adjudicator(&[]));
-    }
-
-    #[test]
-    fn missing_evidence_rereviews_never_repairs() {
-        assert_eq!(
-            lens_outcome(Some("missing_evidence"), 0, 2, true),
-            LensOutcome::Retry
-        );
-        assert_eq!(
-            lens_outcome(Some("missing_evidence"), 2, 2, true),
-            LensOutcome::Unavailable
-        );
-        assert_eq!(
-            lens_outcome(Some("blocked_environment"), 0, 1, true),
-            LensOutcome::Retry
-        );
-        assert_eq!(
-            lens_outcome(Some("blocked_environment"), 1, 1, true),
-            LensOutcome::Unavailable
-        );
-        assert_eq!(
-            lens_outcome(Some("model_unavailable"), 1, 1, false),
-            LensOutcome::Unavailable
-        );
-        assert_eq!(lens_outcome(None, 0, 1, true), LensOutcome::Completed);
-    }
-}
+#[path = "review_convergence_tests.rs"]
+mod convergence_tests;
 
 #[cfg(test)]
-mod delivery_tests {
-    use super::*;
-
-    #[test]
-    fn delivery_review_requires_complete_nonblocking_evidence() {
-        let mut outputs = NodeOutputs {
-            verdict: Some("VERDICT: INCONCLUSIVE".into()),
-            findings_available: Some(true),
-            ..Default::default()
-        };
-        assert!(delivery_matches(
-            AcceptBelow::Blocking,
-            &outputs,
-            "VERDICT: PASS"
-        ));
-        assert!(!delivery_matches(
-            AcceptBelow::Off,
-            &outputs,
-            "VERDICT: PASS"
-        ));
-        outputs.findings_available = None;
-        assert!(!delivery_matches(
-            AcceptBelow::Blocking,
-            &outputs,
-            "VERDICT: PASS"
-        ));
-        outputs.findings_available = Some(true);
-        outputs.partial = true;
-        assert!(!delivery_matches(
-            AcceptBelow::Blocking,
-            &outputs,
-            "VERDICT: PASS"
-        ));
-        outputs.partial = false;
-        outputs.findings.push(
-            serde_json::from_value(serde_json::json!({
-                "id":"F1", "severity":"blocking", "file":"a.rs", "line":1,
-                "summary":"defect", "status":"open"
-            }))
-            .unwrap(),
-        );
-        assert!(!delivery_matches(
-            AcceptBelow::Blocking,
-            &outputs,
-            "VERDICT: PASS"
-        ));
-        outputs.findings.clear();
-        outputs.verdict = Some("VERDICT: FAIL".into());
-        assert!(!delivery_matches(
-            AcceptBelow::Blocking,
-            &outputs,
-            "VERDICT: PASS"
-        ));
-    }
-
-    #[test]
-    fn delivery_review_evidence_parks_contract_errors_but_not_valid_failures() {
-        assert!(malformed_delivery_evidence_error(Some(
-            "review_verdict_invalid"
-        )));
-        assert!(malformed_delivery_evidence_error(Some(
-            "review_findings_invalid"
-        )));
-        assert!(malformed_delivery_evidence_error(Some(
-            "review_triage_missing"
-        )));
-        assert!(!malformed_delivery_evidence_error(None));
-        assert!(!malformed_delivery_evidence_error(Some("review_failed")));
-    }
-}
+#[path = "review_delivery_tests.rs"]
+mod delivery_tests;

@@ -305,6 +305,9 @@ pub(super) fn apply_attempt_observation(
     } else {
         truncated_finding_ids(node, plan, checkpoint, positions)
     };
+    let accept_below = schedule::effective_review_policy(node, checkpoint)
+        .accept_below
+        .value;
     let marker_inputs = propagation_inputs(node, plan, checkpoint, positions);
     let partial_review = template::review_behaviour(node).is_some()
         && review::partial_inputs(node, checkpoint, positions);
@@ -430,14 +433,7 @@ pub(super) fn apply_attempt_observation(
                 let review_contract_error = if stopped_without_reply {
                     None
                 } else {
-                    review::contract_error(
-                        node,
-                        &upstream_findings,
-                        &outputs,
-                        schedule::effective_review_policy(node, checkpoint)
-                            .accept_below
-                            .value,
-                    )
+                    review::contract_error(node, &upstream_findings, &outputs, accept_below)
                 };
                 if node.access == AccessMode::ReadOnly
                     && template::review_node(node)
@@ -534,9 +530,7 @@ pub(super) fn apply_attempt_observation(
                             node,
                             &upstream_findings,
                             &outputs,
-                            schedule::effective_review_policy(node, checkpoint)
-                                .accept_below
-                                .value,
+                            accept_below,
                         )
                     });
                 if template::review_behaviour(node).is_some() {

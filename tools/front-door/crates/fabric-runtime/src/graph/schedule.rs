@@ -315,23 +315,8 @@ fn effective_route_review_policy(
     route: &GraphRoute,
     checkpoint: &GraphCheckpoint,
 ) -> ReviewPolicy {
-    route
-        .effective_review_policy
-        .clone()
-        .or_else(|| {
-            node.route
-                .as_ref()
-                .filter(|candidate| *candidate == route)
-                .and_then(|candidate| candidate.effective_review_policy.clone())
-        })
-        .or_else(|| {
-            node.routes
-                .iter()
-                .find(|candidate| *candidate == route)
-                .and_then(|candidate| candidate.effective_review_policy.clone())
-        })
-        .or_else(|| node.effective_review_policy.clone())
-        .unwrap_or_else(|| checkpoint.review_policy())
+    let node_policy = effective_review_policy(node, checkpoint);
+    candidate::route_review_policy(&node_policy, route).unwrap_or(node_policy)
 }
 
 fn effective_adjudicator_route(
@@ -503,17 +488,29 @@ pub(super) fn review_base_for_attempt(
     }
 }
 
+/// What a review retry needs beside the graph it rewrites: the document, the
+/// structural limits and the worktree layout.
+#[derive(Clone, Copy)]
+struct RetryContext<'a> {
+    document: &'a GraphDocument,
+    limits: &'a crate::config::GraphLimits,
+    worktree_layout: &'a provenant_config::WorktreeLayoutPort,
+}
+
 fn apply_pending_review_retry<R: AttemptOwner, J: GraphJournal>(
-    document: &GraphDocument,
+    context: &RetryContext<'_>,
     owner: &mut R,
     journal: &mut J,
-    limits: &crate::config::GraphLimits,
-    worktree_layout: &provenant_config::WorktreeLayoutPort,
     expanded: &mut GraphDocument,
     plan: &mut PlannedGraph,
     positions: &mut std::collections::BTreeMap<String, usize>,
     checkpoint: &mut GraphCheckpoint,
 ) -> Result<bool, GraphError<R::Error, J::Error>> {
+    let RetryContext {
+        document,
+        limits,
+        worktree_layout,
+    } = *context;
     let pending = checkpoint
         .nodes
         .iter()
@@ -584,15 +581,13 @@ fn apply_pending_review_retry<R: AttemptOwner, J: GraphJournal>(
         )
         .map_err(|error| GraphError::Refused(error.to_string()))?;
         let _ = result;
-        let mut next_expanded = plans::expand(
+        let next_expanded = plans::expand(
             document,
             &candidate.extensions,
             &candidate.expansions,
             limits,
         )
         .map_err(|error| GraphError::Invalid(error.to_string()))?;
-        candidate::resolve_review_policies(&mut next_expanded, &candidate.review_policy())
-            .map_err(|error| GraphError::Invalid(error.to_string()))?;
         let (next_plan, next_positions) = validate_flat_plan(&next_expanded, limits)
             .map_err(|error| GraphError::Invalid(error.to_string()))?;
         validate_expanded_rows(&candidate, &next_plan)?;
@@ -628,26 +623,16 @@ fn apply_pending_review_retry<R: AttemptOwner, J: GraphJournal>(
 }
 
 fn schedule_review_retry<R: AttemptOwner, J: GraphJournal>(
-    document: &GraphDocument,
+    context: &RetryContext<'_>,
     owner: &mut R,
     journal: &mut J,
-    limits: &crate::config::GraphLimits,
-    worktree_layout: &provenant_config::WorktreeLayoutPort,
     expanded: &mut GraphDocument,
     plan: &mut PlannedGraph,
     positions: &mut std::collections::BTreeMap<String, usize>,
     checkpoint: &mut GraphCheckpoint,
 ) -> Result<bool, GraphError<R::Error, J::Error>> {
     if apply_pending_review_retry(
-        document,
-        owner,
-        journal,
-        limits,
-        worktree_layout,
-        expanded,
-        plan,
-        positions,
-        checkpoint,
+        context, owner, journal, expanded, plan, positions, checkpoint,
     )? {
         return Ok(true);
     }
@@ -698,7 +683,7 @@ fn schedule_review_retry<R: AttemptOwner, J: GraphJournal>(
             .filter(|state| {
                 state.valid_for(&chain, &head, policy.evidence_retries.value, max_lens_retry)
             })
-            .cloned()
+            .map(|state| (**state).clone())
             .unwrap_or_else(|| ReviewRetryState::new(&chain, &head, &routes));
         let retry_route = match cause {
             ReviewRetryCause::Evidence
@@ -722,23 +707,15 @@ fn schedule_review_retry<R: AttemptOwner, J: GraphJournal>(
             }
             _ => continue,
         };
-        state.pending_retry = Some(ReviewRetryIntent {
+        state.pending_retry = Some(Box::new(ReviewRetryIntent {
             route: retry_route,
             cause,
             attempt: attempt.key,
-        });
-        checkpoint.nodes[index].review_retry = Some(state);
+        }));
+        checkpoint.nodes[index].review_retry = Some(Box::new(state));
         journal.save(checkpoint).map_err(GraphError::Journal)?;
         return apply_pending_review_retry(
-            document,
-            owner,
-            journal,
-            limits,
-            worktree_layout,
-            expanded,
-            plan,
-            positions,
-            checkpoint,
+            context, owner, journal, expanded, plan, positions, checkpoint,
         );
     }
     Ok(false)
@@ -900,11 +877,13 @@ fn advance_gate<R: AttemptOwner, J: GraphJournal>(
                         document,
                         checkpoint: &mut prospective,
                     },
-                    &item,
-                    node_id,
-                    &panels,
-                    head.as_deref(),
-                    revision,
+                    &patch::AdjudicatorContinuation {
+                        item: &item,
+                        node_id,
+                        panels: &panels,
+                        head: head.as_deref(),
+                        expected_revision: revision,
+                    },
                     limits,
                     effective_budget,
                 )
@@ -912,7 +891,6 @@ fn advance_gate<R: AttemptOwner, J: GraphJournal>(
             } else {
                 let change = repair::split_verdict_patch(
                     &item,
-                    &parent,
                     &panels,
                     head.as_deref(),
                     revision,
@@ -1610,11 +1588,13 @@ pub(super) fn advance_schedule<R: AttemptOwner, J: GraphJournal>(
             continue 'schedule;
         }
         if apply_pending_review_retry(
-            document,
+            &RetryContext {
+                document,
+                limits,
+                worktree_layout: &worktree_layout,
+            },
             owner,
             journal,
-            limits,
-            &worktree_layout,
             &mut expanded,
             &mut plan,
             &mut positions,
@@ -1639,11 +1619,13 @@ pub(super) fn advance_schedule<R: AttemptOwner, J: GraphJournal>(
         }
         if structural_pause.is_none() {
             if schedule_review_retry(
-                document,
+                &RetryContext {
+                    document,
+                    limits,
+                    worktree_layout: &worktree_layout,
+                },
                 owner,
                 journal,
-                limits,
-                &worktree_layout,
                 &mut expanded,
                 &mut plan,
                 &mut positions,
@@ -2292,11 +2274,13 @@ pub(super) fn advance_schedule<R: AttemptOwner, J: GraphJournal>(
                     } => (settled_result, should_continue, quota_redraw),
                 };
                 if schedule_review_retry(
-                    document,
+                    &RetryContext {
+                        document,
+                        limits,
+                        worktree_layout: &worktree_layout,
+                    },
                     owner,
                     journal,
-                    limits,
-                    &worktree_layout,
                     &mut expanded,
                     &mut plan,
                     &mut positions,

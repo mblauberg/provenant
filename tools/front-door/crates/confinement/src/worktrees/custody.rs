@@ -1192,14 +1192,18 @@ fn observe_reservation_liveness(
     grace: &Sourced<u64>,
 ) -> Option<LeaseState> {
     let _observation = provenant_supervisor::custody::writer_observation_guard(slot).ok()?;
-    observe_reservation_liveness_locked(slot, holder, generation, live, now, grace)
+    observe_reservation_liveness_locked(slot, holder, generation, live, false, now, grace)
 }
 
+/// `launching` marks a reservation in its launch window: the attempt is
+/// nonterminal but has no guardian to observe yet, so it counts as live for
+/// the unreachable grace and lapses with it like any unobservable holder.
 fn observe_reservation_liveness_locked(
     slot: &Directory,
     holder: provenant_core::AttemptId,
     generation: u64,
     live: Option<bool>,
+    launching: bool,
     now: WallTime,
     grace: &Sourced<u64>,
 ) -> Option<LeaseState> {
@@ -1249,7 +1253,12 @@ fn observe_reservation_liveness_locked(
                     setting: unreachable_setting_ref(grace),
                 });
             }
-            Some(unreachable_state(since, now, grace))
+            Some(match unreachable_state(since, now, grace) {
+                LeaseState::Unreachable { .. } if launching => LeaseState::Live {
+                    attempt_state: "nonterminal".to_owned(),
+                },
+                state => state,
+            })
         }
     }
 }
@@ -1345,6 +1354,68 @@ fn reservation_snapshot(
     )
 }
 
+/// Classify the reservations of a slot that has no lease yet. The adopter's own
+/// reservation is its launch. Another reservation whose holder is not known to
+/// be gone is a live writer in its launch window and becomes the holder, so the
+/// sharing policy decides; the rest are its siblings. Reservations no live
+/// attempt explains stay unexplained custody evidence and are refused.
+fn unleased_holder(
+    reservations: Vec<provenant_supervisor::custody::WriterReservation>,
+    adopter: Option<provenant_records::custody::Scope>,
+) -> Result<
+    Option<(
+        provenant_supervisor::custody::WriterReservation,
+        Vec<provenant_supervisor::custody::WriterReservation>,
+    )>,
+    String,
+> {
+    let (own, mut others): (Vec<_>, Vec<_>) = reservations
+        .into_iter()
+        .partition(|reservation| Some(reservation.scope) == adopter);
+    if others.is_empty() {
+        return Ok(None);
+    }
+    let Some(position) = others
+        .iter()
+        .position(|reservation| reservation.live != Some(false))
+    else {
+        return Err("writer reservations exist without a worktree lease".into());
+    };
+    let holder = others.remove(position);
+    let mut siblings = own;
+    siblings.extend(others);
+    Ok(Some((holder, siblings)))
+}
+
+/// When the reservation was written: the start of a launch that has no lease
+/// snapshot yet.
+fn reservation_written_at(
+    slot: &Directory,
+    reservation: &provenant_supervisor::custody::WriterReservation,
+) -> Result<WallTime, String> {
+    let unreadable = |detail: String| {
+        format!(
+            "writer reservation time could not be read at {}: {detail}",
+            reservation.reservation.display()
+        )
+    };
+    let attempt = reservation
+        .reservation
+        .parent()
+        .and_then(Path::file_name)
+        .ok_or_else(|| unreadable("it names no attempt directory".into()))?;
+    let modified_ns = slot
+        .open_verified_directory(attempt)
+        .and_then(|child| child.metadata_at(OsStr::new("reservation.json"), false))
+        .map_err(|error| unreadable(error.to_string()))?
+        .modified_ns;
+    i64::try_from(modified_ns / 1_000)
+        .map_err(|error| unreadable(error.to_string()))
+        .and_then(|micros| {
+            WallTime::from_micros(micros).map_err(|error| unreadable(error.to_string()))
+        })
+}
+
 fn reservation_snapshot_under_gate(
     slot: Directory,
     observation: provenant_os::fs::LockGuard,
@@ -1362,16 +1433,22 @@ fn reservation_snapshot_under_gate(
     let lease_bytes = match slot.read_stable(OsStr::new(LEASE_FILE), 4096) {
         Ok(bytes) => bytes,
         Err(error) if error.is_not_found() => {
-            // Before its first lease snapshot, a launch may have only its own
-            // prepared reservation. Every other reservation without a lease
-            // remains unexplained custody evidence.
-            let only_adopter = adopter.is_some_and(|adopter| {
-                listing.reservations.len() == 1 && listing.reservations[0].scope == adopter
-            });
-            if listing.reservations.is_empty() || only_adopter {
+            // Before its first lease snapshot, a launch holds only its prepared
+            // reservation. The adopter's own is its own launch. Another
+            // reservation whose holder is not known to be gone is a live
+            // writer in its launch window: it is the holder, and the sharing
+            // policy decides what the adopter may do. Only reservations no
+            // live attempt explains remain unexplained custody evidence.
+            let Some((reservation, siblings)) = unleased_holder(listing.reservations, adopter)?
+            else {
                 return Ok((slot, observation, None, Vec::new()));
-            }
-            return Err("writer reservations exist without a worktree lease".into());
+            };
+            let lease = WorktreeLease {
+                holder: reservation.scope.attempt,
+                since: reservation_written_at(&slot, &reservation)?,
+                sharing: Sharing::Inherit,
+            };
+            return Ok((slot, observation, Some((reservation, lease)), siblings));
         }
         Err(error) => return Err(format!("worktree lease could not be read: {error}")),
     };
@@ -1473,6 +1550,7 @@ pub fn lock_writer_lease_handover(
                     reservation.scope.attempt,
                     reservation.scope.generation,
                     reservation.live,
+                    reservation.launching,
                     now,
                     grace,
                 )
@@ -1539,6 +1617,7 @@ fn observe_writer_lease(
         reservation.scope.attempt,
         reservation.scope.generation,
         reservation.live,
+        reservation.launching,
         now,
         grace,
     )
@@ -1578,6 +1657,7 @@ fn reservation_observation(
         reservation.scope.attempt,
         reservation.scope.generation,
         reservation.live,
+        reservation.launching,
         now,
         &grace,
     )

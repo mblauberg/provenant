@@ -816,7 +816,7 @@ fn typed_contract_distinguishes_valid_fail_from_a_contradictory_pass() {
                 .find(|node| node.id == "review")
                 .unwrap();
             if verdict == "VERDICT: PASS" {
-                assert_eq!(progress.state, NodeState::Failed);
+                assert_eq!(progress.state, NodeState::Failed, "{name} {:?}", progress.outputs.as_ref().map(|o| &o.findings));
                 assert_eq!(
                     progress.advance_code.as_deref(),
                     Some("review_verdict_conflict")
@@ -836,6 +836,7 @@ fn typed_contract_distinguishes_valid_fail_from_a_contradictory_pass() {
 #[test]
 fn malformed_lens_retries_same_route_with_durable_budget_without_repeating_siblings() {
     let mut document = panel("f0-v0-s0");
+    document.schema_version = 2;
     document.subject = Some(pinned_review_subject());
     let (plan, _) = validate_plan(&document).unwrap();
     let lens = plan
@@ -1060,6 +1061,7 @@ fn below_minimum_review_keeps_returned_findings_on_replay() {
 #[test]
 fn pending_evidence_retry_survives_host_validation_refusal_and_replays_once() {
     let mut document = panel_with_lenses("f0-v0-s0", &["correctness"]);
+    document.schema_version = 2;
     document.subject = Some(pinned_review_subject());
     let (plan, _) = validate_plan(&document).unwrap();
     let lens = plan
@@ -1373,7 +1375,8 @@ fn repair_writer_prompt_uses_full_chain_ledger_and_stages_overflow() {
         node: "source".into(),
         outputs: vec![OutputKind::Findings],
     }];
-    let document = graph(vec![source, writer, node("other", route("fixture"))]);
+    let mut document = graph(vec![source, writer, node("other", route("fixture"))]);
+    document.schema_version = 2;
     let (plan, positions) = validate_plan(&document).unwrap();
     let mut checkpoint = transitions::initial_checkpoint(
         &document,
@@ -1397,6 +1400,7 @@ fn repair_writer_prompt_uses_full_chain_ledger_and_stages_overflow() {
 
     checkpoint.nodes[positions["source"]].state = NodeState::Succeeded;
     checkpoint.nodes[positions["source"]].outputs = Some(NodeOutputs {
+        schema_version: 2,
         findings_available: Some(true),
         ..Default::default()
     });
@@ -1443,7 +1447,8 @@ fn repair_writer_prompt_uses_full_chain_ledger_and_stages_overflow() {
     assert!(!overflow, "the compact ledger projection should fit");
     assert!(prompt.contains("F-LARGE"));
     assert!(prompt.contains("staged full review_ledger artifact"));
-    assert!(!prompt.contains("FULL-LEDGER-EVIDENCE-"));
+    // The prompt carries a bounded summary, never the complete evidence.
+    assert!(!prompt.contains(&evidence));
 
     let requests = upstream_results(
         &plan.nodes[positions["fix"]],
@@ -1504,17 +1509,8 @@ fn unaccepted_replayed_repair_attempt_refuses_a_capped_ledger_artifact() {
     let mut document = graph(vec![source, writer]);
     document.schema_version = 2;
     let limits = crate::config::GraphLimits::default();
-    let admitted = candidate::admit_candidate_with_review_policy(
-        &document,
-        None,
-        &[],
-        &limits,
-        &Default::default(),
-        None,
-        &ReviewPolicy::default(),
-    )
-    .unwrap();
-    let (plan, positions) = validate_flat_plan(admitted.expanded(), &limits).unwrap();
+    let expanded = plans::expand(&document, &[], &[], &limits).unwrap();
+    let (plan, positions) = validate_flat_plan(&expanded, &limits).unwrap();
     let digest = plan_digest(&plan).unwrap().to_string();
     let mut checkpoint = transitions::initial_checkpoint(
         &document,
@@ -1558,6 +1554,7 @@ fn unaccepted_replayed_repair_attempt_refuses_a_capped_ledger_artifact() {
     source_attempt.outcome = Some(GraphAttemptOutcome::Succeeded);
     checkpoint.nodes[positions["source"]].state = NodeState::Succeeded;
     checkpoint.nodes[positions["source"]].outputs = Some(NodeOutputs {
+        schema_version: 2,
         findings_available: Some(true),
         ..Default::default()
     });
@@ -1607,12 +1604,10 @@ fn unaccepted_replayed_repair_attempt_refuses_a_capped_ledger_artifact() {
 
     let mut first_owner = FakeOwner {
         materialise: Some(fully_materialise_inputs),
+        observations: [AttemptObservation::Pending { attempt_ref: None }].into(),
         ..Default::default()
     };
-    assert!(matches!(
-        advance(&document, &mut first_owner, &mut journal),
-        Err(GraphError::Run(_))
-    ));
+    advance(&document, &mut first_owner, &mut journal).unwrap();
     assert_eq!(first_owner.calls.len(), 1);
 
     let mut replay_owner = FakeOwner {
@@ -1642,8 +1637,8 @@ fn unaccepted_replayed_repair_attempt_refuses_a_capped_ledger_artifact() {
 #[test]
 // Spec: docs/specs/fabric.md#fix-round-invariants-and-split-verdict-adjudication
 fn round_two_missing_invariant_is_refused_at_graph_settlement() {
-    let document: GraphDocument = serde_json::from_value(json!({
-        "schema_version": 1, "graph_id": "delta-contract", "nodes": [{
+    let mut document: GraphDocument = serde_json::from_value(json!({
+        "schema_version": 2, "graph_id": "delta-contract", "nodes": [{
             "id": "repair", "kind": "loop", "access": "read_only",
             "loop": {"max_rounds": 2, "until": "accepted", "body": [
                 review("review.tests", "check"),
@@ -1654,11 +1649,22 @@ fn round_two_missing_invariant_is_refused_at_graph_settlement() {
         }]
     }))
     .unwrap();
+    document.subject = Some(pinned_review_subject());
     let mut owner = FakeOwner {
         observations: [
             terminal_with_result(
                 GraphAttemptOutcome::Succeeded,
                 &answer(json!([]), "VERDICT: FAIL"),
+            ),
+            // The first answer and each evidence retry omit the invariant, so the
+            // retry budget (default two) runs out and the round is refused.
+            terminal_with_result(
+                GraphAttemptOutcome::Succeeded,
+                &answer(json!([finding()]), "VERDICT: FAIL"),
+            ),
+            terminal_with_result(
+                GraphAttemptOutcome::Succeeded,
+                &answer(json!([finding()]), "VERDICT: FAIL"),
             ),
             terminal_with_result(
                 GraphAttemptOutcome::Succeeded,
@@ -1666,6 +1672,7 @@ fn round_two_missing_invariant_is_refused_at_graph_settlement() {
             ),
         ]
         .into(),
+        resolve_reviews: true,
         ..Default::default()
     };
     let mut journal = MemoryJournal::default();
@@ -1677,7 +1684,12 @@ fn round_two_missing_invariant_is_refused_at_graph_settlement() {
         .iter()
         .find(|node| node.id == "repair--r2--check")
         .unwrap();
-    assert_eq!(check.state, NodeState::Failed);
+    assert_eq!(
+        check.state,
+        NodeState::Failed,
+        "{:?}",
+        checkpoint.nodes.iter().map(|n| (&n.id, n.state, &n.advance_code, &n.advance_note, n.gate.as_ref().and_then(|g| g.reason.clone()))).collect::<Vec<_>>()
+    );
     assert_eq!(
         check.advance_code.as_deref(),
         Some("review_invariant_missing")

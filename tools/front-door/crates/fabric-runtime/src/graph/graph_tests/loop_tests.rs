@@ -3261,6 +3261,24 @@ fn review_repair_document() -> GraphDocument {
     })).unwrap()
 }
 
+/// The initial review as a one-lens panel. Only a panel settles the chain's
+/// finding ledger, which later rounds read to narrow their lenses.
+fn ledger_initial_review(commit: Option<&str>) -> serde_json::Value {
+    let mut lens = serde_json::json!({
+        "id":"correctness","access":"read_only","review_lens":"correctness",
+        "review_behaviour":"lens","require_findings":true,"prompt":"review",
+        "route":{"alias":"senior"}
+    });
+    if let Some(commit) = commit {
+        lens["source"] = serde_json::json!({"type":"commit","commit":commit});
+    }
+    serde_json::json!({
+        "id":"initial","kind":"composite","access":"read_only",
+        "composite":{"min_successful":1,"reduce_verdict":true,"nodes":[lens],
+            "exports":[{"node":"correctness","outputs":["findings","verdict"]}]}
+    })
+}
+
 fn repair_finding(design: bool) -> String {
     format!(
         "```findings\n{}\n```\nVERDICT: FAIL",
@@ -3308,20 +3326,27 @@ fn clean_initial_review_starts_no_repair_attempt() {
 }
 
 #[test]
-fn confirmed_should_fix_on_the_default_path_runs_a_repair_writer() {
+fn medium_finding_is_posted_at_the_default_ceiling_and_repaired_when_the_ceiling_drops() {
     let document = review_repair_document();
-    let should_fix = repair_finding(false)
+    let medium = repair_finding(false)
         .replace("\"severity\":\"high\"", "\"severity\":\"medium\"")
         .replace(
             "\"blocking_class\":\"default_path_defect\"",
             "\"blocking_class\":\"none\"",
         )
         .replace("VERDICT: FAIL", "VERDICT: PASS");
-    let mut owner = repair_reviews(&[
-        &should_fix,
-        "fixed",
-        "```findings\n{\"schema_version\":1,\"findings\":[]}\n```\nVERDICT: PASS",
-    ]);
+    let clean = "```findings\n{\"schema_version\":1,\"findings\":[]}\n```\nVERDICT: PASS";
+    // The default ceiling is high: a confirmed medium finding is posted, not repaired.
+    let mut owner = repair_reviews(&[&medium]);
+    let mut journal = MemoryJournal::default();
+    let run = advance(&document, &mut owner, &mut journal).unwrap();
+    assert!(run.checkpoint.successful());
+    assert_eq!(owner.calls.len(), 1);
+    // Lowering the ceiling to medium makes the same finding blocking, so a writer runs.
+    let mut lowered = ReviewPolicy::default();
+    lowered.accept_below.value = AcceptBelow::Medium;
+    let mut owner = repair_reviews(&[&medium, "fixed", clean]);
+    owner.resolved_review_policy = Some(lowered);
     let mut journal = MemoryJournal::default();
     let run = advance(&document, &mut owner, &mut journal).unwrap();
     assert!(run.checkpoint.successful());
@@ -3565,19 +3590,19 @@ fn round_one_rereview_uses_verified_delta_or_widens_before_lens_selection() {
     let mut document = review_repair_document();
     document.context =
         Some(serde_json::from_value(serde_json::json!({"risk_tier":"substantial"})).unwrap());
-    let original_base = "0".repeat(40);
-    let original_head = "1".repeat(40);
+    // The fixture host resolves every review range from base "1…1".
+    let original_base = "1".repeat(40);
+    let original_head = "3".repeat(40);
     let repaired_head = "a".repeat(40);
     document.review_base = Some(original_base.clone());
     document.schema_version = 2;
-    document.nodes[0].source = Some(SourceBinding::Commit {
-        commit: original_head.clone(),
-    });
+    document.nodes[0] = serde_json::from_value(ledger_initial_review(Some(&original_head))).unwrap();
     let check = serde_json::from_value(serde_json::json!({
         "id":"check","kind":"composite","access":"read_only","depends_on":["fix"],
+        "source":{"type":"node","node":"fix"},
         "composite":{"nodes":[
-            {"id":"correctness","repair_lens":"correctness","repair_risk_assessment":true,"access":"read_only","prompt":"correctness delta","route":{"alias":"senior"},"require_findings":true},
-            {"id":"security","repair_lens":"security","repair_risk_assessment":true,"access":"read_only","prompt":"security delta","route":{"alias":"senior"},"require_findings":true}
+            {"id":"correctness","repair_lens":"correctness","repair_risk_assessment":true,"review_base":original_base,"access":"read_only","prompt":"correctness delta","route":{"alias":"senior"},"require_findings":true},
+            {"id":"security","repair_lens":"security","repair_risk_assessment":true,"review_base":original_base,"access":"read_only","prompt":"security delta","route":{"alias":"senior"},"require_findings":true}
         ],"exports":[{"node":"correctness","outputs":["findings","verdict"]},{"node":"security","outputs":["findings"]}]}
     })).unwrap();
     document.nodes[1].loop_body.as_mut().unwrap().body[1] = check;
@@ -3585,6 +3610,8 @@ fn round_one_rereview_uses_verified_delta_or_widens_before_lens_selection() {
     let pass = "```findings\n{\"schema_version\":1,\"risk_tier\":\"substantial\",\"findings\":[]}\n```\nVERDICT: PASS";
     for (attributable, expected_calls) in [(true, 3), (false, 4)] {
         let mut owner = repair_reviews(&[&finding, "fixed", pass, pass]);
+        owner.resolve_reviews = true;
+        owner.last_commit = Some(original_head.clone());
         owner.review_delta_is_ancestor = attributable;
         if let AttemptObservation::Terminal { commit, .. } = &mut owner.observations[1] {
             *commit = Some(repaired_head.clone());
@@ -3592,11 +3619,19 @@ fn round_one_rereview_uses_verified_delta_or_widens_before_lens_selection() {
         let mut journal = MemoryJournal::default();
         let run = advance(&document, &mut owner, &mut journal).unwrap();
         assert!(run.checkpoint.successful());
-        assert_eq!(owner.calls.len(), expected_calls);
-        assert_eq!(owner.repair_growth_calls, 1);
         assert_eq!(
-            owner.review_delta_checks,
-            vec![(original_head.clone(), repaired_head.clone())]
+            owner.calls.len(),
+            expected_calls,
+            "attributable={attributable}"
+        );
+        assert_eq!(owner.repair_growth_calls, 1);
+        // Each lens seals its own scope; every check asks the same question.
+        assert!(!owner.review_delta_checks.is_empty());
+        assert!(
+            owner
+                .review_delta_checks
+                .iter()
+                .all(|check| check == &(original_head.clone(), repaired_head.clone()))
         );
         assert_eq!(owner.repair_panel_calls, 0);
         assert!(owner.calls[2].0.node_id.ends_with("check--correctness"));
@@ -3640,8 +3675,14 @@ fn round_one_rereview_uses_verified_delta_or_widens_before_lens_selection() {
             assert_eq!(security.state, NodeState::Succeeded);
             assert!(owner.calls[3].0.node_id.ends_with("check--security"));
         }
+        let mut replay_owner = FakeOwner {
+            resolve_reviews: true,
+            last_commit: Some(repaired_head.clone()),
+            review_delta_is_ancestor: attributable,
+            ..FakeOwner::default()
+        };
         assert_eq!(
-            advance(&document, &mut FakeOwner::default(), &mut journal)
+            advance(&document, &mut replay_owner, &mut journal)
                 .unwrap()
                 .checkpoint,
             run.checkpoint
@@ -3652,22 +3693,111 @@ fn round_one_rereview_uses_verified_delta_or_widens_before_lens_selection() {
 #[test]
 fn later_repair_round_uses_latest_raising_lenses() {
     let mut document = review_repair_document();
+    // Later rounds narrow their lenses from the chain's finding ledger, which
+    // only a panel settles; the fixture host resolves every range from "1…1".
+    let base = "1".repeat(40);
+    let heads = ["3".repeat(40), "a".repeat(40), "b".repeat(40)];
+    document.schema_version = 2;
+    document.review_base = Some(base.clone());
+    // The initial panel has one unresolved finding per lens, so the first
+    // repair check re-runs both lenses.
+    let mut initial_panel = ledger_initial_review(Some(&heads[0]));
+    let mut security_lens = initial_panel["composite"]["nodes"][0].clone();
+    security_lens["id"] = "security".into();
+    security_lens["review_lens"] = "security".into();
+    initial_panel["composite"]["nodes"]
+        .as_array_mut()
+        .unwrap()
+        .push(security_lens);
+    initial_panel["composite"]["exports"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!({"node":"security","outputs":["findings","verdict"]}));
+    document.nodes[0] = serde_json::from_value(initial_panel).unwrap();
     let check = serde_json::from_value(serde_json::json!({
-        "id":"check","kind":"composite","access":"read_only","depends_on":["fix"],
+        "id":"check","kind":"composite","access":"read_only","depends_on":["fix","initial"],
+        "source":{"type":"node","node":"fix"},
         "composite":{"min_successful":1,"reduce_verdict":true,"nodes":[
-            {"id":"correctness","repair_lens":"correctness","access":"read_only","prompt":"correctness delta","route":{"alias":"senior"},"require_findings":true},
-            {"id":"security","repair_lens":"security","access":"read_only","prompt":"security delta","route":{"alias":"senior"},"require_findings":true}
+            {"id":"correctness","repair_lens":"correctness","review_lens":"correctness","review_behaviour":"lens","review_base":base,"access":"read_only","prompt":"correctness delta","route":{"alias":"senior"},"require_findings":true,"inputs":[{"node":"initial","outputs":["findings"]}]},
+            {"id":"security","repair_lens":"security","review_lens":"security","review_behaviour":"lens","review_base":base,"access":"read_only","prompt":"security delta","route":{"alias":"senior"},"require_findings":true,"inputs":[{"node":"initial","outputs":["findings"]}]}
         ],"exports":[{"node":"correctness","outputs":["findings","result"]},{"node":"security","outputs":["findings","result"]}]}
     })).unwrap();
     document.nodes[1].loop_body.as_mut().unwrap().body[1] = check;
     let initial = repair_finding(false);
-    let next = initial
-        .replace("F1", "F2")
-        .replace("correctness", "security");
+    // The ledger carries F1 until a review closes it, and a second finding with
+    // the same root cause would be a recurrence: the check closes F1 and raises
+    // F2 on another root cause.
+    let raised = |id: &str, lens: &str, root_cause: &str, status: &str| {
+        let mut finding = serde_json::from_str::<serde_json::Value>(
+            initial
+                .split("```findings\n")
+                .nth(1)
+                .and_then(|body| body.split("\n```").next())
+                .unwrap(),
+        )
+        .unwrap()["findings"][0]
+            .clone();
+        finding["id"] = id.into();
+        finding["lens"] = lens.into();
+        finding["status"] = status.into();
+        finding["triage"]["root_cause"] = root_cause.into();
+        if status == "open" {
+            finding["file"] = "b.rs".into();
+            finding["summary"] = root_cause.into();
+        }
+        finding
+    };
+    let block = |findings: Vec<serde_json::Value>, verdict: &str| {
+        format!(
+            "```findings\n{}\n```\nVERDICT: {verdict}",
+            serde_json::json!({"schema_version":1,"findings":findings})
+        )
+    };
+    let initial_security = block(
+        vec![raised("F0", "security", "boundary", "open")],
+        "FAIL",
+    );
+    let correctness_closes = block(
+        vec![raised("F1", "correctness", "constraint", "closed")],
+        "FAIL",
+    );
+    let security_raises = block(
+        vec![
+            raised("F0", "security", "boundary", "closed"),
+            raised("F2", "security", "isolation", "open"),
+        ],
+        "FAIL",
+    );
     let pass = "```findings\n{\"schema_version\":1,\"findings\":[]}\n```\nVERDICT: PASS";
-    let mut owner = repair_reviews(&[&initial, "fix one", &next, "fix two", pass]);
+    let fix_two = format!(
+        "fix two\n```findings\n{}\n```",
+        serde_json::json!({"schema_version":1,"findings":[],"repair_items":[{
+            "id":"isolation","status":"fixed","reason":"The default-path defect is repaired"
+        }]})
+    );
+    let mut owner = repair_reviews(&[
+        &initial,
+        &initial_security,
+        "fix one",
+        &correctness_closes,
+        &security_raises,
+        &fix_two,
+        pass,
+    ]);
+    owner.resolve_reviews = true;
+    owner.last_commit = Some(heads[0].clone());
+    owner.review_delta_is_ancestor = true;
+    for (slot, head) in [(2, &heads[1]), (5, &heads[2])] {
+        if let AttemptObservation::Terminal { commit, .. } = &mut owner.observations[slot] {
+            *commit = Some(head.clone());
+        }
+    }
     let run = advance(&document, &mut owner, &mut MemoryJournal::default()).unwrap();
-    assert!(run.checkpoint.successful());
+    assert!(
+        run.checkpoint.successful(),
+        "{:?}",
+        owner.calls.iter().map(|c| c.0.node_id.clone()).collect::<Vec<_>>()
+    );
     let calls: Vec<_> = owner
         .calls
         .iter()
@@ -3676,12 +3806,16 @@ fn later_repair_round_uses_latest_raising_lenses() {
     assert_eq!(
         calls,
         [
-            "initial",
+            "initial--correctness",
+            "initial--security",
             "repair--r1--fix",
             "repair--r1--check--correctness",
+            "repair--r1--check--security",
             "repair--r2--fix",
             "repair--r2--check--security"
-        ]
+        ],
+        "{:?}",
+        run.checkpoint.nodes.iter().filter(|n| n.state != NodeState::Skipped).map(|n| (&n.id, n.state)).collect::<Vec<_>>()
     );
 }
 
@@ -3927,6 +4061,7 @@ fn failed_replanned_panel_repairs_its_findings_within_cycle_limit() {
             ])
         };
         owner.repair_panel = Some(vec!["correctness".into(), "security".into()]);
+        owner.materialise = Some(fully_materialise_inputs);
         for (index, oid) in [(1, 'a'), (7, 'b')] {
             if let Some(AttemptObservation::Terminal { commit, .. }) =
                 owner.observations.get_mut(index)
@@ -3937,7 +4072,16 @@ fn failed_replanned_panel_repairs_its_findings_within_cycle_limit() {
         let mut journal = MemoryJournal::default();
         let run = advance(&document, &mut owner, &mut journal).unwrap();
         assert_eq!(run.status, GraphStatus::Complete);
-        assert!(run.checkpoint.successful(), "{:?}", run.checkpoint.nodes);
+        assert!(
+            run.checkpoint.successful(),
+            "{:?}",
+            run.checkpoint
+                .nodes
+                .iter()
+                .filter(|node| node.state == NodeState::Failed)
+                .map(|node| (&node.id, &node.gate, &node.advance_note))
+                .collect::<Vec<_>>()
+        );
         let first_gate = run
             .checkpoint
             .nodes
@@ -4505,10 +4649,12 @@ fn compiled_repair_rechecks_new_panel_lens_after_the_next_fix() {
             "\"summary\":\"constraint\"",
             "\"class\":\"security invariant\",\"summary\":\"constraint\"",
         );
-    let checked_security = security.replace(
-        "\"status\":\"open\"",
-        "\"status\":\"open\",\"disposition\":\"accepted\",\"reason\":\"Reproduced on the repaired head\"",
-    );
+    let checked_security = security
+        .replace(
+            "\"status\":\"open\"",
+            "\"status\":\"open\",\"disposition\":\"accepted\",\"reason\":\"Reproduced on the repaired head\"",
+        )
+;
     let growth = "```findings\n{\"schema_version\":1,\"risk_tier\":\"crucial\",\"findings\":[]}\n```\nVERDICT: PASS";
     let pass = "```findings\n{\"schema_version\":1,\"risk_tier\":\"substantial\",\"findings\":[]}\n```\nVERDICT: PASS";
     let mut owner = repair_reviews(&[
@@ -4529,6 +4675,8 @@ fn compiled_repair_rechecks_new_panel_lens_after_the_next_fix() {
         pass,
     ]);
     owner.repair_panel = Some(vec!["correctness".into(), "security".into()]);
+    // The split panel's adjudicator launches only with its complete evidence.
+    owner.materialise = Some(fully_materialise_inputs);
     for (index, oid) in [(1, 'a'), (8, 'b')] {
         if let AttemptObservation::Terminal { commit, .. } = &mut owner.observations[index] {
             *commit = Some(oid.to_string().repeat(40));
@@ -4539,12 +4687,14 @@ fn compiled_repair_rechecks_new_panel_lens_after_the_next_fix() {
     assert_eq!(run.status, GraphStatus::Complete);
     assert!(
         run.checkpoint.successful(),
-        "{:?}",
+        "{:?} {:?}",
+        owner.calls.iter().map(|c| c.0.node_id.clone()).collect::<Vec<_>>(),
         run.checkpoint
             .nodes
             .iter()
+            .filter(|node| node.state == NodeState::Failed)
             .map(|node| (&node.id, node.state, &node.gate, &node.advance_note))
-            .collect::<Vec<_>>()
+            .collect::<Vec<_>>(),
     );
     assert_eq!(owner.repair_panel_calls, 2);
     // The first repair receives the complete structured finding, not just the

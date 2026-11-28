@@ -266,3 +266,137 @@ fn writer_occupancy_contention_keeps_the_durable_holder() {
         WorktreeError::UnknownOccupancy { .. }
     ));
 }
+
+fn scope(byte: u8) -> provenant_records::custody::Scope {
+    provenant_records::custody::Scope {
+        attempt: holder(byte),
+        generation: 1,
+    }
+}
+
+fn reservation(
+    byte: u8,
+    live: Option<bool>,
+    launching: bool,
+) -> provenant_supervisor::custody::WriterReservation {
+    provenant_supervisor::custody::WriterReservation {
+        scope: scope(byte),
+        reservation: PathBuf::from(format!("{}/reservation.json", holder(byte))),
+        branch: None,
+        live,
+        age: None,
+        legacy_fence: false,
+        launching,
+    }
+}
+
+// Spec: docs/specs/supervisor.md#writer-reservation-and-settlement
+#[test]
+fn reservation_without_a_lease_is_a_live_holder_or_unexplained() {
+    // A writer in its launch window has a reservation and no lease yet. The
+    // adopter's own reservation is its launch; another live one is the holder.
+    let (holder_reservation, siblings) = unleased_holder(
+        vec![reservation(1, None, true), reservation(2, None, true)],
+        Some(scope(1)),
+    )
+    .unwrap()
+    .expect("a live launch window is a holder");
+    assert_eq!(holder_reservation.scope, scope(2));
+    assert_eq!(
+        siblings.iter().map(|r| r.scope).collect::<Vec<_>>(),
+        [scope(1)]
+    );
+    // The adopter alone has nothing to share with.
+    assert!(
+        unleased_holder(vec![reservation(1, None, true)], Some(scope(1)))
+            .unwrap()
+            .is_none()
+    );
+    assert!(unleased_holder(Vec::new(), None).unwrap().is_none());
+    // Any reservation whose holder is not known to be gone is explained by a
+    // live attempt, even beside an orphan.
+    for live in [Some(true), None] {
+        let (found, rest) = unleased_holder(
+            vec![
+                reservation(3, Some(false), false),
+                reservation(4, live, false),
+            ],
+            None,
+        )
+        .unwrap()
+        .expect("a live reservation is the holder");
+        assert_eq!(found.scope, scope(4));
+        assert_eq!(rest.len(), 1);
+    }
+    // A reservation no live attempt explains stays refused.
+    assert!(
+        unleased_holder(vec![reservation(5, Some(false), false)], Some(scope(1)))
+            .unwrap_err()
+            .contains("without a worktree lease")
+    );
+    assert!(
+        unleased_holder(
+            vec![
+                reservation(1, None, true),
+                reservation(5, Some(false), false)
+            ],
+            Some(scope(1)),
+        )
+        .is_err()
+    );
+}
+
+// Spec: docs/specs/supervisor.md#writer-reservation-and-settlement
+#[test]
+fn launch_window_holder_goes_through_the_sharing_policy() {
+    let temp = tempfile::tempdir().unwrap();
+    let slot = Directory::open_anchor(temp.path()).unwrap();
+    provenant_supervisor::custody::prepare_writer_observation(&slot).unwrap();
+    let grace = Sourced {
+        value: 10,
+        source: Source::at(Layer::Host, "fixture"),
+    };
+    let started = WallTime::from_unix_seconds(1_700_000_000).unwrap();
+    let attempt = holder(11);
+    // Presence cannot be observed before a guardian is recorded, but the
+    // attempt is nonterminal: it is live for the grace, then it lapses.
+    let state = observe_reservation_liveness_locked(&slot, attempt, 1, None, true, started, &grace)
+        .unwrap();
+    assert!(matches!(&state, LeaseState::Live { attempt_state } if attempt_state == "nonterminal"));
+    let observation = LeaseObservation {
+        lease: WorktreeLease {
+            holder: attempt,
+            since: started,
+            sharing: Sharing::Inherit,
+        },
+        state,
+    };
+    let tree = tree();
+    let Admit::Proceed {
+        warning: Some(warning),
+    } = admit_shared_writer(&tree, Some(&observation), &sharing(Sharing::Warn))
+    else {
+        panic!("a live launch window warns under the default policy");
+    };
+    assert_eq!(
+        warning.code.as_ref(),
+        provenant_records::policy::WORKTREE_SHARED
+    );
+    assert!(matches!(
+        admit_shared_writer(&tree, Some(&observation), &sharing(Sharing::Allow)),
+        Admit::Proceed { warning: None }
+    ));
+    let Admit::Refuse { error } =
+        admit_shared_writer(&tree, Some(&observation), &sharing(Sharing::Refuse))
+    else {
+        panic!("refuse still refuses a live launch window");
+    };
+    assert_eq!(error.code, WORKTREE_SHARING_REFUSED);
+    let after_grace = started
+        .checked_add(provenant_core::DurationMicros::from_seconds(10).unwrap())
+        .unwrap();
+    assert!(matches!(
+        observe_reservation_liveness_locked(&slot, attempt, 1, None, true, after_grace, &grace),
+        Some(LeaseState::LapsedUnreachable { .. })
+    ));
+}

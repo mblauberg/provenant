@@ -2157,18 +2157,24 @@ fn reviews_of_the_same_subject_attach_to_the_completed_attempt() -> Result {
         fn observe_or_start(
             &mut self,
             _: &graph::AttemptKey,
-            _: graph::NodeInput<'_>,
+            node: graph::NodeInput<'_>,
             _: &graph::GraphRoute,
             _: graph::AccessMode,
             _: Option<&str>,
             _: graph::Replay<'_>,
         ) -> std::result::Result<graph::AttemptObservation, Self::Error> {
             self.0 += 1;
+            // Valid evidence: a reviewer that returns none is retried on
+            // the same route and head (domains.review.evidence_retries).
+            let mut result =
+                provenant_records::result_capture::ResultCapture::new(node.required_verdict);
+            result
+                .push(b"```findings\n{\"schema_version\":1,\"findings\":[]}\n```\nVERDICT: PASS\n");
             Ok(graph::AttemptObservation::Terminal {
                 attempt_ref: Some("fixture/review".into()),
                 outcome: graph::GraphAttemptOutcome::Succeeded,
                 launched: true,
-                result: None,
+                result: Some(Box::new(result.finish())),
                 result_warning: None,
                 result_path: None,
                 branch: None,
@@ -2241,6 +2247,9 @@ fn reviews_of_the_same_subject_attach_to_the_completed_attempt() -> Result {
             serde_json::from_value(attached["checkpoint"].clone())?;
         let mut comparable = checkpoint.clone();
         comparable.extra.remove("subject");
+        // The submission reports its subject beside the checkpoint; the
+        // journal read projects the same subject into the typed field.
+        comparable.subject = first.checkpoint.subject.clone();
         assert_eq!(comparable, first.checkpoint);
         assert_eq!(
             checkpoint.extra["subject"]["head"],

@@ -2159,10 +2159,13 @@ fn production_files_stay_within_their_line_ceilings() -> Result<(), Box<dyn Erro
         ("crates/fabric-runtime/src/coordination/facade.rs", 2000),
         ("crates/fabric-runtime/src/graph.rs", 4500),
         ("crates/fabric-runtime/src/graph/journal.rs", 2750),
-        ("crates/fabric-runtime/src/graph/model.rs", 3000),
-        ("crates/fabric-runtime/src/graph/outputs.rs", 2500),
-        ("crates/fabric-runtime/src/graph/patch.rs", 2500),
+        // Review machinery wiring (#4121); split tracked in #4143.
+        ("crates/fabric-runtime/src/graph/model.rs", 3500),
+        ("crates/fabric-runtime/src/graph/outputs.rs", 2750),
+        ("crates/fabric-runtime/src/graph/patch.rs", 2750),
         ("crates/fabric-runtime/src/graph/plans.rs", 2500),
+        // Review machinery wiring (#4121); split tracked in #4143.
+        ("crates/fabric-runtime/src/graph/schedule.rs", 2750),
         ("crates/fabric-runtime/src/graph/template.rs", 3250),
         ("crates/fabric-runtime/src/graph/transitions.rs", 2750),
         ("crates/fabric-runtime/src/hosts.rs", 4000),

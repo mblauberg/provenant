@@ -79,6 +79,10 @@ struct FakeOwner {
     review_base_worktrees: Vec<Option<String>>,
     observed_review_bases: Vec<Option<String>>,
     equal_range: bool,
+    /// Review attempts settle with a resolvable range and a host attempt ref, as
+    /// a real host reports them, so panel settlements reach the finding ledger.
+    resolve_reviews: bool,
+    last_commit: Option<String>,
     no_review_base: bool,
     review_delta_is_ancestor: bool,
     review_delta_checks: Vec<(String, String)>,
@@ -137,6 +141,13 @@ fn reply(option: Option<&str>, text: Option<&str>) -> AskReply {
         text: text.map(str::to_owned),
         actor: "chair".into(),
         at: None,
+    }
+}
+
+impl FakeOwner {
+    /// A host that replans a repair panel resolves its reviews; any test may also ask.
+    fn resolves_reviews(&self) -> bool {
+        self.resolve_reviews || self.repair_panel.is_some()
     }
 }
 
@@ -477,6 +488,11 @@ impl AttemptOwner for FakeOwner {
                 base: "1".repeat(40),
                 head: "1".repeat(40),
             }
+        } else if self.resolves_reviews() {
+            ReviewRange::Resolved {
+                base: "1".repeat(40),
+                head: self.last_commit.clone().unwrap_or_else(|| "2".repeat(40)),
+            }
         } else if self.no_review_base {
             ReviewRange::NoBase
         } else {
@@ -536,7 +552,21 @@ impl AttemptOwner for FakeOwner {
             self.families.insert(reference.clone(), family);
             return Ok(done_as(&reference));
         }
-        let observation = self.observations.pop_front().ok_or(NoObservation)?;
+        let mut observation = self.observations.pop_front().ok_or(NoObservation)?;
+        if self.resolves_reviews()
+            && let AttemptObservation::Terminal {
+                attempt_ref,
+                commit,
+                ..
+            } = &mut observation
+        {
+            if attempt_ref.is_none() {
+                *attempt_ref = Some(format!("fixture/{:032x}", self.calls.len()));
+            }
+            if commit.is_some() {
+                self.last_commit.clone_from(commit);
+            }
+        }
         if let AttemptObservation::Terminal {
             attempt_ref: Some(reference),
             outcome,

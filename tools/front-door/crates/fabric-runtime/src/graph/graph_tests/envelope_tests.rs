@@ -1,6 +1,22 @@
 use super::*;
 use serde_json::json;
 
+/// The checkpoint bound under the default review policy.
+fn checkpoint_bound(
+    document: &GraphDocument,
+    expansions: &[Expansion],
+    extensions: &[String],
+    plan: &PlannedGraph,
+) -> usize {
+    envelope::checkpoint_bound_with_policy(
+        document,
+        expansions,
+        extensions,
+        plan,
+        &ReviewPolicy::default(),
+    )
+}
+
 /// Measure the actual journal representation after durable text externalisation.
 fn persisted_len(stored: &StoredCheckpoint) -> usize {
     let temp = tempfile::tempdir().unwrap();
@@ -332,13 +348,15 @@ fn filled_checkpoint(document: &GraphDocument, plan: &PlannedGraph) -> GraphChec
         "disposition": "accepted"
     }))
     .unwrap();
-    let mut prior_outputs = NodeOutputs::default();
-    prior_outputs.schema_version = 2;
-    prior_outputs.verdict = Some("VERDICT: INCONCLUSIVE".into());
-    prior_outputs.findings_available = Some(true);
-    prior_outputs.findings = vec![prior_finding.clone()];
-    prior_outputs.full_artifact_findings = Some(vec![prior_finding.clone()]);
-    prior_outputs.full_disposition_findings = Some(vec![prior_finding]);
+    let prior_outputs = NodeOutputs {
+        schema_version: 2,
+        verdict: Some("VERDICT: INCONCLUSIVE".into()),
+        findings_available: Some(true),
+        findings: vec![prior_finding.clone()],
+        full_artifact_findings: Some(vec![prior_finding.clone()]),
+        full_disposition_findings: Some(vec![prior_finding]),
+        ..Default::default()
+    };
     let nodes = plan
         .nodes
         .iter()
@@ -772,7 +790,7 @@ fn assert_fits_with_repair_metadata(document: GraphDocument, tier: &str, grew: b
         execution,
     };
     let size = persisted_len(&stored);
-    let bound = envelope::checkpoint_bound(&document, &[], &stored.checkpoint.extensions, &plan);
+    let bound = checkpoint_bound(&document, &[], &stored.checkpoint.extensions, &plan);
     assert!(
         size <= bound,
         "filled checkpoint is {size} bytes, over its {bound}-byte bound"
@@ -799,7 +817,7 @@ fn queue_prep_retries_reserve_each_possible_attempt_row() {
     document.queue = Some(queue);
     let single_attempt_plan = planned(&document);
     let single_attempt_bound =
-        envelope::checkpoint_bound(&document, &[], &[], &single_attempt_plan);
+        checkpoint_bound(&document, &[], &[], &single_attempt_plan);
 
     let mut escalated = document.clone();
     escalated.nodes[0].escalate = Some(EscalateSpec {
@@ -807,7 +825,7 @@ fn queue_prep_retries_reserve_each_possible_attempt_row() {
         max_ci_rounds: 3,
     });
     let escalated_plan = planned(&escalated);
-    let escalated_bound = envelope::checkpoint_bound(&escalated, &[], &[], &escalated_plan);
+    let escalated_bound = checkpoint_bound(&escalated, &[], &[], &escalated_plan);
     assert!(
         escalated_bound > single_attempt_bound,
         "escalation route and persisted rung evidence must fit the envelope"
@@ -815,7 +833,7 @@ fn queue_prep_retries_reserve_each_possible_attempt_row() {
 
     document.queue.as_mut().unwrap().prep_retries.value = 2;
     let retried_plan = planned(&document);
-    let retried_bound = envelope::checkpoint_bound(&document, &[], &[], &retried_plan);
+    let retried_bound = checkpoint_bound(&document, &[], &[], &retried_plan);
 
     assert!(
         retried_bound > single_attempt_bound,
@@ -973,10 +991,10 @@ fn long_and_many_extensions_are_kept_and_count_toward_the_envelope() {
     };
     advance(&document, &mut owner, &mut journal).unwrap();
     let plan = planned(&document);
-    let without = envelope::checkpoint_bound(&document, &[], &[], &plan);
+    let without = checkpoint_bound(&document, &[], &[], &plan);
     let mut extensions = vec![format!("budget.per_graph.tokens={}", "9".repeat(18))];
     extensions.extend((1..=300).map(|index| format!("budget.per_graph.tokens={index}")));
-    assert!(envelope::checkpoint_bound(&document, &[], &extensions, &plan) > without);
+    assert!(checkpoint_bound(&document, &[], &extensions, &plan) > without);
     let run = resume_with_budget(
         &document,
         &mut FakeOwner {
@@ -1288,7 +1306,7 @@ fn ci_failed_checks_and_findings_fit_the_configured_envelope() {
                 execution,
             };
             let bound =
-                envelope::checkpoint_bound(&document, &[], &stored.checkpoint.extensions, &plan);
+                checkpoint_bound(&document, &[], &stored.checkpoint.extensions, &plan);
             assert!(persisted_len(&stored) <= bound, "cap={cap} count={count}");
         }
     }
@@ -1343,7 +1361,13 @@ fn disposition_checkpoint_fits_its_reduced_bound() {
             break;
         }
     }
-    let bound = graph_envelope_bound(&document, &[], &checkpoint.extensions, &plan);
+    let bound = graph_envelope_bound_with_policy(
+        &document,
+        &[],
+        &checkpoint.extensions,
+        &plan,
+        &ReviewPolicy::default(),
+    );
     let execution = GraphExecution {
         peer_origin_context: None,
         peer_submission_digest: None,
@@ -1405,13 +1429,13 @@ fn principal_scope_report_notification_and_assessment_fit_checkpoint_bound() {
 fn live_child_patch_keeps_the_planners_final_fragment_envelope_reserve() {
     let document = mixed();
     let plan = planned(&document);
-    let before = envelope::checkpoint_bound(&document, &[], &[], &plan);
+    let before = checkpoint_bound(&document, &[], &[], &plan);
     let live: Expansion = serde_json::from_value(json!({
         "source":"plan",  "nodes":[],
         "patch":{"revision":1,"digest":format!("sha256:{}", "a".repeat(64)),"parent":"plan"}
     }))
     .unwrap();
-    let live_bound = envelope::checkpoint_bound(&document, std::slice::from_ref(&live), &[], &plan);
+    let live_bound = checkpoint_bound(&document, std::slice::from_ref(&live), &[], &plan);
     assert!(
         live_bound >= before,
         "a live child patch must retain space for the planner's final fragment"
@@ -1419,7 +1443,7 @@ fn live_child_patch_keeps_the_planners_final_fragment_envelope_reserve() {
 
     let mut final_fragment = live.clone();
     final_fragment.final_fragment = true;
-    let closed_bound = envelope::checkpoint_bound(&document, &[final_fragment], &[], &plan);
+    let closed_bound = checkpoint_bound(&document, &[final_fragment], &[], &plan);
     assert!(
         closed_bound < live_bound,
         "a final fragment releases its producer's fragment reserve"
@@ -1427,7 +1451,7 @@ fn live_child_patch_keeps_the_planners_final_fragment_envelope_reserve() {
 
     let mut fallback = live;
     fallback.patch = None;
-    let fallback_bound = envelope::checkpoint_bound(&document, &[fallback], &[], &plan);
+    let fallback_bound = checkpoint_bound(&document, &[fallback], &[], &plan);
     assert!(
         fallback_bound < live_bound,
         "a fallback expansion also closes its producer"

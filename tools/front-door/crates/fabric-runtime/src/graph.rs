@@ -311,21 +311,6 @@ fn bounded_envelope_plan(plan: &PlannedGraph) -> PlannedGraph {
     bounded
 }
 
-fn graph_envelope_reason(
-    document: &GraphDocument,
-    expansions: &[Expansion],
-    extensions: &[String],
-    plan: &PlannedGraph,
-) -> Option<String> {
-    graph_envelope_reason_with_policy(
-        document,
-        expansions,
-        extensions,
-        plan,
-        &ReviewPolicy::default(),
-    )
-}
-
 fn graph_envelope_reason_with_policy(
     document: &GraphDocument,
     expansions: &[Expansion],
@@ -339,21 +324,6 @@ fn graph_envelope_reason_with_policy(
         extensions,
         &bounded_envelope_plan(plan),
         review_policy,
-    )
-}
-
-fn graph_envelope_bound(
-    document: &GraphDocument,
-    expansions: &[Expansion],
-    extensions: &[String],
-    plan: &PlannedGraph,
-) -> usize {
-    graph_envelope_bound_with_policy(
-        document,
-        expansions,
-        extensions,
-        &bounded_envelope_plan(plan),
-        &ReviewPolicy::default(),
     )
 }
 
@@ -3448,6 +3418,12 @@ fn advance_inner<R: AttemptOwner, J: GraphJournal>(
             checkpoint
         }
     };
+    // The subject is a runtime projection of the admitted document, never
+    // stored. A host journal hydrates it on load; project it here too so a
+    // pinned subject reaches review scheduling whatever journal is in use.
+    if checkpoint.subject.is_none() {
+        checkpoint.subject.clone_from(&document.subject);
+    }
 
     if let Some(limit) = admitted.growth_limit {
         // A refused resume cannot reopen or re-pause a cancelled graph.
@@ -3849,7 +3825,8 @@ fn gate_failure(
                 let head = repair::split_panel_head(&input.node, checkpoint)
                     .ok()
                     .flatten();
-                let adjudicator = repair::panel_adjudicator(&input.node, head, checkpoint);
+                let item = repair::review_item_for_panel(&input.node, plan);
+                let adjudicator = repair::panel_adjudicator(&item, head, checkpoint);
                 let adjudication = adjudicator
                     .and_then(|adjudicator| positions.get(&adjudicator.id))
                     .and_then(|&index| checkpoint.nodes.get(index))
@@ -3902,7 +3879,8 @@ fn gate_failure(
                     let head = repair::split_panel_head(&input.node, checkpoint)
                         .ok()
                         .flatten();
-                    let adjudication = repair::panel_adjudicator(&input.node, head, checkpoint)
+                    let item = repair::review_item_for_panel(&input.node, plan);
+                    let adjudication = repair::panel_adjudicator(&item, head, checkpoint)
                         .and_then(|adjudicator| positions.get(&adjudicator.id))
                         .and_then(|&index| checkpoint.nodes.get(index))
                         .filter(|progress| progress.state == NodeState::Succeeded)

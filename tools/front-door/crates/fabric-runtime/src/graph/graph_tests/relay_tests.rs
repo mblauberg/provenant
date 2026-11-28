@@ -204,8 +204,13 @@ fn review_child_range_survives_v1_parent_and_checkpoint_reload() {
     let plan = validate_flat_plan(&effective, &plans::generous())
         .unwrap()
         .0;
-    let before_identity =
-        envelope::checkpoint_bound(&document, &restored.expansions, &restored.extensions, &plan);
+    let before_identity = envelope::checkpoint_bound_with_policy(
+        &document,
+        &restored.expansions,
+        &restored.extensions,
+        &plan,
+        &ReviewPolicy::default(),
+    );
     let mut with_identity = restored.clone();
     with_identity
         .expansions
@@ -221,11 +226,12 @@ fn review_child_range_survives_v1_parent_and_checkpoint_reload() {
         id: "f".repeat(32),
         digest: format!("sha256:{}", "f".repeat(64)),
     });
-    let after_identity = envelope::checkpoint_bound(
+    let after_identity = envelope::checkpoint_bound_with_policy(
         &document,
         &with_identity.expansions,
         &with_identity.extensions,
         &plan,
+        &ReviewPolicy::default(),
     );
     assert!(after_identity <= before_identity);
     let replay = add(&document, &mut restored, "a", &request).unwrap();

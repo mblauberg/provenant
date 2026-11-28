@@ -119,8 +119,10 @@ pub fn admit_candidate_with_review_policy(
         limits,
         budget,
         requester_path,
-        false,
-        review_policy,
+        Recheck {
+            running_unchanged: false,
+            review_policy,
+        },
     )
 }
 
@@ -140,9 +142,19 @@ pub fn admit_running_candidate(
         limits,
         budget,
         requester_path,
-        true,
-        &checkpoint.review_policy(),
+        Recheck {
+            running_unchanged: true,
+            review_policy: &checkpoint.review_policy(),
+        },
     )
+}
+
+/// How a candidate is admitted: against a fresh request, or as the unchanged
+/// running graph, and which review settings apply to a graph with no sealed
+/// policy.
+struct Recheck<'a> {
+    running_unchanged: bool,
+    review_policy: &'a ReviewPolicy,
 }
 
 fn admit(
@@ -152,9 +164,12 @@ fn admit(
     limits: &crate::config::GraphLimits,
     budget: &crate::config::GraphBudget,
     requester_path: Option<&[u8]>,
-    running_unchanged: bool,
-    requested_review_policy: &ReviewPolicy,
+    recheck: Recheck<'_>,
 ) -> Result<AdmittedCandidate, CandidateError> {
+    let Recheck {
+        running_unchanged,
+        review_policy: requested_review_policy,
+    } = recheck;
     GraphInput::Resume {
         extra: Default::default(),
         document: document.graph_id.clone().into(),
@@ -468,6 +483,33 @@ fn resolve_review_node(
         }
     }
     Ok(())
+}
+
+/// The policy one route runs under: the inherited policy with the route's own
+/// override applied. A sealed route policy wins; an unsealed route resolves
+/// here, so a review decision never depends on whether admission sealed it.
+pub(super) fn route_review_policy(
+    inherited: &ReviewPolicy,
+    route: &GraphRoute,
+) -> Result<ReviewPolicy, CandidateError> {
+    if let Some(sealed) = &route.effective_review_policy {
+        return Ok(sealed.clone());
+    }
+    let mut policy = inherited.clone();
+    apply_review_policy_override(
+        &mut policy,
+        route.review_policy.as_ref(),
+        provenant_records::Layer::Route,
+        &format!(
+            "route:{}",
+            route
+                .alias
+                .as_deref()
+                .or(route.name.as_deref())
+                .unwrap_or("unnamed")
+        ),
+    )?;
+    Ok(policy)
 }
 
 pub(super) fn resolve_review_policies(

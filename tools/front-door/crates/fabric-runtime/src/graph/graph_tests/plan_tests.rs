@@ -1466,7 +1466,21 @@ fn allowed_pattern_instantiation_records_parameters_and_matches_a_static_composi
             node
         })
         .collect();
-    assert_eq!(by_id(expansion.nodes.clone()), by_id(expected));
+    // The pattern's boundary records the template it was instantiated from so
+    // that template's review policy resolves; a static composite names none.
+    let instantiated: Vec<_> = expansion
+        .nodes
+        .iter()
+        .cloned()
+        .map(|mut node| {
+            if node.id == "plan--impl" {
+                assert_eq!(node.template.as_deref(), Some("generator"));
+                node.template = None;
+            }
+            node
+        })
+        .collect();
+    assert_eq!(by_id(instantiated), by_id(expected));
 }
 
 #[test]
@@ -4012,8 +4026,16 @@ fn initial_submission_envelope_counts_prompt_references_not_brief_copies() {
     .unwrap();
     assert!(canonical_len(&document) > fixture_limit);
     let (plan, _) = validate_plan_with_limits(&document, &limits).unwrap();
-    assert!(envelope::admit_with_limit(&document, &[], &[], &plan, fixture_limit).is_ok());
-    assert!(graph_envelope_reason(&document, &[], &[], &plan).is_none());
+    assert!(envelope::admit_with_limit_and_policy(
+            &document,
+            &[],
+            &[],
+            &plan,
+            &ReviewPolicy::default(),
+            fixture_limit
+        )
+        .is_ok());
+    assert!(graph_envelope_reason_with_policy(&document, &[], &[], &plan, &ReviewPolicy::default()).is_none());
 }
 
 #[test]

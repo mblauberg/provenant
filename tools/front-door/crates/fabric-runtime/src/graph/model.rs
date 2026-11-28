@@ -246,21 +246,12 @@ impl EscalateSpec {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct DeliveryReviewSpec {
     pub shape: provenant_records::graph::ReviewShape,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub accept_below: Option<AcceptBelow>,
-}
-
-impl Default for DeliveryReviewSpec {
-    fn default() -> Self {
-        Self {
-            shape: Default::default(),
-            accept_below: None,
-        }
-    }
 }
 
 /// Host retry policy sealed with the attempt before a launch can fail.
@@ -453,6 +444,20 @@ pub enum GraphRouteSelector<'a> {
 }
 
 impl GraphRoute {
+    /// Whether an attempt launched on `self`, as the plan now expands it, may carry
+    /// `launched`. The sealed effective review policy is a host annotation added
+    /// when a replanned preview is resolved; a plan route that does not carry one
+    /// matches the launched route without it.
+    #[must_use]
+    pub fn launched_as(&self, launched: &Self) -> bool {
+        self == launched
+            || (self.effective_review_policy.is_none()
+                && Self {
+                    effective_review_policy: None,
+                    ..launched.clone()
+                } == *self)
+    }
+
     pub fn selector(&self) -> GraphRouteSelector<'_> {
         match (self.model.as_deref(), self.name.as_deref()) {
             (Some(model), _) => GraphRouteSelector::Model(model),
@@ -2058,15 +2063,31 @@ pub struct ReviewRetryState {
     #[serde(default, skip_serializing_if = "is_zero_usize")]
     pub lens_retries: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pending_retry: Option<ReviewRetryIntent>,
+    pub pending_retry: Option<Box<ReviewRetryIntent>>,
 }
 
 /// Host-verified later-review range pinned before input staging and launch.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ReviewRoundScope {
-    Delta { base: String, head: String },
-    Full { head: String },
+    Delta {
+        #[serde(deserialize_with = "git_oid_text")]
+        base: String,
+        #[serde(deserialize_with = "git_oid_text")]
+        head: String,
+    },
+    Full {
+        #[serde(deserialize_with = "git_oid_text")]
+        head: String,
+    },
+}
+
+/// A stored range endpoint must be a real Git object id, never free text.
+fn git_oid_text<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<String, D::Error> {
+    let text = String::deserialize(deserializer)?;
+    provenant_core::GitOid::parse(&text)
+        .map(|_| text)
+        .map_err(serde::de::Error::custom)
 }
 
 /// Number of malformed-evidence retries already used on one exact route.
@@ -2551,7 +2572,7 @@ pub struct NodeProgress {
     pub review_settlement: Option<ReviewSettlement>,
     /// Checkpointed retry budget and eligible routes for this review leaf.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub review_retry: Option<ReviewRetryState>,
+    pub review_retry: Option<Box<ReviewRetryState>>,
     /// Immutable evidence from redos and continuations, included in budgets.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub previous_attempts: Vec<GraphAttempt>,

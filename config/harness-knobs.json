@@ -475,6 +475,16 @@
       "preflight_busy_timeout_ms": {"type": "int", "allowed": "0 to 60000 milliseconds", "min": 0, "max": 60000, "default": "2000", "effect": "How long a wait tolerates a momentarily busy store during preflight before it reports the store busy; the final snapshot stays nonblocking. Zero fails at once."}
     }
   },
+  "domain_review_settings": {
+    "path": "domains.review",
+    "settings": {
+      "later_rounds": {"type": "enum", "allowed": "delta or full", "default": "delta", "effect": "Review later rounds against the changed head and unresolved findings, or the full head."},
+      "adjudicator_route": {"type": "string", "default": "principal", "effect": "Route used for one adjudication lane when reviewers split on the same head."},
+      "accept_below": {"type": "enum", "allowed": "off, nit, low, medium, high or blocking", "default": "high", "effect": "Exclusive severity ceiling for open findings after exact-head CI and review requirements pass; off accepts no open finding."},
+      "evidence_retries": {"type": "int", "default": "2", "effect": "Retries for missing or malformed review evidence on the same route and head."},
+      "lens_retry": {"type": "int", "default": "1", "effect": "Retries for an unavailable review lens on a later eligible route."}
+    }
+  },
   "domain_smoke_settings": {
     "path": "domains.smoke",
     "settings": {

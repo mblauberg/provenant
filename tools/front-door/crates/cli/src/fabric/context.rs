@@ -87,7 +87,7 @@ fn review_policy(
         }
         .unwrap_or_else(|| crate::config_reads::origin_source(origins.get(key), key));
         Sourced { value, source }
-    };
+    }
     ReviewPolicy {
         later_rounds: effective(
             settings.later_rounds,

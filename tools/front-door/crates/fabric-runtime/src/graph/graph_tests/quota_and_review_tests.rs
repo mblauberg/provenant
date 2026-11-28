@@ -420,7 +420,7 @@ fn typed_delta_verifier_can_falsify_a_previously_upheld_finding() {
     let mut owner = FakeOwner {
         observations: [
             terminal_with_result(GraphAttemptOutcome::Succeeded, &findings_text(&entry(",\"verification\":\"upheld\""))),
-            terminal_with_result(GraphAttemptOutcome::Succeeded, &findings_text(r#"{"id":"F1","verification":"falsified","reason":"Delta removed the failing path","triage":{"decision":"rejected","reason":"Delta removed the failing path","worth_fixing":false,"root_cause":"failing path","blocking_class":"none"}}"#)),
+            terminal_with_result(GraphAttemptOutcome::Succeeded, &findings_text(r#"{"id":"F1","verification":"falsified","reason":"Delta removed the failing path","evidence":"The delta deletes the failing path and the regression test no longer reaches it","triage":{"decision":"rejected","reason":"Delta removed the failing path","worth_fixing":false,"root_cause":"failing path","blocking_class":"none"}}"#)),
         ].into(),
         ..Default::default()
     };

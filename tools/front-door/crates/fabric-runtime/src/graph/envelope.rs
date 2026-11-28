@@ -21,21 +21,6 @@ const UNKNOWN_USAGE_TEXT_BYTES: usize = 64;
 /// Space for each runtime-owned refusal code, including future causes.
 pub(super) const REFUSAL_CODE_BYTES: usize = 64;
 
-pub(super) fn reason(
-    document: &GraphDocument,
-    expansions: &[Expansion],
-    extensions: &[String],
-    plan: &PlannedGraph,
-) -> Option<String> {
-    reason_with_policy(
-        document,
-        expansions,
-        extensions,
-        plan,
-        &ReviewPolicy::default(),
-    )
-}
-
 pub(super) fn reason_with_policy(
     document: &GraphDocument,
     expansions: &[Expansion],
@@ -79,25 +64,6 @@ pub(super) fn admit_with_policy(
         MAX_CHECKPOINT_BYTES as usize,
     )
     .map_err(|bound| AdmissionError::Envelope(GraphEnvelopeLimit { bound }))
-}
-
-// Return the measured bound; the production caller owns the fixed envelope's
-// diagnostic. Tests can cross this same admission boundary with a small budget.
-pub(super) fn admit_with_limit(
-    document: &GraphDocument,
-    expansions: &[Expansion],
-    extensions: &[String],
-    plan: &PlannedGraph,
-    byte_limit: usize,
-) -> Result<(), usize> {
-    admit_with_limit_and_policy(
-        document,
-        expansions,
-        extensions,
-        plan,
-        &ReviewPolicy::default(),
-        byte_limit,
-    )
 }
 
 pub(super) fn admit_with_limit_and_policy(
@@ -164,21 +130,6 @@ fn ask_bound(ask: &AskRequest) -> usize {
         request: "f".repeat(asks::REQUEST_ID_BYTES),
     };
     canonical_len(&link) + 1
-}
-
-pub(super) fn checkpoint_bound(
-    document: &GraphDocument,
-    expansions: &[Expansion],
-    extensions: &[String],
-    plan: &PlannedGraph,
-) -> usize {
-    checkpoint_bound_with_policy(
-        document,
-        expansions,
-        extensions,
-        plan,
-        &ReviewPolicy::default(),
-    )
 }
 
 pub(super) fn checkpoint_bound_with_policy(
@@ -509,8 +460,8 @@ fn node_bound(
         })
         .max()
         .unwrap_or(review_policy.lens_retry.value);
-    let review_retry =
-        (template::review_node(node) && node.composite.is_none()).then(|| ReviewRetryState {
+    let review_retry = (template::review_node(node) && node.composite.is_none()).then(|| {
+        Box::new(ReviewRetryState {
             review_chain: "x".repeat(longest_id),
             head: "f".repeat(64),
             eligible_routes: node.routes.clone(),
@@ -527,7 +478,7 @@ fn node_bound(
                     .collect()
             },
             lens_retries: max_lens_retries,
-            pending_retry: Some(ReviewRetryIntent {
+            pending_retry: Some(Box::new(ReviewRetryIntent {
                 route: node
                     .routes
                     .iter()
@@ -536,8 +487,9 @@ fn node_bound(
                     .unwrap_or_default(),
                 cause: ReviewRetryCause::LensUnavailable,
                 attempt: worst_attempt_key.clone(),
-            }),
-        });
+            })),
+        })
+    });
     let mut skeleton = NodeProgress {
         delivery_adoption: None,
         delivery_review_disposition: None,

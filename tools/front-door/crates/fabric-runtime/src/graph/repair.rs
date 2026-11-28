@@ -43,6 +43,76 @@ fn ledger_head_at(ledger: &FindingLedger, round: Option<usize>) -> Option<&Findi
         .or_else(|| ledger.heads.values().max_by_key(|head| head.round))
 }
 
+/// Whether a review panel judges the loop's chain: bound as evidence into the
+/// loop, or expanded as one of its rounds. Only a panel settles a finding
+/// ledger; a chain of plain reviewers keeps its latest review output instead.
+fn chain_has_panel(owner_id: &str, plan: &PlannedGraph) -> bool {
+    let panel = |node: &PlannedNode| {
+        node.composite
+            .as_ref()
+            .is_some_and(|spec| spec.reduce_verdict)
+    };
+    let positions: BTreeMap<_, _> = plan
+        .nodes
+        .iter()
+        .enumerate()
+        .map(|(index, candidate)| (candidate.id.clone(), index))
+        .collect();
+    let Some(owner) = plan.nodes.iter().find(|node| node.id == owner_id) else {
+        return false;
+    };
+    let bound = owner.inputs.iter().map(|input| input.node.as_str()).chain(
+        owner
+            .loop_body
+            .iter()
+            .flat_map(|body| body.previous_bindings.values().map(String::as_str)),
+    );
+    plan.nodes.iter().any(|node| {
+        panel(node)
+            && node
+                .round
+                .as_ref()
+                .is_some_and(|round| round.loop_id == owner_id)
+    }) || bound.into_iter().any(|source| {
+        review::evidence_dependency_closure(source, plan, &positions)
+            .into_iter()
+            .any(|index| panel(&plan.nodes[index]))
+    })
+}
+
+/// The latest review output of a chain with no panel: the newest round's
+/// check or synthesis, else the loop's explicitly bound initial review.
+fn plain_chain_output(
+    owner_id: &str,
+    plan: &PlannedGraph,
+    checkpoint: &GraphCheckpoint,
+) -> Option<NodeOutputs> {
+    if chain_has_panel(owner_id, plan) {
+        return None;
+    }
+    let latest_round = checkpoint
+        .nodes
+        .iter()
+        .filter(|progress| {
+            progress.round.as_ref().is_some_and(|round| {
+                round.loop_id == owner_id && matches!(round.node_id.as_str(), "synthesis" | "check")
+            })
+        })
+        .filter(|progress| progress.outputs.is_some())
+        .max_by_key(|progress| progress.round.as_ref().map(|round| round.round))
+        .and_then(|progress| progress.outputs.clone());
+    latest_round.or_else(|| {
+        let owner = plan.nodes.iter().find(|node| node.id == owner_id)?;
+        owner
+            .inputs
+            .iter()
+            .filter(|input| input.outputs.contains(&OutputKind::Findings))
+            .filter_map(|input| plan.nodes.iter().position(|node| node.id == input.node))
+            .filter_map(|index| checkpoint.nodes[index].outputs.clone())
+            .next()
+    })
+}
+
 fn ledger_output_at(
     node: &PlannedNode,
     plan: &PlannedGraph,
@@ -65,7 +135,15 @@ fn ledger_output_for_owner(
         .iter()
         .find(|progress| progress.id == owner_id)
         .and_then(|progress| progress.finding_ledger.clone())
-        .or_else(|| review::initial_chain_ledger(&owner_id, plan, checkpoint))?;
+        .or_else(|| review::initial_chain_ledger(owner_id, plan, checkpoint));
+    let Some(ledger) = ledger else {
+        // No panel judges this chain: its plain reviewer's output is the evidence.
+        return if chain_has_panel(owner_id, plan) {
+            None
+        } else {
+            base
+        };
+    };
     let head = ledger_head_at(&ledger, round)?;
     let outputs = base.get_or_insert_with(NodeOutputs::default);
     outputs.findings.clone_from(&head.unresolved);
@@ -90,13 +168,16 @@ pub(super) fn ledger_findings(
         .iter()
         .position(|candidate| candidate.id == node.id)?;
     let owner_id = review::chain_owner_id(index, plan);
-    let ledger = checkpoint
+    let stored = checkpoint
         .nodes
         .iter()
         .find(|progress| progress.id == owner_id)?
         .finding_ledger
         .clone()
-        .or_else(|| review::initial_chain_ledger(&owner_id, plan, checkpoint))?;
+        .or_else(|| review::initial_chain_ledger(&owner_id, plan, checkpoint));
+    let Some(ledger) = stored else {
+        return plain_chain_output(&owner_id, plan, checkpoint).map(|output| output.findings);
+    };
     let head = ledger
         .last_reviewed_head
         .as_deref()
@@ -128,7 +209,7 @@ fn initial_outputs(
         .collect();
     if is_repair(node) {
         let Some(ledger_output) =
-            ledger_output_at(node, plan, checkpoint, None, outputs.first().cloned())
+            ledger_output_at(node, plan, checkpoint, Some(0), outputs.first().cloned())
         else {
             return Vec::new();
         };
@@ -243,12 +324,15 @@ fn answered(finding: &Finding) -> bool {
 
 /// An unresolved blocking severity or blocking class applies on every path.
 /// Boundary and data-loss findings require evidence of falsification.
-pub(super) fn blocks_acceptance(finding: &Finding) -> bool {
-    blocks_acceptance_for(finding, AcceptBelow::High)
-}
-
 pub(super) fn blocks_acceptance_for(finding: &Finding, threshold: AcceptBelow) -> bool {
     review::blocks_threshold(finding, threshold)
+}
+
+/// Whether the finding's severity alone is at or above the default acceptance
+/// ceiling. An unknown severity word decodes as high, so it counts. The
+/// trigger never changes this: severity applies on every path.
+pub(super) fn blocking_severity(finding: &Finding) -> bool {
+    review::finding_severity(finding).0 >= Severity::High
 }
 
 /// Work a repair writer must take at the exact acceptance threshold. Findings
@@ -314,7 +398,6 @@ pub(super) fn panel_patch(parent: &str, commit: &str, revision: u64) -> patch::P
 /// Spec: docs/specs/fabric.md#fix-round-invariants-and-split-verdict-adjudication
 pub(super) fn split_verdict_patch(
     item: &str,
-    parent: &str,
     panels: &[String],
     head: Option<&str>,
     revision: u64,
@@ -586,7 +669,7 @@ pub(super) fn split_adjudication(
     Ok(None)
 }
 
-fn review_item_for_panel(panel: &str, plan: &PlannedGraph) -> String {
+pub(super) fn review_item_for_panel(panel: &str, plan: &PlannedGraph) -> String {
     let first_review_leaf = plan.nodes.iter().position(|node| {
         (node.id == panel || node.id.starts_with(&format!("{panel}--")))
             && node.composite.is_none()
@@ -1024,7 +1107,7 @@ pub(super) fn escalation(
     {
         return Some("concrete design defect");
     }
-    let mut prior = initial;
+    let mut prior: Vec<Finding> = initial.into_iter().cloned().collect();
     let budget = node.loop_body.as_ref().map_or(0, |spec| spec.max_rounds);
     // The third-review judgement applies within the default budget; a chair
     // who raised the budget has already authorised further rounds, and
@@ -1080,7 +1163,7 @@ pub(super) fn escalation(
         {
             return Some("recurring finding after repair");
         }
-        prior = current;
+        prior = current.into_iter().cloned().collect();
     }
     None
 }
@@ -1186,13 +1269,9 @@ pub(super) fn inactive_lens(
     let Some(previous) = ledger.heads.get(base) else {
         return false;
     };
-    if previous.unresolved.iter().any(|finding| {
-        finding
-            .lens
-            .as_deref()
-            .is_none_or(|lens| lens.trim().is_empty())
-    }) {
-        // Unknown attribution keeps every configured lens active.
+    if !review::delta_attributable(previous) {
+        // Unknown attribution, or an invariant whose only covering lens was
+        // unavailable, keeps every configured lens active.
         return false;
     }
     // Risk and scope growth require the full host-selected panel even when
@@ -1389,6 +1468,10 @@ pub(super) fn selected_publication(
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// Acceptance at the default threshold.
+    fn blocks_acceptance(finding: &Finding) -> bool {
+        blocks_acceptance_for(finding, AcceptBelow::High)
+    }
     fn finding(id: &str, lens: &str) -> Finding {
         serde_json::from_value(serde_json::json!({"id":id,"lens":lens,"severity":"high", "file":"a.rs", "summary":"constraint", "status":"open", "evidence":"counterexample", "trigger":{"sequence":"default invocation","reach":"default_path","observed":true}, "triage":{"decision":"confirmed","reason":"observed","worth_fixing":true,"root_cause":"constraint","blocking_class":"default_path_defect","shared_flaw":false}})).unwrap()
     }
@@ -1525,9 +1608,10 @@ mod tests {
             "schema_version": 1,
             "graph_id": "delta-lens-source",
             "nodes": [
-                {"id":"fix", "access":"worktree_write", "prompt":"write"},
-                {"id":"review", "access":"read_only", "prompt":"review",
-                 "source":{"type":"node", "node":"fix"}, "repair_lens":"correctness"}
+                {"id":"fix", "route":{"alias":"fixture"}, "access":"worktree_write", "prompt":"write",
+                 "worktree":"/fixture", "write_scope":["src"]},
+                {"id":"review", "route":{"alias":"fixture"}, "access":"read_only", "prompt":"review",
+                 "depends_on":["fix"], "source":{"type":"node", "node":"fix"}, "repair_lens":"correctness"}
             ]
         }))
         .unwrap();
@@ -1659,7 +1743,7 @@ mod tests {
     // Spec: docs/specs/fabric.md#fix-round-invariants-and-split-verdict-adjudication
     fn split_verdict_patch_creates_one_adjudicator_and_no_round() {
         let panels = ["panel".to_owned(), "second-panel".to_owned()];
-        let patch = split_verdict_patch("split", "panel", &panels, None, 2, "principal");
+        let patch = split_verdict_patch("split", &panels, None, 2, "principal");
         assert_eq!(patch.nodes.len(), 1);
         assert_eq!(patch.nodes[0]["kind"], "adjudicate");
         assert_eq!(patch.nodes[0]["route"]["alias"], "principal");
@@ -1670,14 +1754,12 @@ mod tests {
         assert!(patch.nodes[0].get("repeat").is_none());
         assert_eq!(
             patch.idempotency_key,
-            split_verdict_patch("split", "another-panel", &panels, None, 3, "principal")
-                .idempotency_key,
+            split_verdict_patch("split", &panels[1..], None, 3, "principal").idempotency_key,
             "one item/head split has one adjudicator regardless of panel"
         );
         assert_ne!(
             patch.idempotency_key,
-            split_verdict_patch("another-item", "panel", &panels, None, 2, "principal")
-                .idempotency_key,
+            split_verdict_patch("another-item", &panels, None, 2, "principal").idempotency_key,
             "different queue items do not share adjudicators"
         );
     }

@@ -2846,6 +2846,10 @@ pub struct WriterReservation {
     /// so the stable serialized listing does not grow a policy-only field.
     #[serde(skip)]
     pub legacy_fence: bool,
+    /// The launch window: no guardian recorded yet, launch neither spawned nor
+    /// failed, so the attempt is nonterminal though unobservable. Not reported.
+    #[serde(skip)]
+    pub launching: bool,
 }
 impl WriterReservation {
     /// The stable lock slot containing this attempt's journal.
@@ -3227,6 +3231,11 @@ pub fn list_writer_reservations_in_slot(slot: &Directory) -> Result<ReservationL
                 live,
                 age,
                 legacy_fence: legacy && holderless,
+                launching: reservation.guardian.is_none()
+                    && matches!(
+                        reservation.launch_state,
+                        LaunchState::Prepared | LaunchState::HandingOff
+                    ),
             }))
         };
         match entry() {
