@@ -77,6 +77,51 @@ pub(super) fn mode(
     }
 }
 
+/// The carry setting where it only shapes a warning or a peer request. An
+/// unreadable setting warns and uses the compiled default (`tracked`) rather
+/// than aborting the graph advance before the node settles. The caller keeps
+/// the returned warnings with the launch.
+pub(super) fn advisory_mode(
+    owner: &BoundGraphOwner<'_>,
+    override_mode: Option<CarryMode>,
+) -> (CarryMode, Vec<Warning>) {
+    match mode(owner, override_mode) {
+        Ok(mode) => (mode, Vec::new()),
+        Err(error) => {
+            let code = provenant_records::warning::CARRY_SETTING_UNREADABLE;
+            let warning = Warning::new(
+                code,
+                format!(
+                    "CARRY_SETTING_UNREADABLE: {error}; using lanes.carry_uncommitted=tracked (compiled default)"
+                ),
+                provenant_records::warning::detected_source(code),
+            );
+            warn(warning.clone());
+            (CarryMode::Tracked, vec![warning])
+        }
+    }
+}
+
+/// Warnings for a peer writer that cannot receive the sender's uncommitted
+/// edits; none when carrying is off.
+pub(super) fn peer_unsupported_warnings(
+    owner: &BoundGraphOwner<'_>,
+    mode: Option<CarryMode>,
+) -> Vec<Warning> {
+    let (mode, mut warnings) = advisory_mode(owner, mode);
+    if mode != CarryMode::Off {
+        let code = provenant_records::warning::CARRY_PEER_UNSUPPORTED;
+        let warning = Warning::new(
+            code,
+            "CARRY_PEER_UNSUPPORTED: uncommitted edits cannot be carried to a peer writer",
+            provenant_records::warning::detected_source(code),
+        );
+        warn(warning.clone());
+        warnings.push(warning);
+    }
+    warnings
+}
+
 fn with_target<T>(
     owner: &BoundGraphOwner<'_>,
     target: &Path,

@@ -100,6 +100,9 @@ pub const PEER_UNREACHABLE: WarningCode = WarningCode("PEER_UNREACHABLE");
 pub const HOST_ALL_UNSUPPORTED: WarningCode = WarningCode("HOST_ALL_UNSUPPORTED");
 /// A peer writer cannot receive the submitting checkout's uncommitted edits.
 pub const CARRY_PEER_UNSUPPORTED: WarningCode = WarningCode("CARRY_PEER_UNSUPPORTED");
+/// `lanes.carry_uncommitted` could not be read where it only shapes a warning
+/// or a peer request; the compiled default applies and the advance proceeds.
+pub const CARRY_SETTING_UNREADABLE: WarningCode = WarningCode("CARRY_SETTING_UNREADABLE");
 /// A lane's unfinished Git operation is retained while its committed tip settles.
 pub const GIT_OPERATION_RETAINED: WarningCode = WarningCode("GIT_OPERATION_RETAINED");
 /// A live provider emitted no output past its configured stall threshold.

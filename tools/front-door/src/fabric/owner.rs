@@ -2647,17 +2647,12 @@ impl BoundGraphOwner<'_> {
                 .attempt
                 .and_then(|spec| spec.new_worktree.as_ref())
                 .is_some_and(|tree| tree.default_base)
-            && carry::mode(self, node.attempt.and_then(|spec| spec.carry_uncommitted))?
-                != provenant_records::lane_contract::CarryMode::Off
         {
-            let code = provenant_records::warning::CARRY_PEER_UNSUPPORTED;
-            let warning = Warning::new(
-                code,
-                "CARRY_PEER_UNSUPPORTED: uncommitted edits cannot be carried to a peer writer",
-                provenant_records::warning::detected_source(code),
+            let warnings = carry::peer_unsupported_warnings(
+                self,
+                node.attempt.and_then(|spec| spec.carry_uncommitted),
             );
-            warn(warning.clone());
-            self.launch_warnings.push(warning);
+            self.launch_warnings.extend(warnings);
         }
         let writer_project = if access == provenant_fabric_runtime::graph::AccessMode::WorktreeWrite
         {
@@ -3539,7 +3534,9 @@ impl BoundGraphOwner<'_> {
                 .as_ref()
                 .is_some_and(|tree| tree.default_base)
         {
-            attempt.carry_uncommitted = Some(carry::mode(self, attempt.carry_uncommitted)?);
+            let (mode, warnings) = carry::advisory_mode(self, attempt.carry_uncommitted);
+            self.launch_warnings.extend(warnings);
+            attempt.carry_uncommitted = Some(mode);
         }
         // The graph checkpoint owns worktree provisioning on this host;
         // submission receives the resolved checkout, never a second request to

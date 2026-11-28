@@ -586,6 +586,24 @@ fn new_writer_carries_chair_edits_once_and_preserves_the_chair()
         .ok_or("configured binding")?;
     assert_eq!(configured_binding.head, base);
     assert_eq!(std::fs::read(rig.project.join(".git/index"))?, index);
+    // Where the setting only shapes a warning, an unreadable value warns and
+    // uses the compiled default instead of aborting the advance.
+    std::fs::write(
+        rig.project.join(".provenant/config.toml"),
+        "[knobs]\n'lanes.carry_uncommitted' = 7\n",
+    )?;
+    owner.take_launch_warnings();
+    owner.peer_carry_unsupported(None)?;
+    let codes: Vec<_> = owner
+        .take_launch_warnings()
+        .into_iter()
+        .map(|warning| warning.code.as_ref().to_owned())
+        .collect();
+    assert_eq!(
+        codes,
+        ["CARRY_SETTING_UNREADABLE", "CARRY_PEER_UNSUPPORTED"],
+        "{codes:?}"
+    );
     Ok(())
 }
 
