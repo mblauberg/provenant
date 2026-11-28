@@ -1,7 +1,7 @@
 # Policy table: the section 3.2 audit
 
-Owner: `tools/front-door` records and run crates. Anchor: the compiled table at
-`crates/run/assets/policy.toml` and the shared contracts in `docs/specs/agent-native.md`.
+Owner: `tools/front-door` records and run crates.
+Anchor: `tools/front-door/crates/run/assets/policy.toml`; the shared contracts are in [agent-native](agent-native.md).
 
 This document records the audit of all 83 rows that refused on the slice 0 base.
 The table is the single executable source of rule codes, classes, strengths and

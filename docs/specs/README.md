@@ -39,6 +39,8 @@ renders them as Markdown under the untracked `<repository>/docs/reference/`.
 - [Retry owner](retry-owner.md): lineage, budgets, admission and recovery
 - [Fabric](fabric.md): coordination store, lane relay, graphs and peer hosts
 - [Delivery queue](delivery-queue.md): target graph and queue contract for durable delivery
+- [Agent-native lanes](agent-native.md): sourced settings, outcomes, deadlines, custody and delivery
+- [Policy table](policy.md): the audit of the compiled policy rows
 - [Telemetry](telemetry.md): usage ledger, cost and outcomes
 - [CI](ci.md): the required check, suite tiers and green evidence
 - [Workflow](workflow.md): review coverage, receipts and sessions
