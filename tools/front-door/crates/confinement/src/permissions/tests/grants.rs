@@ -426,7 +426,8 @@ fn serialised_digest_cannot_authorise_without_a_verified_worktree() {
             &authority,
             &anchors,
             &provenant_core::CredentialRoots::for_home(anchors.home),
-            &isolated_access_receipt()
+            &isolated_access_receipt(),
+            &provenant_records::policy::Policy::default()
         ),
         Err(PermissionError::GitWriteAuthorityMissing)
     ));
@@ -837,7 +838,8 @@ fn linked_worktree_grants_derive_from_verified_git_paths_and_ref()
             &authority,
             &wrong_home,
             &provenant_core::CredentialRoots::for_home(wrong_home.home),
-            &isolated_access_receipt()
+            &isolated_access_receipt(),
+            &provenant_records::policy::Policy::default()
         ),
         Err(PermissionError::GitWriteAuthorityMissing)
     ));
@@ -846,6 +848,7 @@ fn linked_worktree_grants_derive_from_verified_git_paths_and_ref()
         &anchors,
         &provenant_core::CredentialRoots::for_home(anchors.home),
         &isolated_access_receipt(),
+        &provenant_records::policy::Policy::default(),
     )?;
     assert_eq!(verified_grants.worktree.path, linked.path());
     assert_eq!(verified_grants.private_git_dir.path, private);
@@ -867,7 +870,8 @@ fn linked_worktree_grants_derive_from_verified_git_paths_and_ref()
             &authority,
             &mismatched,
             &provenant_core::CredentialRoots::for_home(mismatched.home),
-            &isolated_access_receipt()
+            &isolated_access_receipt(),
+            &provenant_records::policy::Policy::default()
         ),
         Err(PermissionError::GitWriteAuthorityMissing)
     ));
@@ -879,7 +883,8 @@ fn linked_worktree_grants_derive_from_verified_git_paths_and_ref()
             &tampered,
             &anchors,
             &provenant_core::CredentialRoots::for_home(anchors.home),
-            &isolated_access_receipt()
+            &isolated_access_receipt(),
+            &provenant_records::policy::Policy::default()
         ),
         Err(PermissionError::GitWriteAuthorityMissing)
     ));
@@ -891,7 +896,8 @@ fn linked_worktree_grants_derive_from_verified_git_paths_and_ref()
             &tampered,
             &anchors,
             &provenant_core::CredentialRoots::for_home(anchors.home),
-            &isolated_access_receipt()
+            &isolated_access_receipt(),
+            &provenant_records::policy::Policy::default()
         ),
         Err(PermissionError::GitWriteAuthorityMissing)
     ));
@@ -902,7 +908,8 @@ fn linked_worktree_grants_derive_from_verified_git_paths_and_ref()
             &tampered,
             &anchors,
             &provenant_core::CredentialRoots::for_home(anchors.home),
-            &isolated_access_receipt()
+            &isolated_access_receipt(),
+            &provenant_records::policy::Policy::default()
         ),
         Err(PermissionError::GitWriteAuthorityMissing)
     ));
@@ -932,7 +939,8 @@ fn linked_worktree_grants_derive_from_verified_git_paths_and_ref()
             )?,
             &anchors,
             &credentials,
-            &isolated_access_receipt()
+            &isolated_access_receipt(),
+            &provenant_records::policy::Policy::default()
         ),
         Err(PermissionError::GitWriteAuthorityMissing)
     ));
@@ -942,6 +950,7 @@ fn linked_worktree_grants_derive_from_verified_git_paths_and_ref()
         &anchors,
         &provenant_core::CredentialRoots::for_home(anchors.home),
         &isolated_access_receipt(),
+        &provenant_records::policy::Policy::default(),
     )?;
     Ok(())
 }

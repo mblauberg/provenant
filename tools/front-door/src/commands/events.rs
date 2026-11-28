@@ -18,6 +18,7 @@ fn run(inv: &Call) -> Result<Outcome, CommandError> {
     let command = inv.command.clone();
     let status = match command {
         Command::Events {
+            common: _,
             from,
             follow,
             consumer,

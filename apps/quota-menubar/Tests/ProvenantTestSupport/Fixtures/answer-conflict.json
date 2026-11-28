@@ -3,9 +3,15 @@
   "data": null,
   "error": {
     "cause": null,
+    "class": "operation",
     "code": "conflict",
     "message": "request revision or delivery target conflicts with current state",
-    "repair": "Inspect `provenant inbox --state all --json` before submitting another operation; preserve the authoritative answer and its revision."
+    "next": [
+      {
+        "argv": [],
+        "why": "Inspect `provenant inbox --state all --json` before submitting another operation; preserve the authoritative answer and its revision."
+      }
+    ]
   },
   "next": [],
   "schema_version": 2,

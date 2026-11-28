@@ -2,6 +2,9 @@
 mod graph_human;
 mod graph_inputs;
 mod graph_status;
+pub(crate) mod host_events;
+pub(crate) mod host_read;
+pub(crate) mod invocation_deadline;
 pub(crate) use graph_status::node_digests;
 mod interface;
 #[cfg(test)]
@@ -21,13 +24,14 @@ pub(crate) mod git_facts;
 mod graph_auto_settle;
 mod graph_document;
 pub(crate) mod owner;
-mod peer;
+pub(crate) mod peer;
 mod peer_source_binding;
+pub(crate) mod progress;
 mod queue_adoption;
 mod queue_controls;
 mod queue_delivery;
 mod queue_dispatch;
-mod queue_registry;
+pub(crate) mod queue_registry;
 mod queue_scheduler;
 mod queue_snapshot;
 pub(crate) mod run_owner;
@@ -761,6 +765,7 @@ fn factory_mode(
 }
 
 mod graph_execution;
+mod wake_queue;
 use graph_execution::*;
 pub(crate) use graph_execution::{Announce, tick_graphs};
 

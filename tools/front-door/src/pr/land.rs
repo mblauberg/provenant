@@ -5,8 +5,11 @@ use super::git::{Git, plain_ref};
 use crate::{roots, worktrees};
 use provenant_confinement::worktrees::{ObservedProcess, WorkerObserver};
 use provenant_core::GitOid;
+use provenant_os::fs::Directory;
+use provenant_records::warning::{CUSTODY_CHANGED, Warning, detected_source, warn};
 use serde::{Deserialize, Serialize};
 use std::{
+    ffi::OsStr,
     fs, io,
     path::{Path, PathBuf},
 };
@@ -592,12 +595,15 @@ fn follow_up(
             } else {
                 steps.push(delete_branch(
                     git,
-                    cleanup_project,
-                    branch,
-                    base,
-                    &upstream,
-                    tip,
-                    branch_gone,
+                    DeleteBranch {
+                        host_state: git.host_state(),
+                        project: cleanup_project,
+                        branch,
+                        base,
+                        upstream: &upstream,
+                        tip,
+                        already_gone: branch_gone,
+                    },
                 )?);
             }
         }
@@ -912,15 +918,26 @@ fn fast_forward(
 /// Delete the merged local branch, but only while it is still at `tip`, the
 /// head the cleanup check verified: `git update-ref -d` compares and deletes in
 /// one locked ref transaction, so a branch moved since the check is kept.
-fn delete_branch(
-    git: &Git,
-    project: &Path,
-    branch: &str,
-    base: &str,
-    upstream: &str,
+struct DeleteBranch<'a> {
+    host_state: &'a Path,
+    project: &'a Path,
+    branch: &'a str,
+    base: &'a str,
+    upstream: &'a str,
     tip: GitOid,
     already_gone: bool,
-) -> Result<Step> {
+}
+
+fn delete_branch(git: &Git, params: DeleteBranch<'_>) -> Result<Step> {
+    let DeleteBranch {
+        host_state,
+        project,
+        branch,
+        base,
+        upstream,
+        tip,
+        already_gone,
+    } = params;
     if already_gone {
         return Ok(Step::new(
             "branch",
@@ -973,6 +990,9 @@ fn delete_branch(
             format!("{branch} is {how} at {path}"),
         ));
     }
+    if let Err(detail) = guard_branch_lease(host_state, project, branch) {
+        return Ok(Step::new("branch", Status::Refused, detail));
+    }
     let tip = tip.to_string();
     Ok(
         match git.run(project, &["update-ref", "-d", &local, &tip])? {
@@ -992,6 +1012,80 @@ fn delete_branch(
             ),
         },
     )
+}
+
+/// Consult the slot lease before deleting an unregistered local branch. Only
+/// positive evidence of a live lease refuses; missing or unreadable evidence
+/// warns and proceeds under the batch's ordinary-outcome rule.
+pub(crate) fn guard_branch_lease(
+    host_state: &Path,
+    project: &Path,
+    branch: &str,
+) -> std::result::Result<(), String> {
+    let Some(project_id) = provenant_config::project_id_for_path(project) else {
+        warn(
+            Warning::new(
+                CUSTODY_CHANGED,
+                "branch delete proceeds because project custody is unavailable (source: project binding)".to_owned(),
+                detected_source(CUSTODY_CHANGED),
+            )
+            .subject(format!("refs/heads/{branch}")),
+        );
+        return Ok(());
+    };
+    let root = match Directory::open_anchor(host_state) {
+        Ok(root) => root,
+        Err(error) => {
+            warn(
+                Warning::new(
+                    CUSTODY_CHANGED,
+                    format!("branch delete proceeds because state custody could not be opened: {error} (source: state root)"),
+                    detected_source(CUSTODY_CHANGED),
+                )
+                .subject(format!("refs/heads/{branch}")),
+            );
+            return Ok(());
+        }
+    };
+    let worktrees = match root.open_verified_directory(OsStr::new("worktrees")) {
+        Ok(worktrees) => worktrees,
+        Err(error) if error.is_not_found() => return Ok(()),
+        Err(error) => {
+            warn(
+                Warning::new(
+                    CUSTODY_CHANGED,
+                    format!("branch delete proceeds because worktree custody could not be opened: {error} (source: worktrees state)"),
+                    detected_source(CUSTODY_CHANGED),
+                )
+                .subject(format!("refs/heads/{branch}")),
+            );
+            return Ok(());
+        }
+    };
+    let project_name = project_id.to_string();
+    let project_state = match worktrees.open_verified_directory(OsStr::new(&project_name)) {
+        Ok(state) => state,
+        Err(error) if error.is_not_found() => return Ok(()),
+        Err(error) => {
+            warn(
+                Warning::new(
+                    CUSTODY_CHANGED,
+                    format!("branch delete proceeds because project custody could not be opened: {error} (source: project state)"),
+                    detected_source(CUSTODY_CHANGED),
+                )
+                .subject(format!("refs/heads/{branch}")),
+            );
+            return Ok(());
+        }
+    };
+    let reference = provenant_confinement::repo::GitRefName::branch(branch)
+        .map_err(|_| "branch name is invalid while checking custody".to_owned())?;
+    provenant_confinement::worktrees::guard_destructive_branch(
+        &project_state,
+        &reference,
+        "branch delete",
+    )
+    .map_err(|error| error.to_string())
 }
 
 /// Land a graph node's pull request through the landing owner: the same
@@ -1373,7 +1467,18 @@ pub(crate) fn delete_after_check(
             return Err(format!("the interleaved command failed: {detail}").into());
         }
     }
-    let step = delete_branch(&git, project, "feat", "main", upstream, tip, false)?;
+    let step = delete_branch(
+        &git,
+        DeleteBranch {
+            host_state,
+            project,
+            branch: "feat",
+            base: "main",
+            upstream,
+            tip,
+            already_gone: false,
+        },
+    )?;
     let status = serde_json::to_value(step.status)?
         .as_str()
         .unwrap_or_default()

@@ -330,7 +330,9 @@ fn open(globals: &Globals) -> u8 {
             ));
             if let Some(error) = result.error.as_mut() {
                 error.code = "console_window_not_ready".into();
-                error.repair = Some(REPAIR.into());
+                error.next = vec![provenant_records::command_result::NextStep::from_text(
+                    REPAIR,
+                )];
             }
             result
         }
@@ -339,8 +341,8 @@ fn open(globals: &Globals) -> u8 {
     };
     let human = match (&result.data, &result.error) {
         (Some(_), _) => format!("Opened {APP_NAME}"),
-        (_, Some(error)) => match &error.repair {
-            Some(repair) => format!("{}\n{repair}", error.message),
+        (_, Some(error)) => match error.next.first() {
+            Some(next) => format!("{}\n{}", error.message, next.display_text()),
             None => error.message.clone(),
         },
         _ => String::new(),

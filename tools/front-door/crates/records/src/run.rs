@@ -90,6 +90,10 @@ pub struct HarnessProfile {
     /// Dispatch-level policy overrides after typed validation.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub policy_overrides: std::collections::BTreeMap<String, crate::policy::Strength>,
+    /// Explicit `--checks`/`--strict` mode, retained separately from policy
+    /// dispatch values so its source and precedence survive recovery.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checks_mode: Option<String>,
     /// Project key used to resolve project-scoped policy at launch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub policy_project: Option<ProjectId>,
@@ -992,7 +996,7 @@ pub enum SandboxFloorStrength {
 #[serde(default)]
 pub struct SandboxAdmissionReceipt {
     pub parent_sandboxed: bool,
-    pub boundary: crate::diagnostic::BoundaryClass,
+    pub boundary: crate::policy::Boundary,
     pub strength: SandboxFloorStrength,
     pub knob: String,
     pub source: crate::Layer,
@@ -2057,7 +2061,7 @@ pub struct SkippedRoute {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan_error: Option<crate::diagnostic::PlanFailure>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub guard_boundary: Option<crate::diagnostic::BoundaryClass>,
+    pub guard_boundary: Option<crate::policy::Boundary>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub guard_resource: Option<crate::diagnostic::ResourceFact>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2109,7 +2113,7 @@ impl SkippedRoute {
     /// Preserve an individual candidate's safe guard facts across fallback.
     pub fn set_guard_facts(
         &mut self,
-        boundary: Option<crate::diagnostic::BoundaryClass>,
+        boundary: Option<crate::policy::Boundary>,
         resource: Option<crate::diagnostic::ResourceFact>,
     ) -> Result<(), serde_json::Error> {
         self.guard_boundary = boundary;
@@ -3315,7 +3319,7 @@ mod tests {
             guard_resource: Some(crate::diagnostic::ResourceFact::PacingReserve {
                 percent: 10,
                 setting: crate::diagnostic::PacingReserveSetting::Account,
-                origin: crate::diagnostic::PacingSettingSource::Configuration,
+                origin: crate::Layer::Host,
                 hold: Box::new(crate::diagnostic::PacingHold {
                     account: "codex/opaque-account".into(),
                     window: "five_hour".into(),
@@ -3552,7 +3556,7 @@ mod tests {
         skipped = serde_json::from_slice(&serde_json::to_vec(&skipped)?)?;
         assert_eq!(
             skipped.guard_boundary,
-            Some(crate::diagnostic::BoundaryClass::Authority)
+            Some(crate::policy::Boundary::Authority)
         );
         assert_eq!(
             skipped.diagnostic().detail.as_deref(),
@@ -3895,6 +3899,7 @@ mod tests {
             knob_sources: [("lanes.ci_scope".into(), Layer::Launch)].into(),
             budget_wrap_up: Some(BudgetWrapUp { remaining: 17 }),
             policy_overrides: [("WRITE_SCOPE".into(), crate::policy::Strength::Warn)].into(),
+            checks_mode: Some("strict".into()),
             policy_project: Some(ProjectId::from_bytes([7; 16])),
             repository_policy: Some(LaunchPolicy {
                 confidential: true,
@@ -3922,6 +3927,7 @@ mod tests {
                 "policy_overrides",
                 serde_json::json!({"WRITE_SCOPE":"refuse-me"}),
             ),
+            ("checks_mode", serde_json::json!(true)),
             ("policy_project", serde_json::json!([])),
             ("repository_policy", serde_json::json!("host")),
             ("write_scope", serde_json::json!([1])),

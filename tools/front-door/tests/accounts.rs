@@ -410,7 +410,7 @@ fn set_writes_clears_and_resolves_by_id_and_label() -> Result {
     assert_ne!(status, 0);
     assert_eq!(missing["error"]["code"], "UNKNOWN_ACCOUNT");
     assert!(
-        missing["error"]["next"]
+        missing["error"]["next"][0]["why"]
             .as_str()
             .unwrap()
             .contains("provenant accounts list")

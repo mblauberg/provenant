@@ -1190,11 +1190,21 @@ impl BinaryRunOwner<'_> {
         call: &provenant_run::Request<'_>,
     ) -> Result<SubmissionReceipt, FacadeError> {
         // An uncertain handoff is reconciled by receipt lookup, never relaunched.
-        if started
+        if let Some(provenant_run::Started::Unknown { error, .. }) = started
             .iter()
-            .any(|s| matches!(s, provenant_run::Started::Unknown { .. }))
+            .find(|s| matches!(s, provenant_run::Started::Unknown { .. }))
         {
-            return Err(FacadeError::LaunchUnknown { operation_id });
+            let detail = provenant_records::diagnostic::safe_text(error);
+            let code = provenant_records::warning::WarningCode("LAUNCH_UNKNOWN");
+            provenant_records::warning::warn(provenant_records::warning::Warning::new(
+                code,
+                detail.clone(),
+                provenant_records::warning::detected_source(code),
+            ));
+            return Err(FacadeError::LaunchUnknown {
+                operation_id,
+                detail: Some(detail.into()),
+            });
         }
         let mut lanes = Vec::new();
         let mut after = 0;
@@ -2379,6 +2389,7 @@ impl BinaryRunOwner<'_> {
                 // Without a launch summary nothing was asked to stop.
                 if let provenant_run::CancelReceipt::Unobservable { .. } = receipt {
                     return Err(FacadeError::LaunchUnknown {
+                        detail: None,
                         operation_id: operation_id.clone(),
                     });
                 }

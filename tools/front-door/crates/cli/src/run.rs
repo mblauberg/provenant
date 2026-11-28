@@ -296,13 +296,14 @@ fn command_error(fail: &Fail) -> CommandError {
         cause.as_deref(),
         repair,
     );
-    error.diagnostic = fail.projection.as_deref().map(Into::into);
+    error.set_diagnostic(fail.projection.as_deref().map(Into::into));
     error
 }
 
-/// The pinned commit a read-only lane reads. Under the compiled default this is
-/// the fetched upstream head when the checkout is behind it, and the observed
-/// checkout HEAD otherwise. `checkout_head` is kept so a launch can name both the tree
+/// The pinned commit a read-only lane reads. The `live` default keeps the tree
+/// unpinned locally (and pins HEAD on a peer); under `auto` this is the fetched
+/// upstream head when the checkout is behind it, and the observed checkout HEAD
+/// otherwise. `checkout_head` is kept so a launch can name both the tree
 /// the checkout held at admission and the one the lane reads.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReadSourcePin {
@@ -343,7 +344,7 @@ impl std::fmt::Display for ReadSource {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Auto => f.write_str("auto"),
-            Self::Live => f.write_str("live"),
+            Self::Live => f.write_str(provenant_config::READ_SOURCE_LIVE),
             Self::DefaultBranch => f.write_str("default_branch"),
             Self::Ref(value) => f.write_str(value),
         }
@@ -362,7 +363,7 @@ pub struct ReadSourceChoice {
 impl Default for ReadSourceChoice {
     fn default() -> Self {
         Self {
-            source: ReadSource::Auto,
+            source: ReadSource::Live,
             fetch_first: false,
             layer: provenant_records::Layer::Default,
             origin: None,
@@ -371,10 +372,15 @@ impl Default for ReadSourceChoice {
 }
 
 impl ReadSourceChoice {
-    /// The compiled default: pin the fetched upstream when the checkout is
-    /// behind it, otherwise pin the checkout HEAD observed at admission.
+    /// The explicit auto policy: pin the fetched upstream when the checkout is
+    /// behind it, otherwise pin the checkout HEAD observed at admission. The
+    /// resolver's configured default is `live`; callers that need the advisory
+    /// pin ask for it by name here.
     pub fn automatic() -> Self {
-        Self::default()
+        Self {
+            source: ReadSource::Auto,
+            ..Self::default()
+        }
     }
 
     /// The knob named whenever this choice is reported.
@@ -398,9 +404,10 @@ impl ReadSourceChoice {
 }
 
 /// Resolve the source of a read-only launch through the one resolver. The
-/// compiled default pins the upstream when the checkout is behind it, and the
-/// checkout HEAD otherwise; an explicit choice pins its own commit. Missing Git
-/// evidence is advisory, never a refusal.
+/// configured default is `live`, which keeps the tree; under `auto` the upstream
+/// is pinned when the checkout is behind it, and the checkout HEAD otherwise.
+/// An explicit choice pins its own commit. Missing Git evidence is advisory,
+/// never a refusal.
 pub fn resolve_read_source(
     state: &Path,
     source: &Path,
@@ -453,8 +460,9 @@ pub fn read_only_source_warning(
 }
 
 /// The warning for a read-only launch that keeps the local checkout. Under the
-/// compiled default the observed HEAD itself is the pin, so a later commit
-/// cannot move it; the fetched upstream is only the reason it was stale.
+/// `auto` policy the observed HEAD itself is the pin, so a later commit cannot
+/// move it; the fetched upstream is only the reason it was stale. The `live`
+/// default keeps the tree and reports its commit on a peer.
 pub fn read_only_local_checkout_warning(source: &Path, selected: &ReadSourcePin) -> String {
     format!(
         "{} is {} commit{} behind {} ({}); read-only lane will read the local checkout ({}) because no upstream source was pinned",
@@ -673,7 +681,7 @@ fn writer_gc_settings(
                 "gc.free_floor configuration unavailable ({error}); using compiled GC defaults"
             )),
         ) {
-            warn(warning);
+            warn(*warning);
         }
         provenant_config::GcSettings::default()
     })
@@ -737,7 +745,7 @@ impl run::Providers for Registry<'_> {
                         "domains.run.write_grant_limit_bytes unavailable ({error}); using compiled default"
                     )),
                 ) {
-                    warn(warning);
+                    warn(*warning);
                 }
                 run::WriteGrantLimit::default()
             }
@@ -778,7 +786,7 @@ impl run::Providers for Registry<'_> {
                     "writer disk policy context unavailable; continuing without a disk check",
                 ),
             ) {
-                warn(warning);
+                warn(*warning);
             }
             return Ok(());
         };
@@ -969,8 +977,9 @@ fn settlement_policy(
             let mut policy = provenant_records::policy::Policy::default();
             policy.overlay(
                 &provenant_config::policy::dispatch(&task.profile),
-                provenant_records::policy::Source::Dispatch,
+                provenant_records::Layer::Route,
             );
+            provenant_config::policy::apply_profile_checks_mode(&mut policy, &task.profile);
             policy
         }
         // No host roots and no sealed task: only the compiled policy table
@@ -1817,6 +1826,18 @@ fn open_read_only(
     let store = read_only_store(&context, edge.roots.state.as_path(), call)?;
     Ok((context, store))
 }
+/// [`open_read_only`] whose store open waits on a contended store for at most
+/// `busy`.
+fn open_read_only_within(
+    edge: &Edge<'_>,
+    call: &run::Request<'_>,
+    busy: std::time::Duration,
+) -> Result<(run::ExecutionContext, Option<run::RunStore>), Fail> {
+    let context = execution_context(edge)?;
+    let store = run::RunStore::open_read_only_within(&context, call, busy)?
+        .map(|store| store.with_writer_registry(edge.roots.state.as_path()));
+    Ok((context, store))
+}
 /// The read-only open of `context`'s store. Like the writable open, it reads
 /// the host admission ledger from the host state root: in a nested lane
 /// the store is a child directory with no ledger of its own, and without the
@@ -2060,7 +2081,6 @@ fn safe_cause(error: &run::RunError) -> Option<String> {
             | E::AttemptReservationRetained
             | E::Validation(_)
             | E::InvalidTaskTitle(_)
-            | E::WriterLineage(_)
             | E::WriterHeadNotLaneBranch
             | E::WriterSourceMismatch { .. }
             | E::ReviewAcceptanceRequired
@@ -2586,5 +2606,22 @@ mod read_source_spelling_tests {
         for value in ["", "checkout", "local", "upstream"] {
             assert!(ReadSource::parse(value).is_err());
         }
+    }
+
+    /// The catalogue default and the spelling shared by every writer are the
+    /// same live policy, and the reader accepts it.
+    #[test]
+    fn catalogue_default_and_writer_spelling_round_trip() {
+        assert_eq!(
+            ReadSource::Live.to_string(),
+            provenant_config::READ_SOURCE_LIVE
+        );
+        let catalogue: serde_json::Value =
+            serde_json::from_str(include_str!("../../../../../config/harness-knobs.json"))
+                .expect("knob catalogue");
+        let default = catalogue["knobs"]["lanes.read_source"]["default"]
+            .as_str()
+            .expect("read_source default");
+        assert_eq!(ReadSource::parse(default).unwrap(), ReadSource::Live);
     }
 }

@@ -74,7 +74,7 @@ plan and replay semantics; new fields are versioned and validated on admission.
 | --- | --- |
 | `loop` | A named bounded cycle with `max_rounds`, a persisted round and a typed outcome edge. A round is consumed once when its repair attempt is admitted, not on observation or replay. `max_ci_rounds` defaults to 3 CI repair attempts per rung. A red result at that bound advances to the next rung and resets the per-rung count; exhaustion of the final rung parks. A separately authorised edit may extend the bound. Admission budgets the expanded worst case. |
 | `escalate` | Ordered route-tier aliases, default `[junior, senior, principal]`, on a node. The first attempt uses the first rung; a typed hygiene outcome or review repair that remains unsuccessful advances one rung; CI red advances at its per-rung bound, never past the final rung. The final rung's brief permits wider scope within actual authority; strict scope and custody still bind. Persist rung and cause. Exhaustion parks. Route unavailability remains distinct from an unsuccessful attempt. |
-| `review` | `single` (default, one independent review after green CI) or `panel` (one existing review panel after green CI). `accept_inconclusive_without_blocking` defaults to `true`; only a valid, complete structured findings result with no blocking finding qualifies. Blocking severity applies even when a finding has no trigger. Missing or malformed evidence triggers bounded re-review; it never becomes repair findings or silent acceptance. A FAIL or blocking finding routes to repair. |
+| `review` | `single` (default, one independent review after green CI) or `panel` (one existing review panel after green CI). `domains.review.accept_below` sets the exclusive severity ceiling; agent-native.md §3.7 owns this field and its default. Only valid, complete structured findings with no open blocking-class finding qualify. The reported severity applies even when a finding has no trigger. Missing or malformed evidence triggers bounded re-review; it never becomes repair findings or silent acceptance. A FAIL or blocking finding routes to repair. |
 | `plan` | Existing sourced boolean; default follows `domains.fabric.implement.plan`. When true, a read-only scope result joins the writer brief; failure or missing required plan parks instead of pretending a plan exists. |
 | `hygiene` | A generic post-writer step runs the configured repository formatter in the retained worktree and commits only its changes. Outputs are `clean`, `no_commit`, `uncommitted_edits` or `error`, with before/after heads and handoff. Check all tracked and untracked edits before formatting; never absorb a writer's edits. Compare the attempt's input and output heads, not merely commits ahead of main. Formatter or commit failure is `error`, not success. The two named non-success outcomes feed escalation; errors park with diagnostics. |
 | `park` | An idempotent ask/inbox request records graph/item/node/attempt, typed reason (`loop_exhausted`, `ladder_exhausted`, `no_commit`, `uncommitted_edits`, `ci_unavailable`, `conflict`, `review_evidence`, `operation_error`), bounded lane handoff, head and evidence references. One open request per parking transition; answer alone neither resumes nor grants landing authority. |
@@ -187,12 +187,12 @@ A replacement must meet the same typed input/output and authority contracts. A
 composite override changes its constituent nodes, not unsupported leaf fields on
 the composite. No engine fork or custom JavaScript hook is needed.
 
-`graph::template::seal_queue_knobs` resolves the three queue knobs over
-`QUEUE_KNOB_PRECEDENCE` (default, host, project, launch), sealing the winning
-`Sourced<usize>` value with its layer and optional origin; an undeclared layer
-warns and is ignored. `seal_queue_knob` does the same for one knob. The host
-supplies candidates keyed by `domains.fabric.queue.*`; absent keys keep their
-shipped value and source. The `deliver` composite exposes `review_shape`
+`graph::template::seal_settings` uses the shipped-default map as the set of
+settings to resolve, avoiding a separate key list, over
+`SEALED_SETTINGS_PRECEDENCE` (default, host, project, launch), sealing the
+winning `Sourced<usize>` value with its layer and optional origin; an undeclared
+layer warns and is ignored. The host supplies candidates keyed by
+`domains.fabric.queue.*`; absent keys keep their shipped value and source. The `deliver` composite exposes `review_shape`
 (`single` default, or `panel`) with the matching `review_template`
 (`review` or `review-panel`), `ladder`, `max_ci_rounds`, `lenses`, and the
 `failing_head`/`failure_excerpt` repair inputs. `widen_final_rung_brief` and
@@ -304,8 +304,8 @@ silently treated as absent. Unknown extension fields still round-trip.
   `review_repair`, `ci_red`). The ladder and CI bound must be nonempty and positive.
 - `GraphNode.delivery_review: Option<DeliveryReviewSpec>` contains
   `shape: ReviewShape` (`single` by default, or `panel`) and
-  `accept_inconclusive_without_blocking: bool` (default `true`). The distinct
-  name avoids the existing graph review request and template review protocol.
+  `accept_below: AcceptBelow`. The field and its current default are specified
+  by `domains.review.accept_below` in agent-native.md §3.7.
 - `HygieneOutcome` contains `kind: HygieneOutcomeKind` (`clean`, `no_commit`,
   `uncommitted_edits`, `error`), `before_head`, `after_head`, and `handoff`
   (each optional). `ParkReason` has the eight snake-case values in the table

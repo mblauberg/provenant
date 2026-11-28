@@ -55,7 +55,7 @@ fn identity_only_dispositions_inherit_selected_findings() {
             let finding = &progress.outputs.as_ref().unwrap().findings[0];
             assert_eq!(finding.summary, "s");
             assert_eq!(finding.file, "a.rs");
-            assert_eq!(finding.effective_severity(), "note");
+            assert_eq!(finding.effective_severity(), finding.severity);
             assert_eq!(finding.status, "open");
             assert_eq!(finding.reason.as_deref(), Some("falsified"));
         } else {
@@ -397,7 +397,7 @@ fn large_synthesis_trims_metadata_and_replays_with_finding_identities() {
     assert!(outputs.findings.iter().all(|finding| finding.id == "F1"
         && finding.severity == "high"
         && finding.trigger().is_none()
-        && finding.effective_severity() == "note"
+        && finding.effective_severity() == finding.severity
         && finding.file == "a.rs"));
     assert_eq!(
         run.checkpoint.nodes.last().unwrap().state,
@@ -541,7 +541,7 @@ fn large_synthesis_compacts_immutable_fields_and_replays_with_finding_identities
             validate_flat_plan(&expanded, &crate::config::GraphLimits::default()).unwrap();
         let reconstructed =
             materialised_findings(positions["synthesis"], &plan, &run.checkpoint, &positions);
-        let bound = graph_envelope_bound(&document, &[], &[], &plan);
+        let bound = graph_envelope_bound_with_policy(&document, &[], &[], &plan, &ReviewPolicy::default());
         assert!(canonical_len(&run.checkpoint) <= bound);
         let mut reporting = run.checkpoint.clone();
         materialise_checkpoint_findings(&document, &mut reporting).unwrap();
@@ -568,7 +568,7 @@ fn large_synthesis_compacts_immutable_fields_and_replays_with_finding_identities
                 && finding.trigger.as_ref().is_some_and(|value| {
                     serde_json::to_value(value).is_ok_and(|value| value == trigger)
                 })
-                && finding.effective_severity() == "note"
+                && finding.effective_severity() == finding.severity
                 && finding.file == long_file
                 && finding.lens.as_deref() == Some("tests")
                 && finding.evidence.as_deref() == Some("observed")
@@ -733,13 +733,13 @@ fn compacted_synthesis_survives_composite_export_and_replay() {
         &run.checkpoint,
         &positions,
     );
-    let bound = graph_envelope_bound(&document, &[], &[], &plan);
+    let bound = graph_envelope_bound_with_policy(&document, &[], &[], &plan, &ReviewPolicy::default());
     assert!(canonical_len(&run.checkpoint) <= bound);
     assert_eq!(reconstructed.len(), 20 * MAX_FINDINGS);
     assert!(reconstructed.iter().all(|finding| finding.id == "F1"
         && finding.severity == "high"
         && finding.trigger().is_none()
-        && finding.effective_severity() == "note"
+        && finding.effective_severity() == finding.severity
         && finding.file == long_file));
     assert_eq!(
         run.checkpoint.nodes.last().unwrap().state,

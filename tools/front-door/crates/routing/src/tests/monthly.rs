@@ -141,7 +141,7 @@ fn monthly_pacing_is_account_eligibility_with_sourced_overrides()
             "PACING_ACCOUNT".into(),
             provenant_records::policy::Strength::Warn,
         )]),
-        provenant_records::policy::Source::Dispatch,
+        provenant_records::Layer::Route,
     );
     let accounts = ["a", "b"].map(|key| AvailabilityRecord {
         adapter: "cursor".into(),

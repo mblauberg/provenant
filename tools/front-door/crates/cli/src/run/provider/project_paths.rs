@@ -342,6 +342,7 @@ mod tests {
             scope: PathScope::Subtree,
         };
         let plan = ConfinedPlan::new(PlanRequest {
+            policy: provenant_records::policy::Policy::default(),
             scope: WorkScope::Project(ProjectId::from_bytes([1; 16])),
             codex: CodexPolicy::Clean,
             extensions: ExtensionPolicy::Deny,
@@ -395,6 +396,7 @@ mod tests {
                 )?));
             }
             let mode_plan = ConfinedPlan::new(PlanRequest {
+                policy: provenant_records::policy::Policy::default(),
                 scope: WorkScope::Project(ProjectId::from_bytes([2; 16])),
                 codex: CodexPolicy::Clean,
                 extensions: ExtensionPolicy::Deny,
@@ -660,6 +662,7 @@ mod tests {
             scope: PathScope::Subtree,
         };
         let plan = ConfinedPlan::new(PlanRequest {
+            policy: provenant_records::policy::Policy::default(),
             scope: WorkScope::Project(ProjectId::from_bytes([2; 16])),
             codex: CodexPolicy::Clean,
             extensions: ExtensionPolicy::Deny,
@@ -696,6 +699,7 @@ mod tests {
                 )?));
             }
             let mode_plan = ConfinedPlan::new(PlanRequest {
+                policy: provenant_records::policy::Policy::default(),
                 scope: WorkScope::Project(ProjectId::from_bytes([2; 16])),
                 codex: CodexPolicy::Clean,
                 extensions: ExtensionPolicy::Deny,
@@ -767,6 +771,7 @@ mod tests {
             scope: PathScope::Subtree,
         };
         let plan = ConfinedPlan::new(PlanRequest {
+            policy: provenant_records::policy::Policy::default(),
             scope: WorkScope::Project(ProjectId::from_bytes([2; 16])),
             codex: CodexPolicy::Clean,
             extensions: ExtensionPolicy::Deny,
@@ -893,6 +898,7 @@ mod tests {
                 AccessMode::ReadOnly
             };
             let plan = ConfinedPlan::new(PlanRequest {
+                policy: provenant_records::policy::Policy::default(),
                 scope: WorkScope::Project(ProjectId::from_bytes([3; 16])),
                 codex: CodexPolicy::Clean,
                 extensions: ExtensionPolicy::Deny,
@@ -1044,6 +1050,7 @@ mod tests {
             scope: PathScope::Subtree,
         };
         let plan = ConfinedPlan::new(PlanRequest {
+            policy: provenant_records::policy::Policy::default(),
             scope: WorkScope::Project(ProjectId::from_bytes([1; 16])),
             codex: CodexPolicy::Clean,
             extensions: ExtensionPolicy::Deny,

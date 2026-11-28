@@ -56,6 +56,17 @@ use super::*;
 #[allow(unused_imports)] // Also compiled by the harness=false worktree driver.
 use provenant_core::Clock as _;
 
+#[test]
+fn graph_wait_worker_spawn_failure_preserves_the_cause() {
+    let error = graph_wait_spawn_error(std::io::Error::other("thread limit"));
+    assert_eq!(error.kind(), std::io::ErrorKind::Other);
+    assert!(
+        error
+            .to_string()
+            .contains("cannot spawn graph wait worker: thread limit")
+    );
+}
+
 /// Render an event detail with a pinned-no-head subject, the same shape a
 /// direct reading has before the forge reports a head.
 fn event_reading(number: u64, complete: bool, detail: Value) -> Reading {

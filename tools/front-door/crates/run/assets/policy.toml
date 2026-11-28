@@ -5,23 +5,29 @@ schema_version = 2
 [[rule]]
 code = "VALIDATION_VERIFY_WORKTREE_AUTHORITY_GIT_ISOLATION"
 site = "confinement/src/permissions/validation.rs#verify_worktree_authority"
-boundary = "other_work"
-strength = "refuse"
-justification = "Verified worktree, selected ref and Git grants must match."
+boundary = "none"
+strength = "warn"
+group = "confinement"
+justification = "An exact grant with other hard links warns: settlement moves hard-linked handoffs aside, so the link destroys nothing. A replaced or missing checkout is the typed operation error SOURCE_IDENTITY_MISMATCH."
+knob = "policy.VALIDATION_VERIFY_WORKTREE_AUTHORITY_GIT_ISOLATION"
+refusable = true
 
 [[rule]]
 code = "VALIDATION_VERIFY_GIT_CONTROL_LINKS_GIT_ISOLATION"
 site = "confinement/src/permissions/validation.rs#verify_git_control_links"
-boundary = "other_work"
-strength = "refuse"
-justification = "A second link to a Git control file could permit writes through another name."
+boundary = "none"
+strength = "warn"
+group = "git"
+justification = "A hard link on a Git control file warns: settlement moves hard-linked handoffs aside before a writer starts, so the link is not destruction of another lane's work."
+knob = "policy.VALIDATION_VERIFY_GIT_CONTROL_LINKS_GIT_ISOLATION"
+refusable = true
 
 [[rule]]
 code = "VALIDATION_VERIFY_GIT_CONTROL_LINKS_DATA_INTEGRITY"
 site = "confinement/src/permissions/validation.rs#verify_git_control_links"
-boundary = "other_work"
+boundary = "operation"
 strength = "refuse"
-justification = "An incomplete control-directory scan cannot establish that protected Git files have no extra hard links."
+justification = "An incomplete control-directory scan cannot establish that protected Git files have no extra links; proceeding cannot produce a valid verification, so this is a typed operation error."
 
 [[rule]]
 code = "VALIDATION_REFUSES_LANE_ROOT_CREDENTIALS"
@@ -147,16 +153,19 @@ justification = "An out-of-range write-grant threshold warns and uses the compil
 [[rule]]
 code = "CONFINEMENT_HOST_INDEXES_PROTECTED_DATA_INTEGRITY"
 site = "cli/src/run/provider/confinement.rs#host_indexes_protected"
-boundary = "other_work"
-strength = "refuse"
-justification = "Applied write grants cannot overlap host indexes that carry durable authority and run state."
+boundary = "none"
+strength = "warn"
+group = "confinement"
+justification = "A write grant that overlaps a host index or durable run state warns and is re-rooted into a staged copy; overlapping grants are advisory and no other lane's data is overwritten."
+knob = "policy.CONFINEMENT_HOST_INDEXES_PROTECTED_DATA_INTEGRITY"
+refusable = true
 
 [[rule]]
 code = "PREPARATION_PREPARE_CANDIDATES_AUTHORITY"
 site = "cli/src/run/provider/preparation.rs#prepare_candidates"
-boundary = "authority"
+boundary = "operation"
 strength = "refuse"
-justification = "An adapter cannot be launched with capabilities or write access its declared model policy does not permit."
+justification = "The selected adapter lacks a declared capability or write access. Proceeding cannot produce a valid launch, so this is a typed operation error naming the missing capability, not a user-gate boundary."
 
 [[rule]]
 code = "LANE_LAUNCHSPEC_CONFIGURE_PUBLISHING_AUTHORITY"
@@ -312,9 +321,9 @@ justification = "The stored prompt must match its recorded length and digest bef
 [[rule]]
 code = "ARTIFACTS_RUNSTORE_ARTIFACT_BYTES_DATA_INTEGRITY"
 site = "run/src/launch.rs#RunStore::start_inner"
-boundary = "other_work"
+boundary = "operation"
 strength = "refuse"
-justification = "At launch the validated attempt record already limits its recorded prompt to RECORD_LIMIT; a file exceeding that read bound cannot match the recorded length. Length and digest are then verified before use."
+justification = "A prompt artifact above its recorded length or failing its digest cannot be reopened as the authorised task; this is a typed operation error naming the artifact and bound."
 
 [[rule]]
 code = "ARTIFACTS_RUNSTORE_ARTIFACT_BYTES_AUTHORITY"
@@ -341,9 +350,12 @@ justification = "Project-local agent configuration is not a credential boundary;
 [[rule]]
 code = "CONFINEMENT_SOURCE_CWD_AUTHORITY"
 site = "cli/src/run/provider/confinement.rs#source_cwd"
-boundary = "operation"
-strength = "refuse"
-justification = "The selected graph source must remain a permitted registered checkout with the recorded identity."
+boundary = "none"
+strength = "warn"
+group = "confinement"
+justification = "A valid registered checkout outside the read roots is added to the roots and warns; a missing or replaced checkout is the typed operation error SOURCE_IDENTITY_MISMATCH. Path ownership is advisory and destroys nothing."
+knob = "policy.CONFINEMENT_SOURCE_CWD_AUTHORITY"
+refusable = true
 
 [[rule]]
 code = "CONFINEMENT_REQUIRE_SOURCE_HEAD_AUTHORITY"
@@ -362,16 +374,32 @@ justification = "Read-only plans require the selected project binding and a Git 
 [[rule]]
 code = "SOURCE_TREE_ENSURE_SOURCE_ROOTS_AUTHORITY"
 site = "cli/src/run/provider/source_tree.rs#ensure_source_roots"
-boundary = "operation"
-strength = "refuse"
-justification = "Access and asset grants cannot reopen the live checkout beside the selected pinned source view."
+boundary = "none"
+strength = "warn"
+group = "confinement"
+justification = "Under a pinned view, an overlapping access or asset grant is re-rooted to a copy staged inside the view and warns; it is never bound to the live tree. If re-rooting is impossible the grant reads the live tree with LIVE_TREE_EXPOSED."
+knob = "policy.SOURCE_TREE_ENSURE_SOURCE_ROOTS_AUTHORITY"
+refusable = true
 
 [[rule]]
 code = "SOURCE_TREE_ENSURE_PROFILE_ISOLATED_AUTHORITY"
 site = "cli/src/run/provider/source_tree.rs#ensure_profile_isolated"
-boundary = "operation"
-strength = "refuse"
-justification = "Provider grants cannot reopen the live checkout beside the selected pinned source view."
+boundary = "none"
+strength = "warn"
+group = "confinement"
+justification = "Under a pinned view, a provider grant that would reopen the live checkout is re-rooted to a staged copy and warns; overlapping grants are advisory claims and destroy no other lane's work."
+knob = "policy.SOURCE_TREE_ENSURE_PROFILE_ISOLATED_AUTHORITY"
+refusable = true
+
+[[rule]]
+code = "LIVE_TREE_EXPOSED"
+site = "cli/src/run/provider/source_tree.rs#reroot_grant"
+boundary = "none"
+strength = "warn"
+group = "confinement"
+knob = "policy.LIVE_TREE_EXPOSED"
+refusable = true
+justification = "When an overlapping grant cannot be re-rooted into the pinned view, it reads the live tree and warns; the grant is an advisory claim and destroys no other lane's work."
 
 [[rule]]
 code = "SOURCE_TREE_ENSURE_VIEW_READ_ONLY_AUTHORITY"
@@ -383,9 +411,12 @@ justification = "Provider writes cannot modify the immutable source view supplie
 [[rule]]
 code = "CONFINEMENT_WRITER_SOURCE_CONTEXT_AUTHORITY"
 site = "cli/src/run/provider/confinement.rs#writer_source_context"
-boundary = "operation"
-strength = "refuse"
-justification = "A writer continuation requires readable predecessor status and a head descended from its pinned source; retained uncommitted edits are reported in its brief."
+boundary = "none"
+strength = "warn"
+group = "custody"
+justification = "A writer continuation whose predecessor head moved re-pins to the current head and warns WRITER_HEAD_MOVED; retained uncommitted files are listed, never reset. An unreadable predecessor is an operation error."
+knob = "policy.CONFINEMENT_WRITER_SOURCE_CONTEXT_AUTHORITY"
+refusable = true
 
 [[rule]]
 code = "HAND_OFF_RUNSTORE_HAND_OFF_GIT_ISOLATION"
@@ -397,16 +428,19 @@ justification = "A retained writer import keeps its worktree fenced until the pr
 [[rule]]
 code = "WRITER_WRITERLAUNCH_SNAPSHOT_GIT_ISOLATION"
 site = "run/src/writer.rs#WriterLaunch::snapshot"
-boundary = "other_work"
+boundary = "operation"
 strength = "refuse"
-justification = "The writer HEAD must match the selected lane branch before protected Git state is captured."
+justification = "The HEAD is not on the selected branch, so a writer snapshot would capture the wrong tree; this typed operation error names the branch and HEAD and cannot be overridden."
 
 [[rule]]
 code = "WRITER_WRITERLAUNCH_REQUIRE_CONTINUATION_SOURCE_GIT_ISOLATION"
 site = "run/src/writer.rs#WriterLaunch::require_continuation_source_with_policy"
-boundary = "other_work"
-strength = "refuse"
-justification = "The selected source and continuation head must match the pinned commit and its ancestry before the writer is launched."
+boundary = "none"
+strength = "warn"
+group = "custody"
+justification = "A head that moved on from the pinned commit is re-pinned and warns WRITER_HEAD_MOVED; a moved head is not destruction. An unreadable predecessor record is a typed operation error."
+knob = "policy.WRITER_WRITERLAUNCH_REQUIRE_CONTINUATION_SOURCE_GIT_ISOLATION"
+refusable = true
 
 [[rule]]
 code = "HAND_OFF_RUNSTORE_HAND_OFF_AUTHORITY"
@@ -418,9 +452,12 @@ justification = "A handoff must use the selected worktree and held custody bindi
 [[rule]]
 code = "CONTROLS_RUNSTORE_CHECK_WRITER_LINEAGE_AUTHORITY"
 site = "run/src/controls.rs#RunStore::check_writer_lineage"
-boundary = "operation"
-strength = "refuse"
-justification = "A continuation must retain its recorded worktree ownership and cannot take custody from a nonterminal predecessor."
+boundary = "none"
+strength = "warn"
+group = "custody"
+justification = "Custody is a lease derived from the holder's attempt state. Taking a lapsed lease warns WRITER_HANDOVER and keeps the prior lane's uncommitted files; only destroying a live lane's work refuses."
+knob = "policy.CONTROLS_RUNSTORE_CHECK_WRITER_LINEAGE_AUTHORITY"
+refusable = true
 
 [[rule]]
 code = "HAND_OFF_RUNSTORE_HAND_OFF_AUTHORITY_2"
@@ -432,9 +469,12 @@ justification = "An attempt changed after custody acquisition cannot be handed o
 [[rule]]
 code = "PLAN_CONFINEDPLAN_NEW_AUTHORITY"
 site = "confinement/src/plan.rs#ConfinedPlan::new"
-boundary = "authority"
-strength = "refuse"
-justification = "Read-only execution cannot enable unconfined extensions or inherited hooks that exceed its selected policy; requested nested confinement cannot be claimed when unsupported."
+boundary = "none"
+strength = "warn"
+group = "confinement"
+justification = "A read-only lane that enables extensions or inherited hooks warns and proceeds with the plain profile; it destroys no other lane's work. Claiming a nested confinement the backend cannot enforce is the typed operation error PLAN_NESTED_CONFINEMENT_UNSUPPORTED."
+knob = "policy.PLAN_CONFINEDPLAN_NEW_AUTHORITY"
+refusable = true
 
 [[rule]]
 code = "PLAN_CONFINEDPLAN_NEW_CREDENTIALS"
@@ -446,9 +486,12 @@ justification = "Secret roots and provider-private state must not overlap grants
 [[rule]]
 code = "PLAN_CONFINEDPLAN_NEW_DATA_INTEGRITY"
 site = "confinement/src/plan.rs#ConfinedPlan::new"
-boundary = "other_work"
-strength = "refuse"
-justification = "Write roots cannot overlap protected host objects, and private scratch and provider state must not overlap each other or the approved lane roots."
+boundary = "none"
+strength = "warn"
+group = "confinement"
+justification = "Overlapping grant roots warn and are re-rooted into the pinned view; claim overlap alone never destroys another lane's work and is not a boundary."
+knob = "policy.PLAN_CONFINEDPLAN_NEW_DATA_INTEGRITY"
+refusable = true
 
 [[rule]]
 code = "PLAN_CONFINEDPLAN_NEW_CREDENTIALS_2"
@@ -562,9 +605,12 @@ justification = "Worktree registration, common Git identity, backlinks and repos
 [[rule]]
 code = "REPO_REJECT_ALTERNATES_DATA_INTEGRITY"
 site = "confinement/src/repo.rs#reject_alternates"
-boundary = "other_work"
-strength = "refuse"
-justification = "Protected history cannot rely on unverified alternate Git object stores."
+boundary = "none"
+strength = "warn"
+group = "git"
+justification = "Borrowed objects from an alternate store are copied into the lane store and then used, with a warning; only objects that cannot be read are a typed operation error."
+knob = "policy.REPO_REJECT_ALTERNATES_DATA_INTEGRITY"
+refusable = true
 
 [[rule]]
 code = "REPO_VERIFIEDREPO_OPEN_STRUCTURE_GIT_ISOLATION"
@@ -583,16 +629,19 @@ justification = "A probed repository's Git structure and configuration must reta
 [[rule]]
 code = "REPO_READ_BOUNDED_GIT_ISOLATION"
 site = "confinement/src/repo.rs#read_bounded"
-boundary = "other_work"
+boundary = "operation"
 strength = "refuse"
-justification = "Git markers and configuration must be read completely and consistently before the selected worktree and its Git policy can be verified."
+justification = "Git markers and configuration must be read completely and consistently; a short or racy read cannot produce a valid verification of the selected worktree and is a typed operation error."
 
 [[rule]]
 code = "REPO_REJECT_ALTERNATES_DATA_INTEGRITY_2"
 site = "confinement/src/repo.rs#reject_alternates"
-boundary = "other_work"
-strength = "refuse"
-justification = "The complete alternates declaration must be inspected before protected history can be accepted."
+boundary = "none"
+strength = "warn"
+group = "git"
+justification = "The alternates declaration is copied into the lane store and warned about before history is accepted; the snapshot dissociates the borrowed objects rather than refusing them."
+knob = "policy.REPO_REJECT_ALTERNATES_DATA_INTEGRITY_2"
+refusable = true
 
 [[rule]]
 code = "OPENCODE_PREPARE_CREDENTIALS"
@@ -1074,9 +1123,9 @@ justification = "The retained state root must remain an anchored directory; syml
 [[rule]]
 code = "PREPARATION_PREPARE_CANDIDATES_DATA_INTEGRITY"
 site = "cli/src/run/provider/preparation.rs#prepare_candidates"
-boundary = "other_work"
+boundary = "operation"
 strength = "refuse"
-justification = "The raw prompt must fit RECORD_LIMIT, the same bound reader::validate_attempt applies to its recorded prompt artifact, before host preambles are added."
+justification = "The raw prompt must fit RECORD_LIMIT before host preambles are added; an over-long prompt cannot be recorded, so this is a typed operation error naming the bound, never a refusal of another lane's work."
 
 [[rule]]
 code = "WRITE_SCOPE"
@@ -1283,15 +1332,6 @@ strength = "warn"
 refusable = false
 knob = "policy.SECRET_SHAPED_INPUT"
 justification = "Secret-shaped input warns with its schema path and proceeds; scanner matches never refuse, and real known credential values are masked or refused only at their owning boundary."
-
-[[rule]]
-code = "DIRTY_WRITER"
-site = "run/src/graph_relay.rs#dirty_writer"
-boundary = "none"
-strength = "warn"
-refusable = true
-knob = "policy.DIRTY_WRITER"
-justification = "A writer worktree with uncommitted edits launches and records the dirty state; checked-out and detached writers stay refused."
 
 [[rule]]
 code = "SOURCE_TREE_ENTRY_OMITTED"
@@ -1502,3 +1542,54 @@ strength = "warn"
 refusable = false
 knob = "policy.DECLARATION_JOURNAL_NEAR_FULL"
 justification = "A declaration below 10% of its journal bound still succeeds and warns; the declaration is the sealed record, so a refusal would drop the lane's result. Off silences the warning without changing the bound."
+# Split codes introduced by the section 3.2 audit: the warn half keeps a
+# knob; the typed operation half is immutable and names its cause.
+
+[[rule]]
+code = "PLAN_NESTED_CONFINEMENT_UNSUPPORTED"
+site = "confinement/src/plan.rs#ConfinedPlan::new"
+boundary = "operation"
+strength = "refuse"
+justification = "The backend cannot provide the nested confinement requested by the plan; proceeding cannot enforce the claim, so this typed operation error names the requested mode and the enforcing backend."
+
+[[rule]]
+code = "WRITER_HEAD_MOVED"
+site = "run/src/writer.rs#WriterLaunch"
+boundary = "none"
+strength = "warn"
+group = "custody"
+knob = "policy.WRITER_HEAD_MOVED"
+refusable = true
+justification = "A continuation whose predecessor head moved re-pins to the current head and warns; it names the prior lane, its terminal state and last head, and keeps uncommitted files."
+
+[[rule]]
+code = "GITDIR_REGISTRATION_STALE_NONE"
+site = "confinement/src/repo.rs#verify_worktree"
+boundary = "none"
+strength = "warn"
+group = "git"
+knob = "policy.GITDIR_REGISTRATION_STALE_NONE"
+refusable = true
+justification = "A stale worktree registration whose backlink names this path and which no live lease names another holder is repaired with git worktree repair, re-verified, and warned; only a registration a live lane's lease names refuses."
+
+[[rule]]
+code = "SOURCE_IDENTITY_MISMATCH"
+site = "cli/src/run/provider/confinement.rs#source_cwd"
+boundary = "operation"
+strength = "refuse"
+justification = "A checkout that is missing or replaced cannot be pinned to its recorded identity, so the source cannot be prepared; this typed operation error names the expected and observed identity."
+
+[[rule]]
+code = "GITDIR_LAYOUT_INVALID"
+site = "confinement/src/repo.rs#verify_worktree"
+boundary = "operation"
+strength = "refuse"
+justification = "A fabricated Git layout or a backlink that does not name this worktree cannot be repaired into a valid registration; this typed operation error names the layout."
+
+[[rule]]
+code = "UNREADABLE_PREDECESSOR"
+site = "run/src/writer.rs#WriterLaunch"
+boundary = "operation"
+strength = "refuse"
+justification = "A writer continuation whose predecessor record cannot be read has no pinned commit or owner to inherit, so it is a typed operation error naming the predecessor."
+

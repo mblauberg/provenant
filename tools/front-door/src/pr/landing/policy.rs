@@ -4,36 +4,27 @@ use std::collections::BTreeMap;
 use super::model::PublicationGrant;
 use provenant_cli::domains::{AdminPublication, LandOverride, LandSettings};
 use provenant_config::Origin;
-use provenant_records::Layer;
+use provenant_records::provenance::{Layer, Source, Sourced};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct TargetRule {
-    pub index: usize,
-    pub target: String,
-    #[serde(flatten, default)]
-    pub extra: provenant_records::ExtraFields,
+/// The recipe for one resolved landing field's shared `provenance::Source`.
+/// It is not a second source vocabulary: the layer is the shared `Layer`, and
+/// the originating file plus key are folded into `origin` as `<path>#<key>` so
+/// warnings and `config explain` can name both from one record.
+#[derive(Clone, Debug)]
+struct FieldOrigin {
+    layer: Layer,
+    key: String,
+    path: Option<Value>,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct Source {
-    pub layer: Layer,
-    pub path: Option<Value>,
-    pub key: String,
-    pub rule: Option<TargetRule>,
-    #[serde(flatten, default)]
-    pub extra: provenant_records::ExtraFields,
-}
-
-impl Source {
-    fn new(layer: Layer, key: String, path: Option<Value>) -> Self {
+impl FieldOrigin {
+    fn new(layer: Layer, key: impl Into<String>, path: Option<Value>) -> Self {
         Self {
             layer,
+            key: key.into(),
             path,
-            key,
-            rule: None,
-            extra: Default::default(),
         }
     }
 
@@ -42,40 +33,52 @@ impl Source {
         field: &str,
         origins: &BTreeMap<String, Origin>,
     ) -> Result<Self, serde_json::Error> {
-        let mut source = self.clone();
+        let mut origin = self.clone();
         if !field.is_empty() {
-            source.key = format!("{}.{field}", source.key);
+            origin.key = format!("{}.{field}", origin.key);
         }
-        if source.path.is_none() {
-            source.path = origins
-                .get(&source.key)
+        if origin.path.is_none() {
+            origin.path = origins
+                .get(&origin.key)
                 .or_else(|| {
                     origins
                         .iter()
-                        .find(|(key, origin)| {
-                            (source.key.starts_with(&format!("{key}."))
-                                || key.starts_with(&format!("{}.", source.key)))
-                                && matches!(origin, Origin::User { .. })
+                        .find(|(key, candidate)| {
+                            (origin.key.starts_with(&format!("{key}."))
+                                || key.starts_with(&format!("{}.", origin.key)))
+                                && matches!(candidate, Origin::User { .. })
                         })
-                        .map(|(_, origin)| origin)
+                        .map(|(_, candidate)| candidate)
                 })
-                .and_then(|origin| match origin {
+                .and_then(|candidate| match candidate {
                     Origin::User { path } => Some(path),
                     _ => None,
                 })
                 .map(serde_json::to_value)
                 .transpose()?;
         }
-        Ok(source)
+        Ok(origin)
     }
-}
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct Sourced<T> {
-    pub value: T,
-    pub source: Source,
-    #[serde(flatten, default)]
-    pub extra: provenant_records::ExtraFields,
+    fn into_sourced<T>(self, value: T) -> Sourced<T> {
+        let origin = match self.path {
+            Some(path) => {
+                let path = path
+                    .as_str()
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| path.to_string());
+                format!("{path}#{}", self.key)
+            }
+            None => self.key,
+        };
+        Sourced {
+            value,
+            source: Source {
+                layer: self.layer,
+                origin: Some(origin),
+            },
+        }
+    }
 }
 
 /// Resolve the admin-publication grant. Only the owner's host config may grant
@@ -83,28 +86,17 @@ pub struct Sourced<T> {
 /// and fall back to `never`. The shared `Precedence` merge reports the ignored
 /// candidate with its source so the warning never invents a second vocabulary.
 /// Spec: docs/specs/cli.md#landing-adds-no-merge-authority
-fn admin_candidate(
-    field: &Sourced<Value>,
-) -> Result<provenant_records::Sourced<AdminPublication>, serde_json::Error> {
-    use provenant_records::{Source as SharedSource, Sourced as SharedSourced};
+fn admin_candidate(field: &Sourced<Value>) -> Result<Sourced<AdminPublication>, serde_json::Error> {
     let value: AdminPublication = serde_json::from_value(field.value.clone())?;
-    let origin = field.source.path.as_ref().map(|path| {
-        path.as_str()
-            .map(str::to_owned)
-            .unwrap_or_else(|| path.to_string())
-    });
-    Ok(SharedSourced {
+    Ok(Sourced {
         value,
-        source: SharedSource {
-            layer: field.source.layer,
-            origin,
-        },
+        source: field.source.clone(),
     })
 }
 
 fn resolve_admin_publication(
     fields: &BTreeMap<String, Sourced<Value>>,
-    base: Option<provenant_records::Sourced<AdminPublication>>,
+    base: Option<Sourced<AdminPublication>>,
 ) -> Result<PublicationGrant, serde_json::Error> {
     use provenant_records::warning;
     let final_candidate = fields
@@ -252,20 +244,13 @@ impl LandPolicy {
         let mut budget_rate_micros_per_minute = BTreeMap::new();
         for (pool, value) in &settings.budget.rate_micros_per_minute {
             let key = format!("domains.pr.land.budget.rate_micros_per_minute.{pool}");
-            let source = match origins.get(&key) {
+            let origin = match origins.get(&key) {
                 Some(Origin::User { path }) => {
-                    Source::new(Layer::Host, key.clone(), Some(serde_json::to_value(path)?))
+                    FieldOrigin::new(Layer::Host, key.clone(), Some(serde_json::to_value(path)?))
                 }
-                _ => Source::new(Layer::Default, key.clone(), None),
+                _ => FieldOrigin::new(Layer::Default, key.clone(), None),
             };
-            budget_rate_micros_per_minute.insert(
-                pool.clone(),
-                Sourced {
-                    value: *value,
-                    source,
-                    extra: Default::default(),
-                },
-            );
+            budget_rate_micros_per_minute.insert(pool.clone(), origin.into_sourced(*value));
         }
         let mut fields = BTreeMap::new();
         for (key, value) in leaves {
@@ -280,20 +265,13 @@ impl LandPolicy {
                     })
                     .map(|(_, origin)| origin)
             });
-            let source = match origin {
+            let origin = match origin {
                 Some(Origin::User { path: file }) => {
-                    Source::new(Layer::Host, path, Some(serde_json::to_value(file)?))
+                    FieldOrigin::new(Layer::Host, path, Some(serde_json::to_value(file)?))
                 }
-                _ => Source::new(Layer::Default, path, None),
+                _ => FieldOrigin::new(Layer::Default, path, None),
             };
-            fields.insert(
-                key,
-                Sourced {
-                    value,
-                    source,
-                    extra: Default::default(),
-                },
-            );
+            fields.insert(key, origin.into_sourced(value));
         }
         // Keep the host/bundled candidate before any lower-precedence layer
         // overwrites the field: a tier or project value must not suppress a
@@ -305,7 +283,7 @@ impl LandPolicy {
         fn apply(
             fields: &mut BTreeMap<String, Sourced<Value>>,
             override_: &LandOverride,
-            source: Source,
+            origin: FieldOrigin,
             beneath_host: bool,
             rates: &mut BTreeMap<String, Sourced<u64>>,
             origins: &BTreeMap<String, Origin>,
@@ -327,14 +305,9 @@ impl LandPolicy {
                     {
                         rates.insert(
                             pool.clone(),
-                            Sourced {
-                                value: *value,
-                                source: source.field(
-                                    &format!("budget.rate_micros_per_minute.{pool}"),
-                                    origins,
-                                )?,
-                                extra: Default::default(),
-                            },
+                            origin
+                                .field(&format!("budget.rate_micros_per_minute.{pool}"), origins)?
+                                .into_sourced(*value),
                         );
                     }
                 }
@@ -346,15 +319,8 @@ impl LandPolicy {
                         .get(&key)
                         .is_some_and(|field| field.source.layer == Layer::Host)
                 {
-                    let field_source = source.field(&key, origins)?;
-                    fields.insert(
-                        key,
-                        Sourced {
-                            value,
-                            source: field_source,
-                            extra: Default::default(),
-                        },
-                    );
+                    let field_origin = origin.field(&key, origins)?;
+                    fields.insert(key, field_origin.into_sourced(value));
                 }
             }
             Ok(())
@@ -363,9 +329,9 @@ impl LandPolicy {
             apply(
                 &mut fields,
                 declaration,
-                Source::new(
+                FieldOrigin::new(
                     Layer::Project,
-                    "domains.pr.land".into(),
+                    "domains.pr.land",
                     Some(serde_json::to_value(path)?),
                 ),
                 true,
@@ -377,7 +343,7 @@ impl LandPolicy {
             apply(
                 &mut fields,
                 override_,
-                Source::new(
+                FieldOrigin::new(
                     Layer::HostProject,
                     format!("domains.pr.land.projects.{}", project.unwrap_or_default()),
                     None,
@@ -415,7 +381,7 @@ impl LandPolicy {
         } else {
             (&settings.branches, "domains.pr.land.branches".into(), None)
         };
-        let rules_file = Source::new(Layer::Route, rules_key.clone(), rules_path)
+        let rules_file = FieldOrigin::new(Layer::Route, rules_key.clone(), rules_path)
             .field("", origins)?
             .path;
         if let Some(target) = target
@@ -433,16 +399,10 @@ impl LandPolicy {
             apply(
                 &mut fields,
                 &override_,
-                Source {
+                FieldOrigin {
                     layer: Layer::Route,
                     path: rules_file.clone(),
                     key: format!("{rules_key}.{index}"),
-                    rule: Some(TargetRule {
-                        index,
-                        target: rule.target.clone(),
-                        extra: Default::default(),
-                    }),
-                    extra: Default::default(),
                 },
                 false,
                 &mut budget_rate_micros_per_minute,
@@ -466,7 +426,7 @@ impl LandPolicy {
                 apply(
                     &mut fields,
                     override_,
-                    Source::new(layer, key.unwrap_or_else(|| "domains.pr.land".into()), None),
+                    FieldOrigin::new(layer, key.unwrap_or_else(|| "domains.pr.land".into()), None),
                     false,
                     &mut budget_rate_micros_per_minute,
                     origins,
@@ -526,11 +486,7 @@ impl LandPolicy {
         for (key, value) in values {
             policy.fields.insert(
                 key.clone(),
-                Sourced {
-                    value,
-                    source: Source::new(Layer::Launch, format!("request.{key}"), None),
-                    extra: Default::default(),
-                },
+                FieldOrigin::new(Layer::Launch, format!("request.{key}"), None).into_sourced(value),
             );
         }
         Ok(policy)
@@ -712,8 +668,8 @@ mod tests {
         )?;
         assert_eq!(project_rules.settings()?.strategy, Strategy::Stack);
         assert_eq!(
-            project_rules.fields["strategy"].source.key,
-            "domains.pr.land.projects.p.branches.0.strategy"
+            project_rules.fields["strategy"].source.origin.as_deref(),
+            Some("domains.pr.land.projects.p.branches.0.strategy")
         );
         assert!(
             serde_json::from_value::<LandSettings>(serde_json::json!({"integration":"single"}))
@@ -884,7 +840,16 @@ mod tests {
         assert_eq!(base.fields["publish_settle_seconds"].value, 30);
         assert_eq!(base.fields["batch_size"].value, 7);
         assert_eq!(base.fields["batch_size"].source.layer, Layer::Host);
-        assert!(base.fields["batch_size"].source.path.is_some());
+        let batch_origin = base.fields["batch_size"]
+            .source
+            .origin
+            .as_deref()
+            .expect("host field names its source");
+        assert!(batch_origin.contains("config.toml"), "{batch_origin}");
+        assert!(
+            batch_origin.ends_with("#domains.pr.land.batch_size"),
+            "{batch_origin}"
+        );
         assert_eq!(base.fields["gate.kind"].source.layer, Layer::Default);
         let project = LandPolicy::resolve(
             &settings,

@@ -163,18 +163,21 @@ fn writer_continuation_dirty_brief(committed: bool) -> Result<(), Box<dyn std::e
         "uncommitted dirty edit"
     );
 
-    // A source mismatch still refuses and names both commits and retained edits.
+    // A corrupt predecessor lineage is an operation error. Its uncommitted
+    // edits remain in place while the host refuses to continue it.
     let mut bad_task = task.clone();
     bad_task.source_head = Some("0".repeat(40));
     let error = writer_source_context(&writer, &bad_task, &git, &policy)
         .err()
-        .ok_or("mismatched continuation should refuse")?;
+        .ok_or("corrupt continuation lineage should refuse")?;
     let error_text = error.to_string();
-    assert!(error_text.contains(&"0".repeat(40)), "{error_text}");
-    assert!(error_text.contains(&predecessor_head), "{error_text}");
     assert!(
-        error_text.contains("uncommitted predecessor edits: uncommitted_leftover.txt"),
-        "refusal must list uncommitted predecessor edits: {error_text}"
+        error_text.contains("pinned predecessor head does not descend from the writer source"),
+        "invalid lineage must be explicit: {error_text}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(worktree.join("uncommitted_leftover.txt"))?,
+        "uncommitted dirty edit"
     );
     let mut moved_task = task.clone();
     moved_task.head = Some("1".repeat(40));
@@ -814,6 +817,7 @@ fn read_only_plan_runs_host_git_with_a_private_home_outside_the_child_store()
         scope: PathScope::Subtree,
     };
     let request = PlanRequest {
+        policy: provenant_records::policy::Policy::default(),
         scope: WorkScope::Project(ProjectId::from_bytes([1; 16])),
         permissions: PlanPermissions {
             credential_roots: roots.credential_roots().clone(),
@@ -1283,7 +1287,7 @@ fn missing_legacy_sessions_fail_and_retained_codex_remains_resumable()
                 ));
                 assert_eq!(
                     error.boundary_class(),
-                    provenant_records::diagnostic::BoundaryClass::Authority
+                    provenant_records::policy::Boundary::Authority
                 );
             } else {
                 let error = error.to_string();

@@ -1230,7 +1230,7 @@ fn settlement_and_tick_read_only_owned_or_pending_graphs() -> Result<(), Box<dyn
         claude_config: None,
         codex_home: None,
     };
-    let report = tick_graphs(&resolved, clock.wall_now()?, &FreeWorkers)?;
+    let report = tick_graphs(&resolved, clock.wall_now()?, &FreeWorkers, provenant_core::Deadline::at(provenant_core::MonoTime::from_micros(u64::MAX)))?;
     assert!(report.errors.is_empty(), "{:?}", report.errors);
     let reads = graph::take_checkpoint_read_ids();
     assert!(!reads.is_empty());
@@ -1322,6 +1322,12 @@ fn an_attempt_keyed_to_another_graph_is_refused_not_adopted()
         &Default::default(),
     )?;
     drop(journal);
+    let before = graph::FileJournal::read_checkpoint(
+        &fixture.roots.state,
+        fixture.settled.project_id,
+        "owner",
+    )?
+    .ok_or("owner")?;
     fixture.settled.launch = Some(provenant_run::HostLaunchContext {
         graph_directory: None,
         configuration_root: fixture.rig.state.clone(),
@@ -1344,12 +1350,12 @@ fn an_attempt_keyed_to_another_graph_is_refused_not_adopted()
         claude_config: None,
         codex_home: None,
     };
-    let report = tick_graphs(&resolved, clock.wall_now()?, &FreeWorkers)?;
+    let report = tick_graphs(&resolved, clock.wall_now()?, &FreeWorkers, provenant_core::Deadline::at(provenant_core::MonoTime::from_micros(u64::MAX)))?;
     assert!(
         report
             .errors
             .iter()
-            .any(|error| error.contains("/owner:") && error.contains("corrupt")),
+            .any(|error| error.contains("/owner:") && error.contains("WAKE_ADVANCE_FAILED")),
         "{:?}",
         report.errors
     );
@@ -1359,7 +1365,20 @@ fn an_attempt_keyed_to_another_graph_is_refused_not_adopted()
         "owner",
     )?
     .ok_or("owner")?;
-    assert_ne!(after.nodes[0].state, graph::NodeState::Succeeded);
+    // Tick fills in sourced retry metadata even when the foreign attempt is
+    // refused. All identity and settlement fields must remain unchanged.
+    let mut after_node = serde_json::to_value(&after.nodes[0])?;
+    let mut before_node = serde_json::to_value(&before.nodes[0])?;
+    assert_eq!(after_node["retry"]["retries"], 2);
+    assert_eq!(after_node["retry"]["origin"], "shipped_default");
+    assert_eq!(after_node["launch_retry"]["policy"]["limit"], 3);
+    assert!(after_node["launch_retry"]["deadline"].is_string());
+    for field in ["retry", "launch_retry"] {
+        assert!(after_node.get(field).is_some(), "missing {field}");
+        after_node.as_object_mut().ok_or("node")?.remove(field);
+        before_node.as_object_mut().ok_or("node")?.remove(field);
+    }
+    assert_eq!(after_node, before_node);
     assert!(fixture.worktree.exists());
     Ok(())
 }

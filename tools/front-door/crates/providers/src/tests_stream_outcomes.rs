@@ -1171,7 +1171,7 @@ fn argv_prompt_limit_counts_utf8_bytes() {
             "ARGV_PROMPT".into(),
             provenant_records::policy::Strength::Refuse,
         )]),
-        provenant_records::policy::Source::Project,
+        provenant_records::Layer::Project,
     );
     assert!(matches!(
         Prompt::new("é".repeat(32_769)).check_argv(&strict),
@@ -1210,6 +1210,7 @@ pub(super) fn read_only_plan_protecting(
         scope: PathScope::Subtree,
     };
     ConfinedPlan::new(PlanRequest {
+        policy: provenant_records::policy::Policy::default(),
         scope: WorkScope::Project(ProjectId::from_bytes([1; 16])),
         codex: CodexPolicy::Clean,
         extensions: ExtensionPolicy::Deny,
@@ -1255,6 +1256,7 @@ pub(super) fn fixture_access_plan(
         permissions.mode = AccessMode::WorktreeWrite(Box::new(authority));
     }
     ConfinedPlan::new(PlanRequest {
+        policy: provenant_records::policy::Policy::default(),
         scope: reader.scope(),
         permissions,
         codex: CodexPolicy::Clean,
@@ -1276,6 +1278,7 @@ pub(super) fn fixture_network_plan(
     let mut permissions = plan.permissions().clone();
     permissions.network = network;
     ConfinedPlan::new(PlanRequest {
+        policy: provenant_records::policy::Policy::default(),
         scope: plan.scope(),
         permissions,
         codex: CodexPolicy::Clean,
@@ -1432,12 +1435,12 @@ fn rust_less_hosts_keep_repository_execution_in_the_rendered_profile()
 // Spec: docs/specs/fabric.md#bounded-graphs-and-route-fallback
 #[test]
 fn continuation_stream_keeps_the_supplied_policy_snapshot() -> Result<(), ProviderError> {
-    use provenant_records::policy::{Policy, Source, Strength};
+    use provenant_records::policy::{Policy, Strength};
     let mut policy = Policy::default();
-    policy.overlay(&[("STREAM_IDENTITY_MISMATCH".into(), Strength::Refuse)].into(), Source::Project);
+    policy.overlay(&[("STREAM_IDENTITY_MISMATCH".into(), Strength::Refuse)].into(), provenant_records::Layer::Project);
     let stream = codex::Codex.stream_for_continuation("session", "model", &policy)?;
-    policy.overlay(&[("STREAM_IDENTITY_MISMATCH".into(), Strength::Warn)].into(), Source::Project);
+    policy.overlay(&[("STREAM_IDENTITY_MISMATCH".into(), Strength::Warn)].into(), provenant_records::Layer::Project);
     assert_eq!(stream.policy.rule("STREAM_IDENTITY_MISMATCH").rule.strength, Strength::Refuse);
-    assert_eq!(stream.policy.rule("STREAM_IDENTITY_MISMATCH").source, Source::Project);
+    assert_eq!(stream.policy.rule("STREAM_IDENTITY_MISMATCH").source.layer, provenant_records::Layer::Project);
     Ok(())
 }

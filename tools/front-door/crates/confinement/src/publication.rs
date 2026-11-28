@@ -188,6 +188,19 @@ impl<'a> CrossHostTransport<'a> {
         Ok(())
     }
 
+    /// Project a complete structured payload before it crosses to another
+    /// host. This is for typed command envelopes whose declared text fields
+    /// vary by verb; route metadata remains subject to the JSON projector's
+    /// metadata rules.
+    pub fn json(&self, value: &mut Value) -> Result<(), ProjectionError> {
+        let bytes = serde_json::to_vec(value).map_err(|_| ProjectionError::Document)?;
+        let projected = self
+            .projector
+            .json(Destination::CrossHostTransport, &bytes)?;
+        *value = serde_json::from_slice(&projected.bytes).map_err(|_| ProjectionError::Document)?;
+        Ok(())
+    }
+
     pub fn inspect_text<'b>(&self, bytes: &'b [u8]) -> Result<&'b str, ProjectionError> {
         let text = std::str::from_utf8(bytes).map_err(|_| ProjectionError::Encoding)?;
         if text

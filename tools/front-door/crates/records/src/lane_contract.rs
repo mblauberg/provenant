@@ -4,10 +4,24 @@ use std::collections::{BTreeMap, BTreeSet};
 use provenant_core::{AttemptId, ProjectId};
 use serde::{Deserialize, Serialize};
 
+/// Lane contracts carry the shared provenance wrapper. Re-export it here so
+/// readers of the lane-contract seam name one `Sourced`, not a second spelling.
+pub use crate::provenance::Sourced;
 use crate::{
-    ExtraFields, Layer, PathWire, RecordHeader, WorkKey,
+    ExtraFields, PathWire, RecordHeader, WorkKey,
     handoff::{Handoff, WriteScopeReport},
+    provenance::Source,
 };
+
+/// A missing launch field is a default value from the compiled layer, not a
+/// second source vocabulary. The shared `Sourced` carries the layer in its
+/// source, so every reader sees the same spelling as every other setting.
+fn default_sourced<T: Default>() -> Sourced<T> {
+    Sourced {
+        value: T::default(),
+        source: Source::default(),
+    }
+}
 
 /// Resolved restrictions within the parent's authority. Paths are relative to
 /// the same host-verified root; admission must resolve links and other boundary
@@ -60,25 +74,49 @@ pub enum BranchChoice {
     Existing { name: String },
 }
 
-/// Resolved configuration always records its source, including the off default.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Sourced<T> {
-    pub value: T,
-    pub source: Layer,
-}
-impl<T: Default> Default for Sourced<T> {
-    fn default() -> Self {
-        Self {
-            value: T::default(),
-            source: Layer::Default,
-        }
-    }
-}
-
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CommitChoice {
     OwnPaths,
+}
+
+/// Whether a lane launch runs inline or returns a handle immediately.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LaunchMode {
+    #[default]
+    Inline,
+    Handle,
+}
+
+/// Explicit context inputs for a native lane. Conversation history is not
+/// represented here: only named files and shared notes are opt-in inputs.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContextInputs {
+    #[serde(default)]
+    pub files: Vec<String>,
+    #[serde(default)]
+    pub notes: Vec<String>,
+}
+
+/// Which uncommitted files to carry when creating a new lane worktree.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CarryMode {
+    Off,
+    #[default]
+    Tracked,
+    All,
+}
+
+/// Writer destination resolved from the launch setting.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DestinationChoice {
+    #[default]
+    Auto,
+    Parent,
+    New,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -86,9 +124,9 @@ pub struct ChildLaunchRequest {
     pub parent_attempt: AttemptId,
     pub authority: NarrowedAuthority,
     pub destination: Destination,
-    #[serde(default)]
+    #[serde(default = "default_sourced")]
     pub path_claim: Sourced<Option<Vec<PathWire>>>,
-    #[serde(default)]
+    #[serde(default = "default_sourced")]
     pub commit: Sourced<Option<CommitChoice>>,
     #[serde(flatten)]
     pub extra: ExtraFields,
@@ -433,8 +471,8 @@ mod tests {
                     name: "feature".into(),
                 },
             },
-            path_claim: Sourced::default(),
-            commit: Sourced::default(),
+            path_claim: default_sourced(),
+            commit: default_sourced(),
             extra: Default::default(),
         };
         let mut wire = serde_json::to_value(&request).unwrap();
@@ -442,8 +480,8 @@ mod tests {
         wire.as_object_mut().unwrap().remove("commit");
         wire["future"] = json!({"value": true});
         let decoded: ChildLaunchRequest = serde_json::from_value(wire).unwrap();
-        assert_eq!(decoded.path_claim, Sourced::default());
-        assert_eq!(decoded.commit, Sourced::default());
+        assert_eq!(decoded.path_claim, default_sourced());
+        assert_eq!(decoded.commit, default_sourced());
         assert_eq!(decoded.extra["future"], json!({"value": true}));
         assert_eq!(
             serde_json::from_slice::<ChildLaunchRequest>(&serde_json::to_vec(&decoded).unwrap())

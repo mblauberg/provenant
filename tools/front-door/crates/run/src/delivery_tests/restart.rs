@@ -796,6 +796,7 @@ fn writer_revalidation_refusal_settles_before_deferred_pin_cleanup()
             };
             let plan =
                 provenant_confinement::ConfinedPlan::new(provenant_confinement::PlanRequest {
+                    policy: provenant_records::policy::Policy::default(),
                     scope: provenant_core::WorkScope::Project(self.project),
                     codex: provenant_confinement::CodexPolicy::Clean,
                     extensions: provenant_confinement::ExtensionPolicy::Deny,

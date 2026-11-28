@@ -616,7 +616,7 @@ pub fn run(
             );
             let mut result = CommandResult::new(&command, status, Value::Null);
             let mut command_error = CommandError::new(code, message, None, repair);
-            command_error.diagnostic = diagnostic;
+            command_error.set_diagnostic(diagnostic);
             result.error = Some(command_error);
             result
         }
@@ -633,7 +633,7 @@ pub fn run(
         &mut result,
         mode,
         |value| context::publish(value, roots),
-        crate::OverflowPolicy::Refuse,
+        crate::OverflowPolicy::Proceed,
     ) {
         Ok(status) => crate::exit_status(&status),
         Err(_) => {

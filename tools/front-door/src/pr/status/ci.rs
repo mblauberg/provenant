@@ -1,6 +1,6 @@
 //! Exact-head observations for deterministic graph gates.
 use super::{Check, encode, mark_conflict, required_checks, summarise_ci};
-use crate::pr::observer::{Check as Observed, ObserveError, Observer};
+use crate::pr::observer::{self, Check as Observed, ObserveError, Observer};
 use provenant_fabric_runtime::graph::{
     CiFailedCheck, CiObservation, CiState, ConflictObservation, ConflictState,
 };
@@ -39,6 +39,71 @@ pub(super) fn observe(
         )
         .ok()
     };
+    if let Some(number) = pull_number(target) {
+        let request = provenant_config::ports::Request::within(READ_BUDGET);
+        let repository = match pull_repository(target) {
+            Some(repository) => Ok(repository),
+            None => observer::repository_for_project(state, project, &request),
+        };
+        let repository = match repository {
+            Ok(repository) => repository,
+            Err(ObserveError::RateLimited { reset }) => {
+                let mut pending = summarise_ci(None, None);
+                wait_for_rate_limit(&mut pending, reset);
+                return pending;
+            }
+            Err(_) => {
+                let mut unavailable = summarise_ci(None, None);
+                unavailable.summary = "pull request repository unavailable".into();
+                return unavailable;
+            }
+        };
+        let mut reader = match Observer::open(state, project, &repository, &request) {
+            Ok(reader) => reader,
+            Err(ObserveError::RateLimited { reset }) => {
+                let mut pending = summarise_ci(None, None);
+                wait_for_rate_limit(&mut pending, reset);
+                return pending;
+            }
+            Err(_) => return summarise_ci(None, None),
+        };
+        let graphql_head = || match crate::pr::status::batch::single_for_repository_with_request(
+            state,
+            project,
+            &repository,
+            number,
+            &request,
+        ) {
+            crate::pr::status::batch::Batch::Entries(entries) => {
+                entries.first().map(|entry| entry.head.clone())
+            }
+            _ => None,
+        };
+        let reading = match reader.observe_current_head(
+            number,
+            &request,
+            READ_BUDGET,
+            (!names.is_empty()).then_some(names),
+            &graphql_head,
+        ) {
+            Ok(reading) => reading,
+            Err(ObserveError::RateLimited { reset }) => {
+                let mut pending = summarise_ci(None, None);
+                wait_for_rate_limit(&mut pending, reset);
+                return pending;
+            }
+            Err(_) => return summarise_ci(None, None),
+        };
+        let result = from_head_reading(
+            reading,
+            names,
+            delivery_queue,
+            failed_checks_max_bytes,
+            max_failed_checks,
+        );
+        return result;
+    }
+
     let rate_limit = std::cell::RefCell::new(None);
     let evidence = |head: &Head| {
         let request = provenant_config::ports::Request::within(READ_BUDGET);
@@ -58,6 +123,134 @@ pub(super) fn observe(
     });
     if let Some(reset) = rate_limit.into_inner() {
         wait_for_rate_limit(&mut result, reset);
+    }
+    result.bound_failed_checks(failed_checks_max_bytes, max_failed_checks);
+    result
+}
+
+fn pull_number(target: &str) -> Option<u64> {
+    if let Ok(number) = target.strip_prefix('#').unwrap_or(target).parse() {
+        return Some(number);
+    }
+    if let Some((_, number)) = target.rsplit_once('#')
+        && let Ok(number) = number.parse()
+    {
+        return Some(number);
+    }
+    target
+        .split("/pull/")
+        .nth(1)
+        .and_then(|suffix| suffix.split(['/', '?', '#']).next())
+        .and_then(|number| number.parse().ok())
+}
+
+fn pull_repository(target: &str) -> Option<String> {
+    let prefix = target.split("/pull/").next()?.split('#').next()?;
+    let path = prefix.split_once("://").map_or(prefix, |(_, rest)| rest);
+    let mut parts = path.split('/');
+    let host_or_owner = parts.next()?;
+    if prefix.contains("://") {
+        let owner = parts.next()?;
+        let name = parts.next()?;
+        Some(format!("{owner}/{name}"))
+    } else if prefix.contains('/') {
+        let name = parts.next()?;
+        Some(format!("{host_or_owner}/{name}"))
+    } else {
+        None
+    }
+}
+
+fn from_head_reading(
+    reading: observer::HeadReading,
+    configured_names: &[String],
+    delivery_queue: bool,
+    failed_checks_max_bytes: usize,
+    max_failed_checks: usize,
+) -> CiObservation {
+    let checks: Vec<Check> = reading
+        .required
+        .iter()
+        .map(|check| Check {
+            name: check.name.clone(),
+            bucket: check.bucket.clone(),
+        })
+        .collect();
+    let required_names: Vec<String> = reading
+        .required_policy
+        .iter()
+        .map(|required| required.name.clone())
+        .collect();
+    let policy = if configured_names.is_empty() {
+        "branch-required"
+    } else {
+        "configured"
+    };
+    let mut result = summarise_ci(Some(checks), Some((policy, &required_names)));
+    let current_head = reading
+        .pr_head
+        .map(|head| head.to_string())
+        .unwrap_or_else(|| reading.expected_head.to_string());
+    let head_matches = reading.pr_head == Some(reading.expected_head);
+    let head_moved = reading
+        .pr_head
+        .is_some_and(|head| head != reading.expected_head);
+    result.head_sha = Some(current_head.clone());
+    result.failed_checks = reading
+        .required
+        .iter()
+        .filter(|check| matches!(check.bucket.as_str(), "fail" | "cancel"))
+        .map(|check| CiFailedCheck {
+            extra: Default::default(),
+            job_id: check.job_id.clone(),
+            name: check.name.clone(),
+            url: check.url.clone(),
+            excerpt: check.excerpt.clone(),
+        })
+        .collect();
+    if head_moved {
+        result.state = CiState::Pending;
+        result.summary = format!(
+            "head superseded {} -> {}; waiting for checks",
+            reading.expected_head, current_head
+        );
+        result.failed_checks.clear();
+    } else if let Some(quota) = reading.quota_error() {
+        if let provenant_records::command_result::ErrorClass::Transient {
+            retry_at: Some(retry_at),
+        } = &quota.class
+            && let Ok(retry_at) = provenant_core::WallTime::from_micros(retry_at.as_microsecond())
+        {
+            result.set_quota_reset(retry_at);
+        }
+        result.state = CiState::Pending;
+        result.summary = quota.message.clone();
+        result.failed_checks.clear();
+    } else if !reading.complete && result.state != CiState::Failed {
+        result.state = CiState::Pending;
+        result.summary = if delivery_queue
+            && configured_names.is_empty()
+            && reading.required_policy.is_empty()
+        {
+            "policy=required-unavailable; waiting for the branch check policy".into()
+        } else {
+            format!(
+                "policy={policy} observation pending: {}",
+                reading
+                    .pending_reason
+                    .as_deref()
+                    .unwrap_or("head-bound CI is incomplete")
+            )
+        };
+        result.failed_checks.clear();
+    }
+    if head_matches && reading.mergeable == observer::MergeState::Conflicting {
+        result.state = CiState::Conflict;
+        result.summary = format!(
+            "pull request conflicts with its base; next: {}",
+            provenant_fabric_runtime::graph::CONFLICT_GUIDANCE
+        );
+        result.failed_checks.clear();
     }
     result.bound_failed_checks(failed_checks_max_bytes, max_failed_checks);
     result
@@ -414,11 +607,72 @@ fn valid_head(repository: String, sha: String) -> Option<Head> {
 #[allow(unused_imports, dead_code)] // The worktree driver includes this module without libtest.
 mod tests {
     use super::*;
+    use provenant_core::GitOid;
     use serde_json::json;
     use std::cell::{Cell, RefCell};
 
     const OLD: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const NEW: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+    #[test]
+    fn pull_number_accepts_cli_and_web_pr_targets() {
+        assert_eq!(super::pull_number("42"), Some(42));
+        assert_eq!(super::pull_number("#42"), Some(42));
+        assert_eq!(
+            super::pull_number("https://github.com/example/project/pull/42/files"),
+            Some(42)
+        );
+        assert_eq!(super::pull_number("example/project#42"), Some(42));
+        assert_eq!(super::pull_number("refs/heads/release/42"), None);
+        assert_eq!(
+            super::pull_repository("https://github.com/example/project/pull/42"),
+            Some("example/project".into())
+        );
+        assert_eq!(
+            super::pull_repository("example/project#42"),
+            Some("example/project".into())
+        );
+        assert_eq!(
+            super::pull_repository("example/project/pull/42"),
+            Some("example/project".into())
+        );
+    }
+
+    #[test]
+    fn a_moved_pr_head_cannot_settle_a_graph_ci_result() {
+        let check = Observed {
+            head: OLD.into(),
+            name: "build".into(),
+            job_id: Some("1".into()),
+            bucket: "fail".into(),
+            app: None,
+            app_slug: None,
+            conclusion: Some("failure".into()),
+            registered: None,
+            url: None,
+            excerpt: String::new(),
+        };
+        let reading = super::observer::HeadReading {
+            expected_head: GitOid::parse(OLD).unwrap(),
+            branch_ref: Some("feature".into()),
+            pr_head: Some(GitOid::parse(NEW).unwrap()),
+            mergeable: super::observer::MergeState::Mergeable,
+            required_policy: vec![super::observer::RequiredCheck {
+                name: "build".into(),
+                app: None,
+            }],
+            observed: vec![check.clone()],
+            required: vec![check],
+            observed_at: jiff::Timestamp::UNIX_EPOCH,
+            complete: false,
+            pending_reason: Some("pull head changed".into()),
+            retry_at: None,
+        };
+        let result = super::from_head_reading(reading, &["build".into()], false, 4096, 10);
+        assert_eq!(result.state, CiState::Pending);
+        assert_eq!(result.head_sha.as_deref(), Some(NEW));
+        assert!(result.failed_checks.is_empty());
+    }
 
     fn pull(sha: &str) -> serde_json::Value {
         json!({"headRefOid":sha,"headRepository":{"name":"repo"},"headRepositoryOwner":{"login":"owner"}})

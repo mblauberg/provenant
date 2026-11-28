@@ -1,5 +1,5 @@
 //! The error envelope and the catalogue of stable edge error codes.
-use super::schema::{nullable, object, string};
+use super::schema::{array, choices, constant, nullable, object, one_of, open_object, string};
 use serde_json::Value;
 
 /// How well a code identifies one refusal.
@@ -132,10 +132,29 @@ pub const EDGE_ERROR_CODES: &[EdgeErrorCode] = &[
     ),
 ];
 
-/// Schema of `error`: `{code, message, cause, repair}`, with the last two null
-/// when absent. The code is a free string because the run owner and edges each
-/// own a catalogue; `EDGE_ERROR_CODES` and the run owner's list name them.
+/// Schema of the version-two command error. Legacy cancel receipt rows retain
+/// their distinct `{code, message, cause, repair}` shape.
 pub fn error_schema() -> Value {
+    object(
+        &[
+            ("code", string()),
+            ("message", string()),
+            ("cause", nullable(string())),
+            ("class", error_class_schema()),
+            ("next", array(super::next_step_schema())),
+        ],
+        &[
+            ("subject", super::subject_schema()),
+            ("setting", super::setting_schema()),
+            ("root", open_object()),
+            ("category", string()),
+            ("detail", string()),
+        ],
+    )
+}
+
+/// Schema for one receipt row's owner error.
+pub fn row_error_schema() -> Value {
     object(
         &[
             ("code", string()),
@@ -151,7 +170,26 @@ pub fn error_schema() -> Value {
     )
 }
 
-/// Schema for one receipt row's owner error.
-pub fn row_error_schema() -> Value {
-    error_schema()
+fn error_class_schema() -> Value {
+    one_of(vec![
+        object(
+            &[(
+                "boundary",
+                choices(&[
+                    "credentials",
+                    "other_work",
+                    "authority",
+                    "operation",
+                    "none",
+                ]),
+            )],
+            &[],
+        ),
+        constant("configured"),
+        constant("operation"),
+        object(
+            &[("transient", object(&[], &[("retry_at", string())]))],
+            &[],
+        ),
+    ])
 }

@@ -1,7 +1,9 @@
 //! Version-two command transport facts, shared by CLI edges.
 
+use crate::Layer;
 use crate::warning::Warning;
 use crate::wire::ENVELOPE_VERSION;
+use provenant_core::{GitOid, ProjectId};
 use serde::{Deserialize, Serialize};
 
 /// Encoded command/relay output capacity; retained run artifacts have a separate bound.
@@ -29,33 +31,155 @@ pub enum Outcome {
     Stalled,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct CommandError(Box<CommandErrorPayload>);
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[non_exhaustive]
-pub struct CommandError {
+pub struct CommandErrorPayload {
     pub code: String,
     pub message: String,
     pub cause: Option<String>,
-    pub repair: Option<String>,
+    #[serde(default)]
+    pub class: ErrorClass,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subject: Option<Subject>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub setting: Option<SettingRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub root: Option<Box<CommandError>>,
+    #[serde(default)]
+    pub next: Vec<NextStep>,
     #[serde(flatten)]
     pub diagnostic: Option<crate::diagnostic::DiagnosticFields>,
 }
+
+/// The subject an error or warning concerns, in machine-readable form.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Subject {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<ProjectId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub graph: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub item: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pr: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub head: Option<GitOid>,
+}
+
+/// The setting that selected the behaviour reported by an error or warning.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SettingRef {
+    pub key: String,
+    pub value: String,
+    pub layer: Layer,
+    /// The exact source, such as a `file:line` location or command-line flag.
+    pub origin: String,
+}
+
+/// Whether an error is an immutable boundary, a configured stop, or an
+/// operation that cannot proceed.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ErrorClass {
+    Boundary(crate::policy::Boundary),
+    Configured,
+    #[default]
+    Operation,
+    Transient {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        retry_at: Option<jiff::Timestamp>,
+    },
+}
+
+impl std::ops::Deref for CommandError {
+    type Target = CommandErrorPayload;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for CommandError {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
 impl CommandError {
-    /// Construct a refusal with the concrete next step an operator or agent
-    /// must take. `repair` is mandatory: it is the exact command or flag to
-    /// run, or the condition to wait for. A refusal without a next step is not
-    /// actionable, so the type requires one rather than relying on a lint.
+    pub fn into_payload(self) -> CommandErrorPayload {
+        *self.0
+    }
+
+    /// Construct an error and translate the former repair hint into a typed
+    /// next step. Commands beginning with `provenant` become argv; other text
+    /// remains a condition for the caller to satisfy.
     pub fn new(
         code: impl Into<String>,
         message: impl Into<String>,
         cause: Option<&str>,
         repair: impl Into<String>,
     ) -> Self {
-        Self {
+        let repair = repair.into();
+        let code = code.into();
+        let class = if code == "PEER_UPGRADE_PENDING" {
+            ErrorClass::Transient { retry_at: None }
+        } else {
+            ErrorClass::Operation
+        };
+        Self(Box::new(CommandErrorPayload {
             diagnostic: None,
-            code: code.into(),
+            code,
             message: message.into(),
             cause: cause.map(Into::into),
-            repair: Some(repair.into()),
+            class,
+            subject: None,
+            setting: None,
+            root: None,
+            next: vec![NextStep::from_text(&repair)],
+        }))
+    }
+
+    pub fn with_subject(mut self, subject: Subject) -> Self {
+        self.subject = Some(subject);
+        self
+    }
+
+    pub fn with_setting(mut self, setting: SettingRef) -> Self {
+        self.setting = Some(setting);
+        self
+    }
+
+    pub fn with_class(mut self, class: ErrorClass) -> Self {
+        self.class = class;
+        self
+    }
+
+    /// Attach diagnostic details and move their legacy next hint into the
+    /// structured next-step list, avoiding a duplicate flattened `next` key.
+    pub fn set_diagnostic(&mut self, mut diagnostic: Option<crate::diagnostic::DiagnosticFields>) {
+        if let Some(class) = diagnostic
+            .as_mut()
+            .and_then(|details| details.error_class.take())
+        {
+            self.class = class;
         }
+        if let Some(details) = diagnostic.as_mut()
+            && let Some(next) = details.next.take()
+        {
+            let next = NextStep::from_text(&next);
+            if !self.next.contains(&next) {
+                self.next.push(next);
+            }
+        }
+        self.diagnostic = diagnostic;
     }
 }
 impl Outcome {
@@ -117,6 +241,26 @@ impl NextStep {
     /// separated by whitespace. Each token becomes one literal argv entry.
     pub fn from_command(command: &str, why: impl Into<String>) -> Self {
         Self::new(command.split_whitespace().map(str::to_owned).collect(), why)
+    }
+
+    /// Interpret a legacy free-form repair hint as a command or a condition.
+    pub fn from_text(text: &str) -> Self {
+        if text.split_whitespace().next() == Some("provenant") {
+            Self::from_command(text, "")
+        } else {
+            Self::new(Vec::new(), text)
+        }
+    }
+
+    /// Human-readable content without a `next:` prefix.
+    pub fn display_text(&self) -> String {
+        if self.argv.is_empty() {
+            self.why.clone()
+        } else if self.why.is_empty() {
+            self.argv.join(" ")
+        } else {
+            format!("{}; {}", self.why, self.argv.join(" "))
+        }
     }
 }
 

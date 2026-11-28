@@ -438,7 +438,7 @@ fn provisioned_writer_fast_forward_preserves_launch_budget()
         remaining > 10_000_000,
         "writer launch wait must outlast the 1 s reader budget: {remaining}us"
     );
-    owner.provision_writer_worktree(".worktrees/later", "later", source.trim(), None)?;
+    owner.provision_writer_worktree(".worktrees/later", "later", source.trim(), None, None)?;
     let budget = owner.writer_launch_budget.ok_or("budget")?;
     owner.fast_forward_writer(
         &rig.project,
@@ -458,6 +458,181 @@ fn provisioned_writer_fast_forward_preserves_launch_budget()
         crate::worktree_tests::git(&rig, &["-C", ".worktrees/later", "rev-parse", "HEAD"])?.trim(),
         source.trim()
     );
+    Ok(())
+}
+
+#[test]
+fn new_writer_carries_chair_edits_once_and_preserves_the_chair()
+-> Result<(), Box<dyn std::error::Error>> {
+    use super::*;
+    use provenant_fabric_runtime::graph::{AttemptOwner, WriterCarryRequest};
+    use provenant_records::lane_contract::CarryMode;
+    if super::super::peer_tests::host_test(
+        "fabric::owner::journal_error_tests::new_writer_carries_chair_edits_once_and_preserves_the_chair",
+    )? {
+        return Ok(());
+    }
+    let rig = crate::worktree_tests::repository()?;
+    let base = crate::worktree_tests::git(&rig, &["rev-parse", "HEAD"])?;
+    std::fs::write(rig.project.join("AGENTS.md"), "chair edit")?;
+    std::fs::write(rig.project.join("new.txt"), "untracked")?;
+    let index = std::fs::read(rig.project.join(".git/index"))?;
+    let roots = crate::roots::child(&rig.home, &rig.project, rig.state.clone())?;
+    let factory = Factory {
+        context: Context::open(roots, &rig.home, &rig.project)?,
+        project_attribution: false,
+        clock: SystemClock,
+        backoff: ThreadPause,
+        executor: SystemExecutor::new(1)?,
+        home: rig.home.clone(),
+        cwd: rig.project.clone(),
+        assets: rig.project.clone(),
+        host_launch: None,
+        workers: &provenant_confinement::worktrees::SystemWorkerObserver,
+    };
+    let cancel = CancelToken::new();
+    let budget = WaitBudget::cli(factory.clock.mono_now(), 60)?;
+    let mut owner = BoundGraphOwner {
+        writer_launch_budget: None,
+        admission_timeout: None,
+        factory: &factory,
+        repo_facts: Default::default(),
+        launch_warnings: Vec::new(),
+        integration_base: None,
+        integration_branch: None,
+        network: None,
+        capability_overrides: Default::default(),
+        exclude: Vec::new(),
+        budget,
+        cancel: &cancel,
+        prices: None,
+        tick: false,
+    };
+    let request = WriterCarryRequest {
+        graph: "carry-graph",
+        node: "writer",
+        mode: Some(CarryMode::All),
+    };
+    let binding = owner
+        .provision_writer_worktree(".worktrees/carried", "carried", &base, None, Some(&request))?
+        .ok_or("binding")?;
+    let carried_head = binding.head.clone();
+    assert_ne!(carried_head, base);
+    assert_eq!(
+        binding.carried_paths,
+        vec!["AGENTS.md".to_owned(), "new.txt".to_owned()]
+    );
+    assert_eq!(std::fs::read(rig.project.join(".git/index"))?, index);
+    assert_eq!(std::fs::read(rig.project.join("AGENTS.md"))?, b"chair edit");
+    assert_eq!(std::fs::read(rig.project.join("new.txt"))?, b"untracked");
+    assert_eq!(
+        std::fs::read(rig.project.join(".worktrees/carried/AGENTS.md"))?,
+        b"chair edit"
+    );
+    assert_eq!(
+        std::fs::read(rig.project.join(".worktrees/carried/new.txt"))?,
+        b"untracked"
+    );
+    assert_eq!(
+        crate::worktree_tests::git(
+            &rig,
+            &["-C", ".worktrees/carried", "log", "-1", "--format=%s"]
+        )?,
+        "wip: carried from chair"
+    );
+    let replay = owner
+        .provision_writer_worktree(".worktrees/carried", "carried", &base, None, Some(&request))?
+        .ok_or("replay binding")?;
+    assert_eq!(replay.head, carried_head);
+    assert_eq!(replay.carried_paths, binding.carried_paths);
+    let off = WriterCarryRequest {
+        graph: "off-graph",
+        node: "writer",
+        mode: Some(CarryMode::Off),
+    };
+    let off_binding = owner
+        .provision_writer_worktree(".worktrees/off", "off", &base, None, Some(&off))?
+        .ok_or("off binding")?;
+    assert_eq!(off_binding.head, base);
+    assert!(!rig.project.join(".worktrees/off/new.txt").exists());
+    let tracked = WriterCarryRequest {
+        graph: "tracked-graph",
+        node: "writer",
+        mode: Some(CarryMode::Tracked),
+    };
+    let tracked_binding = owner
+        .provision_writer_worktree(".worktrees/tracked", "tracked", &base, None, Some(&tracked))?
+        .ok_or("tracked binding")?;
+    assert_eq!(tracked_binding.carried_paths, vec!["AGENTS.md".to_owned()]);
+    assert!(!rig.project.join(".worktrees/tracked/new.txt").exists());
+    std::fs::create_dir_all(rig.project.join(".provenant"))?;
+    std::fs::write(
+        rig.project.join(".provenant/config.toml"),
+        "[knobs]\n'lanes.carry_uncommitted' = 'off'\n",
+    )?;
+    let configured = WriterCarryRequest {
+        graph: "configured-graph",
+        node: "writer",
+        mode: None,
+    };
+    let configured_binding = owner
+        .provision_writer_worktree(
+            ".worktrees/configured",
+            "configured",
+            &base,
+            None,
+            Some(&configured),
+        )?
+        .ok_or("configured binding")?;
+    assert_eq!(configured_binding.head, base);
+    assert_eq!(std::fs::read(rig.project.join(".git/index"))?, index);
+    // Where the setting only shapes a warning, an unreadable value warns and
+    // uses the compiled default instead of aborting the advance.
+    std::fs::write(
+        rig.project.join(".provenant/config.toml"),
+        "[knobs]\n'lanes.carry_uncommitted' = 7\n",
+    )?;
+    owner.take_launch_warnings();
+    owner.peer_carry_unsupported(None)?;
+    let codes: Vec<_> = owner
+        .take_launch_warnings()
+        .into_iter()
+        .map(|warning| warning.code.as_ref().to_owned())
+        .collect();
+    assert_eq!(
+        codes,
+        ["CARRY_SETTING_UNREADABLE", "CARRY_PEER_UNSUPPORTED"],
+        "{codes:?}"
+    );
+    // A local writer resolves the same setting: a malformed value warns,
+    // carries tracked edits by default and still provisions the writer.
+    for (setting, path) in [("7", "malformed"), ("'sometimes'", "unknown")] {
+        std::fs::write(
+            rig.project.join(".provenant/config.toml"),
+            format!("[knobs]\n'lanes.carry_uncommitted' = {setting}\n"),
+        )?;
+        let request = WriterCarryRequest {
+            graph: "malformed-graph",
+            node: path,
+            mode: None,
+        };
+        let worktree = format!(".worktrees/{path}");
+        let binding = owner
+            .provision_writer_worktree(&worktree, path, &base, None, Some(&request))?
+            .ok_or("malformed-setting binding")?;
+        assert_eq!(
+            binding.carried_paths,
+            vec!["AGENTS.md".to_owned()],
+            "{setting}"
+        );
+        let codes: Vec<_> = owner
+            .take_launch_warnings()
+            .into_iter()
+            .map(|warning| warning.code.as_ref().to_owned())
+            .collect();
+        assert_eq!(codes, ["CARRY_SETTING_UNREADABLE"], "{setting}");
+    }
+    assert_eq!(std::fs::read(rig.project.join(".git/index"))?, index);
     Ok(())
 }
 

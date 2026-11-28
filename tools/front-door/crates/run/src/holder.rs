@@ -248,11 +248,12 @@ fn route_identity_label(route: Option<&RouteRecord>) -> String {
 #[cfg(test)]
 mod identity_policy_tests {
     use super::*;
-    use provenant_records::policy::{Policy, Source, Strength};
+    use provenant_records::policy::{Policy, Strength};
 
     // Spec: docs/specs/fabric.md#session-ready-steering
     #[test]
     fn incomplete_identity_evidence_respects_policy_and_conflicts_remain_fatal() {
+        use provenant_records::Layer;
         use provenant_records::settlement::IdentityPolicyEffect;
         for (strength, conflict) in [
             (Strength::Warn, false),
@@ -265,7 +266,7 @@ mod identity_policy_tests {
             let mut policy = Policy::default();
             policy.overlay(
                 &[("PROVIDER_IDENTITY_EVIDENCE_INCOMPLETE".to_owned(), strength)].into(),
-                Source::Host,
+                Layer::Host,
             );
             let mut exit = crate::tests::exit();
             exit.provider_identity_evidence_incomplete = true;
@@ -1944,7 +1945,6 @@ impl RunStore {
                 error @ (RunError::RecordedRefusal(_)
                 | RunError::ContinuationRefused { .. }
                 | RunError::ProviderStateExpired
-                | RunError::WriterLineage(_)
                 | RunError::GenerationConflict { .. }),
             ) => refused(&error.to_string()),
             Err(error) => Err(error),
@@ -2080,14 +2080,10 @@ impl RunStore {
                 match launch.repin_head(&git, pinned)? {
                     crate::RepinOutcome::Unchanged { .. } => {}
                     crate::RepinOutcome::Repinned { head, .. } => {
-                        let owner = self.check_writer_lineage(&record, &launch.worktree, call)?;
-                        if !owner.is_some_and(|owner| {
-                            owner.origin == provenant_confinement::worktrees::WorktreeOrigin::Lane
-                        }) {
-                            return Err(RunError::WriterLineage(
-                                "re-pin requires the predecessor's lane-owned writer",
-                            ));
-                        }
+                        // Custody is a lease: a lapsed or adopted writer may
+                        // re-pin with a handover notice. Ownership alone never
+                        // refuses a head that moved forward on its branch.
+                        self.check_writer_lineage(&record, &launch.worktree, call)?;
                         let outcome = crate::RepinOutcome::Repinned { pinned, head };
                         repin_warning = outcome.warning();
                         repin_head = Some(head);

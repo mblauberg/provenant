@@ -423,6 +423,10 @@ pub(crate) fn launch_disposition<R: AttemptOwner, J: GraphJournal>(
         timing.policy,
     )
     .map_err(GraphError::Refused)?;
+    // Warnings the failed launch raised (a custody change, a carry setting)
+    // explain the refusal; keep them on this node rather than leaking them
+    // into the next launch's metadata.
+    super::retain_launch_warnings(owner, checkpoint, index);
     journal.save(checkpoint).map_err(GraphError::Journal)
 }
 
@@ -1503,6 +1507,7 @@ mod tests {
                 path: None,
             },
             FacadeError::LaunchUnknown {
+                detail: None,
                 operation_id: operation,
             },
         ] {
@@ -1568,6 +1573,7 @@ mod tests {
         }));
         assert!(!launch_pre_host(&FacadeError::Busy));
         assert!(!launch_pre_host(&FacadeError::LaunchUnknown {
+            detail: None,
             operation_id: provenant_core::OperationId::parse("op").unwrap()
         }));
 

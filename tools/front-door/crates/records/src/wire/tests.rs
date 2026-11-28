@@ -592,26 +592,35 @@ fn envelopes_validate_for_every_command_and_for_errors() {
         assert!(command_schema(command).is_some(), "{command}");
     }
     let lanes = command_schema("lanes").unwrap();
+    let warning = json!({
+        "code": "WRITER_CENSUS",
+        "message": "writer census incomplete",
+        "subject": "writer",
+        "subject_ref": {"graph": "g", "node": "writer", "attempt": 1},
+        "source": {"layer": "host", "origin": "~/.config/provenant/config.toml"},
+        "setting": {"key": "policy.WRITER_CENSUS", "value": "warn", "layer": "host", "origin": "~/.config/provenant/config.toml"},
+        "next": [{"argv": ["provenant", "status", "g"], "why": "inspect the writer"}]
+    });
     let ok = json!({
         "schema_version": ENVELOPE_VERSION, "command": "lanes", "status": "ok",
         "data": serde_json::to_value(list(vec![row()])).unwrap(), "error": null,
-        "warnings": [], "next": []
+        "warnings": [warning], "next": []
     });
     validate(&lanes, &ok).unwrap();
     // A failed command carries null data and the error envelope.
     let failed = json!({
         "schema_version": ENVELOPE_VERSION, "command": "lanes", "status": "failed", "data": null,
-        "error": {"code": "NOT_FOUND", "message": "m", "cause": null, "repair": null},
+        "error": {"code": "NOT_FOUND", "message": "m", "cause": null, "class": "operation", "next": []},
         "warnings": [], "next": []
     });
     validate(&lanes, &failed).unwrap();
     let errors = error_envelope_schema();
     validate(&errors, &failed).unwrap();
-    let mut with_repair = failed.clone();
-    with_repair["error"]["cause"] = json!("c");
-    with_repair["error"]["repair"] = json!("run reconcile");
-    with_repair["data"] = json!({"operation_id": id, "receipts": []});
-    validate(&errors, &with_repair).unwrap();
+    let mut with_next = failed.clone();
+    with_next["error"]["cause"] = json!("c");
+    with_next["error"]["next"] = json!([{"argv": [], "why": "run reconcile"}]);
+    with_next["data"] = json!({"operation_id": id, "receipts": []});
+    validate(&errors, &with_next).unwrap();
     // An error envelope needs its error; a success cannot pass as one.
     assert!(validate(&errors, &ok).is_err());
     let mut invalid = ok.clone();
@@ -635,7 +644,7 @@ fn envelopes_validate_for_every_command_and_for_errors() {
     partial["error"] = json!({"code": "X", "message": "m"});
     assert!(
         validate(&lanes, &partial).is_err(),
-        "cause and repair are always present"
+        "cause, class and next are always present"
     );
 }
 
@@ -787,7 +796,7 @@ fn current_cli_failure_envelopes_validate() {
         "cancel",
         "failed",
         json!({"operation_id": "o"}),
-        json!({"code": "NOT_FOUND", "message": "m", "cause": null, "repair": null}),
+        json!({"code": "NOT_FOUND", "message": "m", "cause": null, "class": "operation", "next": []}),
     );
     validate(&cancel, &failure).unwrap();
     validate(&error_envelope_schema(), &failure).unwrap();
@@ -826,7 +835,7 @@ fn current_cli_failure_envelopes_validate() {
         "cancel",
         "failed",
         json!({"operation_id": "o"}),
-        json!({"code": "NOT_FOUND", "message": "m", "cause": null, "repair": null}),
+        json!({"code": "NOT_FOUND", "message": "m", "cause": null, "class": "operation", "next": []}),
     );
     no_next.as_object_mut().unwrap().remove("next");
     rejected(&cancel, no_next.clone());

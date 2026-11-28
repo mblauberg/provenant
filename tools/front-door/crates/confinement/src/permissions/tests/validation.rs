@@ -100,13 +100,13 @@ fn git_control_link_refusal_names_the_file_and_the_recovery() {
 fn only_git_control_files_are_checked_for_other_names() -> Result<(), Box<dyn std::error::Error>> {
     let fixture = crate::test_support::Fixture::new()?;
     let git_dir = fixture.repo.common_git_dir().to_owned();
-    verify_git_control_links(&fixture.repo)?;
+    verify_git_control_links(&fixture.repo, &provenant_records::policy::Policy::default())?;
     // Build output and dependency trees hold hard links and are not walked.
     let tree = fixture.root.join("target/debug");
     std::fs::create_dir_all(&tree)?;
     std::fs::write(tree.join("object"), b"o")?;
     std::fs::hard_link(tree.join("object"), tree.join("alias"))?;
-    verify_git_control_links(&fixture.repo)?;
+    verify_git_control_links(&fixture.repo, &provenant_records::policy::Policy::default())?;
     std::fs::create_dir_all(git_dir.join("hooks"))?;
     std::fs::create_dir_all(git_dir.join("info"))?;
     std::fs::write(git_dir.join("hooks/pre-commit"), b"#!/bin/sh\n")?;
@@ -114,30 +114,52 @@ fn only_git_control_files_are_checked_for_other_names() -> Result<(), Box<dyn st
     for control in ["config", "hooks/pre-commit", "info/exclude"] {
         let alias = fixture.root.join("alias");
         std::fs::hard_link(git_dir.join(control), &alias)?;
-        let error = verify_git_control_links(&fixture.repo).unwrap_err();
+        // Settlement moves hard-linked handoffs aside, so a second name is
+        // advisory: the check warns through its `none/warn` rule and proceeds.
+        let (result, warnings) = provenant_records::warning::capture(|| {
+            verify_git_control_links(&fixture.repo, &provenant_records::policy::Policy::default())
+        });
+        result?;
         assert!(
-            matches!(&error, PermissionError::GitControlHardLinked(path) if path == &git_dir.join(control)),
-            "{control}: {error}"
+            warnings.iter().any(|warning| {
+                warning.code == "VALIDATION_VERIFY_GIT_CONTROL_LINKS_GIT_ISOLATION"
+                    && warning
+                        .message
+                        .contains(&git_dir.join(control).display().to_string())
+            }),
+            "{control}: {warnings:?}"
         );
         let policy = provenant_records::policy::Policy::default();
         let rule = policy.rule("VALIDATION_VERIFY_GIT_CONTROL_LINKS_GIT_ISOLATION");
         assert_eq!(
             rule.rule.boundary,
-            provenant_records::policy::Boundary::OtherWork
+            provenant_records::policy::Boundary::None
         );
         assert_eq!(
             rule.rule.strength,
-            provenant_records::policy::Strength::Refuse
+            provenant_records::policy::Strength::Warn
         );
         assert!(matches!(
             policy.check(
                 "VALIDATION_VERIFY_GIT_CONTROL_LINKS_GIT_ISOLATION",
                 provenant_records::policy::Facts::violation("guard failed"),
             ),
-            provenant_records::policy::Effect::Refuse(_)
+            provenant_records::policy::Effect::Warn(_)
+        ));
+        let mut strict = provenant_records::policy::Policy::default();
+        strict.overlay(
+            &std::collections::BTreeMap::from([(
+                "default".into(),
+                provenant_records::policy::Strength::Refuse,
+            )]),
+            provenant_records::Layer::Launch,
+        );
+        assert!(matches!(
+            verify_git_control_links(&fixture.repo, &strict),
+            Err(PermissionError::GitControlHardLinked(_))
         ));
         std::fs::remove_file(alias)?;
-        verify_git_control_links(&fixture.repo)?;
+        verify_git_control_links(&fixture.repo, &provenant_records::policy::Policy::default())?;
     }
     Ok(())
 }
@@ -165,7 +187,35 @@ fn a_hard_linked_exact_grant_names_its_path() -> Result<(), Box<dyn std::error::
         Err(PermissionError::AnchorMismatchAt { path, stage })
             if path == root.join("linked") && stage == "file has other hard links"
     ));
+    // Worktree grants use the advisory check: the default `none/warn` rule
+    // names the link and proceeds, while the strict check above is retained
+    // for credential grants.
+    let (result, warnings) = provenant_records::warning::capture(|| {
+        anchors.verify_single_link_grant_advisory(
+            &grant("linked"),
+            "VALIDATION_VERIFY_WORKTREE_AUTHORITY_GIT_ISOLATION",
+            &provenant_records::policy::Policy::default(),
+        )
+    });
+    result?;
+    assert!(
+        warnings.iter().any(|warning| {
+            warning.code == "VALIDATION_VERIFY_WORKTREE_AUTHORITY_GIT_ISOLATION"
+                && warning.message.contains("file has other hard links")
+        }),
+        "{warnings:?}"
+    );
+    anchors.verify_single_link_grant_advisory(
+        &grant("linked"),
+        "VALIDATION_VERIFY_WORKTREE_AUTHORITY_GIT_ISOLATION",
+        &provenant_records::policy::Policy::default(),
+    )?;
     anchors.verify_single_link_grant(&grant("absent"))?;
+    anchors.verify_single_link_grant_advisory(
+        &grant("absent"),
+        "VALIDATION_VERIFY_WORKTREE_AUTHORITY_GIT_ISOLATION",
+        &provenant_records::policy::Policy::default(),
+    )?;
     Ok(())
 }
 
@@ -760,7 +810,7 @@ fn directory_discovery_keeps_literal_scope_and_refuses_symlinks()
                 "PLAN_STATE_SCRATCH_OVERLAP".to_owned(),
                 provenant_records::policy::Strength::Refuse,
             )]),
-            provenant_records::policy::Source::Project,
+            provenant_records::Layer::Project,
         );
         assert!(matches!(
             compile_sbpl_impl(&plan, &profile, &anchors, ProfileLimits::default(), &strict),
@@ -902,7 +952,7 @@ fn invalid_native_control_labels_are_omitted() {
     use super::super::validation::{
         filtered_native_controls, filtered_native_controls_with_policy,
     };
-    use provenant_records::policy::{Effect, Facts, Policy, Source, Strength};
+    use provenant_records::policy::{Effect, Facts, Policy, Strength};
     use std::collections::BTreeMap;
     let mut spec = ProviderProfileSpec {
         process_executables: vec![PathGrant {
@@ -934,7 +984,7 @@ fn invalid_native_control_labels_are_omitted() {
     ));
     policy.overlay(
         &BTreeMap::from([(code.to_owned(), Strength::Off)]),
-        Source::Host,
+        provenant_records::Layer::Host,
     );
     assert_eq!(
         policy.check(code, Facts::violation("predicate observed")),

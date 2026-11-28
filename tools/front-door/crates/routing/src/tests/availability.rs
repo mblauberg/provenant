@@ -137,7 +137,7 @@ fn pacing_reserve_warns_without_excluding_accounts() -> Result<(), Box<dyn std::
                         provenant_records::policy::Strength::Warn,
                     ),
                 ]),
-                provenant_records::policy::Source::Dispatch,
+                provenant_records::Layer::Route,
             );
             let mut ctx = context(&catalogue, &config, now()?);
             ctx.registry = &registry;
@@ -164,7 +164,7 @@ fn pacing_reserve_warns_without_excluding_accounts() -> Result<(), Box<dyn std::
                     fact,
                     provenant_records::diagnostic::ResourceFact::PacingReserve {
                         setting,
-                        origin: provenant_records::diagnostic::PacingSettingSource::ShippedDefault,
+                        origin: provenant_records::Layer::Default,
                         ..
                     } if Some(setting) == expected_setting
                 ));
@@ -195,13 +195,13 @@ fn pacing_reserve_warns_without_excluding_accounts() -> Result<(), Box<dyn std::
         (
             serde_json::json!({"pacing": {"codex": "pace"}, "pacing_reserve": {"codex": {"five_hour_percent": 20}}}),
             provenant_records::diagnostic::PacingReserveSetting::AdapterFiveHour,
-            provenant_records::diagnostic::PacingSettingSource::Unresolved,
+            provenant_records::Layer::Default,
             20,
         ),
         (
             serde_json::json!({"pacing": {"accounts": {"codex/opaque-account": {"policy": "pace", "reserve": {"five_hour": 25}}}}}),
             provenant_records::diagnostic::PacingReserveSetting::Account,
-            provenant_records::diagnostic::PacingSettingSource::Configuration,
+            provenant_records::Layer::Host,
             25,
         ),
     ] {
@@ -221,7 +221,7 @@ fn pacing_reserve_warns_without_excluding_accounts() -> Result<(), Box<dyn std::
                     provenant_records::policy::Strength::Warn,
                 ),
             ]),
-            provenant_records::policy::Source::Dispatch,
+            provenant_records::Layer::Route,
         );
         let mut ctx = context(&catalogue, &config, now()?);
         ctx.registry = &registry;
@@ -257,7 +257,7 @@ fn pacing_reserve_warns_without_excluding_accounts() -> Result<(), Box<dyn std::
                     "PACING_ACCOUNT".into(),
                     provenant_records::policy::Strength::Refuse,
                 )]),
-                provenant_records::policy::Source::Dispatch,
+                provenant_records::Layer::Route,
             );
             let mut held_context = context(&catalogue, &config, now()?);
             held_context.registry = &registry;

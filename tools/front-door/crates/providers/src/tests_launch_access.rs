@@ -592,7 +592,7 @@ fn cursor_uses_outer_confinement_for_fresh_and_resumed_tool_access() -> Result<(
             "ARGV_PROMPT".into(),
             provenant_records::policy::Strength::Refuse,
         )]),
-        provenant_records::policy::Source::Project,
+        provenant_records::Layer::Project,
     );
     let mut input = fixture_input(&route, &plan, &prompt, Path::new("/fixture/repo"), None);
     input.policy = &strict;
@@ -712,6 +712,7 @@ fn agy_read_only_adds_read_roots_outside_the_working_directory() -> Result<(), P
         scope: PathScope::Subtree,
     });
     let plan = ConfinedPlan::new(PlanRequest {
+        policy: provenant_records::policy::Policy::default(),
         scope: reader.scope(),
         permissions,
         codex: CodexPolicy::Clean,
@@ -761,6 +762,7 @@ fn claude_read_only_adds_read_roots_outside_the_working_directory() -> Result<()
         });
     }
     let plan = ConfinedPlan::new(PlanRequest {
+        policy: provenant_records::policy::Policy::default(),
         scope: reader.scope(),
         permissions,
         codex: CodexPolicy::Clean,
@@ -838,6 +840,7 @@ fn opencode_profile_follows_lane_access() -> Result<(), Box<dyn std::error::Erro
         });
         permissions.policy = Some(policy);
         provenant_confinement::ConfinedPlan::new(provenant_confinement::PlanRequest {
+            policy: provenant_records::policy::Policy::default(),
             scope: base.scope(),
             permissions,
             codex: provenant_confinement::CodexPolicy::Clean,
@@ -1527,6 +1530,7 @@ fn codex_configuration_is_a_writer_preference_and_read_only_authority()
             }
             let base = fixture_access_plan(access, Some("login"), false);
             let plan = ConfinedPlan::new(PlanRequest {
+                policy: provenant_records::policy::Policy::default(),
                 scope: base.scope(),
                 permissions: base.permissions().clone(),
                 codex: configuration,
@@ -1743,6 +1747,7 @@ fn opencode_config_overlapping_a_credential_root_follows_lane_access()
         });
         permissions.policy = Some(policy);
         let plan = provenant_confinement::ConfinedPlan::new(provenant_confinement::PlanRequest {
+            policy: provenant_records::policy::Policy::default(),
             scope: base.scope(),
             permissions: permissions.clone(),
             codex: provenant_confinement::CodexPolicy::Clean,

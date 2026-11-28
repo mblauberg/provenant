@@ -66,6 +66,23 @@ fn panel_with_lenses(topology: &str, lenses: &[&str]) -> GraphDocument {
     graph(vec![panel])
 }
 
+fn pinned_review_subject() -> provenant_records::subject::PinnedSubject {
+    provenant_records::subject::PinnedSubject {
+        extra: Default::default(),
+        base: None,
+        head: provenant_core::GitOid::parse(&"1".repeat(40)).unwrap(),
+        origin: provenant_records::subject::SubjectOrigin::LocalRef {
+            name: "main".into(),
+        },
+        pinned_at: provenant_core::WallTime::from_micros(1).unwrap(),
+        policy: provenant_records::subject::SubjectPolicy::Pinned,
+        repository: None,
+        base_ref: None,
+        policy_source: None,
+        followed_from: Vec::new(),
+    }
+}
+
 #[test]
 fn every_review_topology_preserves_partial_panel_coverage() {
     for frame in [false, true] {
@@ -168,8 +185,10 @@ fn complete_panels_reduce_verifier_verdicts_and_partial_panels_keep_fail() {
                 let document = panel(&format!("f{}-v1-s0", u8::from(frame)));
                 let mut observations = VecDeque::new();
                 if frame {
-                    observations
-                        .push_back(terminal_with_result(GraphAttemptOutcome::Succeeded, "Frame"));
+                    observations.push_back(terminal_with_result(
+                        GraphAttemptOutcome::Succeeded,
+                        "Frame",
+                    ));
                 }
                 observations.push_back(terminal_with_result(
                     GraphAttemptOutcome::Succeeded,
@@ -262,12 +281,7 @@ fn a_contract_invalid_member_keeps_its_finding_through_verification_and_synthesi
         run.checkpoint
             .nodes
             .iter()
-            .map(|node| (
-                &node.id,
-                node.state,
-                &node.advance_code,
-                &node.advance_note
-            ))
+            .map(|node| (&node.id, node.state, &node.advance_code, &node.advance_note))
             .collect::<Vec<_>>()
     );
     let invalid = run
@@ -326,7 +340,9 @@ fn synthesis_cannot_restore_inconclusive_verifier_evidence() {
             "VERDICT: PASS",
             "VERDICT: PASS",
         ]
-        .map(|verdict| terminal_with_result(GraphAttemptOutcome::Succeeded, &answer(json!([]), verdict)))
+        .map(|verdict| {
+            terminal_with_result(GraphAttemptOutcome::Succeeded, &answer(json!([]), verdict))
+        })
         .into(),
         ..Default::default()
     };
@@ -387,10 +403,7 @@ fn invalid_propagation_cannot_alias_an_independent_sibling_finding() {
         .iter()
         .find(|node| node.id.ends_with("--synthesis"))
         .unwrap();
-    assert_eq!(
-        synthesis.advance_code.as_deref(),
-        Some("disposition_count")
-    );
+    assert_eq!(synthesis.advance_code.as_deref(), Some("disposition_count"));
     let findings = &synthesis.outputs.as_ref().unwrap().findings;
     assert_eq!(findings.len(), 2);
     assert_ne!(findings[0].id, findings[1].id);
@@ -479,7 +492,11 @@ fn review_contract_accepts_verdict_followed_only_by_handoff() {
         answer(json!([]), "").trim_end()
     );
     let mut owner = FakeOwner {
-        observations: [terminal_with_result(GraphAttemptOutcome::Succeeded, &response)].into(),
+        observations: [terminal_with_result(
+            GraphAttemptOutcome::Succeeded,
+            &response,
+        )]
+        .into(),
         ..Default::default()
     };
     let run = advance(
@@ -526,7 +543,7 @@ fn review_contract_accepts_one_verdict_after_a_valid_closed_handoff() {
             commit: None,
             settlement_class: Some(provenant_records::run::SettlementClass::Completed),
             stop: None,
-        cause: None,
+            cause: None,
         }]
         .into(),
         ..Default::default()
@@ -586,7 +603,7 @@ fn a_long_review_with_a_spaced_handoff_keeps_its_single_verdict() {
                 commit: None,
                 settlement_class: Some(provenant_records::run::SettlementClass::Completed),
                 stop: None,
-            cause: None,
+                cause: None,
             }]
             .into(),
             ..Default::default()
@@ -686,9 +703,13 @@ fn typed_contract_reports_malformed_findings_and_preserves_usable_entries() {
         let mut bad = good.clone();
         bad.as_object_mut().unwrap().remove(field);
         cases.push(bad);
-        let mut blank = good.clone();
-        blank[field] = json!(" ");
-        cases.push(blank);
+        // An unrecognised severity, including a blank string, is deliberately
+        // mapped to high with a warning by the severity contract.
+        if field != "severity" {
+            let mut blank = good.clone();
+            blank[field] = json!(" ");
+            cases.push(blank);
+        }
         let mut wrong_type = good.clone();
         wrong_type[field] = json!(42);
         cases.push(wrong_type);
@@ -712,7 +733,7 @@ fn typed_contract_reports_malformed_findings_and_preserves_usable_entries() {
         )
         .unwrap();
         let progress = &run.checkpoint.nodes[0];
-        assert_eq!(progress.state, NodeState::Failed);
+        assert_eq!(progress.state, NodeState::Failed, "{bad}");
         assert_eq!(
             progress.advance_code.as_deref(),
             Some("review_findings_invalid"),
@@ -799,7 +820,12 @@ fn typed_contract_distinguishes_valid_fail_from_a_contradictory_pass() {
                 .find(|node| node.id == "review")
                 .unwrap();
             if verdict == "VERDICT: PASS" {
-                assert_eq!(progress.state, NodeState::Failed);
+                assert_eq!(
+                    progress.state,
+                    NodeState::Failed,
+                    "{name} {:?}",
+                    progress.outputs.as_ref().map(|o| &o.findings)
+                );
                 assert_eq!(
                     progress.advance_code.as_deref(),
                     Some("review_verdict_conflict")
@@ -815,140 +841,84 @@ fn typed_contract_distinguishes_valid_fail_from_a_contradictory_pass() {
     }
 }
 
-// Spec: docs/specs/run-settlement.md#settlement
+// Spec: docs/specs/agent-native.md#37-review-convergence
 #[test]
-fn malformed_lens_is_corrected_once_without_repeating_siblings() {
-    for corrected in [true, false] {
-        let document = panel("f0-v0-s0");
-        let (plan, _) = validate_plan(&document).unwrap();
-        let lens = plan
-            .nodes
+fn malformed_lens_retries_same_route_with_durable_budget_without_repeating_siblings() {
+    let mut document = panel("f0-v0-s0");
+    document.schema_version = 2;
+    document.subject = Some(pinned_review_subject());
+    let (plan, _) = validate_plan(&document).unwrap();
+    let lens = plan
+        .nodes
+        .iter()
+        .find(|node| node.review_lens.as_deref() == Some("correctness"))
+        .unwrap();
+    let lens_id = lens.id.clone();
+    let mut owner = FakeOwner {
+        observations: [
+            terminal_with_result(
+                GraphAttemptOutcome::Succeeded,
+                &answer(json!([finding()]), ""),
+            ),
+            terminal_with_result(
+                GraphAttemptOutcome::Succeeded,
+                &answer(json!([finding()]), "VERDICT: FAIL"),
+            ),
+            terminal_with_result(
+                GraphAttemptOutcome::Succeeded,
+                &answer(json!([]), "VERDICT: PASS"),
+            ),
+        ]
+        .into(),
+        ..Default::default()
+    };
+    let mut journal = MemoryJournal::default();
+    let run = advance(&document, &mut owner, &mut journal).unwrap();
+    assert!(owner.observations.is_empty());
+    let retried = run
+        .checkpoint
+        .nodes
+        .iter()
+        .find(|node| node.id == lens_id)
+        .unwrap();
+    assert_eq!(retried.state, NodeState::Succeeded);
+    assert_eq!(retried.previous_attempts.len(), 1);
+    assert_eq!(retried.attempts.len(), 1);
+    assert_eq!(
+        retried.previous_attempts[0].route,
+        retried.attempts[0].route
+    );
+    let retry = retried.review_retry.as_ref().unwrap();
+    assert_eq!(retry.evidence_retries.len(), 1);
+    assert_eq!(retry.evidence_retries[0].retries, 1);
+    assert_eq!(retry.evidence_retries[0].route, retried.attempts[0].route);
+    assert!(retry.pending_retry.is_none());
+    assert_eq!(
+        owner
+            .calls
             .iter()
-            .find(|node| node.review_lens.as_deref() == Some("correctness"))
-            .unwrap();
-        let lenses = plan
-            .nodes
-            .iter()
-            .find(|node| {
-                node.composite
-                    .as_ref()
-                    .is_some_and(|spec| spec.exports.iter().any(|export| export.node == lens.id))
-            })
-            .unwrap();
-        let mut owner = FakeOwner {
-            observations: [
-                terminal_with_result(GraphAttemptOutcome::Succeeded, &answer(json!([finding()]), "")),
-                terminal_with_result(
-                    GraphAttemptOutcome::Succeeded,
-                    &answer(
-                        json!([finding()]),
-                        if corrected { "VERDICT: FAIL" } else { "" },
-                    ),
-                ),
-                terminal_with_result(
-                    GraphAttemptOutcome::Succeeded,
-                    &answer(json!([]), "VERDICT: PASS"),
-                ),
-            ]
-            .into(),
-            ..Default::default()
-        };
-        let mut journal = MemoryJournal::default();
-        let run = advance(&document, &mut owner, &mut journal).unwrap();
-        assert!(owner.observations.is_empty());
-        assert_eq!(
-            run.checkpoint
-                .nodes
-                .iter()
-                .filter(|node| !node.previous_attempts.is_empty())
-                .count(),
-            1
-        );
-        let retried = run
-            .checkpoint
-            .nodes
-            .iter()
-            .find(|node| !node.previous_attempts.is_empty())
-            .unwrap();
-        assert_eq!(retried.id, lens.id);
-        assert_eq!(
-            retried.state,
-            if corrected {
-                NodeState::Succeeded
-            } else {
-                NodeState::Failed
-            }
-        );
-        let correction = owner
-            .prompts
-            .iter()
-            .position(|prompt| prompt.contains("only automatic verdict correction"))
-            .unwrap();
-        assert_eq!(correction, 1);
-        // Every review prompt, the correction and the synthesis alike, asks for
-        // the verdict line as the very last thing.
-        assert_eq!(owner.prompts.len(), 3);
-        for prompt in &owner.prompts {
-            assert!(
-                prompt.contains(super::review::VERDICT_LAST),
-                "{prompt}"
-            );
-            assert!(!prompt.contains("may follow"), "{prompt}");
-        }
-        assert_eq!(owner.calls[correction].0.node_id, retried.id);
-        assert_eq!(
-            owner
-                .calls
-                .iter()
-                .filter(|(key, _)| key.node_id == retried.id)
-                .count(),
-            2
-        );
-        for id in ["panel", lenses.id.as_str()] {
-            let composite = run
-                .checkpoint
-                .nodes
-                .iter()
-                .find(|node| node.id == id)
-                .unwrap();
-            assert_eq!(composite.state, NodeState::Succeeded);
-        }
-        if !corrected {
-            let lenses = run
-                .checkpoint
-                .nodes
-                .iter()
-                .find(|node| node.id == lenses.id)
-                .unwrap();
-            assert!(
-                lenses
-                    .outputs
-                    .as_ref()
-                    .unwrap()
-                    .warnings
-                    .iter()
-                    // The panel warning names the node and its lens (#3345).
-                    .any(|warning| warning.starts_with(&format!("unavailable {} (lens ", lens.id)))
-            );
-        }
-        let output = run
-            .checkpoint
-            .nodes
-            .iter()
-            .find(|node| node.id == "panel")
-            .unwrap()
-            .outputs
-            .as_ref()
-            .unwrap();
-        assert!(!output.findings.is_empty());
-        assert_ne!(output.verdict.as_deref(), Some("VERDICT: PASS"));
-        assert_eq!(
-            advance(&document, &mut owner, &mut journal)
-                .unwrap()
-                .checkpoint,
-            run.checkpoint
-        );
+            .filter(|(key, _)| key.node_id == lens_id)
+            .count(),
+        2
+    );
+    assert_eq!(owner.prompts.len(), 3, "the sibling reviewer runs once");
+    for prompt in &owner.prompts {
+        assert!(prompt.contains(super::review::VERDICT_LAST), "{prompt}");
+        assert!(!prompt.contains("only automatic verdict correction"));
     }
+    assert!(run.checkpoint.expansions.iter().all(|expansion| {
+        expansion
+            .patch
+            .as_ref()
+            .and_then(|patch| patch.reason.as_deref())
+            .is_none_or(|reason| !reason.starts_with("correct review verdict"))
+    }));
+    assert_eq!(
+        advance(&document, &mut owner, &mut journal)
+            .unwrap()
+            .checkpoint,
+        run.checkpoint
+    );
 }
 
 #[test]
@@ -1103,85 +1073,78 @@ fn below_minimum_review_keeps_returned_findings_on_replay() {
     }
 }
 
-// Spec: docs/specs/fabric.md#graph-admission-and-refusal-causes
 #[test]
-fn correction_over_structural_limit_pauses_until_limit_is_raised() {
-    let document = panel_with_lenses("f0-v0-s0", &["correctness"]);
+fn pending_evidence_retry_survives_host_validation_refusal_and_replays_once() {
+    let mut document = panel_with_lenses("f0-v0-s0", &["correctness"]);
+    document.schema_version = 2;
+    document.subject = Some(pinned_review_subject());
     let (plan, _) = validate_plan(&document).unwrap();
     let lens = plan
         .nodes
         .iter()
         .find(|node| node.review_lens.as_deref() == Some("correctness"))
         .unwrap();
-    let limits = crate::config::GraphLimits {
-        node_prompt_bytes: plan
-            .nodes
-            .iter()
-            .map(|node| node.prompt.len())
-            .max()
-            .unwrap(),
-        ..Default::default()
-    };
     let mut owner = FakeOwner {
         observations: [
-            terminal_with_result(GraphAttemptOutcome::Succeeded, &answer(json!([finding()]), "")),
+            terminal_with_result(
+                GraphAttemptOutcome::Succeeded,
+                &answer(json!([finding()]), ""),
+            ),
             terminal_with_result(
                 GraphAttemptOutcome::Succeeded,
                 &answer(json!([]), "VERDICT: PASS"),
             ),
         ]
         .into(),
+        refuse_review_retry_once: true,
         ..Default::default()
     };
     let mut journal = MemoryJournal::default();
-    let run = advance_with_budget(
-        &document,
-        &mut owner,
-        &mut journal,
-        &limits,
-        &Default::default(),
-    )
-    .unwrap();
-    let lens = run
-        .checkpoint
+    assert!(matches!(
+        advance(&document, &mut owner, &mut journal),
+        Err(GraphError::Run(_))
+    ));
+    let interrupted = journal.0.as_ref().unwrap();
+    let lens = interrupted
         .nodes
         .iter()
         .find(|node| node.id == lens.id)
         .unwrap();
     assert_eq!(lens.state, NodeState::Failed);
-    assert!(lens.review_verdict_correction_refused.is_none());
-    assert!(lens.previous_attempts.is_empty());
-    assert_eq!(run.status, GraphStatus::Paused);
+    assert_eq!(lens.attempts.len(), 1);
+    let retry = lens.review_retry.as_ref().unwrap();
+    assert_eq!(retry.evidence_retries[0].retries, 1);
     assert_eq!(
-        run.checkpoint.pause_cause(),
-        Some(PauseCause::StructuralLimit)
+        retry.pending_retry.as_ref().unwrap().cause,
+        ReviewRetryCause::Evidence
     );
-    assert!(lens.expansion_pause.is_some());
-    assert_eq!(journal.0.as_ref(), Some(&run.checkpoint));
-    // Reopen the durable checkpoint as a fresh host would.
+    assert_eq!(
+        owner.observations.len(),
+        1,
+        "refused reset must not launch the retry"
+    );
+    assert_eq!(owner.calls.len(), 1);
+
+    // Reopen the durable pending intent as a fresh host would.
     let saved = serde_json::to_vec(&journal.0).unwrap();
     let mut journal = MemoryJournal(serde_json::from_slice(&saved).unwrap());
-    let resumed = resume_with_budget(
-        &document,
-        &mut owner,
-        &mut journal,
-        &Default::default(),
-        &Default::default(),
-        &[],
-    )
-    .unwrap();
-    assert_ne!(
-        resumed.checkpoint.pause_cause(),
-        Some(PauseCause::StructuralLimit)
-    );
-    assert_eq!(
-        owner
-            .prompts
-            .iter()
-            .filter(|prompt| prompt.contains("only automatic verdict correction"))
-            .count(),
-        1
-    );
+    let resumed = advance(&document, &mut owner, &mut journal).unwrap();
+    let lens = resumed
+        .checkpoint
+        .nodes
+        .iter()
+        .find(|node| node.id == lens.id)
+        .unwrap();
+    assert_eq!(lens.state, NodeState::Succeeded);
+    assert_eq!(lens.previous_attempts.len(), 1);
+    assert_eq!(lens.attempts.len(), 1);
+    let retry = lens.review_retry.as_ref().unwrap();
+    assert_eq!(retry.evidence_retries[0].retries, 1);
+    assert!(retry.pending_retry.is_none());
+    assert_eq!(owner.calls.len(), 2);
+    assert_eq!(owner.calls[0].1, owner.calls[1].1);
+    assert!(owner.observations.is_empty());
+    assert_eq!(owner.prompts.len(), 2);
 }
 
 #[test]
@@ -1430,10 +1393,285 @@ fn fix_round_without_sweep_sites_and_pin_is_flagged() {
 }
 
 #[test]
+fn repair_writer_prompt_uses_full_chain_ledger_and_stages_overflow() {
+    let mut source = node("source", route("fixture"));
+    source.access = AccessMode::ReadOnly;
+    let mut writer = node("fix", route("fixture"));
+    writer.repair_writer = true;
+    writer.depends_on = vec!["source".into()];
+    writer.inputs = vec![GraphInput {
+        extra: Default::default(),
+        required_outputs: vec![OutputKind::Findings],
+        node: "source".into(),
+        outputs: vec![OutputKind::Findings],
+    }];
+    let mut document = graph(vec![source, writer, node("other", route("fixture"))]);
+    document.schema_version = 2;
+    let (plan, positions) = validate_plan(&document).unwrap();
+    let mut checkpoint = transitions::initial_checkpoint(
+        &document,
+        &plan,
+        "repair-ledger-prompt".into(),
+        None,
+        None,
+        None,
+    );
+    checkpoint.review_policy = Some(ReviewPolicy::default());
+    let mut large = finding();
+    large["id"] = json!("F-LARGE");
+    let evidence = "FULL-LEDGER-EVIDENCE-".repeat(900);
+    large["evidence"] = json!(evidence);
+    let large: Finding = serde_json::from_value(large).unwrap();
+    let mut rejected = large.clone();
+    rejected.id = "F-REJECTED".into();
+    rejected.disposition = Some("rejected".into());
+    let mut other_chain = large.clone();
+    other_chain.id = "F-OTHER-CHAIN".into();
+
+    checkpoint.nodes[positions["source"]].state = NodeState::Succeeded;
+    checkpoint.nodes[positions["source"]].outputs = Some(NodeOutputs {
+        schema_version: 2,
+        findings_available: Some(true),
+        ..Default::default()
+    });
+    checkpoint.nodes[positions["fix"]].finding_ledger = Some(FindingLedger {
+        heads: std::collections::BTreeMap::from([(
+            "a".repeat(40),
+            FindingHead {
+                findings: vec![large.clone(), rejected],
+                unresolved: vec![large.clone()],
+                ..Default::default()
+            },
+        )]),
+        last_reviewed_head: Some("a".repeat(40)),
+    });
+    checkpoint.nodes[positions["other"]].finding_ledger = Some(FindingLedger {
+        heads: std::collections::BTreeMap::from([(
+            "b".repeat(40),
+            FindingHead {
+                findings: vec![other_chain.clone()],
+                unresolved: vec![other_chain],
+                ..Default::default()
+            },
+        )]),
+        last_reviewed_head: Some("b".repeat(40)),
+    });
+
+    let selected = selected_findings(
+        &plan.nodes[positions["fix"]],
+        &plan,
+        &checkpoint,
+        &positions,
+    );
+    assert_eq!(selected.len(), 1);
+    assert_eq!(selected[0].0, "review_ledger");
+    assert_eq!(selected[0].1.id, "F-LARGE");
+
+    let (prompt, overflow) = render_input(
+        &plan.nodes[positions["fix"]],
+        &plan,
+        &checkpoint,
+        &positions,
+        crate::config::GraphLimits::default().node_prompt_bytes,
+    );
+    assert!(!overflow, "the compact ledger projection should fit");
+    assert!(prompt.contains("F-LARGE"));
+    assert!(prompt.contains("staged full review_ledger artifact"));
+    // The prompt carries a bounded summary, never the complete evidence.
+    assert!(!prompt.contains(&evidence));
+
+    let requests = upstream_results(
+        &plan.nodes[positions["fix"]],
+        &plan,
+        &checkpoint,
+        &positions,
+    );
+    let ledger = requests
+        .iter()
+        .find(|request| request.label == "review_ledger")
+        .expect("the complete chain ledger is staged under its own label");
+    let staged = ledger.inline_findings.as_ref().unwrap();
+    assert_eq!(staged.len(), 1);
+    assert_eq!(staged[0].evidence.as_deref(), Some(evidence.as_str()));
+    let staged_bytes = serde_json::to_vec(staged).unwrap();
+    assert!(staged_bytes.len() <= NODE_INPUT_FILE_BYTES);
+    let full_input = MaterialisedInputs {
+        directory: Some(std::path::PathBuf::from("/fixture/inputs")),
+        index: None,
+        entries: vec![MaterialisedInput::File {
+            label: "review_ledger".into(),
+            path: std::path::PathBuf::from("/fixture/inputs/review_ledger.json"),
+            bytes: staged_bytes.len() as u64,
+            omitted: 0,
+        }],
+    };
+    assert!(complete_review_ledger_artifact(
+        &requests,
+        Some(&full_input)
+    ));
+    let files = render_files(&full_input.entries, &requests, full_input.index.as_deref());
+    assert!(files.contains("review_ledger.json"));
+    let capped = MaterialisedInputs {
+        entries: vec![MaterialisedInput::Capped {
+            label: "review_ledger".into(),
+        }],
+        ..Default::default()
+    };
+    assert!(!complete_review_ledger_artifact(&requests, Some(&capped)));
+}
+
+#[test]
+fn unaccepted_replayed_repair_attempt_refuses_a_capped_ledger_artifact() {
+    let mut source = node("source", route("fixture"));
+    source.access = AccessMode::ReadOnly;
+    let mut writer = node("fix", route("fixture"));
+    writer.repair_writer = true;
+    writer.depends_on = vec!["source".into()];
+    writer.inputs = vec![GraphInput {
+        extra: Default::default(),
+        required_outputs: vec![OutputKind::Findings],
+        node: "source".into(),
+        outputs: vec![OutputKind::Findings],
+    }];
+    let mut document = graph(vec![source, writer]);
+    document.schema_version = 2;
+    let limits = crate::config::GraphLimits::default();
+    let expanded = plans::expand(&document, &[], &[], &limits).unwrap();
+    let (plan, positions) = validate_flat_plan(&expanded, &limits).unwrap();
+    let digest = plan_digest(&plan).unwrap().to_string();
+    let mut checkpoint =
+        transitions::initial_checkpoint(&document, &plan, digest, None, None, None);
+    checkpoint.review_policy = Some(ReviewPolicy::default());
+    let source_key = AttemptKey {
+        extra: Default::default(),
+        retry_generation: None,
+        previous_attempt_ref: None,
+        graph_id: document.graph_id.clone(),
+        node_id: "source".into(),
+        route_index: 0,
+        attempt: 1,
+    };
+    transitions::begin_attempt(
+        positions["source"],
+        &plan,
+        &mut checkpoint,
+        &positions,
+        &source_key,
+        &plan.nodes[positions["source"]].routes[0],
+        transitions::LaunchFacts {
+            input_cap: limits.node_prompt_bytes,
+            placement_host_id: None,
+            launch_actor: "fixture".into(),
+            input_cap_source: provenant_records::Layer::Detected,
+            timing: None,
+        },
+    );
+    let source_attempt = checkpoint.nodes[positions["source"]]
+        .attempts
+        .last_mut()
+        .unwrap();
+    source_attempt.state = AttemptState::Terminal;
+    source_attempt.attempt_ref = Some("host-a/source".into());
+    source_attempt.outcome = Some(GraphAttemptOutcome::Succeeded);
+    checkpoint.nodes[positions["source"]].state = NodeState::Succeeded;
+    checkpoint.nodes[positions["source"]].outputs = Some(NodeOutputs {
+        schema_version: 2,
+        findings_available: Some(true),
+        ..Default::default()
+    });
+    let mut large = finding();
+    large["id"] = json!("F-LARGE-REPLAY");
+    large["evidence"] = json!("FULL-LEDGER-EVIDENCE-".repeat(900));
+    let large: Finding = serde_json::from_value(large).unwrap();
+    let head = "a".repeat(40);
+    checkpoint.nodes[positions["fix"]].finding_ledger = Some(FindingLedger {
+        heads: std::collections::BTreeMap::from([(
+            head.clone(),
+            FindingHead {
+                findings: vec![large.clone()],
+                unresolved: vec![large],
+                ..Default::default()
+            },
+        )]),
+        last_reviewed_head: Some(head),
+    });
+    let key = AttemptKey {
+        extra: Default::default(),
+        retry_generation: None,
+        previous_attempt_ref: None,
+        graph_id: document.graph_id.clone(),
+        node_id: "fix".into(),
+        route_index: 0,
+        attempt: 1,
+    };
+    transitions::begin_attempt(
+        positions["fix"],
+        &plan,
+        &mut checkpoint,
+        &positions,
+        &key,
+        &plan.nodes[positions["fix"]].routes[0],
+        transitions::LaunchFacts {
+            input_cap: limits.node_prompt_bytes,
+            placement_host_id: None,
+            launch_actor: "fixture".into(),
+            input_cap_source: provenant_records::Layer::Detected,
+            timing: None,
+        },
+    );
+    let checkpoint: GraphCheckpoint =
+        serde_json::from_value(serde_json::to_value(checkpoint).unwrap()).unwrap();
+    let mut journal = MemoryJournal(Some(checkpoint));
+
+    let mut first_owner = FakeOwner {
+        materialise: Some(fully_materialise_inputs),
+        observations: [AttemptObservation::Pending { attempt_ref: None }].into(),
+        ..Default::default()
+    };
+    advance(&document, &mut first_owner, &mut journal).unwrap();
+    assert_eq!(first_owner.calls.len(), 1);
+
+    let mut replay_owner = FakeOwner {
+        materialise: Some(cap_materialised_inputs),
+        ..Default::default()
+    };
+    let replay = advance(&document, &mut replay_owner, &mut journal);
+    assert!(
+        matches!(replay, Err(GraphError::Refused(reason)) if reason.contains("full review-chain ledger"))
+    );
+    assert!(
+        replay_owner.calls.is_empty(),
+        "the unaccepted attempt must not launch"
+    );
+    assert!(
+        replay_owner.file_requests[0]
+            .iter()
+            .any(|request| request.label == "review_ledger")
+    );
+
+    // A resumed unaccepted attempt must not launch with a clipped inline
+    // prompt, even when the full staged ledger is otherwise available.
+    journal.0.as_mut().unwrap().nodes[positions["fix"]]
+        .attempts
+        .last_mut()
+        .unwrap()
+        .input_cap = Some(64);
+    let mut small_cap_owner = FakeOwner {
+        materialise: Some(fully_materialise_inputs),
+        ..Default::default()
+    };
+    let replay = advance(&document, &mut small_cap_owner, &mut journal);
+    assert!(
+        matches!(replay, Err(GraphError::Refused(reason)) if reason.contains("selected upstream data"))
+    );
+    assert!(small_cap_owner.calls.is_empty());
+}
+
+#[test]
 // Spec: docs/specs/fabric.md#fix-round-invariants-and-split-verdict-adjudication
 fn round_two_missing_invariant_is_refused_at_graph_settlement() {
-    let document: GraphDocument = serde_json::from_value(json!({
-        "schema_version": 1, "graph_id": "delta-contract", "nodes": [{
+    let mut document: GraphDocument = serde_json::from_value(json!({
+        "schema_version": 2, "graph_id": "delta-contract", "nodes": [{
             "id": "repair", "kind": "loop", "access": "read_only",
             "loop": {"max_rounds": 2, "until": "accepted", "body": [
                 review("review.tests", "check"),
@@ -1444,11 +1682,22 @@ fn round_two_missing_invariant_is_refused_at_graph_settlement() {
         }]
     }))
     .unwrap();
+    document.subject = Some(pinned_review_subject());
     let mut owner = FakeOwner {
         observations: [
             terminal_with_result(
                 GraphAttemptOutcome::Succeeded,
                 &answer(json!([]), "VERDICT: FAIL"),
+            ),
+            // The first answer and each evidence retry omit the invariant, so the
+            // retry budget (default two) runs out and the round is refused.
+            terminal_with_result(
+                GraphAttemptOutcome::Succeeded,
+                &answer(json!([finding()]), "VERDICT: FAIL"),
+            ),
+            terminal_with_result(
+                GraphAttemptOutcome::Succeeded,
+                &answer(json!([finding()]), "VERDICT: FAIL"),
             ),
             terminal_with_result(
                 GraphAttemptOutcome::Succeeded,
@@ -1456,6 +1705,7 @@ fn round_two_missing_invariant_is_refused_at_graph_settlement() {
             ),
         ]
         .into(),
+        resolve_reviews: true,
         ..Default::default()
     };
     let mut journal = MemoryJournal::default();
@@ -1467,7 +1717,22 @@ fn round_two_missing_invariant_is_refused_at_graph_settlement() {
         .iter()
         .find(|node| node.id == "repair--r2--check")
         .unwrap();
-    assert_eq!(check.state, NodeState::Failed);
+    assert_eq!(
+        check.state,
+        NodeState::Failed,
+        "{:?}",
+        checkpoint
+            .nodes
+            .iter()
+            .map(|n| (
+                &n.id,
+                n.state,
+                &n.advance_code,
+                &n.advance_note,
+                n.gate.as_ref().and_then(|g| g.reason.clone())
+            ))
+            .collect::<Vec<_>>()
+    );
     assert_eq!(
         check.advance_code.as_deref(),
         Some("review_invariant_missing")
@@ -1610,16 +1875,18 @@ fn malformed_composite_delivery_review_parks_failed_and_partial_members_on_repla
                 &mut journal,
             )
             .unwrap();
-            assert!(park_malformed_composite_delivery_review(
-                &expanded,
-                boundary,
-                &plan,
-                &positions,
-                &mut owner,
-                &mut journal,
-                &mut checkpoint,
-            )
-            .unwrap());
+            assert!(
+                park_malformed_composite_delivery_review(
+                    &expanded,
+                    boundary,
+                    &plan,
+                    &positions,
+                    &mut owner,
+                    &mut journal,
+                    &mut checkpoint,
+                )
+                .unwrap()
+            );
             transition_ids.push(
                 checkpoint.nodes[boundary]
                     .delivery_park
@@ -1631,10 +1898,18 @@ fn malformed_composite_delivery_review_parks_failed_and_partial_members_on_repla
         }
 
         let parked = checkpoint.nodes[boundary].delivery_park.as_ref().unwrap();
-        assert_eq!(parked.reason, provenant_records::graph::ParkReason::ReviewEvidence);
+        assert_eq!(
+            parked.reason,
+            provenant_records::graph::ParkReason::ReviewEvidence
+        );
         assert_eq!(transition_ids[0], transition_ids[1]);
         assert!(parked.attempt_key.is_none());
-        assert!(parked.evidence.iter().any(|entry| entry.starts_with("member ")));
+        assert!(
+            parked
+                .evidence
+                .iter()
+                .any(|entry| entry.starts_with("member "))
+        );
     }
 
     let document = delivery_review_panel();

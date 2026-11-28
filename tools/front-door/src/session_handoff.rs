@@ -919,7 +919,7 @@ fn execute(
             ));
         }
         Err(PeerFailure { error, .. }) if matches!(*error, FacadeError::LaunchUnknown { .. }) => {
-            let FacadeError::LaunchUnknown { operation_id } = *error else {
+            let FacadeError::LaunchUnknown { operation_id, .. } = *error else {
                 unreachable!()
             };
             return Err(Refusal::new(

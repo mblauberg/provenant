@@ -814,7 +814,7 @@ fn no_input_prompt_does_not_change_on_resume_with_lower_cap() {
     root.prompt = "x".repeat(300);
     let document = graph(vec![root]);
     let mut owner = FakeOwner {
-        input_cap_source: Some(InputCapSource::Default),
+        input_cap_source: Some(Layer::Default),
         observations: VecDeque::from([
             AttemptObservation::Pending { attempt_ref: None },
             terminal(GraphAttemptOutcome::Succeeded),
@@ -849,7 +849,7 @@ fn no_input_prompt_does_not_change_on_resume_with_lower_cap() {
     assert_eq!(owner.prompts, vec!["x".repeat(300), "x".repeat(300)]);
     let attempt = &journal.0.as_ref().unwrap().nodes[0].attempts[0];
     assert_eq!(attempt.input_cap, Some(500));
-    assert_eq!(attempt.input_cap_source, Some(InputCapSource::Default));
+    assert_eq!(attempt.input_cap_source, Some(Layer::Default));
 }
 
 #[test]
@@ -990,7 +990,7 @@ fn replay_keeps_the_admission_input_cap() {
     });
     let document = graph(vec![child, node("parent", route("fixture"))]);
     let mut owner = FakeOwner {
-        input_cap_source: Some(InputCapSource::Configured),
+        input_cap_source: Some(Layer::Host),
         observations: VecDeque::from([
             terminal_with_result(GraphAttemptOutcome::Succeeded, &"x".repeat(150)),
             AttemptObservation::Pending { attempt_ref: None },
@@ -1013,7 +1013,7 @@ fn replay_keeps_the_admission_input_cap() {
     .unwrap();
     let original = owner.prompts[1].clone();
     assert!(original.len() > 100);
-    owner.input_cap_source = Some(InputCapSource::Default);
+    owner.input_cap_source = Some(Layer::Default);
     let changed = crate::config::GraphLimits {
         node_prompt_bytes: 100,
         ..Default::default()
@@ -1037,7 +1037,7 @@ fn replay_keeps_the_admission_input_cap() {
         .unwrap();
     assert_eq!(
         child.attempts[0].input_cap_source,
-        Some(InputCapSource::Configured)
+        Some(Layer::Host)
     );
 }
 
@@ -1233,7 +1233,7 @@ fn checked_findings_group_before_writer_and_dispute_reaches_synthesis() {
     let writer_files = owner
         .file_requests
         .iter()
-        .find(|requests| requests.iter().any(|request| request.label == "review"))
+        .find(|requests| requests.iter().any(|request| request.label == "review_ledger"))
         .unwrap();
     assert!(
         writer_files
@@ -1250,7 +1250,7 @@ fn checked_findings_group_before_writer_and_dispute_reaches_synthesis() {
             .iter()
             .all(|finding| finding.summary != "REJECTED_DO_NOT_REPAIR")
     );
-    let (_, input) = owner.prompts[1].split_once("review findings: ").unwrap();
+    let (_, input) = owner.prompts[1].split_once("review_ledger findings: ").unwrap();
     let groups: serde_json::Value = serde_json::from_str(input.lines().next().unwrap()).unwrap();
     assert_eq!(groups.as_array().unwrap().len(), 1);
     assert_eq!(groups[0]["findings"].as_array().unwrap().len(), 2);

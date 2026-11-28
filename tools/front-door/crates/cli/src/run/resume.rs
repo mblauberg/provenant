@@ -11,11 +11,20 @@ pub fn lane(command: crate::Lane, edge: &Edge<'_>) -> Reply {
                     "delivery is host-only",
                 ));
             }
-            let crate::Lane::Deliver {
-                target,
-                deliver,
-                accept_review,
-            } = command;
+            let (target, deliver, accept_review) = match command {
+                crate::Lane::Deliver {
+                    target,
+                    deliver,
+                    accept_review,
+                } => (target, deliver, accept_review),
+                crate::Lane::Share { .. } => {
+                    return Err(Fail::new(
+                        Status::Error,
+                        ErrorKind::Config,
+                        "`lane share` is declared but its execution path has not landed",
+                    ));
+                }
+            };
             let clock = SystemClock;
             let cancel = CancelToken::new();
             let call = request(&clock, &cancel)?;

@@ -15,8 +15,58 @@ use provenant_fabric_runtime::graph::{
     template::{Layer, TemplateLibrary},
 };
 use provenant_fabric_runtime::relay::{FacadeError, ServiceError};
-use provenant_records::warning::{Warning, warn};
+use provenant_records::custody::{
+    Sharing, Subject as CustodySubject, SubjectKind, default_sharing, sharing_setting_ref,
+};
+use provenant_records::policy::WORKTREE_SHARED;
+use provenant_records::progress::WakeSubjectRef;
+use provenant_records::provenance::Sourced;
+use provenant_records::warning::{Warning, WarningCode, warn};
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+
+/// A lane's read-class progress request to its host. Waking advances one
+/// custody subject under the caller's remaining deadline; it never grants
+/// resume, retry or landing authority, so it travels the read path.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
+pub enum GraphRelay {
+    Wake { subject: WakeSubjectRef },
+}
+
+/// Resolve the sharing setting at the host boundary, retaining its source.
+fn configured_sharing(context: &Context) -> Sourced<Sharing> {
+    let config = match crate::config_reads::read_for(&context.roots, "fabric") {
+        Ok(config) => config,
+        Err(error) => {
+            let fallback = default_sharing();
+            warn(
+                Warning::new(
+                    provenant_records::warning::CONFIG_UNAVAILABLE,
+                    format!(
+                        "{} could not be resolved ({error}); using the default",
+                        provenant_records::custody::WORKTREE_SHARING_KEY
+                    ),
+                    provenant_records::warning::detected_source(
+                        provenant_records::warning::CONFIG_UNAVAILABLE,
+                    ),
+                )
+                .setting(sharing_setting_ref(&fallback)),
+            );
+            return fallback;
+        }
+    };
+    config
+        .knobs
+        .get(provenant_records::custody::WORKTREE_SHARING_KEY)
+        .and_then(|knob| {
+            Some(Sourced {
+                value: knob.value.as_str()?.parse().ok()?,
+                source: knob.source.clone(),
+            })
+        })
+        .unwrap_or_else(default_sharing)
+}
 
 fn refused(code: &str, message: impl Into<String>) -> ServiceError {
     use provenant_fabric_runtime::coordination::facade::{
@@ -210,6 +260,8 @@ fn bind_shared_writers(
             .ok_or_else(|| refused("invalid_graph", "shared writer progress missing"))?;
         progress.writer_binding = Some(WriterWorktreeBinding {
             extra: Default::default(),
+            carry_examined: false,
+            carried_paths: Vec::new(),
             shared_worktree: Some(sealed.clone()),
             source_directory_identity: Some(provenant_records::run::SourceIdentity {
                 device: identity.device,
@@ -265,6 +317,7 @@ fn provisioning_owner_digest(
 /// active scheduling. A deferred writer must not fall back to host authority.
 fn bind_admitted_provisioning_owners(
     checkpoint: &mut provenant_fabric_runtime::graph::GraphCheckpoint,
+    sharing: &Sourced<Sharing>,
 ) -> Result<(), ServiceError> {
     use provenant_fabric_runtime::graph::{AccessMode, NodeState};
     let writers = checkpoint
@@ -305,10 +358,15 @@ fn bind_admitted_provisioning_owners(
             }
             if row.id == id || row.id == logical || row.worktree.as_deref() == Some(path.as_str()) {
                 if row.provisioned_owner.is_some_and(|prior| prior != owner) {
-                    return Err(refused(
-                        "writer_parent_required",
-                        "nested provisioning belongs to another lane",
-                    ));
+                    let tree = CustodySubject::new(SubjectKind::Worktree, path.clone());
+                    warn(Warning::new(
+                        WarningCode(WORKTREE_SHARED),
+                        format!(
+                            "{tree} had an advisory claim from another lane; it now names {owner}"
+                        ),
+                        provenant_records::warning::detected_source(WarningCode(WORKTREE_SHARED)),
+                    )
+                    .setting(sharing_setting_ref(sharing)));
                 }
                 row.provisioned_owner = Some(owner);
             }
@@ -320,6 +378,7 @@ fn bind_admitted_provisioning_owners(
 fn bind_provisioning_owner(
     checkpoint: &mut provenant_fabric_runtime::graph::GraphCheckpoint,
     node: &str,
+    sharing: &Sourced<Sharing>,
 ) -> Result<(), ServiceError> {
     let path = checkpoint
         .pending_writer_provisioning
@@ -341,10 +400,15 @@ fn bind_provisioning_owner(
         for row in &mut checkpoint.nodes {
             if row.id == node || row.worktree.as_deref() == Some(pending.path.as_str()) {
                 if row.provisioned_owner.is_some_and(|prior| prior != owner) {
-                    return Err(refused(
-                        "writer_parent_required",
-                        "nested provisioning belongs to another lane",
-                    ));
+                    let tree = CustodySubject::new(SubjectKind::Worktree, pending.path.clone());
+                    warn(Warning::new(
+                        WarningCode(WORKTREE_SHARED),
+                        format!(
+                            "{tree} had an advisory claim from another lane; it now names {owner}"
+                        ),
+                        provenant_records::warning::detected_source(WarningCode(WORKTREE_SHARED)),
+                    )
+                    .setting(sharing_setting_ref(sharing)));
                 }
                 row.provisioned_owner = Some(owner);
             }
@@ -491,6 +555,14 @@ fn serve_authorised(
     } else {
         Vec::new()
     };
+    // Wake is a read-class frame: it advances one custody subject under the
+    // caller's remaining deadline and grants no resume, retry or landing
+    // authority. The host reader applies the same-chair-session authorisation
+    // used for sibling reads and delegates to `progress::wake`; no mutation
+    // policy check or journal lock is taken on this path.
+    if arguments["op"].as_str() == Some("wake") {
+        return read(arguments);
+    }
     let mut op: RelayOp = serde_json::from_value(arguments)
         .map_err(|error| refused("invalid_input", format!("invalid graph frame: {error}")))?;
     // The lane has already started the launch allowance. This confirmed
@@ -849,7 +921,7 @@ fn serve_authorised(
                 return Ok(value);
             }
             if nested {
-                bind_admitted_provisioning_owners(&mut checkpoint)?;
+                bind_admitted_provisioning_owners(&mut checkpoint, &configured_sharing(context))?;
             }
             if request.needs_worktree_provisioning()
                 && !skipped_row(&checkpoint, &receipt.node)
@@ -867,7 +939,11 @@ fn serve_authorised(
                 // this point is finished by `recover_provisioning`.
                 relay::fence_provisioning(&mut checkpoint, &receipt.node, path, &source);
                 if nested {
-                    bind_provisioning_owner(&mut checkpoint, &receipt.node)?;
+                    bind_provisioning_owner(
+                        &mut checkpoint,
+                        &receipt.node,
+                        &configured_sharing(context),
+                    )?;
                     bind_shared_writers(context, &mut checkpoint, sealed_parent_worktree)?;
                 }
                 journal.save(&checkpoint).map_err(journal_error)?;
@@ -965,7 +1041,7 @@ fn serve_authorised(
                 ));
             }
             if nested && !admitted.replayed {
-                bind_admitted_provisioning_owners(&mut checkpoint)?;
+                bind_admitted_provisioning_owners(&mut checkpoint, &configured_sharing(context))?;
                 bind_shared_writers(context, &mut checkpoint, sealed_parent_worktree)?;
             }
             // Leave time to persist a refusal and deliver it to the caller.
@@ -1037,8 +1113,16 @@ fn serve_authorised(
         && let Some(owner) = checkpoint.nodes.iter_mut().find(|row| row.id == parent)
     {
         for warning in warnings.iter().filter_map(Value::as_str) {
-            if owner.warnings.len() < 64 && !owner.warnings.iter().any(|old| old == warning) {
-                owner.warnings.push(warning.to_owned());
+            if owner.warnings.len() < 64 && !owner.warnings.iter().any(|old| old.message == warning)
+            {
+                owner.warnings.push(Warning::new(
+                    provenant_records::warning::LEGACY_WARNING,
+                    warning,
+                    provenant_records::Source {
+                        layer: provenant_records::Layer::Detected,
+                        origin: Some("legacy graph warning".to_owned()),
+                    },
+                ));
             }
         }
     }
@@ -1049,24 +1133,31 @@ fn serve_authorised(
 
 /// Add this request's advisory input warnings to any durable admission
 /// warnings already on the reply, sorted and deduplicated.
-fn merge_warnings(value: &mut Value, extra: &[provenant_records::warning::Warning]) {
+fn merge_warnings(value: &mut Value, extra: &[Warning]) {
     if extra.is_empty() {
         return;
     }
-    let mut all: Vec<String> = value
+    // Keep the stable code and source: consumers read `warnings[].message`
+    // from the same JSON shape the model's `Vec<Warning>` serialises to.
+    let mut all: Vec<Value> = value
         .get("warnings")
         .and_then(Value::as_array)
-        .map(|existing| {
-            existing
-                .iter()
-                .filter_map(Value::as_str)
-                .map(str::to_owned)
-                .collect()
-        })
+        .cloned()
         .unwrap_or_default();
-    all.extend(extra.iter().map(|warning| warning.message.clone()));
-    all.sort();
-    all.dedup();
+    for warning in extra {
+        let Ok(rendered) = serde_json::to_value(warning) else {
+            continue;
+        };
+        let code = rendered.get("code").and_then(Value::as_str);
+        let duplicate = all.iter().any(|old| {
+            old.get("code").and_then(Value::as_str) == code
+                && old.get("message").and_then(Value::as_str) == Some(warning.message.as_str())
+        });
+        if !duplicate {
+            all.push(rendered);
+        }
+    }
+    all.sort_by_key(|value| value.to_string());
     value["warnings"] = json!(all);
 }
 
@@ -1226,7 +1317,7 @@ fn provision_added_writers(
         }
         relay::fence_provisioning(checkpoint, &owner, path, &source);
         if nested {
-            bind_provisioning_owner(checkpoint, &owner)?;
+            bind_provisioning_owner(checkpoint, &owner, &configured_sharing(context))?;
         }
         fresh.push(owner);
     }
@@ -1894,17 +1985,8 @@ fn launch_resolvers_with(
         }
     };
     let selection_review = fallback_review.as_ref().unwrap_or(review);
-    let applied_floors = selection_review.path_floors(&paths);
     let mut hard_review_coverage = false;
-    let mut hard_floor_tier: Option<String> = None;
     let mut hard_floor_lenses = Vec::new();
-    let risk_rank = |tier: &str| match tier {
-        "routine" => 0,
-        "substantial" => 1,
-        "crucial" => 2,
-        "terminal" => 3,
-        _ => 0,
-    };
     // Only a floor the project declared `hard = true` refuses; every other
     // class warns about a shortfall and names the missing lenses.
     for path in &paths {
@@ -1913,13 +1995,6 @@ fn launch_resolvers_with(
             continue;
         }
         hard_review_coverage = true;
-        let tier = floors.tier.as_deref().unwrap_or("routine");
-        if hard_floor_tier
-            .as_deref()
-            .is_none_or(|current| risk_rank(tier) > risk_rank(current))
-        {
-            hard_floor_tier = Some(tier.to_owned());
-        }
         for lens in floors.lenses {
             if !hard_floor_lenses.contains(&lens) {
                 hard_floor_lenses.push(lens);
@@ -1927,14 +2002,8 @@ fn launch_resolvers_with(
         }
     }
     let mut panel = selection_review.resolve_panel(&request, measured_size, &paths, false)?;
-    let coverage_minimum = hard_floor_tier
-        .as_deref()
-        .or(applied_floors.tier.as_deref())
-        .and_then(|tier| selection_review.select.by_risk.get(tier))
-        .and_then(|shape| selection_review.shapes.get(shape))
-        .or_else(|| selection_review.shapes.get(&panel.shape))
-        .map(|shape| shape.reviewers.iter().map(|reviewer| reviewer.count).sum())
-        .unwrap_or(panel.slots.len());
+    let coverage_minimum =
+        provenant_fabric_runtime::graph::template::default_review_minimum(panel.slots.len());
     if (!panel.minimum_family_counts.is_empty()
         || panel
             .slots
@@ -2084,6 +2153,15 @@ pub fn provision_writer(
 fn provisioning_refusal(error: provenant_confinement::worktrees::WorktreeError) -> ServiceError {
     use provenant_confinement::worktrees::WorktreeError;
     use provenant_fabric_runtime::coordination::facade::DispatchRefusalFact;
+    if let WorktreeError::CustodyCommand(command) = &error {
+        let diagnostic =
+            provenant_run::RunError::Writer(WorktreeError::CustodyCommand(command.clone()))
+                .diagnostic(provenant_records::diagnostic::Destination::Local);
+        return ServiceError::Facade(FacadeError::RecordedRefusal {
+            refusal_code: command.code.clone(),
+            diagnostic: Box::new(diagnostic),
+        });
+    }
     if matches!(&error, WorktreeError::ManagedPathMismatch { .. }) {
         let diagnostic = provenant_run::RunError::Writer(error)
             .diagnostic(provenant_records::diagnostic::Destination::Local);
@@ -2288,21 +2366,7 @@ fn provision_in_context(
                 return Err(WorktreeError::UnknownWriter);
             }
         }
-        let _writer = worktrees::cache_writer_guard(context.project_state, tree.path()).map_err(
-            |occupancy| match occupancy {
-                worktrees::Occupancy::Held => WorktreeError::WriterBusy {
-                    holder: worktrees::writer_holder(context.project_state, tree.path()).or_else(
-                        || {
-                            worktrees::load_owner(&tree)
-                                .ok()
-                                .flatten()
-                                .and_then(|owner| owner.attempt_id)
-                        },
-                    ),
-                },
-                other => worktrees::custody_refusal(other),
-            },
-        )?;
+        let _writer = worktrees::admitted_writer_guard(context, tree.path())?;
         worktrees::check_writer_terminal(tree.repo())?;
         let reference = provenant_confinement::repo::GitRefName::new(expected_branch)
             .map_err(|_| WorktreeError::IdentityChanged)?;
@@ -2405,13 +2469,35 @@ pub fn from_lane(
     cancel: &CancelToken,
     within: std::time::Duration,
 ) -> Result<Value, ServiceError> {
+    from_lane_value(serde_json::to_value(op)?, cancel, within)
+}
+
+/// Lane side: send one read-class wake frame to the host that owns the subject.
+/// It carries no mutation authority and uses the caller's remaining deadline.
+pub fn wake_from_lane(
+    subject: WakeSubjectRef,
+    cancel: &CancelToken,
+    within: std::time::Duration,
+) -> Result<Value, ServiceError> {
+    from_lane_value(
+        serde_json::to_value(GraphRelay::Wake { subject })?,
+        cancel,
+        within,
+    )
+}
+
+fn from_lane_value(
+    frame: Value,
+    cancel: &CancelToken,
+    within: std::time::Duration,
+) -> Result<Value, ServiceError> {
     let attempt = std::env::var(provenant_core::consumer_env::PARENT_ATTEMPT_ID)
         .ok()
         .and_then(|id| provenant_core::AttemptId::parse(&id).ok())
         .ok_or_else(|| refused("graph_relay_unavailable", "not running inside a lane"))?;
     provenant_fabric_runtime::relay::graph_authenticated(
         &provenant_providers::LaneRuntime::fabric_socket(attempt),
-        serde_json::to_value(op)?,
+        frame,
         cancel,
         within,
         crate::run::nested_authority::server_is_current_ancestor,

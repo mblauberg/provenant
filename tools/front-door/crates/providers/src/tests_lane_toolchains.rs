@@ -278,6 +278,7 @@ fn native_provider_preparation_keeps_npm_and_pnpm_caches_shared()
         permissions.credential_roots = provenant_core::CredentialRoots::for_home(&home);
         permissions.read_roots = vec![crate::launch::subtree(project_root)];
         let plan = provenant_confinement::ConfinedPlan::new(provenant_confinement::PlanRequest {
+            policy: provenant_records::policy::Policy::default(),
             scope: base_plan.scope(),
             permissions,
             codex: provenant_confinement::CodexPolicy::Clean,

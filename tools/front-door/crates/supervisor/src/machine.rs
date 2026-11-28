@@ -109,6 +109,7 @@ pub enum Effect {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 pub struct Budgets {
+    /// `u64::MAX` when the plan enforces no wall bound.
     pub wall_deadline_ms: u64,
     pub root_flush_ms: u64,
     pub descendant_grace_ms: u64,

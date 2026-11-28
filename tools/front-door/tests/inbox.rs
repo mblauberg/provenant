@@ -296,7 +296,7 @@ fn inbox_explicit_local_and_unconfigured_owner() -> Result {
             .contains("retry-answer")
     );
     assert!(
-        answer["error"]["repair"]
+        answer["next"][0]["why"]
             .as_str()
             .ok_or("repair")?
             .contains("--operation-id retry-answer")
@@ -320,7 +320,9 @@ fn inbox_explicit_local_and_unconfigured_owner() -> Result {
         None,
         3,
     )?;
-    let repair = generated["error"]["repair"].as_str().ok_or("repair")?;
+    let repair = generated["next"][0]["why"]
+        .as_str()
+        .ok_or("next condition")?;
     let operation = repair
         .split_once("--operation-id ")
         .ok_or("operation ID in repair")?
@@ -734,10 +736,11 @@ fn inbox_outside_a_project_without_state_names_cause_and_repair() -> Result {
     );
     assert!(error["cause"].as_str().is_some());
     assert!(
-        error["repair"]
-            .as_str()
-            .ok_or("repair")?
-            .contains("--all-projects")
+        error["next"]
+            .as_array()
+            .ok_or("next")?
+            .iter()
+            .any(|step| step.to_string().contains("--all-projects"))
     );
     Ok(())
 }

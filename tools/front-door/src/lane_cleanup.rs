@@ -1184,6 +1184,11 @@ fn remote_outcomes(
                 path: context.repo.root_path().into(),
                 detail,
             })?;
+        worktrees::guard_destructive_branch(
+            context.project_state,
+            &reference,
+            "remote branch delete",
+        )?;
         worktrees::validate_removal_evidence(context, tip, &evidence, &evidence_refs, cancel)
     };
     if let Err(error) = eligible() {
@@ -2457,9 +2462,9 @@ mod tests {
                 .iter()
                 .find(|warning| warning.code.as_ref() == "FORGE_CONTEXT_UNRESOLVED")
                 .expect("a fail-closed forge refusal");
-            let repair = refusal.repair.as_deref().expect("an actionable repair");
-            assert!(repair.contains("git.remote"), "{repair}");
-            assert!(repair.contains("provenant gc"), "{repair}");
+            let next = refusal.next.first().expect("next").display_text();
+            assert!(next.contains("git.remote"), "{next}");
+            assert!(next.contains("provenant gc"), "{next}");
             for branch in ["main", "lane/old", "lane/changed"] {
                 let reference = GitRefName::branch(branch).expect("branch");
                 assert!(!scope.permits(&reference), "{branch} must not be retired");
@@ -2487,13 +2492,10 @@ mod tests {
                 .iter()
                 .find(|warning| warning.code.as_ref() == "FORGE_CONTEXT_UNRESOLVED")
                 .expect("a fail-closed forge refusal");
-            let repair = refusal.repair.as_deref().expect("an actionable repair");
-            assert!(
-                repair.contains("git remote set-head bound --auto"),
-                "{repair}"
-            );
-            assert!(repair.contains("git.default_branch"), "{repair}");
-            assert!(repair.contains("provenant gc"), "{repair}");
+            let next = refusal.next.first().expect("next").display_text();
+            assert!(next.contains("git remote set-head bound --auto"), "{next}");
+            assert!(next.contains("git.default_branch"), "{next}");
+            assert!(next.contains("provenant gc"), "{next}");
             Ok(())
         })?;
         Ok(())

@@ -1964,11 +1964,14 @@ fn usage_verbs_keep_their_persisted_spelling() {
         "ci failures",
         "ci failures pr",
         "ci failures run",
+        "ci patch pr",
+        "ci patch run",
         "cloud collect",
         "cloud launch",
         "config apply",
         "config check",
         "config detect",
+        "config explain",
         "config history",
         "config path",
         "config ports",
@@ -2027,6 +2030,7 @@ fn usage_verbs_keep_their_persisted_spelling() {
         "internal tick-gc",
         "land",
         "lane deliver",
+        "lane share",
         "native end",
         "native start",
         "notes add",
@@ -2038,6 +2042,13 @@ fn usage_verbs_keep_their_persisted_spelling() {
         "pr status",
         "pr sync",
         "process-tree",
+        "queue accept",
+        "queue drop",
+        "queue fix",
+        "queue hold",
+        "queue prioritise",
+        "queue resume",
+        "queue status",
         "quota",
         "quota clear",
         "quota display",
@@ -2046,6 +2057,8 @@ fn usage_verbs_keep_their_persisted_spelling() {
         "quota tick",
         "reconcile",
         "release",
+        // The spec adds retire as a first-class command; its usage spelling is persisted.
+        "retire",
         "result",
         "retry",
         "root",
@@ -2146,11 +2159,15 @@ fn production_files_stay_within_their_line_ceilings() -> Result<(), Box<dyn Erro
         ("crates/fabric-runtime/src/coordination/facade.rs", 2000),
         ("crates/fabric-runtime/src/graph.rs", 4500),
         ("crates/fabric-runtime/src/graph/journal.rs", 2750),
-        ("crates/fabric-runtime/src/graph/model.rs", 3000),
-        ("crates/fabric-runtime/src/graph/outputs.rs", 2500),
-        ("crates/fabric-runtime/src/graph/patch.rs", 2500),
+        // Review machinery wiring (#4121); split tracked in #4143.
+        ("crates/fabric-runtime/src/graph/model.rs", 3500),
+        ("crates/fabric-runtime/src/graph/outputs.rs", 2750),
+        ("crates/fabric-runtime/src/graph/patch.rs", 2750),
         ("crates/fabric-runtime/src/graph/plans.rs", 2500),
-        ("crates/fabric-runtime/src/graph/template.rs", 3250),
+        // Review machinery wiring (#4121); split tracked in #4143.
+        ("crates/fabric-runtime/src/graph/schedule.rs", 2750),
+        // Review-minimum default (#4121); split tracked in #4143.
+        ("crates/fabric-runtime/src/graph/template.rs", 3500),
         ("crates/fabric-runtime/src/graph/transitions.rs", 2750),
         ("crates/fabric-runtime/src/hosts.rs", 4000),
         ("crates/os/src/sys/pid.rs", 2750),
@@ -2174,7 +2191,8 @@ fn production_files_stay_within_their_line_ceilings() -> Result<(), Box<dyn Erro
         ("crates/run/src/completion.rs", 2750),
         // Stall detection and its opt-in policy (#3903); unreadable-record
         // writer-lease reclaim under writer exclusion (#3829).
-        ("crates/run/src/controls.rs", 5500),
+        // Agent-native wiring of reclaim and custody grace (#4121).
+        ("crates/run/src/controls.rs", 5750),
         ("crates/run/src/delivery.rs", 4750),
         ("crates/run/src/git_context.rs", 3000),
         // One host phase and one sealed settlement assembly (#4020, #4024).
@@ -2192,7 +2210,7 @@ fn production_files_stay_within_their_line_ceilings() -> Result<(), Box<dyn Erro
         ("crates/supervisor/src/guardian.rs", 3250),
         ("crates/workflow/src/session.rs", 3500),
         ("src/ci.rs", 2500),
-        ("src/fabric/graph_execution.rs", 2750),
+        ("src/fabric/graph_execution.rs", 3000),
         // The #4064 reused-worktree review-base binding, typed writer-base
         // report and node-sourced panel helpers, #4066's authored repair writer
         // resolution and per-node route preview, and the #4062 adapter

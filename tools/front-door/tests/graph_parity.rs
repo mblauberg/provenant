@@ -22,7 +22,10 @@ type Crash = provenant_fabric_runtime::coordination::facade::FacadeError;
 
 fn crash() -> Crash {
     provenant_core::OperationId::parse("op")
-        .map(|operation_id| Crash::LaunchUnknown { operation_id })
+        .map(|operation_id| Crash::LaunchUnknown {
+            operation_id,
+            detail: None,
+        })
         .unwrap_or(Crash::StateCorrupt)
 }
 
@@ -87,6 +90,8 @@ impl AttemptOwner for Provider {
             .as_ref()
             .map(|head| graph::WriterWorktreeBinding {
                 extra: Default::default(),
+                carry_examined: false,
+                carried_paths: Vec::new(),
                 shared_worktree: None,
                 source_directory_identity: None,
                 worktree: worktree.into(),

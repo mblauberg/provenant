@@ -976,6 +976,7 @@ fn main() -> Result<()> {
         policy
             .resolve_optional_aliases(provenant_confinement::permissions::resolve_boundary_path)?;
         Ok(ConfinedPlan::new(PlanRequest {
+            policy: provenant_records::policy::Policy::default(),
             scope: WorkScope::Project(ProjectId::from_bytes([7; 16])),
             permissions: PlanPermissions {
                 credential_roots: mandatory.credential_roots().clone(),

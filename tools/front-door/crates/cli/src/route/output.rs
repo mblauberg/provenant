@@ -392,7 +392,7 @@ pub fn run(
                     next.to_owned()
                 });
             let mut command_error = CommandError::new(code, error.to_string(), None, repair);
-            command_error.diagnostic = diagnostic;
+            command_error.set_diagnostic(diagnostic);
             result.error = Some(command_error);
             result
         }
@@ -681,6 +681,6 @@ pub fn run(
     );
     // Spec: docs/specs/cli.md#warnings-are-typed-values
     let outcome =
-        crate::render_command_result(&mut result, mode, publish, crate::OverflowPolicy::Refuse);
+        crate::render_command_result(&mut result, mode, publish, crate::OverflowPolicy::Proceed);
     outcome.map_or(3, |outcome| crate::exit_status(&outcome))
 }

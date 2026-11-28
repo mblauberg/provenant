@@ -43,6 +43,7 @@ pub use hooks_config::{
     Settings as HookSettings, hook_budget,
 };
 mod inspection;
+pub use inspection::{ExplanationCandidate, SettingExplanation, explain};
 mod knobs;
 mod lane_history;
 mod loader;
@@ -67,6 +68,7 @@ pub use forge::{
 };
 pub mod ports;
 mod project_binding;
+mod project_fence;
 pub use ports::{
     Adapter, BuildClean, BuildOffload, BuildOverflow, BuildPort, BuildPriority, BuildSoakPort,
     BuildStrategyName, BuildTargetKey, CommandExitCodes, DEFAULT_BUILD_TARGET_KEYS,
@@ -111,23 +113,26 @@ pub use domains::{
 };
 pub use edit::{EditOptions, Edited, edit_config, revision_of, show};
 pub use history::{FieldChange, HistoryEntry, HistoryLimits, history};
-pub use knobs::{KNOB_PRECEDENCE, KnobEdit, knob_source, read_source_value};
+pub use knobs::{KNOB_PRECEDENCE, KnobEdit, READ_SOURCE_LIVE, knob_source, read_source_value};
 pub use lane_history::{
     CONFLICT_MARKERS, DEFAULT_BRANCH_REWRITE, DefaultBranchRewrite, HistoryEffect, HistoryValue,
     LaneHistory, REBASE, Rebase, Setting, UNROOTED_TIP,
 };
 pub use loader::{
-    config_show, inspect_config, load, load_with_domains, read, read_knobs, read_with_domains,
+    config_show, inspect_config, load, load_with_domains, read, read_knobs, read_knobs_at_state,
+    read_with_domains,
 };
 pub use presets::Profile;
 pub use project_binding::{
-    GcProjectSelection, GcProjectStatus, ProjectBinding, ProjectLocation, Retirement, bind_host,
-    bind_project, forget_project, forget_project_at_state, host_project_dir, lookup_gc_project,
-    lookup_host, lookup_project, lookup_project_at_state, lookup_project_by_id,
-    project_binding_dir, registered_gc_project_selection,
+    GcProjectSelection, GcProjectStatus, PROJECT_RETRY_SECONDS, ProjectBinding, ProjectIncarnation,
+    ProjectLocation, ProjectPresence, Retirement, bind_host, bind_project,
+    classify_project_presence, forget_project, forget_project_at_state, host_project_dir,
+    lookup_gc_project, lookup_host, lookup_project, lookup_project_at_state, lookup_project_by_id,
+    project_binding_dir, project_id_for_path, project_presence, registered_gc_project_selection,
     registered_gc_project_selection_with_progress, registered_gc_projects, registered_projects,
     retire_vanished_projects, transient_location,
 };
+pub use project_fence::{fence_project, project_is_retired, unfence_project};
 pub use provenant_records::{Finding, Layer};
 pub use schema::{
     DEDICATED_COMMANDS, DeclaredEnum, SCHEMA_PRECEDENCE, Schema, SchemaField, apply_edit,

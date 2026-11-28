@@ -138,6 +138,8 @@ impl Context {
         let graph_prompt_limit_source = prompt_limit_source(&resolved.origins);
         let graph_decide_timeout_source = decide_timeout_source(&resolved.origins);
         let local_observation = crate::wait::observation_settings(&resolved);
+        let review_policy_base =
+            super::review_policy(&resolved.domains.review, &resolved.knobs, &resolved.origins);
         let config = resolved.domains.fabric;
         let host = match host {
             LaneHost::Lookup => provenant_config::lookup_host(&roots)?.ok_or(EdgeError::Invalid)?,
@@ -152,6 +154,11 @@ impl Context {
             project_config_root.as_deref(),
             roots.state.as_path(),
         )?;
+        let review_policy = super::project_review_policy(
+            review_policy_base,
+            roots.state.as_path(),
+            Some(&project_root),
+        );
         let key = if repository {
             match CrossHostProjectKey::from_home(home, binding.common_dir()) {
                 Ok(key) => Some(key),
@@ -175,6 +182,8 @@ impl Context {
             roots,
             identity,
             config,
+            review_policy,
+            projection: super::projection_from_knobs(&resolved.knobs),
             local_observation,
             port_table,
             project_root,

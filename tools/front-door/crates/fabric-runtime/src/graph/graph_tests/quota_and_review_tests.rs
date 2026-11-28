@@ -328,11 +328,48 @@ fn writer_provision_recovery_keeps_the_checkpointed_base() {
     );
     assert!(checkpoint.nodes[0].writer_binding.is_none());
     assert_eq!(owner.provisions.len(), 1);
+    assert!(owner.carry_requests.is_empty(), "explicit base must not carry chair edits");
     owner.resolved_review_base = Some("b".repeat(40));
     let recovered = advance(&document, &mut owner, &mut journal).unwrap();
     assert_eq!(recovered.checkpoint.nodes[0].state, NodeState::Succeeded);
     assert_eq!(owner.provisions[1].2, pinned);
+    assert!(owner.carry_requests.is_empty(), "recovery must preserve the explicit-base exclusion");
     assert_eq!(owner.review_base_resolutions, 1);
+}
+
+#[test]
+fn default_writer_base_requests_the_selected_carry_mode() {
+    let mut writer = node("writer", route("first"));
+    writer.access = AccessMode::WorktreeWrite;
+    writer.worktree = Some(".worktrees/topic-fix".into());
+    writer.attempt = Some(serde_json::from_value(serde_json::json!({
+        "new_worktree": {"branch":"topic/fix", "base":"HEAD", "default_base":true},
+        "carry_uncommitted":"all"
+    })).unwrap());
+    let mut document = graph(vec![writer]);
+    document.schema_version = 2;
+    let mut owner = FakeOwner {
+        resolved_review_base: Some("a".repeat(40)),
+        observations: [terminal(GraphAttemptOutcome::Succeeded)].into(),
+        ..Default::default()
+    };
+    let mut journal = MemoryJournal::default();
+    advance(&document, &mut owner, &mut journal).unwrap();
+    assert_eq!(owner.carry_requests.len(), 1);
+    assert_eq!(owner.carry_requests[0].1, "writer");
+    assert_eq!(owner.carry_requests[0].2, Some(provenant_records::lane_contract::CarryMode::All));
+
+    let project = provenant_core::ProjectId::from_bytes([1; 16]);
+    document.peer_origin_work_key = Some(provenant_records::WorkKey::new(project, "sender", "writer", 1).unwrap());
+    let mut peer = FakeOwner {
+        resolved_review_base: Some("a".repeat(40)),
+        observations: [terminal(GraphAttemptOutcome::Succeeded)].into(),
+        ..Default::default()
+    };
+    let mut peer_journal = MemoryJournal::default();
+    advance(&document, &mut peer, &mut peer_journal).unwrap();
+    assert!(peer.carry_requests.is_empty(), "peer checkout edits are not the chair's edits");
+    assert_eq!(peer.peer_carry_requests, [Some(provenant_records::lane_contract::CarryMode::All)]);
 }
 
 #[test]
@@ -420,7 +457,7 @@ fn typed_delta_verifier_can_falsify_a_previously_upheld_finding() {
     let mut owner = FakeOwner {
         observations: [
             terminal_with_result(GraphAttemptOutcome::Succeeded, &findings_text(&entry(",\"verification\":\"upheld\""))),
-            terminal_with_result(GraphAttemptOutcome::Succeeded, &findings_text(r#"{"id":"F1","verification":"falsified","reason":"Delta removed the failing path","triage":{"decision":"rejected","reason":"Delta removed the failing path","worth_fixing":false,"root_cause":"failing path","blocking_class":"none"}}"#)),
+            terminal_with_result(GraphAttemptOutcome::Succeeded, &findings_text(r#"{"id":"F1","verification":"falsified","reason":"Delta removed the failing path","evidence":"The delta deletes the failing path and the regression test no longer reaches it","triage":{"decision":"rejected","reason":"Delta removed the failing path","worth_fixing":false,"root_cause":"failing path","blocking_class":"none"}}"#)),
         ].into(),
         ..Default::default()
     };
@@ -480,6 +517,8 @@ fn writer_binding_and_provisioning_contention_wait_for_the_same_launch() {
         fn binding(&self, path: &str) -> Option<WriterWorktreeBinding> {
             Some(WriterWorktreeBinding {
                 extra: Default::default(),
+                carry_examined: false,
+                carried_paths: Vec::new(),
                 shared_worktree: None,
                 source_directory_identity: None,
                 worktree: format!("/fixture/{path}"),
@@ -525,15 +564,20 @@ fn writer_binding_and_provisioning_contention_wait_for_the_same_launch() {
             _: &str,
             _: &str,
         _owner: Option<provenant_core::Digest>,
+        _carry: Option<&WriterCarryRequest<'_>>,
     ) -> Result<Option<WriterWorktreeBinding>, Self::Error> {
             self.contend(1)?;
             Ok(self.binding(path))
         }
-        fn provision_child_worktree(&mut self, _: &str, _: &str,
-        _owner: Option<provenant_core::Digest>,
-    ) -> Result<bool, Self::Error> {
+        fn provision_child_worktree(
+            &mut self,
+            _: &str,
+            _: &str,
+            _owner: Option<provenant_core::Digest>,
+            _: Option<&WriterCarryRequest<'_>>,
+        ) -> Result<Option<ChildWorktreeProvision>, Self::Error> {
             self.contend(2)?;
-            Ok(true)
+            Ok(Some(ChildWorktreeProvision::default()))
         }
         fn observe_or_start(
             &mut self,

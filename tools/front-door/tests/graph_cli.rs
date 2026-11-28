@@ -2031,11 +2031,17 @@ fn review_shape_selects_the_expected_template_nodes() -> Result {
                 {
                     out.push(id.to_owned());
                     if matches!(id, "lenses" | "verify") && map.contains_key("composite") {
-                        // A lens panel carries its configured reviewer count into
-                        // settlement as the coverage minimum (docs/specs/fabric.md,
-                        // review panels); verification still needs one success.
+                        // A lens panel needs all but one lens, at least one
+                        // (docs/specs/agent-native.md, review panels);
+                        // verification still needs one success.
                         let minimum = if id == "lenses" {
-                            json!(map["composite"]["nodes"].as_array().map_or(0, Vec::len))
+                            json!(
+                                map["composite"]["nodes"]
+                                    .as_array()
+                                    .map_or(0, Vec::len)
+                                    .saturating_sub(1)
+                                    .max(1)
+                            )
                         } else {
                             json!(1)
                         };
@@ -2166,7 +2172,10 @@ fn invalid_template_documents_are_refused_by_list_and_show() -> Result {
     let (output, refusal) = rig.run(&["run", "broken", "inspect"])?;
     assert!(!output.status.success(), "{refusal}");
     assert_eq!(refusal["error"]["code"], "invalid_input", "{refusal}");
-    assert!(refusal["error"]["repair"].is_string(), "{refusal}");
+    assert!(
+        !refusal["next"].as_array().ok_or("next steps")?.is_empty(),
+        "{refusal}"
+    );
     assert!(graph_records(&rig.state())?.is_empty());
     Ok(())
 }
@@ -3344,9 +3353,7 @@ fn steer_graph_and_node_refuse_an_unlaunched_attempt_before_reading_stdin() -> R
     assert_eq!(value["status"], "refused", "{value}");
     assert_eq!(value["error"]["code"], "steer_graph_complete", "{value}");
     assert!(
-        value["error"]["repair"]
-            .as_str()
-            .is_some_and(|repair| repair.contains("provenant run implement --worktree")),
+        serde_json::to_string(&value["next"][0])?.contains("provenant run implement --worktree"),
         "{value}"
     );
     let human = rig
@@ -3429,9 +3436,7 @@ fn steer_at_a_settled_node_refuses_even_while_a_sibling_is_running() -> Result {
     assert_eq!(value["status"], "refused", "{value}");
     assert_eq!(value["error"]["code"], "steer_graph_complete", "{value}");
     assert!(
-        value["error"]["repair"]
-            .as_str()
-            .is_some_and(|repair| repair.contains("steer-sibling/done")),
+        serde_json::to_string(&value["next"][0])?.contains("steer-sibling/done"),
         "{value}"
     );
     Ok(())
@@ -3504,9 +3509,7 @@ fn steer_on_a_complete_graph_refuses_even_when_warn_is_configured() -> Result {
     assert_eq!(value["status"], "refused", "{value}");
     assert_eq!(value["error"]["code"], "steer_graph_complete", "{value}");
     assert!(
-        value["error"]["repair"]
-            .as_str()
-            .is_some_and(|repair| repair.contains("provenant run implement --worktree")),
+        serde_json::to_string(&value["next"][0])?.contains("provenant run implement --worktree"),
         "{value}"
     );
     // No note is written for a follow-up that will never run.

@@ -1,3 +1,4 @@
+use crate::deadline::Deadline;
 use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
 use thiserror::Error;
@@ -185,18 +186,6 @@ impl MonoTime {
     }
 }
 
-/// Process-local deadline; never persisted as a cross-process timestamp.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Deadline(MonoTime);
-impl Deadline {
-    pub const fn as_mono_time(self) -> MonoTime {
-        self.0
-    }
-    pub fn is_expired(self, now: MonoTime) -> bool {
-        now >= self.0
-    }
-}
-
 /// The longest a lane, provider deadline or CLI wait may run, in seconds.
 pub const MAX_LANE_RUNTIME_SECONDS: u64 = 14_400;
 
@@ -225,7 +214,7 @@ impl WaitBudget {
     /// holding repository metadata exclusion; never wait on a later lock.
     pub const fn nonblocking(now: MonoTime) -> Self {
         Self {
-            deadline: Deadline(now),
+            deadline: Deadline::at(now),
             nonblocking: true,
         }
     }
@@ -247,7 +236,7 @@ impl WaitBudget {
             return Err(TimeError::WaitLimit { maximum_seconds });
         }
         Ok(Self {
-            deadline: Deadline(now.checked_add(duration)?),
+            deadline: Deadline::at(now.checked_add(duration)?),
             nonblocking: false,
         })
     }
@@ -257,7 +246,7 @@ impl WaitBudget {
     pub fn up_to(now: MonoTime, duration: DurationMicros) -> Self {
         let maximum = DurationMicros(MAX_LANE_RUNTIME_SECONDS * 1_000_000);
         Self {
-            deadline: Deadline(
+            deadline: Deadline::at(
                 now.checked_add(DurationMicros(duration.0.min(maximum.0)))
                     .unwrap_or(MonoTime(u64::MAX)),
             ),
@@ -282,7 +271,7 @@ impl WaitBudget {
     /// or expired bounds. This never turns expiry into an immediate probe.
     pub fn cap_at(self, deadline: MonoTime) -> Self {
         Self {
-            deadline: Deadline(self.deadline.0.min(deadline)),
+            deadline: Deadline::at(self.deadline.as_mono_time().min(deadline)),
             ..self
         }
     }
@@ -291,7 +280,7 @@ impl WaitBudget {
         self.deadline
     }
     pub fn remaining(self, now: MonoTime) -> DurationMicros {
-        DurationMicros(self.deadline.0.0.saturating_sub(now.0))
+        self.deadline.remaining(now)
     }
 }
 
@@ -422,6 +411,26 @@ mod tests {
                 .deadline()
                 .as_mono_time(),
             later
+        );
+    }
+    #[test]
+    fn wait_budget_reports_its_deadlines_remaining_budget() {
+        let start = MonoTime::from_micros(1_000_000);
+        let budget = WaitBudget::relay(start, 5).unwrap();
+        for sample in [
+            start,
+            MonoTime::from_micros(1_250_000),
+            MonoTime::from_micros(6_000_000),
+        ] {
+            assert_eq!(
+                budget.remaining(sample),
+                budget.deadline().remaining(sample),
+                "budget and deadline disagree at {sample:?}"
+            );
+        }
+        assert_eq!(
+            budget.remaining(MonoTime::from_micros(6_000_000)),
+            DurationMicros::ZERO
         );
     }
     #[test]

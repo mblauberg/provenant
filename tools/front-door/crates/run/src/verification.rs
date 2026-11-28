@@ -2,7 +2,13 @@
 //! format only; the paragraph names what the chair's integrated check and CI
 //! will run. Advisory: the preamble names its source. A brief line overrides
 //! the knob.
-use provenant_records::{Layer, run::HarnessProfile};
+use provenant_records::{
+    Layer,
+    command_result::SettingRef,
+    provenance::Source,
+    run::HarnessProfile,
+    warning::{self, VERIFICATION_BRIEF_OVERRIDES, Warning},
+};
 
 /// The registry knob.
 pub const KNOB: &str = "lanes.verification";
@@ -44,11 +50,11 @@ pub struct ResolvedVerification {
     pub source: &'static str,
 }
 
-/// What the preamble should say, and a stop cause when the knob and the brief disagree.
+/// What the preamble should say. A brief line wins over the knob and is
+/// reported with `VERIFICATION_BRIEF_OVERRIDES`; there is no stop cause.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VerificationResolution {
     pub scope: ResolvedVerification,
-    pub conflict: Option<String>,
 }
 
 impl VerificationResolution {
@@ -60,36 +66,28 @@ impl VerificationResolution {
             .and_then(VerificationScope::parse);
         let knob_source = provenant_config::knob_source(profile, KNOB);
         let brief_scope = brief_scope(brief);
-        match (brief_scope, knob) {
-            (Some(brief_value), Some(knob_value)) if brief_value != knob_value => Self {
-                scope: ResolvedVerification {
+        let scope = match (brief_scope, knob) {
+            (Some(brief_value), Some(knob_value)) if brief_value != knob_value => {
+                brief_override_warning(brief_value, knob_value, knob_source);
+                ResolvedVerification {
                     value: brief_value,
                     source: "brief",
-                },
-                conflict: Some(conflict_cause(knob_value.as_str(), brief_value.as_str())),
+                }
+            }
+            (Some(brief_value), _) => ResolvedVerification {
+                value: brief_value,
+                source: "brief",
             },
-            (Some(brief_value), _) => Self {
-                scope: ResolvedVerification {
-                    value: brief_value,
-                    source: "brief",
-                },
-                conflict: None,
+            (None, Some(value)) => ResolvedVerification {
+                value,
+                source: display_source(knob_source),
             },
-            (None, Some(value)) => Self {
-                scope: ResolvedVerification {
-                    value,
-                    source: display_source(knob_source),
-                },
-                conflict: None,
+            (None, None) => ResolvedVerification {
+                value: VerificationScope::Targeted,
+                source: "default",
             },
-            (None, None) => Self {
-                scope: ResolvedVerification {
-                    value: VerificationScope::Targeted,
-                    source: "default",
-                },
-                conflict: None,
-            },
-        }
+        };
+        Self { scope }
     }
 
     /// The verification paragraph. Default `targeted` is [`CHECK_PARAGRAPH`].
@@ -128,10 +126,36 @@ fn display_source(source: Layer) -> &'static str {
     }
 }
 
-/// Stop cause when guidance and the brief name different scopes. The preamble
-/// follows the brief; this names both if the lane stops on the disagreement.
-pub fn conflict_cause(guidance: &str, brief: &str) -> String {
-    format!("verification scope conflict: lane guidance is {guidance}; the brief declares {brief}")
+/// The brief wins: report the override as a typed warning that names both
+/// scopes and the losing setting, with a next step to keep the knob in charge.
+fn brief_override_warning(brief: VerificationScope, knob: VerificationScope, layer: Layer) {
+    warning::warn(
+        Warning::new(
+            VERIFICATION_BRIEF_OVERRIDES,
+            format!(
+                "brief verification scope {} overrides {KNOB}={} from {}",
+                brief.as_str(),
+                knob.as_str(),
+                layer.as_str()
+            ),
+            Source {
+                layer: Layer::Launch,
+                origin: Some("brief#Verification scope".to_owned()),
+            },
+        )
+        .subject(KNOB)
+        .setting(SettingRef {
+            key: KNOB.to_owned(),
+            value: knob.as_str().to_owned(),
+            layer,
+            origin: format!("{}#{KNOB}", layer.as_str()),
+        })
+        .repair(format!(
+            "remove the brief line to use {KNOB}={} from {}",
+            knob.as_str(),
+            layer.as_str()
+        )),
+    );
 }
 
 #[cfg(test)]
@@ -143,17 +167,25 @@ mod tests {
         let mut profile = HarnessProfile::default();
         profile.knobs.insert(KNOB.into(), "check".into());
         profile.knob_sources.insert(KNOB.into(), Layer::Host);
-        let resolved = VerificationResolution::resolve(
-            &profile,
-            "Do the work.\nVerification scope: targeted\n",
-        );
+        let (resolved, warnings) = warning::capture(|| {
+            VerificationResolution::resolve(
+                &profile,
+                "Do the work.\nVerification scope: targeted\n",
+            )
+        });
         assert_eq!(resolved.scope.value, VerificationScope::Targeted);
         assert_eq!(resolved.scope.source, "brief");
-        // docs/specs/run.md: a knob that disagrees with the brief line is a
-        // conflict; the paragraph follows the brief and the cause names both.
-        let cause = resolved.conflict.as_deref().expect("conflict");
-        assert!(cause.contains("lane guidance is check"), "{cause}");
-        assert!(cause.contains("the brief declares targeted"), "{cause}");
+        // The brief wins; the disagreement is a typed warning that names both
+        // scopes and the losing setting, not a stop cause on the resolution.
+        let warning = warnings.first().expect("override warning");
+        assert_eq!(warning.code.as_ref(), VERIFICATION_BRIEF_OVERRIDES.as_str());
+        assert!(warning.message.contains("check"), "{}", warning.message);
+        assert!(warning.message.contains("targeted"), "{}", warning.message);
+        let setting = warning.setting.as_ref().expect("losing setting");
+        assert_eq!(setting.key, KNOB);
+        assert_eq!(setting.value, "check");
+        assert_eq!(setting.layer, Layer::Host);
+        assert!(!warning.next.is_empty());
         let text = resolved.paragraph();
         assert!(text.contains("source: brief"));
         assert!(text.contains("touched crates and their tests"));
@@ -173,7 +205,7 @@ mod tests {
         assert!(!resolved.paragraph().contains("cargo check"));
     }
 
-    // Spec: docs/specs/run.md#lanes-do-not-build
+    // Spec: docs/specs/run.md#build-strategy
     #[test]
     fn every_scope_tells_the_lane_to_format_and_never_to_build() {
         for (scope, source) in [
@@ -195,15 +227,32 @@ mod tests {
     }
 
     #[test]
-    fn a_conflict_stop_names_the_guidance_and_the_brief() {
+    fn a_brief_override_warns_and_names_the_guidance_and_the_brief() {
         let mut profile = HarnessProfile::default();
         profile.knobs.insert(KNOB.into(), "check".into());
         profile.knob_sources.insert(KNOB.into(), Layer::Launch);
-        let resolved = VerificationResolution::resolve(&profile, "Verification scope: full\n");
-        let cause = resolved.conflict.expect("conflict");
-        assert!(cause.contains("lane guidance is check"));
-        assert!(cause.contains("the brief declares full"));
+        let (resolved, warnings) = warning::capture(|| {
+            VerificationResolution::resolve(&profile, "Verification scope: full\n")
+        });
+        let warning = warnings.first().expect("override warning");
+        assert_eq!(warning.code.as_ref(), VERIFICATION_BRIEF_OVERRIDES.as_str());
+        assert!(warning.message.contains("check"), "{}", warning.message);
+        assert!(warning.message.contains("full"), "{}", warning.message);
         assert_eq!(resolved.scope.source, "brief");
         assert_eq!(resolved.scope.value, VerificationScope::Full);
+    }
+
+    #[test]
+    fn an_agreeing_or_absent_brief_emits_no_override_warning() {
+        let mut profile = HarnessProfile::default();
+        profile.knobs.insert(KNOB.into(), "full".into());
+        profile.knob_sources.insert(KNOB.into(), Layer::Project);
+        let (_, warnings) = warning::capture(|| {
+            VerificationResolution::resolve(&profile, "Verification scope: full\n")
+        });
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let (_, warnings) =
+            warning::capture(|| VerificationResolution::resolve(&profile, "implement it"));
+        assert!(warnings.is_empty(), "{warnings:?}");
     }
 }

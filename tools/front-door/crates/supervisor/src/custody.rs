@@ -2,8 +2,10 @@
 pub(crate) mod liveness;
 use crate::census::{
     CensusError, ProcessIdentity, ProcessObservation, ProcessObserver, SystemProcessObserver,
+    boot_observer,
 };
 use crate::machine::StopReason;
+use crate::process_os::handoff::HandoffFailure;
 pub use liveness::{GuardianLossRecovery, LossUnproven};
 use provenant_core::{ActorId, AttemptId, CancelToken, Clock, Digest, GitOid, WaitBudget};
 use provenant_os::{
@@ -18,7 +20,10 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use thiserror::Error;
 
+mod capture;
 mod indexes;
+mod launch_failure;
+pub use launch_failure::{LaunchFailure, LaunchPhase};
 mod writer_release;
 pub use indexes::{
     RecordedAttemptIndex, attempt_index_retired, recorded_attempt_indexes, register_attempt_index,
@@ -96,17 +101,32 @@ pub enum CustodyError {
     UnknownIdentity,
     #[error("record is invalid or belongs to another generation")]
     InvalidRecord,
+    #[error("capture plan {field} is {value}, outside {bound}")]
+    CapturePlan {
+        field: &'static str,
+        value: u64,
+        bound: String,
+    },
     #[error(
         "attempt evidence was written before shared worktree leases and a holder may still be live; stop that holder and run `provenant reconcile` to clear the reservation"
     )]
     LegacyEvidence,
-    #[error("launch handoff is unconfirmed; reservation remains fenced")]
-    HandoffUnknown,
+    #[error("launch handoff is unconfirmed ({0}); reservation remains fenced")]
+    HandoffUnknown(String),
     /// This host cannot hold provider custody; nothing was handed off.
     #[error("process custody is supported only on macOS")]
     UnsupportedPlatform,
-    #[error("sandbox profile transport handoff is unconfirmed; reservation remains fenced")]
-    ProfileHandoffUnknown,
+    #[error("sandbox profile transport handoff is unconfirmed ({0}); reservation remains fenced")]
+    ProfileHandoffUnknown(String),
+    /// The guardian never held the whole launch message; nothing launched.
+    #[error("launch message never reached the guardian ({0}); the provider never launched")]
+    HandoffUndelivered(String),
+    /// The sandbox profile failed in transit or the guardian refused it before
+    /// accepting custody; nothing launched.
+    #[error(
+        "sandbox profile transport failed before the guardian accepted the launch ({0}); the provider never launched"
+    )]
+    ProfileHandoffUndelivered(String),
     #[error("operation was cancelled; custody is retained")]
     Cancelled,
     #[error("another stop request already owns this attempt")]
@@ -579,11 +599,16 @@ pub struct CustodyLease {
     pub(crate) lease: Option<LockGuard>,
     pub(crate) holder: Option<LockGuard>,
     pub(crate) reservation: Reservation,
-    launched: bool,
+    phase: LaunchPhase,
 }
 impl CustodyLease {
     pub fn scope(&self) -> Scope {
         self.reservation.scope
+    }
+    /// How far launch got; only [`LaunchPhase::HandedOff`] may have reached a
+    /// guardian that holds the launch message.
+    pub fn phase(&self) -> LaunchPhase {
+        self.phase
     }
     pub fn lock_directory(&self) -> &Directory {
         &self.lock_directory
@@ -595,7 +620,7 @@ impl CustodyLease {
         guardian: crate::census::ProcessIdentity,
         provider: crate::census::ProcessIdentity,
     ) -> Result<()> {
-        if self.launched
+        if self.phase != LaunchPhase::Unlaunched
             || self.lease.is_none()
             || self.reservation.launch_state != LaunchState::Prepared
         {
@@ -619,13 +644,14 @@ impl CustodyLease {
         )?
         .require_durable()?;
         self.reservation = reservation;
-        self.launched = true;
+        self.phase = LaunchPhase::HandedOff;
         Ok(())
     }
-    /// A preparation failure before handoff has no child to fence. Explicit
-    /// withdrawal keeps crashes conservative: dropping a lease never clears it.
+    /// A failure before handoff, including a never-spawned launch, has no
+    /// child to fence. Explicit withdrawal keeps crashes conservative:
+    /// dropping a lease never clears it. Attempt evidence is retained.
     pub fn withdraw_unlaunched(self) -> Result<()> {
-        if self.launched || self.lease.is_none() {
+        if !self.phase.withdrawable() || self.lease.is_none() {
             return Err(CustodyError::Fenced);
         }
         indexes::retire_unlaunched_index(&self.directory, &self.reservation)?;
@@ -876,7 +902,7 @@ pub(crate) fn acquire_writer_with_observer(
         lease: Some(lease),
         holder: Some(holder),
         reservation,
-        launched: false,
+        phase: LaunchPhase::Unlaunched,
     })
 }
 
@@ -1254,7 +1280,9 @@ impl StreamMode {
 pub struct CapturePlan {
     pub stdout: StreamMode,
     pub stderr: StreamMode,
-    pub wall_ms: u64,
+    /// The enforced wall-clock bound on the attempt. `None` is no enforced
+    /// bound: an advisory (warn-only) or absent deadline never stops the run.
+    pub wall_ms: Option<u64>,
     pub descendant_grace_ms: u64,
     pub root_flush_ms: u64,
     /// Tokens the attempt may use, from the usage its provider reports while
@@ -1293,7 +1321,7 @@ impl Default for CapturePlan {
             stderr: StreamMode::Capture {
                 limit: provenant_os::exec::DEFAULT_CAPTURE_LIMIT as u64,
             },
-            wall_ms: 3600000,
+            wall_ms: Some(3_600_000),
             descendant_grace_ms: crate::machine::DEFAULT_DESCENDANT_GRACE_MS,
             root_flush_ms: crate::machine::DEFAULT_ROOT_FLUSH_MS,
             token_budget: 0,
@@ -1301,22 +1329,6 @@ impl Default for CapturePlan {
             context_handoff: 0,
             retained_custody_ms: default_retained_custody_ms(),
         }
-    }
-}
-impl CapturePlan {
-    pub(crate) fn validate(&self) -> Result<()> {
-        if self.stdout.limit() > 64 * 1024 * 1024
-            || self.stderr.limit() > 64 * 1024 * 1024
-            || self.wall_ms == 0
-            || self.wall_ms > 86400000
-            || self.descendant_grace_ms > 60000
-            || self.root_flush_ms > 60000
-            || self.retained_custody_ms == 0
-            || self.retained_custody_ms > MAX_RETAINED_CUSTODY_SECONDS * 1_000
-        {
-            return Err(CustodyError::InvalidRecord);
-        }
-        Ok(())
     }
 }
 pub struct OwnedLaunch<'a> {
@@ -1350,73 +1362,6 @@ impl CustodyHandle {
             .is_ok_and(|metadata| metadata.same_identity(identity))
     }
 }
-#[derive(Debug)]
-pub struct LaunchFailure {
-    pub error: Box<CustodyError>,
-    pub custody: PublicationReservation,
-    pending_exit: Option<Box<ProcessExit>>,
-}
-impl std::fmt::Display for LaunchFailure {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.error.fmt(f)
-    }
-}
-impl std::error::Error for LaunchFailure {}
-impl LaunchFailure {
-    /// Retry the bounded never-spawned outcome while retaining attempt custody.
-    /// Conflicting terminal bytes are never replaced.
-    pub fn retry_exit_publication(&self) -> Result<Publication> {
-        let record = self
-            .pending_exit
-            .as_ref()
-            .ok_or(CustodyError::HandoffUnknown)?;
-        let bytes = serde_json::to_vec(record).map_err(|_| CustodyError::InvalidRecord)?;
-        if bytes.len() as u64 > EXIT_LIMIT {
-            return Err(CustodyError::InvalidRecord);
-        }
-        let publish = || {
-            self.custody.directory.atomic_write(
-                OsStr::new("process-exit.json"),
-                ".custody-",
-                &bytes,
-                PublishMode::NoReplace,
-            )
-        };
-        let mut result = publish();
-        if result
-            .as_ref()
-            .is_err_and(|error| error.raw_os_error() == Some(provenant_os::sys::errno::ENOSPC))
-        {
-            match self.custody.directory.unlink(OsStr::new("reserve")) {
-                Ok(()) => {
-                    let _ = self.custody.directory.sync();
-                    result = publish();
-                }
-                Err(error) if error.is_not_found() => {
-                    result = publish();
-                }
-                Err(_) => {}
-            }
-        }
-        match result {
-            Ok(publication) => Ok(publication),
-            Err(error) if error.is_exists() => {
-                let previous = self
-                    .custody
-                    .directory
-                    .read_bounded(OsStr::new("process-exit.json"), EXIT_LIMIT)?;
-                if previous != bytes {
-                    return Err(CustodyError::InvalidRecord);
-                }
-                Ok(match self.custody.directory.sync() {
-                    Ok(()) => Publication::Durable,
-                    Err(sync_error) => Publication::VisibleDurabilityUnconfirmed { sync_error },
-                })
-            }
-            Err(error) => Err(error.into()),
-        }
-    }
-}
 pub fn launch(
     owned: OwnedLaunch<'_>,
     capture: CapturePlan,
@@ -1427,7 +1372,8 @@ pub fn launch(
         custody,
         pending_exit: None,
     };
-    if owned.lease.launched {
+    // One lease launches at most once, whatever the previous outcome.
+    if owned.lease.phase != LaunchPhase::Unlaunched {
         return Err(failure(CustodyError::Fenced, publication));
     }
     let scope = owned.lease.scope();
@@ -1443,43 +1389,17 @@ pub fn launch(
         Err(error) => return Err(failure(error.into(), publication)),
     };
     owned.lease.reservation.requester = Some(requester);
-    if owned.cancel.is_cancelled() || capture.validate().is_err() {
-        owned.lease.reservation.launch_state = LaunchState::NeverSpawned;
-        owned.lease.reservation.unresolved_cleanup = false;
-        owned.lease.reservation.census_incomplete = false;
-        owned.lease.launched = true;
-        let reason = if owned.cancel.is_cancelled() {
-            Some(StopReason::ExplicitCancellation)
-        } else {
-            None
-        };
-        let record = ProcessExit::never_spawned(scope, reason, vec![]);
-        let publication_result = write_record(
-            &owned.lease.directory,
-            "reservation.json",
-            &owned.lease.reservation,
-            PublishMode::Replace,
-        )
-        .and_then(|publication| publication.require_durable().map_err(Into::into))
-        .and_then(|()| {
-            write_record(
-                &publication.directory,
-                "process-exit.json",
-                &record,
-                PublishMode::NoReplace,
-            )
-        })
-        .and_then(|publication| publication.require_durable().map_err(Into::into));
-        let error = match publication_result {
-            Err(error) => error,
-            Ok(()) if reason.is_some() => CustodyError::Cancelled,
-            Ok(()) => CustodyError::InvalidRecord,
-        };
-        return Err(LaunchFailure {
-            error: Box::new(error),
-            custody: publication,
-            pending_exit: Some(Box::new(record)),
-        });
+    let invalid_capture = capture.validate().err();
+    if owned.cancel.is_cancelled() || invalid_capture.is_some() {
+        // No guardian is contacted: the failure carries its own cause and the
+        // never-spawned exit, so the caller withdraws instead of fencing.
+        let error = invalid_capture.unwrap_or(CustodyError::InvalidRecord);
+        return Err(launch_failure::refuse_never_spawned(
+            owned.lease,
+            owned.cancel,
+            publication,
+            error,
+        ));
     }
     // A host without provider custody refuses before the reservation records
     // a handoff: the lease stays unlaunched, so the caller withdraws it rather
@@ -1505,27 +1425,76 @@ pub fn launch(
     if let Err(error) = prepared {
         return Err(failure(error, publication));
     }
-    owned.lease.launched = true;
+    // The reservation records the handoff before any guardian may hold the
+    // message. Until it is durable no guardian was contacted: a failed write
+    // leaves the lease unlaunched in its prior state, so the caller withdraws
+    // it locally.
+    let prior = owned.lease.reservation.launch_state;
     owned.lease.reservation.launch_state = LaunchState::HandingOff;
-    if let Err(error) = write_record(
+    let recorded = write_record(
         &owned.lease.directory,
         "reservation.json",
         &owned.lease.reservation,
         PublishMode::Replace,
     )
-    .and_then(|publication| publication.require_durable().map_err(Into::into))
-    {
+    .and_then(|publication| publication.require_durable().map_err(Into::into));
+    #[cfg(test)]
+    let recorded = recorded.and_then(|()| {
+        if TEST_FAIL_HANDOFF_RESERVATION.with(|fault| fault.replace(false)) {
+            Err(CustodyError::InvalidRecord)
+        } else {
+            Ok(())
+        }
+    });
+    if let Err(error) = recorded {
+        owned.lease.reservation.launch_state = prior;
         return Err(failure(error, publication));
     }
-    match crate::guardian::handoff(owned, capture, &publication) {
+    let OwnedLaunch {
+        command,
+        lease,
+        handshake,
+        cancel,
+        clock,
+    } = owned;
+    // From here a guardian may receive the whole message: a failure the
+    // guardian handoff cannot classify as undelivered stays uncertain.
+    lease.phase = LaunchPhase::HandedOff;
+    let handed = crate::guardian::handoff(
+        OwnedLaunch {
+            command,
+            lease: &mut *lease,
+            handshake,
+            cancel,
+            clock,
+        },
+        capture,
+        &publication,
+    );
+    match handed {
         Ok(()) => Ok(CustodyHandle {
             directory: publication.directory,
             scope,
             requester,
             held: false,
         }),
-        Err(error) => Err(failure(error, publication)),
+        // Only a guardian holding the whole message may have launched.
+        Err(HandoffFailure::Unconfirmed(error)) => Err(failure(error, publication)),
+        Err(HandoffFailure::Undelivered(error)) => Err(launch_failure::refuse_never_spawned(
+            lease,
+            cancel,
+            publication,
+            error,
+        )),
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Fail the durable reservation write that records a handoff, after the
+    /// guardian lifetime is prepared and before any guardian is contacted.
+    pub(crate) static TEST_FAIL_HANDOFF_RESERVATION: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -2846,6 +2815,10 @@ pub struct WriterReservation {
     /// so the stable serialized listing does not grow a policy-only field.
     #[serde(skip)]
     pub legacy_fence: bool,
+    /// The launch window: no guardian recorded yet, launch neither spawned nor
+    /// failed, so the attempt is nonterminal though unobservable. Not reported.
+    #[serde(skip)]
+    pub launching: bool,
 }
 impl WriterReservation {
     /// The stable lock slot containing this attempt's journal.
@@ -3209,7 +3182,7 @@ pub fn list_writer_reservations_in_slot(slot: &Directory) -> Result<ReservationL
             let live = if legacy && holderless {
                 Some(false)
             } else {
-                reservation_holder_live(&reservation, &SystemProcessObserver)
+                reservation_holder_live(&reservation, boot_observer(&reservation.boot))
             };
             let branch = match &reservation.binding {
                 StoredWriterBinding::Worktree { branch, .. } => Some(branch.clone()),
@@ -3227,6 +3200,11 @@ pub fn list_writer_reservations_in_slot(slot: &Directory) -> Result<ReservationL
                 live,
                 age,
                 legacy_fence: legacy && holderless,
+                launching: reservation.guardian.is_none()
+                    && matches!(
+                        reservation.launch_state,
+                        LaunchState::Prepared | LaunchState::HandingOff
+                    ),
             }))
         };
         match entry() {

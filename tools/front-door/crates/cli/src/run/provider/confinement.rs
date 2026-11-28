@@ -352,6 +352,12 @@ pub(super) fn confinement_request(
         .optional()
         .network_for(access.network(writer.is_some()));
     Ok(PlanRequest {
+        policy: match &sandbox_context {
+            InventoryContext::Launch(task, _, _) => {
+                run::launch_policy(roots.state, &project_id.to_string(), task)
+            }
+            _ => provenant_records::policy::Policy::default(),
+        },
         scope: WorkScope::Project(project_id),
         permissions: PlanPermissions {
             credential_roots: policy.mandatory().credential_roots().clone(),
@@ -544,7 +550,7 @@ fn admission_policy_is_independent_of_primary_or_fallback_adapter()
             );
             assert_eq!(
                 admission.boundary,
-                provenant_records::diagnostic::BoundaryClass::None
+                provenant_records::policy::Boundary::None
             );
             assert_eq!(admission.source, provenant_records::Layer::Default);
         }
@@ -575,7 +581,7 @@ pub(super) fn apply_sandbox_mode(
     };
     route.sandbox_admission = Some(run::SandboxAdmissionReceipt {
         parent_sandboxed: parent,
-        boundary: provenant_records::diagnostic::BoundaryClass::None,
+        boundary: provenant_records::policy::Boundary::None,
         strength,
         knob: "lanes.sandbox_floor".into(),
         source: task
@@ -933,7 +939,7 @@ pub(super) fn credential_roots(
                 "CREDENTIAL_ROOTS_OVERLAP_NONE",
                 provenant_records::policy::Facts::violation(detail),
             ) {
-                warn(warning);
+                warn(*warning);
             }
         }
     };
@@ -1165,7 +1171,7 @@ pub(super) fn credential_access_grant_refusal(
                     "CREDENTIAL_ROOTS_OVERLAP_NONE",
                     provenant_records::policy::Facts::violation(detail),
                 ) {
-                    warn(warning);
+                    warn(*warning);
                 }
             }
         }
@@ -1217,7 +1223,7 @@ pub(super) fn warn_profile_credential_grants(
                 "CREDENTIAL_ROOTS_OVERLAP_NONE",
                 provenant_records::policy::Facts::violation(detail),
             ) {
-                warn(warning);
+                warn(*warning);
             }
         }
     }
@@ -1439,38 +1445,66 @@ fn requester_path_roots(
     Ok((project, selected))
 }
 
-/// Reopen the graph-bound checkout at launch, refusing a moved or replaced
-/// worktree rather than falling back to the daemon's checkout.
+/// Reopen the graph-bound checkout at launch. A moved or replaced checkout is
+/// an operation error — no valid source can be pinned, so preparation cannot
+/// produce a launch. A configured stop from `policy.confinement` is carried as
+/// `Configured` and keeps the source rule's code and setting, never a boundary.
 #[derive(Debug, thiserror::Error)]
 pub(super) enum SourceCwdError {
     #[error("{0}")]
-    Authority(String),
+    IdentityMismatch(String),
+    #[error("{0}")]
+    Configured(String),
     #[error("{0}")]
     Operational(String),
 }
 impl SourceCwdError {
-    pub(super) fn boundary_class(&self) -> provenant_records::diagnostic::BoundaryClass {
+    pub(super) fn boundary_class(&self) -> provenant_records::policy::Boundary {
         match self {
-            Self::Authority(_) => provenant_records::diagnostic::BoundaryClass::Authority,
-            Self::Operational(_) => provenant_records::diagnostic::BoundaryClass::None,
+            Self::IdentityMismatch(_) => provenant_records::policy::Boundary::Operation,
+            Self::Configured(_) | Self::Operational(_) => provenant_records::policy::Boundary::None,
         }
     }
 }
 
-fn source_cwd_authority(message: String) -> SourceCwdError {
+/// A missing or replaced checkout cannot be reopened at its recorded identity.
+/// This is an immutable operation error, never an ADR 0035 boundary refusal.
+fn source_identity_mismatch(message: String) -> SourceCwdError {
     provenant_records::policy::Policy::default().boundary_error(
-        "CONFINEMENT_SOURCE_CWD_AUTHORITY",
+        "SOURCE_IDENTITY_MISMATCH",
         provenant_records::policy::Facts::violation(&message),
-        SourceCwdError::Authority(message),
+        SourceCwdError::IdentityMismatch(message),
     )
 }
 
-fn source_admission_error(error: crate::run::SourceAdmissionError) -> SourceCwdError {
-    provenant_records::policy::Policy::default().boundary_error(
-        error.code,
-        provenant_records::policy::Facts::violation(&error.reason),
-        SourceCwdError::Authority(error.reason),
-    )
+/// Admit the selected source root. A valid registered checkout outside the
+/// declared read roots is added to the roots for this launch and warned through
+/// the `confinement` group; a checkout that is missing, replaced or protected
+/// is the typed operation error `SOURCE_IDENTITY_MISMATCH`.
+fn admit_source_with_policy(
+    cwd: &Path,
+    state: &Path,
+    source: &Path,
+    mode: crate::run::SourceAdmissionMode,
+    policy: &provenant_records::policy::Policy,
+) -> Result<crate::run::SourceAdmission, SourceCwdError> {
+    match crate::run::admit_source_root(cwd, state, source, mode) {
+        Ok(admission) => Ok(admission),
+        Err(error)
+            if error.reason.contains("not an allowed read root") && !source.starts_with(state) =>
+        {
+            policy.warn_or(
+                "CONFINEMENT_SOURCE_CWD_AUTHORITY",
+                provenant_records::policy::Facts::violation(&error.reason),
+                |diagnostic| SourceCwdError::Configured(diagnostic.detail.unwrap_or_default()),
+            )?;
+            Ok(crate::run::SourceAdmission {
+                path: source.to_path_buf(),
+                warnings: Vec::new(),
+            })
+        }
+        Err(error) => Err(source_identity_mismatch(error.reason)),
+    }
 }
 
 fn source_warning_messages(
@@ -1489,7 +1523,7 @@ fn source_warning_messages(
                     warning.source
                 )),
             ) {
-                provenant_records::policy::Effect::Warn(warning) => Some(warning),
+                provenant_records::policy::Effect::Warn(warning) => Some(*warning),
                 _ => None,
             }
         })
@@ -1498,23 +1532,31 @@ fn source_warning_messages(
 
 fn report_source_warnings(
     admission: &crate::run::SourceAdmission,
+    policy: &provenant_records::policy::Policy,
+) {
+    for warning in source_warning_messages(admission, policy) {
+        warn(warning);
+    }
+}
+
+/// The launch policy is shared by the source admission, its warnings and the
+/// custody warning for a moved writer head, so one `policy.confinement` or
+/// `policy.custody` setting resolves identically for all of them.
+fn source_policy(
     registry: &Registry<'_>,
     task: &run::TaskRequest,
-) {
+) -> provenant_records::policy::Policy {
     let project = task
         .profile
         .policy_project
         .or(registry.project_id)
         .map(|project| project.to_string())
         .unwrap_or_default();
-    let policy = registry
+    registry
         .roots
         .map_or_else(provenant_records::policy::Policy::default, |roots| {
             run::launch_policy(roots.state.as_path(), &project, task)
-        });
-    for warning in source_warning_messages(admission, &policy) {
-        warn(warning);
-    }
+        })
 }
 
 pub(super) fn source_cwd(
@@ -1527,26 +1569,31 @@ pub(super) fn source_cwd(
     let state = registry
         .state_root
         .ok_or_else(|| SourceCwdError::Operational("state root is unavailable".into()))?;
+    let policy = source_policy(registry, task);
     let Some(source) = &task.access.source_root else {
         if task.access.source_identity.is_some() || task.access.source_live {
-            return Err(source_cwd_authority(
+            return Err(source_identity_mismatch(
                 "graph source identity has no checkout".into(),
             ));
         }
-        let admission =
-            crate::run::admit_source_root(cwd, state, cwd, crate::run::SourceAdmissionMode::Live)
-                .map_err(source_admission_error)?;
-        report_source_warnings(&admission, registry, task);
+        let admission = admit_source_with_policy(
+            cwd,
+            state,
+            cwd,
+            crate::run::SourceAdmissionMode::Live,
+            &policy,
+        )?;
+        report_source_warnings(&admission, &policy);
         return Ok(admission.path);
     };
     if task.writer.is_some() || (!task.access.source_live && task.head.is_none()) {
-        return Err(source_cwd_authority(
+        return Err(source_identity_mismatch(
             "read-only source needs a pinned head and no writer".into(),
         ));
     }
     if task.access.source_live && !std::fs::metadata(source).is_ok_and(|metadata| metadata.is_dir())
     {
-        return Err(source_cwd_authority(
+        return Err(source_identity_mismatch(
             "graph source checkout is not an existing directory".into(),
         ));
     }
@@ -1555,17 +1602,17 @@ pub(super) fn source_cwd(
     } else {
         crate::run::SourceAdmissionMode::Registered
     };
-    let admission =
-        crate::run::admit_source_root(cwd, state, source, mode).map_err(source_admission_error)?;
-    report_source_warnings(&admission, registry, task);
+    let admission = admit_source_with_policy(cwd, state, source, mode, &policy)?;
+    report_source_warnings(&admission, &policy);
     if !task.access.source_live && admission.path != *source {
-        return Err(source_cwd_authority(
+        return Err(source_identity_mismatch(
             "graph source checkout changed location".into(),
         ));
     }
-    let identity = source_identity(&admission.path).map_err(source_cwd_authority)?;
+    let identity = source_identity(&admission.path)
+        .map_err(|error| source_identity_mismatch(format!("graph source checkout: {error}")))?;
     if task.access.source_identity.as_ref() != Some(&identity) {
-        return Err(source_cwd_authority(
+        return Err(source_identity_mismatch(
             "graph source checkout identity changed".into(),
         ));
     }
@@ -1676,22 +1723,22 @@ impl From<provenant_config::ConfigError> for ReadOnlyPlanError {
     }
 }
 impl ReadOnlyPlanError {
-    pub(super) fn boundary_class(&self) -> provenant_records::diagnostic::BoundaryClass {
-        use provenant_records::diagnostic::BoundaryClass;
+    pub(super) fn boundary_class(&self) -> provenant_records::policy::Boundary {
+        use provenant_records::policy::Boundary;
         match self {
             Self::Run(error) => error.boundary_class(),
             Self::Plan(error) => error.boundary_class(),
             Self::BindingMismatch
             | Self::MissingBinding
             | Self::PinnedSourceRequiresGit
-            | Self::ProjectBindingDirectory(_) => BoundaryClass::Authority,
-            Self::Other(_) => BoundaryClass::None,
+            | Self::ProjectBindingDirectory(_) => Boundary::Authority,
+            Self::Other(_) => Boundary::None,
         }
     }
 }
 
 fn read_only_plan_authority(error: ReadOnlyPlanError) -> ReadOnlyPlanError {
-    if error.boundary_class() == provenant_records::diagnostic::BoundaryClass::Authority {
+    if error.boundary_class() == provenant_records::policy::Boundary::Authority {
         provenant_records::policy::Policy::default().boundary_error(
             "CONFINEMENT_READ_ONLY_PLAN_AUTHORITY",
             provenant_records::policy::Facts::violation(error.to_string()),
@@ -1705,18 +1752,18 @@ fn read_only_plan_authority(error: ReadOnlyPlanError) -> ReadOnlyPlanError {
 // Spec: docs/specs/state.md#config-never-widens-authority
 #[test]
 fn read_only_plan_preserves_typed_authority_failures() {
-    use provenant_records::diagnostic::BoundaryClass;
+    use provenant_records::policy::Boundary;
     assert_eq!(
         ReadOnlyPlanError::BindingMismatch.boundary_class(),
-        BoundaryClass::Authority
+        Boundary::Authority
     );
     assert_eq!(
         ReadOnlyPlanError::MissingBinding.boundary_class(),
-        BoundaryClass::Authority
+        Boundary::Authority
     );
     assert_eq!(
         ReadOnlyPlanError::PinnedSourceRequiresGit.boundary_class(),
-        BoundaryClass::Authority
+        Boundary::Authority
     );
     let unsafe_binding = ReadOnlyPlanError::from(
         provenant_config::ConfigError::ProjectBindingDirectoryUnsafe {
@@ -1731,18 +1778,18 @@ fn read_only_plan_preserves_typed_authority_failures() {
             if diagnostic.detail.as_deref().is_some_and(|detail| detail.contains("/private/state"))
                 && diagnostic.next.as_deref().is_some_and(|next| next.contains("chmod 700"))
     ));
-    assert_eq!(unsafe_binding.boundary_class(), BoundaryClass::Authority);
+    assert_eq!(unsafe_binding.boundary_class(), Boundary::Authority);
     assert!(matches!(
         ReadOnlyPlanError::from(provenant_config::ConfigError::InvalidProjectBinding),
         ReadOnlyPlanError::Other(_)
     ));
     assert_eq!(
         ReadOnlyPlanError::Other("unavailable".into()).boundary_class(),
-        BoundaryClass::None
+        Boundary::None
     );
     assert_eq!(
         ReadOnlyPlanError::Run(run::RunError::WriterHeadNotLaneBranch).boundary_class(),
-        BoundaryClass::LaneGit
+        Boundary::OtherWork
     );
 }
 
@@ -1948,12 +1995,11 @@ fn fetch_read_source(remote: &provenant_config::RemoteName, repo: &Path) -> bool
         .unwrap_or(false)
 }
 
-/// The one resolver for a read-only lane's source. The compiled default pins
-/// the fetched upstream when the checkout is behind it, and pins the observed
-/// checkout HEAD otherwise, so a commit after admission cannot move the tree a
-/// read-only lane reads; `live` keeps the local tree, `default_branch` the
-/// fetched default, and any other value an explicit ref. `fetch_first` fetches
-/// first; unusable Git evidence is advisory, never fatal.
+/// The one resolver for a read-only lane's source. The compiled `live` default
+/// keeps the local tree; `auto` pins the fetched upstream when the checkout is
+/// behind it, and pins the observed checkout HEAD otherwise. `default_branch`
+/// pins the fetched default, and any other value is an explicit ref.
+/// `fetch_first` fetches first; unusable Git evidence is advisory, never fatal.
 pub(in crate::run) fn resolve_read_source(
     state: &Path,
     source: &Path,
@@ -2574,75 +2620,94 @@ pub(super) fn setup_directory(
     }
 }
 
+/// A predecessor whose record cannot be read has no pinned commit or owner to
+/// inherit. It is an operation error naming the predecessor, never a boundary.
+fn unreadable_writer_predecessor(detail: impl Into<String>) -> PrepareError {
+    let detail = detail.into();
+    provenant_records::policy::Policy::default().boundary_error(
+        "UNREADABLE_PREDECESSOR",
+        provenant_records::policy::Facts::violation(&detail),
+        PrepareError::WriterUnreadable(detail),
+    )
+}
+
+/// A head that moved on from the pinned commit is not destruction: the
+/// continuation re-pins to the current head and reports `WRITER_HEAD_MOVED`.
+/// The custody predicate row still governs a configured stop, so `--strict`
+/// and `policy.custody = refuse` behave like every other non-boundary rule.
+fn writer_head_moved(
+    policy: &provenant_records::policy::Policy,
+    detail: impl Into<String>,
+) -> Result<(), PrepareError> {
+    let detail = detail.into();
+    match policy.check(
+        "CONFINEMENT_WRITER_SOURCE_CONTEXT_AUTHORITY",
+        provenant_records::policy::Facts::violation(&detail),
+    ) {
+        provenant_records::policy::Effect::Stop(diagnostic) => Err(
+            PrepareError::WriterContinuation(diagnostic.detail.unwrap_or_default()),
+        ),
+        provenant_records::policy::Effect::Warn(_) | provenant_records::policy::Effect::Proceed => {
+            let _ = policy.warn_or(
+                provenant_records::policy::WRITER_HEAD_MOVED,
+                provenant_records::policy::Facts::violation(&detail),
+                |diagnostic| {
+                    PrepareError::WriterContinuation(diagnostic.detail.unwrap_or_default())
+                },
+            );
+            Ok(())
+        }
+        // Unreachable for a non-boundary row; keep the re-pin advisory.
+        provenant_records::policy::Effect::Refuse(_) => Ok(()),
+    }
+}
+
 /// Verify the pinned writer source and describe retained predecessor edits.
-/// A continuation keeps dirty work in place; unreadable status and mismatched
-/// source evidence still refuse preparation.
+/// A continuation keeps dirty work in place, re-pins a moved head with a
+/// warning, and reports an unreadable predecessor as an operation error.
 pub(super) fn writer_source_context(
     writer: &run::WriterLaunch,
     task: &run::TaskRequest,
     git: &Path,
     policy: &provenant_records::policy::Policy,
 ) -> Result<Option<String>, PrepareError> {
-    let boundary_error = |error: PrepareError| {
-        policy.boundary_error(
-            "CONFINEMENT_WRITER_SOURCE_CONTEXT_AUTHORITY",
-            provenant_records::policy::Facts::violation(error.to_string()),
-            error,
-        )
-    };
-    // A pin mismatch gets its own cause text naming the pinned commit and the
-    // current head, never the generic launch-handoff wording.
-    let pin_error = |error: run::RunError, uncommitted: &[String]| -> PrepareError {
+    let unreadable = |detail: String| unreadable_writer_predecessor(detail);
+    let moved = |error: run::RunError| -> Result<(), PrepareError> {
         match error {
-            run::RunError::WriterSourceMismatch { expected, actual } => {
-                PrepareError::WriterPinMismatch {
-                    pinned: expected,
-                    head: actual,
-                    uncommitted: uncommitted.to_vec(),
-                }
-            }
-            other => PrepareError::WriterContinuation(other.to_string()),
+            run::RunError::WriterSourceMismatch { expected, actual } => writer_head_moved(
+                policy,
+                format!("writer head moved from pinned {expected} to {actual}"),
+            ),
+            other => Err(unreadable(other.to_string())),
         }
     };
     let Some(source_head) = task.source_head.as_deref() else {
         if let Some(head) = task.head.as_deref() {
-            let head = head.parse().map_err(|_| {
-                boundary_error(PrepareError::WriterContinuation(
-                    "invalid pinned writer source".into(),
-                ))
-            })?;
-            writer
-                .require_source(head, policy)
-                .map_err(|error| boundary_error(pin_error(error, &[])))?;
+            let head = head
+                .parse()
+                .map_err(|_| unreadable("invalid pinned writer source".into()))?;
+            if let Err(error) = writer.require_source(head, policy) {
+                moved(error)?;
+            }
         }
         return Ok(None);
     };
     let uncommitted = writer.uncommitted_paths(git).map_err(|error| {
-        boundary_error(PrepareError::WriterContinuation(format!(
+        unreadable(format!(
             "cannot inspect uncommitted predecessor edits: {error}"
-        )))
+        ))
     })?;
     let predecessor = task
         .head
         .as_deref()
-        .ok_or_else(|| {
-            boundary_error(PrepareError::WriterContinuation(
-                "missing predecessor head for writer continuation".into(),
-            ))
-        })?
+        .ok_or_else(|| unreadable("missing predecessor head for writer continuation".into()))?
         .parse()
-        .map_err(|_| {
-            boundary_error(PrepareError::WriterContinuation(
-                "invalid pinned writer predecessor head".into(),
-            ))
-        })?;
-    let source = source_head.parse().map_err(|_| {
-        boundary_error(PrepareError::WriterContinuation(
-            "invalid pinned writer source".into(),
-        ))
-    })?;
+        .map_err(|_| unreadable("invalid pinned writer predecessor head".into()))?;
+    let source = source_head
+        .parse()
+        .map_err(|_| unreadable("invalid pinned writer source".into()))?;
     if let Err(error) = writer.require_continuation_source(git, source, predecessor, policy) {
-        return Err(boundary_error(pin_error(error, &uncommitted)));
+        moved(error)?;
     }
     Ok((!uncommitted.is_empty()).then(|| {
         format!(
@@ -2659,7 +2724,10 @@ mod alias_tests {
     #[test]
     // Spec: docs/specs/fabric.md#sources-and-read-roots
     fn source_configuration_warning_is_opt_in() {
-        use provenant_records::policy::{Policy, Source, Strength};
+        use provenant_records::{
+            Layer,
+            policy::{Policy, Strength},
+        };
         let admission = crate::run::SourceAdmission {
             path: "/project".into(),
             warnings: vec![crate::run::SourceWarning {
@@ -2674,7 +2742,7 @@ mod alias_tests {
                 "CONFINEMENT_SOURCE_AGENT_CONFIG_NONE".into(),
                 Strength::Warn,
             )]),
-            Source::Host,
+            Layer::Host,
         );
         assert_eq!(source_warning_messages(&admission, &policy).len(), 1);
     }

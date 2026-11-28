@@ -1,5 +1,7 @@
 //! Worktree creation, listing, removal and ref pruning.
+use super::custody::{admitted_writer_guard, guard_destructive_worktree, live_writer_holder};
 use super::*;
+use provenant_records::custody::{Subject as CustodySubject, SubjectKind};
 use provenant_records::warning::{BRANCH_BEHIND_BASE, Warning, warn};
 use std::path::Component;
 
@@ -791,16 +793,10 @@ fn create_with_default(
     let worktree_parent =
         open_or_create_layout_directory(&allocation, &parent_relative, true, layout_device)?;
     let parent_identity = worktree_parent.metadata()?;
-    let _writer = cache_writer_guard(context.project_state, &target).map_err(|occupancy| {
-        match occupancy {
-            // A live provider's reservation names the attempt holding custody;
-            // a bare held lock still refuses without guessing.
-            Occupancy::Held => WorktreeError::WriterBusy {
-                holder: writer_holder(context.project_state, &target),
-            },
-            other => custody_refusal(other),
-        }
-    })?;
+    // A held writer lease is a sharing decision, not an unconditional refusal.
+    // `admit_writer` proceeds with a typed warning under allow/warn and only
+    // refuses under an explicit configured or owner-set `refuse`.
+    let _writer = admitted_writer_guard(context, &target)?;
     context.repo.revalidate()?;
     let named_parent =
         open_or_create_layout_directory(&allocation, &parent_relative, false, layout_device)?;
@@ -1583,6 +1579,16 @@ pub(super) fn remove_tree_when_before_delete_locked(
             entry,
             expected_head,
         )?;
+    }
+    // Only destruction refuses: removing a worktree whose lease is live with
+    // another lane is an `other_work` boundary. A lapsed lease never triggers
+    // this guard; its uncommitted files are retained by the caller's archive.
+    if let Some((holder, live)) = live_writer_holder(context, &canonical) {
+        let subject = CustodySubject {
+            kind: SubjectKind::Worktree,
+            id: canonical.to_string_lossy().into_owned(),
+        };
+        guard_destructive_worktree("worktree remove", &subject, live, holder)?;
     }
     before_delete(&locked.verified, &canonical, archive.as_ref())?;
     // A cache that cannot be derived must not block removal; warn and skip it.

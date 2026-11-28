@@ -64,6 +64,11 @@ pub(crate) struct Preset {
     pub(crate) knobs: BTreeMap<String, Value>,
 }
 
+/// The canonical spelling of the live read source. Every writer of
+/// `lanes.read_source` uses this one spelling, so the config cut-over and the
+/// sealed checkpoint transform cannot drift from `ReadSource::Live`.
+pub const READ_SOURCE_LIVE: &str = "live";
+
 /// The knob family's layers, lowest first. The registry default is the floor,
 /// a named preset overrides it, and an entry in the host's `[knobs]` table
 /// overrides the preset. A launch flag is recorded separately in the sealed
@@ -519,10 +524,10 @@ pub(crate) fn resolve(
         });
         match checked {
             Ok(value) => {
-                by_name
-                    .entry(name.into())
-                    .or_default()
-                    .push(sourced(value, Layer::Host));
+                by_name.entry(name.into()).or_default().push(Sourced {
+                    value,
+                    source: Source::at(Layer::Host, format!("config.toml#knobs.{name}")),
+                });
             }
             Err(rule) => {
                 if let Some(safe) = safe_value(name) {
@@ -865,6 +870,99 @@ mod precedence_tests {
             [Layer::Default, Layer::Profile]
         );
         assert!(merge.ignored.is_empty());
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod deleted_key_catalogue_tests {
+    use super::*;
+    use std::collections::BTreeSet;
+
+    /// The deleted-key list is read from §6 of the batch spec, not copied into
+    /// the test. A key cannot be reintroduced into the catalogue while the spec
+    /// still names it as deleted.
+    fn spec_deleted_keys() -> BTreeSet<String> {
+        let spec = include_str!("../../../../../docs/specs/agent-native.md");
+        let section = spec
+            .split("## 6. What is deleted")
+            .nth(1)
+            .expect("spec §6")
+            .split("\n## ")
+            .next()
+            .expect("spec §6 body");
+        let mut keys = BTreeSet::new();
+        for row in section.lines().filter(|line| line.starts_with('|')) {
+            // Field 1 is the "Deleted" column; field 2 is its replacement.
+            let deleted_cell = row.split('|').nth(1).unwrap_or_default();
+            for token in deleted_cell.split('`').skip(1).step_by(2) {
+                let key_like = !token.is_empty()
+                    && token
+                        .chars()
+                        .next()
+                        .is_some_and(|first| first.is_ascii_alphabetic() || first == '_')
+                    && token
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.');
+                if key_like {
+                    keys.insert(normalize(token));
+                }
+            }
+        }
+        keys
+    }
+
+    fn normalize(key: &str) -> String {
+        key.strip_prefix("policy.").unwrap_or(key).to_owned()
+    }
+
+    #[test]
+    fn no_deleted_key_is_declared_as_a_knob_policy_row_or_sealed_setting() {
+        let deleted = spec_deleted_keys();
+        assert!(
+            deleted.contains("lanes.isolation"),
+            "spec table must name the deleted keys"
+        );
+        assert!(
+            deleted.contains("DIRTY_WRITER"),
+            "spec table must name the deleted policy"
+        );
+
+        let registry: serde_json::Value = serde_json::from_str(REGISTRY).unwrap();
+        let mut declared = BTreeSet::new();
+        for name in registry["documented_fields"].as_array().unwrap() {
+            declared.insert(normalize(name.as_str().unwrap()));
+        }
+        for (name, _) in registry["knobs"].as_object().unwrap() {
+            declared.insert(normalize(name));
+        }
+        for (name, _) in registry["policy_rules"]["settings"].as_object().unwrap() {
+            declared.insert(normalize(name));
+        }
+        for (_, preset) in registry["presets"].as_object().unwrap() {
+            if let Some(knobs) = preset.get("knobs").and_then(Value::as_object) {
+                for name in knobs.keys() {
+                    declared.insert(normalize(name));
+                }
+            }
+        }
+
+        let policy: toml_edit::DocumentMut = include_str!("../../run/assets/policy.toml")
+            .parse()
+            .unwrap();
+        for rule in policy["rule"].as_array_of_tables().unwrap() {
+            for field in ["code", "knob"] {
+                if let Some(value) = rule.get(field).and_then(toml_edit::Item::as_str) {
+                    declared.insert(normalize(value));
+                }
+            }
+        }
+
+        let overlap: Vec<_> = deleted.intersection(&declared).cloned().collect();
+        assert!(
+            overlap.is_empty(),
+            "keys §6 deletes are still declared in the catalogue: {overlap:?}"
+        );
     }
 }
 

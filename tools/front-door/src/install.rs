@@ -11,11 +11,12 @@ use provenant_config::{
 };
 use provenant_core::{CancelToken, Clock, WaitBudget};
 use provenant_os::clock::SystemClock;
-use provenant_os::fs::Directory;
+use provenant_os::fs::{Directory, LockMode};
 use provenant_records::{
     CommandError, CommandResult, Harness, Outcome,
     warning::{
-        GIT_OPERATION_RETAINED, LIVE_RECORD_FORMAT_CHANGED, STATE_ROOT_OVERLAP, Warning, warn,
+        GIT_OPERATION_RETAINED, LIVE_RECORD_FORMAT_CHANGED, SMOKE_GRAPH_RETAINED,
+        STATE_ROOT_OVERLAP, UPGRADE_ALREADY_INSTALLED, Warning, warn,
     },
 };
 use serde::Serialize;
@@ -505,6 +506,7 @@ fn error_class(error: &InstallError) -> (Outcome, &'static str) {
         InstallError::Fs(_) | InstallError::Preview(_) | InstallError::Smoke(_) => {
             (Outcome::Error, "INSTALL_ERROR")
         }
+        InstallError::LockHeld { .. } => (Outcome::Error, "INSTALL_LOCK_HELD"),
     }
 }
 pub(super) fn install_error(command: &str, error: &InstallError, globals: &cli::Globals) -> u8 {
@@ -535,7 +537,7 @@ fn install_error_result(command: &str, error: &InstallError) -> CommandResult<In
             }
         });
     let mut failure = CommandError::new(code, error.to_string(), None, repair);
-    failure.diagnostic = diagnostic;
+    failure.set_diagnostic(diagnostic);
     result.error = Some(failure);
     result
 }
@@ -575,11 +577,28 @@ fn edge_error(command: &str, error: EdgeError, globals: &cli::Globals) -> u8 {
     }
 }
 
+/// Bound the install-lock wait by its declared knob. Unreadable configuration
+/// never blocks installation: the shipped default applies.
+fn install_lock_wait_seconds(roots: &provenant_core::Roots) -> u64 {
+    const KEY: &str = "domains.install.lock_wait_seconds";
+    provenant_cli::config_reads::read_for(roots, "install")
+        .ok()
+        .and_then(|config| {
+            config
+                .knobs
+                .get(KEY)
+                .and_then(|sourced| sourced.value.as_u64())
+        })
+        .filter(|seconds| *seconds > 0)
+        .unwrap_or(120)
+}
+
 fn context<'a>(
+    roots: &provenant_core::Roots,
     clock: &'a SystemClock,
     cancel: &'a CancelToken,
 ) -> Result<InstallContext<'a>, String> {
-    let budget = WaitBudget::cli(clock.mono_now(), 30)
+    let budget = WaitBudget::cli(clock.mono_now(), install_lock_wait_seconds(roots))
         .map_err(|_| "invalid install wait budget".to_owned())?;
     Ok(InstallContext {
         clock,
@@ -646,6 +665,16 @@ fn output_install_with(
 ) -> u8 {
     match result {
         Ok(outcome) => {
+            if outcome.already_installed {
+                warn(
+                    Warning::new(
+                        UPGRADE_ALREADY_INSTALLED,
+                        "install target already matches the recorded receipt; no files were written",
+                        provenant_records::warning::detected_source(UPGRADE_ALREADY_INSTALLED),
+                    )
+                    .repair("provenant upgrade --verify"),
+                );
+            }
             let (mut links, mut hooks) = (0, 0);
             for action in &outcome.actions {
                 let selector = action.selector.to_ascii_lowercase();
@@ -672,6 +701,9 @@ fn output_install_with(
                 }
             }
             human.push('\n');
+            if outcome.already_installed {
+                human.push_str("  Already installed; no files written\n");
+            }
             if !outcome
                 .findings
                 .iter()
@@ -1265,6 +1297,37 @@ struct PreparedInstall {
     live_record_warning: Option<String>,
 }
 
+/// Publish, then migrate only once publication succeeded. Both steps record
+/// into the one `state` the caller reports from, so a stop made by migration
+/// is still visible after a failure.
+fn after_publication<S, T, U, E>(
+    state: &mut S,
+    publish: impl FnOnce(&mut S) -> Result<T, E>,
+    migrate: impl FnOnce(&mut S) -> Result<U, E>,
+) -> Result<(T, U), E> {
+    let published = publish(state)?;
+    let migrated = migrate(state)?;
+    Ok((published, migrated))
+}
+
+#[cfg(test)]
+mod publication_migration_tests {
+    #[test]
+    fn publication_failure_does_not_start_store_migration() {
+        let mut migration_started = false;
+        let result = super::after_publication::<bool, (), (), &str>(
+            &mut migration_started,
+            |_| Err("publication failed"),
+            |started| {
+                *started = true;
+                Ok(())
+            },
+        );
+        assert_eq!(result, Err("publication failed"));
+        assert!(!migration_started);
+    }
+}
+
 fn supports_hooks(batch: &Targets) -> bool {
     batch.harnesses.iter().any(|target| {
         batch
@@ -1353,6 +1416,7 @@ fn preflight_install(
         findings: skipped,
         manual_includes: Vec::new(),
         dry_run: true,
+        already_installed: false,
     };
     let mut reporter = PreviewReporter::default();
     for batch in &batches {
@@ -1414,7 +1478,7 @@ fn apply_install(
     refuse_newer_state(globals)?;
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
-    let context = context(&clock, &cancel)
+    let context = context(&environment.roots, &clock, &cancel)
         .map_err(|error| Refused::Fail(Outcome::Error, "WAIT_BUDGET", error))?;
     let smoke = SystemSmoke::new(None)
         .map_err(|error| Refused::Fail(Outcome::Error, "SMOKE_EXECUTOR", error.to_string()))?;
@@ -1486,9 +1550,7 @@ fn apply_install(
     }
     // Configuration has been validated at the staged root; every actual write
     // now targets its published name. Agent bytes already name that destination.
-    // Non-SQLite state migrates once here, after the live-attempt advisory and
-    // before any release is swapped in.
-    let migrated = migrations::run(environment.roots.state.as_path());
+    let state_root = environment.roots.state.as_path();
     for batch in &mut batches {
         batch.roots = environment.roots.clone();
     }
@@ -1500,44 +1562,73 @@ fn apply_install(
     let home = targets.home.clone();
     let tick_enabled = targets.tick_agent.is_some();
     reporter.home = Some(home.clone());
+    let mut migrated = Vec::new();
     let result: Result<_, Refused> = (|| {
-        let mut combined = InstallOutcome {
-            actions: Vec::new(),
-            findings: preview.findings,
-            manual_includes: Vec::new(),
-            dry_run: args.dry_run,
-        };
-        for batch in batches {
-            // Publish one receipt target at a time, using config's existing lock and ownership rules.
-            let settings = batch_args(&args, &batch, args.dry_run);
-            let outcome = cli::install::execute_install(
-                &settings,
-                batch,
-                &context,
-                &mut reporter,
-                &smoke,
-                env!("PROVENANT_TARGET_TRIPLE"),
-            )
-            .map_err(|error| {
-                let (mut completed, remaining, source) = match error {
-                    InstallError::Partial {
-                        completed,
-                        remaining,
-                        source,
-                    } => (completed, remaining, source),
-                    error => (Vec::new(), Vec::new(), Box::new(error)),
+        let (mut combined, applied) = after_publication(
+            &mut reporter,
+            |reporter| {
+                let mut combined = InstallOutcome {
+                    actions: Vec::new(),
+                    findings: preview.findings,
+                    manual_includes: Vec::new(),
+                    dry_run: args.dry_run,
+                    already_installed: false,
                 };
-                completed.splice(0..0, combined.actions.clone());
-                InstallError::Partial {
-                    completed,
-                    remaining,
-                    source,
+                for batch in batches {
+                    // Publish one receipt target at a time, using config's existing lock and ownership rules.
+                    let settings = batch_args(&args, &batch, args.dry_run);
+                    let outcome = cli::install::execute_install(
+                        &settings,
+                        batch,
+                        &context,
+                        &mut *reporter,
+                        &smoke,
+                        env!("PROVENANT_TARGET_TRIPLE"),
+                    )
+                    .map_err(|error| {
+                        let (mut completed, remaining, source) = match error {
+                            InstallError::Partial {
+                                completed,
+                                remaining,
+                                source,
+                            } => (completed, remaining, source),
+                            error => (Vec::new(), Vec::new(), Box::new(error)),
+                        };
+                        completed.splice(0..0, combined.actions.clone());
+                        InstallError::Partial {
+                            completed,
+                            remaining,
+                            source,
+                        }
+                    })?;
+                    combined.actions.extend(outcome.actions);
+                    combined.findings.extend(outcome.findings);
+                    combined.manual_includes.extend(outcome.manual_includes);
+                    combined.already_installed |= outcome.already_installed;
                 }
-            })?;
-            combined.actions.extend(outcome.actions);
-            combined.findings.extend(outcome.findings);
-            combined.manual_includes.extend(outcome.manual_includes);
-        }
+                Ok(combined)
+            },
+            |reporter| {
+                let cutover_pending = migrations::cutover_pending(state_root).map_err(|error| {
+                    Refused::Fail(Outcome::Error, "UPGRADE_MIGRATION_FAILED", error)
+                })?;
+                if cutover_pending {
+                    let stopped = super::tick_agent::stop(&home).map_err(|error| {
+                        Refused::Fail(
+                            Outcome::Error,
+                            "UPGRADE_MIGRATION_FAILED",
+                            format!("disable tick before migration: {error}"),
+                        )
+                    })?;
+                    if stopped {
+                        reporter.stopped_agents.insert("dev.provenant.tick");
+                    }
+                }
+                migrations::run(state_root)
+                    .map_err(|(code, message)| Refused::Fail(Outcome::Error, code, message))
+            },
+        )?;
+        migrated = applied;
         if !args.dry_run {
             let inspection = provenant_config::inspect_install(
                 &targets,
@@ -1714,10 +1805,11 @@ fn prune_release_directories(
         let metadata = std::fs::symlink_metadata(&path)?;
         let name = entry.file_name();
         let Some(name) = name.to_str() else { continue };
+        let digest = name.strip_prefix("sha256:").unwrap_or(name);
         if !metadata.is_dir()
             || metadata.file_type().is_symlink()
-            || name.len() != 64
-            || !name.bytes().all(|byte| byte.is_ascii_hexdigit())
+            || digest.len() != 64
+            || !digest.bytes().all(|byte| byte.is_ascii_hexdigit())
             || !path.join("release.json").is_file()
         {
             continue;
@@ -1741,6 +1833,20 @@ fn prune_release_directories(
     for protected in in_use {
         if let Some(name) = protected.file_name().and_then(|name| name.to_str()) {
             keep.insert(name.to_owned());
+        }
+    }
+    // A verifier pins the release it is reading with a shared lock. An
+    // exclusive probe reports Held only while such a verifier is live.
+    if let Ok(dir) = Directory::open_anchor(releases) {
+        for (name, _, _) in &candidates {
+            let lock_name = format!("{name}.lock");
+            let lock = OsStr::new(&lock_name);
+            if matches!(
+                dir.try_flock_foreign(lock, LockMode::Exclusive),
+                Ok(provenant_os::fs::ForeignLock::Held)
+            ) {
+                keep.insert(name.clone());
+            }
         }
     }
     for (name, _, path) in candidates {
@@ -1998,7 +2104,7 @@ fn prune_orphans(globals: &cli::Globals) -> Result<Vec<String>, String> {
     };
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
-    let context = context(&clock, &cancel)?;
+    let context = context(&environment.roots, &clock, &cancel)?;
     let mut pruned = Vec::new();
     for record in orphaned_targets(&environment, &base, &receipt) {
         let directory = record
@@ -2198,7 +2304,11 @@ fn installed_destination(targets: &provenant_config::Targets) -> PathBuf {
 fn verify_smoke(
     targets: &provenant_config::Targets,
     args: &cli::Upgrade,
+    timeout_seconds: u64,
 ) -> Result<String, String> {
+    // Hold a shared pin on the release under verification for the whole
+    // lifecycle, so a concurrent upgrade cannot prune bytes this verifier reads.
+    let _pin = verify_release_pin(targets.roots.state.as_path())?;
     let runner = runner_for_verify(targets)?;
     let clock = provenant_os::clock::SystemClock::new();
     let (settings, origin) = provenant_cli::smoke::Settings::resolve(&targets.roots)
@@ -2208,13 +2318,14 @@ fn verify_smoke(
                 provenant_cli::smoke::Origin::compiled(Default::default()),
             )
         });
-    let outcome = crate::smoke::run_lifecycle(
+    let outcome = crate::smoke::run_lifecycle_with_timeout(
         &clock,
         &runner,
         &installed_destination(targets),
         targets.roots.state.as_path(),
         &targets.home,
         args,
+        std::time::Duration::from_secs(timeout_seconds),
     )?;
     crate::smoke::verdict_exit(&outcome.verdict, &outcome.text(), &settings, &origin)
 }
@@ -2227,36 +2338,53 @@ fn verify_installed_smoke(
     environment: &Resolved,
     targets: &provenant_config::Targets,
     args: &cli::Upgrade,
+    timeout_seconds: u64,
 ) -> Result<String, String> {
-    let program = installed_destination(targets);
     // JSON keeps the child's envelopes typed. In compact human mode the
     // verifier's own rows are clipped before the parent could read them, so
     // both the innermost error and the smoke verdict would be lost.
+    let project = provenant_os::git::repository_path(
+        &environment.project,
+        provenant_os::git::RepositoryPath::Toplevel,
+    )
+    .is_ok()
+    .then_some(environment.project.as_path());
+    let argv = verify_installed_smoke_argv(
+        installed_destination(targets),
+        environment.roots.state.as_path(),
+        project,
+        args,
+        timeout_seconds,
+    );
+    let output = runner.execute(&argv, None, 1_048_576, timeout_seconds)?;
+    Ok(String::from_utf8_lossy(&output).into_owned())
+}
+
+fn verify_installed_smoke_argv(
+    program: PathBuf,
+    state: &Path,
+    project: Option<&Path>,
+    args: &cli::Upgrade,
+    timeout_seconds: u64,
+) -> Vec<std::ffi::OsString> {
     let mut argv = vec![
         program.into_os_string(),
         "--json".into(),
         "--state-dir".into(),
-        environment.roots.state.as_path().as_os_str().to_owned(),
+        state.as_os_str().to_owned(),
     ];
     // The verifier builds its own scratch checkout; the caller's project is
     // only needed for config and root resolution. Passing a non-checkout makes
     // the child refuse with INVALID before the smoke can start, which is why a
     // `upgrade --verify` run from $HOME failed only its smoke host. Resolve from
     // the child's own cwd instead when the selected project is not a checkout.
-    if provenant_os::git::repository_path(
-        &environment.project,
-        provenant_os::git::RepositoryPath::Toplevel,
-    )
-    .is_ok()
-    {
-        argv.extend([
-            "--project".into(),
-            environment.project.as_os_str().to_owned(),
-        ]);
+    if let Some(project) = project {
+        argv.extend(["--project".into(), project.as_os_str().to_owned()]);
     }
     argv.extend(["upgrade".into(), "--verify".into(), "--verify-only".into()]);
+    argv.extend(["--timeout".into(), timeout_seconds.to_string().into()]);
     if let Some(host) = &args.host {
-        argv.extend(["--host".into(), host.clone().into()]);
+        argv.extend(["--verify-host".into(), host.clone().into()]);
     }
     if let Some(route) = &args.route {
         argv.extend(["--route".into(), route.clone().into()]);
@@ -2264,8 +2392,46 @@ fn verify_installed_smoke(
     for setting in &args.set {
         argv.extend(["--set".into(), setting.clone().into()]);
     }
-    let output = runner.execute(&argv, None, 1_048_576, 3700)?;
-    Ok(String::from_utf8_lossy(&output).into_owned())
+    argv
+}
+
+#[cfg(test)]
+mod verify_child_argv_tests {
+    use super::verify_installed_smoke_argv;
+    use provenant_cli::{CommonArgs, Upgrade};
+    use std::path::{Path, PathBuf};
+
+    #[test]
+    fn verification_child_receives_the_verify_host_flag() {
+        let args = Upgrade {
+            common: CommonArgs::default(),
+            yes: false,
+            from_source: None,
+            hosts: String::new(),
+            keep: false,
+            verify: true,
+            verify_only: true,
+            dry_run: false,
+            host: Some("remote".to_owned()),
+            route: None,
+            set: Vec::new(),
+        };
+        let argv = verify_installed_smoke_argv(
+            PathBuf::from("/bin/provenant"),
+            Path::new("/state"),
+            None,
+            &args,
+            180,
+        );
+        let captured: Vec<_> = argv.iter().map(|arg| arg.to_string_lossy()).collect();
+        assert!(
+            captured
+                .windows(2)
+                .any(|pair| pair == ["--verify-host", "remote"])
+        );
+        assert!(captured.windows(2).any(|pair| pair == ["--timeout", "180"]));
+        assert!(!captured.iter().any(|arg| arg == "--host"));
+    }
 }
 
 /// The installed binary's own verify phase. It never installs or downloads;
@@ -2274,8 +2440,9 @@ fn run_verify_only(
     targets: &provenant_config::Targets,
     args: &cli::Upgrade,
     globals: &cli::Globals,
+    timeout_seconds: u64,
 ) -> u8 {
-    let result = verify_smoke(targets, args);
+    let result = verify_smoke(targets, args, timeout_seconds);
     let version = env!("CARGO_PKG_VERSION");
     match result {
         Ok(output) => {
@@ -2323,6 +2490,63 @@ fn run_verify_only(
     }
 }
 
+/// The release a verify pins, named by its recorded version identity.
+fn release_pin_version(state_dir: &Path) -> String {
+    read_receipt_at(state_dir)
+        .ok()
+        .flatten()
+        .map(|receipt| receipt.source_digest.to_string())
+        .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_owned())
+}
+
+/// Pin the release under verification with a shared lock, held until verify
+/// ends. Install, swap and collection probe the same lock and skip a pinned
+/// release, so a concurrent upgrade cannot remove bytes a verifier is reading.
+fn verify_release_pin(state_dir: &Path) -> Result<provenant_os::fs::LockGuard, String> {
+    use std::os::unix::fs::DirBuilderExt;
+    let version = release_pin_version(state_dir);
+    let releases = state_dir.join("releases");
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&releases)
+        .map_err(|error| format!("cannot prepare the release pin directory: {error}"))?;
+    let dir = Directory::open_anchor(&releases)
+        .map_err(|error| format!("cannot open the release pin directory: {error}"))?;
+    let clock = SystemClock::new();
+    let budget = WaitBudget::cli(clock.mono_now(), 30)
+        .map_err(|error| format!("invalid release pin budget: {error}"))?;
+    dir.lock(
+        OsStr::new(&format!("{version}.lock")),
+        LockMode::Shared,
+        budget,
+        &CancelToken::new(),
+        &clock,
+    )
+    .map_err(|error| format!("cannot pin release {version}: {error}"))
+}
+
+/// Mark a smoke scratch for retention and tell the caller how to retire it.
+/// The marker is honoured by `ScratchDir::drop`; gc and peer cleanup skip a
+/// scratch that carries it.
+fn retain_smoke(project: &Path, graph: &str, keep: bool) -> Result<(), String> {
+    if !keep {
+        return Ok(());
+    }
+    std::fs::write(project.join("keep"), format!("{graph}\n"))
+        .map_err(|error| format!("cannot keep the smoke scratch: {error}"))?;
+    warn(
+        Warning::new(
+            SMOKE_GRAPH_RETAINED,
+            format!("smoke graph {graph} and its worktree were kept"),
+            provenant_records::warning::detected_source(SMOKE_GRAPH_RETAINED),
+        )
+        .subject(graph.to_owned())
+        .repair(format!("provenant retire graph:{graph}")),
+    );
+    Ok(())
+}
+
 /// The dry run compiles the same fixture-pinned graph the lifecycle would
 /// launch, using the configured fixture root and merged parameters. It never
 /// waits or reports a verdict, and it forgets the fixture binding when done.
@@ -2332,6 +2556,7 @@ fn preview_smoke(
     state_dir: &Path,
     home: &Path,
     args: &cli::Upgrade,
+    timeout_seconds: u64,
 ) -> Result<Vec<u8>, String> {
     let roots =
         crate::roots::child(home, home, state_dir.to_path_buf()).map_err(|e| e.to_string())?;
@@ -2346,21 +2571,17 @@ fn preview_smoke(
     let nonce = crate::smoke::nonce()?;
     let commits = crate::smoke::create_fixture(state_dir, home, &nonce, &root)?;
     let fixture = crate::smoke::fixture_root(home, &root).join(&nonce);
+    let graph = crate::smoke::smoke_graph_name();
+    // Keep the preview's fixture when asked, and name the retire command that
+    // releases it. The marker travels with the fixture the argv builder pins.
+    retain_smoke(&fixture, &graph, args.keep)?;
     // The preview shares the lifecycle's argv builder, so its writer branch,
     // base, host and parameters are the ones the real launch would use.
     let set = crate::smoke::with_fixture_defaults(settings.merged_set(&args.set), commits);
     let argv = crate::smoke::smoke_run_argv(
-        program,
-        &fixture,
-        state_dir,
-        args,
-        &settings,
-        commits,
-        &crate::smoke::smoke_graph_name(),
-        &set,
-        true,
+        program, &fixture, state_dir, args, &settings, commits, &graph, &set, true,
     );
-    let outcome = runner.execute(&argv, None, 1_048_576, 60);
+    let outcome = runner.execute(&argv, None, 1_048_576, timeout_seconds);
     crate::smoke::report_smoke_cleanup(
         outcome,
         crate::smoke::remove_fixture(state_dir, home, &nonce, &root),
@@ -2464,9 +2685,13 @@ fn failed_hosts_message(hosts: &[HostUpgrade]) -> String {
 /// The `UPGRADE_FAILED` refusal. The renderer drops human output when an error
 /// is set, so the next step points at the typed per-host detail in `--json`,
 /// not at `--full`.
-fn failed_upgrade_result(hosts: Vec<HostUpgrade>) -> CommandResult<Vec<HostUpgrade>> {
+fn failed_upgrade_result(hosts: Vec<HostUpgrade>) -> CommandResult<serde_json::Value> {
     let message = failed_hosts_message(&hosts);
-    let mut result = CommandResult::new("upgrade", Outcome::Error, hosts);
+    let mut result = CommandResult::new(
+        "upgrade",
+        Outcome::Error,
+        serde_json::json!({"hosts": hosts}),
+    );
     result.error = Some(CommandError::new(
         "UPGRADE_FAILED",
         message,
@@ -2544,13 +2769,55 @@ fn remote_upgrade_script(tag: &str) -> String {
     )
 }
 
-pub(super) fn run_upgrade(args: cli::Upgrade, globals: &cli::Globals) -> u8 {
+/// Hosts selected by `--host` for an upgrade. `None` means every registered
+/// peer; smoke placement is the separate `--verify-host` flag in `args.host`.
+fn selected_upgrade_hosts(args: &cli::Upgrade) -> Option<std::collections::BTreeSet<String>> {
+    if args.common.host.is_empty()
+        || args
+            .common
+            .host
+            .iter()
+            .any(|host| matches!(host, cli::HostArg::All))
+    {
+        None
+    } else {
+        Some(
+            args.common
+                .host
+                .iter()
+                .filter_map(|host| match host {
+                    cli::HostArg::Named(name) => Some(name.clone()),
+                    cli::HostArg::All => None,
+                })
+                .collect(),
+        )
+    }
+}
+
+fn remaining_timeout_seconds(deadline: provenant_core::Deadline, maximum: u64) -> u64 {
+    crate::smoke::remaining_seconds(&SystemClock::new(), deadline).min(maximum)
+}
+
+pub(super) fn run_upgrade(
+    args: cli::Upgrade,
+    globals: &cli::Globals,
+    timeout: Option<std::time::Duration>,
+) -> u8 {
+    let deadline = crate::smoke::deadline_after(
+        &SystemClock::new(),
+        timeout.unwrap_or(std::time::Duration::from_secs(1_200)),
+    );
     let (environment, targets) = match selected_targets(globals, &[]) {
         Ok(value) => value,
         Err(error) => return edge_error("upgrade", error, globals),
     };
     if args.verify_only {
-        return run_verify_only(&targets, &args, globals);
+        return run_verify_only(
+            &targets,
+            &args,
+            globals,
+            remaining_timeout_seconds(deadline, 3_700),
+        );
     }
     if args.dry_run {
         let runner = match runner_for_verify(&targets) {
@@ -2573,6 +2840,7 @@ pub(super) fn run_upgrade(args: cli::Upgrade, globals: &cli::Globals) -> u8 {
             targets.roots.state.as_path(),
             &targets.home,
             &args,
+            remaining_timeout_seconds(deadline, 60),
         );
         return match output {
             Ok(bytes) => {
@@ -2674,7 +2942,7 @@ pub(super) fn run_upgrade(args: cli::Upgrade, globals: &cli::Globals) -> u8 {
                     ],
                     None,
                     4_194_304,
-                    30,
+                    remaining_timeout_seconds(deadline, 30),
                 )?;
                 source_archive = Some(runner.execute(
                     &[
@@ -2689,7 +2957,7 @@ pub(super) fn run_upgrade(args: cli::Upgrade, globals: &cli::Globals) -> u8 {
                     ],
                     Some(&files),
                     67_108_864,
-                    120,
+                    remaining_timeout_seconds(deadline, 120),
                 )?);
             }
         } else {
@@ -2703,7 +2971,7 @@ pub(super) fn run_upgrade(args: cli::Upgrade, globals: &cli::Globals) -> u8 {
                 ],
                 None,
                 1_048_576,
-                30,
+                remaining_timeout_seconds(deadline, 30),
             )?;
             let release: serde_json::Value =
                 serde_json::from_slice(&latest).map_err(|error| error.to_string())?;
@@ -2761,8 +3029,18 @@ pub(super) fn run_upgrade(args: cli::Upgrade, globals: &cli::Globals) -> u8 {
         };
         let mut commands: Vec<(String, Vec<std::ffi::OsString>, &[u8])> =
             vec![("local".to_owned(), local, &[])];
+        // `--host` selects which registered peers to upgrade; no selection
+        // (or `all`) keeps the whole fleet. Smoke placement is a separate
+        // `--verify-host` flag carried in `args.host`.
+        let selected_hosts = selected_upgrade_hosts(&args);
         // Construct the entire fleet before running either phase.
         for (name, peer) in fabric.peers {
+            if selected_hosts
+                .as_ref()
+                .is_some_and(|hosts| !hosts.contains(&name))
+            {
+                continue;
+            }
             let (command, input) = if let Some(archive) = &source_archive {
                 (
                     format!(
@@ -2812,7 +3090,12 @@ pub(super) fn run_upgrade(args: cli::Upgrade, globals: &cli::Globals) -> u8 {
             }
             let host = report(
                 name.clone(),
-                runner.execute(&preflight, Some(*input), 1_048_576, 3600),
+                runner.execute(
+                    &preflight,
+                    Some(*input),
+                    1_048_576,
+                    remaining_timeout_seconds(deadline, 3_600),
+                ),
             );
             if !host.success {
                 results.push(host);
@@ -2822,7 +3105,12 @@ pub(super) fn run_upgrade(args: cli::Upgrade, globals: &cli::Globals) -> u8 {
         for (name, argv, input) in commands {
             results.push(report(
                 name,
-                runner.execute(&argv, Some(input), 1_048_576, 3600),
+                runner.execute(
+                    &argv,
+                    Some(input),
+                    1_048_576,
+                    remaining_timeout_seconds(deadline, 3_600),
+                ),
             ));
             if !results.last().is_some_and(|host| host.success) {
                 break;
@@ -2842,7 +3130,13 @@ pub(super) fn run_upgrade(args: cli::Upgrade, globals: &cli::Globals) -> u8 {
         Ok(mut hosts) => {
             if args.verify && hosts.iter().all(|host| host.success) {
                 let verified = runner_for_verify(&targets).and_then(|runner| {
-                    verify_installed_smoke(&runner, &environment, &targets, &args)
+                    verify_installed_smoke(
+                        &runner,
+                        &environment,
+                        &targets,
+                        &args,
+                        remaining_timeout_seconds(deadline, 3_700),
+                    )
                 });
                 match verified {
                     Ok(output) => hosts.push(HostUpgrade {
@@ -2876,11 +3170,18 @@ pub(super) fn run_upgrade(args: cli::Upgrade, globals: &cli::Globals) -> u8 {
             }
             let success = hosts.iter().all(|host| host.success);
             let mut human = render_upgrade_hosts(&hosts, globals.full);
+            // One release line leads compact output; --full keeps the per-file
+            // counts and capability notices that the host detail already has.
+            if !globals.full
+                && let Some(version) = &upgrade_version
+            {
+                human.insert_str(0, &format!("provenant {version}\n"));
+            }
             if let Some(warning) = &version_warning {
                 human.push_str(&format!("  Warning: {warning}\n"));
             }
             let result = if success {
-                CommandResult::new("upgrade", Outcome::Ok, hosts)
+                CommandResult::new("upgrade", Outcome::Ok, serde_json::json!({"hosts": hosts}))
             } else {
                 failed_upgrade_result(hosts)
             };
@@ -2899,7 +3200,7 @@ pub(super) fn run_uninstall(args: cli::Uninstall, globals: &cli::Globals) -> u8 
     }
     let clock = SystemClock::new();
     let cancel = CancelToken::new();
-    let context = match context(&clock, &cancel) {
+    let context = match context(&targets.roots, &clock, &cancel) {
         Ok(context) => context,
         Err(error) => {
             return super::fail(

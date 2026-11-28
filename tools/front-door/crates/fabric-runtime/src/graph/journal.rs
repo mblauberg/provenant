@@ -1,7 +1,16 @@
 use super::*;
 
+mod migration;
+pub use migration::{migrate, migrate_store};
+mod guidance;
+pub use guidance::{
+    UnreadableCheckpointNotice, unreadable_graph_explanation, unreadable_graph_guidance,
+};
+
 /// Stored execution/checkpoint contract; older duplicate-pin records are rejected.
-pub(super) const CHECKPOINT_SCHEMA_VERSION: u64 = 3;
+/// Version 4 typed progress warnings and renamed sealed settings; the pure
+/// transform lives in [`migrate`] and runs once under the store's lock.
+pub(super) const CHECKPOINT_SCHEMA_VERSION: u64 = 4;
 
 /// Digest of a validated plan. Writers and readers share the domain and version.
 pub(super) fn plan_digest(plan: &PlannedGraph) -> Result<provenant_core::Digest, CanonicalError> {
@@ -158,31 +167,6 @@ impl JournalError {
             Self::InvalidTopology => "invalid_topology",
         }
     }
-}
-
-/// Guidance for an unreadable checkpoint, with any recovery its error allows.
-pub fn unreadable_graph_explanation(graph_id: &str, _error: &JournalError) -> String {
-    unreadable_graph_guidance(graph_id)
-}
-
-/// A tick notice already recorded in the dedicated unreadable marker. The
-/// reason is the typed `JournalError` code that made the checkpoint unreadable.
-#[derive(Debug, Error)]
-#[error("{}", unreadable_graph_guidance_with_reason(.0, .1))]
-pub struct UnreadableCheckpointNotice(pub String, pub &'static str);
-
-/// Guidance for a graph whose checkpoint cannot be interpreted.
-pub fn unreadable_graph_guidance(graph_id: &str) -> String {
-    format!(
-        "Graph {graph_id} state is unreadable. From the project and state directory that own it, run `provenant stop -- {graph_id}` to remove its record from the listing. There is no safe automatic repair. Other graphs and separately listed attempts remain available; inspect active attempts and writer fences separately."
-    )
-}
-
-/// Guidance carrying the typed reason recorded in the quarantine marker.
-fn unreadable_graph_guidance_with_reason(graph_id: &str, reason: &str) -> String {
-    format!(
-        "Graph {graph_id} state is unreadable ({reason}); it is quarantined and will not be retried until its bytes change. From the project and state directory that own it, run `provenant stop -- {graph_id}` to retire its record. There is no safe automatic repair. Other graphs and separately listed attempts remain available; inspect active attempts and writer fences separately."
-    )
 }
 
 /// Safe, atomic checkpoint file journal. The held owner lock fences concurrent
@@ -654,7 +638,7 @@ impl FileJournal {
                 cancel,
                 clock,
             )?;
-            let stored = migrate_checkpoint_locked(&graphs_dir, graph_id)?;
+            let stored = load_checkpoint(&graphs_dir, graph_id)?;
             let (extra, execution) = stored.map_or_else(
                 || (Default::default(), None),
                 |stored| (stored.extra, Some(stored.execution)),
@@ -690,7 +674,7 @@ impl FileJournal {
             let graphs_dir = open_or_create(&graphs_dir, OsStr::new(&project.to_string()))?;
             let lock_name = format!("graph-{graph_id}.lock");
             let lock = graphs_dir.try_lock(OsStr::new(&lock_name), LockMode::Exclusive)?;
-            let stored = migrate_checkpoint_locked(&graphs_dir, graph_id)?;
+            let stored = load_checkpoint(&graphs_dir, graph_id)?;
             let (extra, execution) = stored.map_or_else(
                 || (Default::default(), None),
                 |stored| (stored.extra, Some(stored.execution)),
@@ -706,6 +690,131 @@ impl FileJournal {
             })
         })()
         .map_err(|error: JournalError| error.for_graph(&error_graph_id))
+    }
+
+    /// Archive a graph and its durable sidecars under the graph lock. The
+    /// caller's finalizer parks queue ownership and releases external leases
+    /// after the archive is durable but before the live checkpoint is cleared.
+    /// If finalisation fails, the live graph remains byte-for-byte intact.
+    pub fn retire(
+        root: &StateRoot,
+        project: ProjectId,
+        graph_id: &str,
+        budget: WaitBudget,
+        cancel: &CancelToken,
+        clock: &dyn Clock,
+        finalize: impl FnOnce(&GraphCheckpoint) -> Result<(), Box<dyn Error>>,
+    ) -> Result<Option<std::path::PathBuf>, Box<dyn Error>> {
+        if !valid_identifier(graph_id) {
+            return Err(JournalError::InvalidGraphId.for_graph(graph_id).into());
+        }
+        let mut journal = Self::open(root, project, graph_id, budget, cancel, clock)?;
+        let Some(checkpoint) = journal.load(graph_id)? else {
+            return Ok(None);
+        };
+        let bytes = read_checkpoint_bytes(&journal.directory, graph_id)?
+            .ok_or(JournalError::BadEnvelope)?;
+        let stamp = clock.wall_now()?.as_micros();
+        match journal.directory.mkdir(OsStr::new("retired"), 0o700) {
+            Ok(()) => {}
+            Err(error) if error.is_exists() => {}
+            Err(error) => return Err(error.into()),
+        }
+        let retired = journal
+            .directory
+            .open_verified_directory(OsStr::new("retired"))?;
+        let archive_name = (0..100)
+            .find_map(|attempt| {
+                let name = if attempt == 0 {
+                    format!("{graph_id}-{stamp}")
+                } else {
+                    format!("{graph_id}-{stamp}-{attempt}")
+                };
+                match retired.mkdir(OsStr::new(&name), 0o700) {
+                    Ok(()) => Some(Ok(name)),
+                    Err(error) if error.is_exists() => None,
+                    Err(error) => Some(Err(error)),
+                }
+            })
+            .transpose()?
+            .ok_or("could not allocate a unique graph retirement archive")?;
+        let archive = retired.open_verified_directory(OsStr::new(&archive_name))?;
+        archive
+            .atomic_write(
+                &checkpoint_file_name(graph_id),
+                ".graph-retired.",
+                &bytes,
+                PublishMode::NoReplace,
+            )?
+            .require_durable()
+            .map_err(JournalError::DurabilityUnconfirmed)?;
+        prompt_store::archive(&journal.directory, &archive, graph_id)?;
+
+        for sidecar in [
+            unreadable_marker_name(graph_id),
+            advance_note_name(graph_id),
+            events::name(graph_id),
+            OsString::from(format!("graph-{graph_id}.reserved")),
+            OsString::from(format!("peer-origin-{graph_id}.json")),
+        ] {
+            copy_optional_sidecar(&journal.directory, &archive, &sidecar)?;
+        }
+        let pending = match journal
+            .directory
+            .open_verified_directory(OsStr::new("pending"))
+        {
+            Ok(markers) => Some(markers),
+            Err(error) if error.is_not_found() => None,
+            Err(error) => return Err(error.into()),
+        };
+        if let Some(markers) = pending.as_ref() {
+            let marker = pending_marker_name(graph_id);
+            if let Some(marker_bytes) = optional_sidecar(markers, &marker)? {
+                match archive.mkdir(OsStr::new("pending"), 0o700) {
+                    Ok(()) => {}
+                    Err(error) if error.is_exists() => {}
+                    Err(error) => return Err(error.into()),
+                }
+                let archive_markers = archive.open_verified_directory(OsStr::new("pending"))?;
+                archive_markers
+                    .atomic_write(
+                        &marker,
+                        ".graph-retired-pending.",
+                        &marker_bytes,
+                        PublishMode::NoReplace,
+                    )?
+                    .require_durable()
+                    .map_err(JournalError::DurabilityUnconfirmed)?;
+                archive_markers.sync()?;
+            }
+        }
+        archive.sync()?;
+        retired.sync()?;
+
+        // Cross-store finalisation happens only after a complete archive exists.
+        // A failure leaves every live graph file available for a safe retry.
+        finalize(&checkpoint)?;
+
+        journal.directory.unlink(&checkpoint_file_name(graph_id))?;
+        prompt_store::remove(&journal.directory, graph_id)?;
+        for sidecar in [
+            unreadable_marker_name(graph_id),
+            advance_note_name(graph_id),
+            events::name(graph_id),
+            OsString::from(format!("graph-{graph_id}.reserved")),
+            OsString::from(format!("peer-origin-{graph_id}.json")),
+        ] {
+            unlink_optional_sidecar(&journal.directory, &sidecar)?;
+        }
+        if let Some(markers) = pending.as_ref() {
+            remove_pending_marker(markers, graph_id)?;
+        }
+        journal
+            .directory
+            .sync()
+            .map_err(JournalError::DurabilityUnconfirmed)?;
+        retired.sync()?;
+        Ok(Some(archive.current_path()?))
     }
 
     /// Give a hand-built fixture the same plan identity as a real admitted graph.
@@ -1691,6 +1800,7 @@ impl FileJournal {
         fn retire_bad_record(
             directory: &Directory,
             graph_id: &str,
+            clock: &dyn Clock,
             cleanup: impl FnOnce(Option<&GraphCheckpoint>) -> Result<(), Box<dyn Error>>,
         ) -> Result<bool, Box<dyn Error>> {
             let bytes = read_checkpoint_bytes(directory, graph_id)
@@ -1700,11 +1810,57 @@ impl FileJournal {
                 decode_verified_checkpoint(&bytes, graph_id, bytes.len() as u64).ok()
             });
             cleanup(recovered.as_ref().map(|stored| &stored.checkpoint))?;
+            // A retired graph is archived, never deleted. Copy the exact
+            // stored bytes (and its marker) under the graph lock before
+            // clearing the live checkpoint, so an interrupted clear still
+            // leaves a recoverable record.
+            let stamp = clock
+                .wall_now()
+                .map(|now| now.as_micros())
+                .unwrap_or_default();
+            let archive_name = format!("{graph_id}-{stamp}");
+            match directory.mkdir(OsStr::new("retired"), 0o700) {
+                Ok(()) => {}
+                Err(error) if error.is_exists() => {}
+                Err(error) => return Err(error.into()),
+            }
+            let retired = directory.open_verified_directory(OsStr::new("retired"))?;
+            match retired.mkdir(OsStr::new(&archive_name), 0o700) {
+                Ok(()) => {}
+                Err(error) if error.is_exists() => {}
+                Err(error) => return Err(error.into()),
+            }
+            let archive = retired.open_verified_directory(OsStr::new(&archive_name))?;
+            if let Some(bytes) = bytes.as_deref() {
+                archive
+                    .atomic_write(
+                        OsStr::new(&format!("graph-{graph_id}.json")),
+                        ".graph-retired.",
+                        bytes,
+                        PublishMode::Replace,
+                    )?
+                    .require_durable()
+                    .map_err(JournalError::DurabilityUnconfirmed)?;
+            }
+            let marker = unreadable_marker_name(graph_id);
+            if let Ok(marker_bytes) = directory.read_bounded(&marker, 4 * 1024) {
+                archive
+                    .atomic_write(
+                        &marker,
+                        ".graph-retired-marker.",
+                        &marker_bytes,
+                        PublishMode::Replace,
+                    )?
+                    .require_durable()
+                    .map_err(JournalError::DurabilityUnconfirmed)?;
+            }
+            archive.sync()?;
+            retired.sync()?;
             directory.unlink(OsStr::new(&format!("graph-{graph_id}.json")))?;
             directory
                 .sync()
                 .map_err(JournalError::DurabilityUnconfirmed)?;
-            let _ = directory.unlink(&unreadable_marker_name(graph_id));
+            let _ = directory.unlink(&marker);
             Ok(true)
         }
         if !valid_identifier(graph_id) {
@@ -1735,9 +1891,11 @@ impl FileJournal {
             clock,
         )?;
         match load_checkpoint(&directory, graph_id) {
-            Err(error) if error.is_unreadable() => retire_bad_record(&directory, graph_id, cleanup),
+            Err(error) if error.is_unreadable() => {
+                retire_bad_record(&directory, graph_id, clock, cleanup)
+            }
             Ok(Some(stored)) if !stored.checkpoint.expansion_pause_owns_graph_pause() => {
-                retire_bad_record(&directory, graph_id, cleanup)
+                retire_bad_record(&directory, graph_id, clock, cleanup)
             }
             Err(error) => Err(error.for_graph(graph_id).into()),
             Ok(_) => Ok(false),
@@ -2329,110 +2487,12 @@ pub(super) fn decode_checkpoint_in(
     graph_id: &str,
 ) -> Result<StoredCheckpoint, JournalError> {
     let bytes = prompt_store::rehydrate(directory, graph_id, bytes)?;
-    let bytes = migrate_checkpoint_bytes(&bytes)?;
     decode_checkpoint_limited(&bytes, graph_id, bytes.len() as u64)
 }
 
-// This is the sole reader of the v2 checkpoint envelope. Validate its original
-// digest before moving any keys, then validate the resulting v3 checkpoint.
-fn migrate_checkpoint_bytes(bytes: &[u8]) -> Result<Vec<u8>, JournalError> {
-    let value: serde_json::Value = provenant_records::decode(
-        bytes,
-        Limits {
-            max_bytes: MAX_CHECKPOINT_BYTES.max(bytes.len() as u64),
-            max_depth: 64,
-            max_members: MAX_CHECKPOINT_MEMBERS,
-        },
-    )?;
-    if value
-        .get("schema_version")
-        .and_then(serde_json::Value::as_u64)
-        != Some(2)
-    {
-        return Ok(bytes.to_vec());
-    }
-    let checkpoint = value.get("checkpoint").ok_or(JournalError::BadEnvelope)?;
-    let execution = value.get("execution").ok_or(JournalError::BadEnvelope)?;
-    let digest =
-        CanonicalV1::record_digest("fabric-graph-checkpoint", 2, &(checkpoint, execution))?;
-    if value.get("digest").and_then(serde_json::Value::as_str) != Some(digest.to_string().as_str())
-    {
-        return Err(JournalError::BadDigest);
-    }
-    let migrated_value = migrate_checkpoint_2_3(value)?;
-    let mut stored: StoredCheckpoint =
-        serde_json::from_value(migrated_value).map_err(|_| JournalError::BadEnvelope)?;
-    stored.digest = checkpoint_digest(&stored.checkpoint, &stored.execution)?.to_string();
-    let migrated = CanonicalV1::bytes(&stored)?.as_bytes().to_vec();
-    decode_checkpoint_limited(
-        &migrated,
-        &stored.checkpoint.graph_id,
-        migrated.len() as u64,
-    )?;
-    Ok(migrated)
-}
-
-fn migrate_checkpoint_2_3(mut value: serde_json::Value) -> Result<serde_json::Value, JournalError> {
-    fn rename(object: &mut serde_json::Map<String, serde_json::Value>, old: &str, new: &str) {
-        if let Some(value) = object.remove(old) {
-            object.entry(new.to_owned()).or_insert(value);
-        }
-    }
-    let nodes = value
-        .pointer_mut("/checkpoint/nodes")
-        .and_then(serde_json::Value::as_array_mut)
-        .ok_or(JournalError::BadEnvelope)?;
-    for node in nodes {
-        let node = node.as_object_mut().ok_or(JournalError::BadEnvelope)?;
-        rename(node, "advance_error_code", "advance_code");
-        rename(node, "advance_error", "advance_note");
-        if node.get("advance_code").and_then(serde_json::Value::as_str)
-            == Some("writer_declared_stop")
-        {
-            node.insert("advance_code".into(), "declared_stop".into());
-        }
-    }
-    let execution = value
-        .get_mut("execution")
-        .and_then(serde_json::Value::as_object_mut)
-        .ok_or(JournalError::BadEnvelope)?;
-    rename(execution, "advance_error", "advance_note");
-    value["schema_version"] = 3.into();
-    Ok(value)
-}
-
-// Called only after acquiring the graph writer lock.
-fn migrate_checkpoint_locked(
-    directory: &Directory,
-    graph_id: &str,
-) -> Result<Option<StoredCheckpoint>, JournalError> {
-    let Some(bytes) = read_checkpoint_bytes(directory, graph_id)? else {
-        return Ok(None);
-    };
-    let inline = prompt_store::rehydrate(directory, graph_id, &bytes)?;
-    let migrated = migrate_checkpoint_bytes(&inline)?;
-    let stored = decode_checkpoint_limited(&migrated, graph_id, migrated.len() as u64)?;
-    if migrated.as_slice() != &*inline {
-        let mut value: serde_json::Value =
-            serde_json::from_slice(&migrated).map_err(|_| JournalError::BadEnvelope)?;
-        prompt_store::externalise(directory, graph_id, &mut value)?;
-        let compact = CanonicalV1::bytes(&value)?;
-        if compact.as_bytes().len() as u64 > MAX_CHECKPOINT_BYTES {
-            return Err(JournalError::TooLarge);
-        }
-        directory
-            .atomic_write(
-                &checkpoint_file_name(graph_id),
-                ".graph-checkpoint.",
-                compact.as_bytes(),
-                PublishMode::Replace,
-            )?
-            .require_durable()
-            .map_err(JournalError::DurabilityUnconfirmed)?;
-    }
-    Ok(Some(stored))
-}
-
+// The sole reader of older checkpoint envelopes. Every old record is digest-checked
+// before its keys move; each step is idempotent, so a record already at the
+// current version is returned untouched and a resumed cut-over changes nothing.
 pub(super) fn read_checkpoint_bytes(
     directory: &Directory,
     graph_id: &str,
@@ -2453,6 +2513,41 @@ pub(super) fn read_checkpoint_bytes(
         return Err(JournalError::TooLarge);
     }
     Ok(Some(bytes))
+}
+
+fn optional_sidecar(directory: &Directory, name: &OsStr) -> Result<Option<Vec<u8>>, JournalError> {
+    match directory.read_bounded(name, MAX_CHECKPOINT_BYTES) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(error) if error.is_not_found() => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn copy_optional_sidecar(
+    source: &Directory,
+    archive: &Directory,
+    name: &OsStr,
+) -> Result<(), JournalError> {
+    let Some(bytes) = optional_sidecar(source, name)? else {
+        return Ok(());
+    };
+    archive
+        .atomic_write(
+            name,
+            ".graph-retired-sidecar.",
+            &bytes,
+            PublishMode::NoReplace,
+        )?
+        .require_durable()
+        .map_err(JournalError::DurabilityUnconfirmed)
+}
+
+fn unlink_optional_sidecar(directory: &Directory, name: &OsStr) -> Result<(), JournalError> {
+    match directory.unlink(name) {
+        Ok(()) => Ok(()),
+        Err(error) if error.is_not_found() => Ok(()),
+        Err(error) => Err(error.into()),
+    }
 }
 
 #[cfg(test)]

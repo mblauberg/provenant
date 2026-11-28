@@ -18,6 +18,12 @@ fn seal_progress_handoff(
     Ok(())
 }
 
+// Spec: docs/specs/run-launch.md#admission-and-custody
+// A never-spawned writer settles lost with its private evidence retained, and
+// only once its never-spawned exit is recorded: while the exit path is blocked
+// reconcile keeps custody, and a reconcile interrupted after the exit, or
+// after the lost commit, finishes on re-entry. The `exit_*` modes start from
+// the state a launch whose exit could not be recorded leaves behind.
 #[test]
 fn modern_writer_reconcile_preserves_unlaunched_private_evidence()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
@@ -27,6 +33,9 @@ fn modern_writer_reconcile_preserves_unlaunched_private_evidence()
     for mode in [
         "no_summary_terminal_modern",
         "no_summary_terminal_other_generation",
+        "exit_blocked",
+        "exit_recorded",
+        "exit_recorded_committed",
     ] {
         let fixture = PrepareFixture::new()?;
         let execution = registered_landed_writer_fixture(&fixture)?;
@@ -158,24 +167,71 @@ fn modern_writer_reconcile_preserves_unlaunched_private_evidence()
                 serde_json::to_vec(&reservation)?,
             )?;
         }
-        store.commit_lost(
-            scope,
-            "launch interrupted: provider never spawned; private evidence retained",
-            &call,
-        )?;
-        let mut spawned = false;
-        store.queue_reconcile_with(run.attempt_id, &call, |argv, _| {
-            assert_eq!(argv[1..3], ["internal", "settle"]);
-            spawned = true;
-            Ok(())
-        })?;
-        assert!(spawned, "{mode}: reconcile must queue recovery");
-        let queued = store.attempt_dir(run.attempt_id, false)?;
-        assert!(
-            crate::artifacts::read_sealed(&queued, "settlement-queued.json", RECORD_LIMIT)?
-                .is_some(),
-            "{mode}: reconcile must queue recovery"
-        );
+        let exit_path = attempt.current_path()?.join("process-exit.json");
+        if mode == "exit_blocked" {
+            std::fs::create_dir(&exit_path)?;
+            let blocked = store.reconcile_with_observer(
+                run.attempt_id,
+                &crate::dispatch_tests::Fake::default(),
+                &call,
+                &provenant_supervisor::fixture::RecordedBootObserver,
+            )?;
+            // An unwritable exit leaves the attempt uncertain and retryable;
+            // which reason names the obstruction depends on the first read
+            // that meets it. The invariant is the custody kept below.
+            assert!(
+                matches!(
+                    blocked.as_slice(),
+                    [(_, crate::Reconciled::Uncertain { .. })]
+                ),
+                "{mode}: {blocked:?}"
+            );
+            assert!(
+                matches!(
+                    store.record(id, &call)?.state,
+                    AttemptState::Starting { .. }
+                ),
+                "{mode}: settled without its exit"
+            );
+            assert!(
+                modern.join("reservation.json").is_file(),
+                "{mode}: custody released without its exit"
+            );
+            std::fs::remove_dir(&exit_path)?;
+        }
+        if mode.starts_with("exit_recorded") {
+            let recovery = provenant_supervisor::custody::acquire_recovery(
+                slot.try_clone()?,
+                scope,
+                call.lock_budget(),
+                &cancel,
+                &clock,
+            )?;
+            recovery
+                .record_never_spawned_exit(&attempt, None)?
+                .require_durable()?;
+            drop(recovery);
+        }
+        if !matches!(mode, "exit_blocked" | "exit_recorded") {
+            store.commit_lost(
+                scope,
+                "launch interrupted: provider never spawned; private evidence retained",
+                &call,
+            )?;
+            let mut spawned = false;
+            store.queue_reconcile_with(run.attempt_id, &call, |argv, _| {
+                assert_eq!(argv[1..3], ["internal", "settle"]);
+                spawned = true;
+                Ok(())
+            })?;
+            assert!(spawned, "{mode}: reconcile must queue recovery");
+            let queued = store.attempt_dir(run.attempt_id, false)?;
+            assert!(
+                crate::artifacts::read_sealed(&queued, "settlement-queued.json", RECORD_LIMIT)?
+                    .is_some(),
+                "{mode}: reconcile must queue recovery"
+            );
+        }
         if mode == "no_summary_terminal_other_generation" {
             continue;
         }
@@ -208,10 +264,33 @@ fn modern_writer_reconcile_preserves_unlaunched_private_evidence()
             "{:?}",
             terminal.state
         );
+        // The exit is evidence on disk; the terminal record carries none, so
+        // the lost attempt keeps its private head through cleanup and GC.
+        assert!(terminal.exit_evidence.is_none(), "{mode}");
+        let exit: serde_json::Value = serde_json::from_slice(
+            &crate::artifacts::read_sealed(&attempt, "process-exit.json", RECORD_LIMIT)?
+                .ok_or("settled lost without the never-spawned exit")?,
+        )?;
+        assert_eq!(exit["never_spawned"], true, "{mode}");
         assert!(store.writer_fences()?.is_empty());
         assert!(store.writer_fence_listing()?.issues.is_empty());
         assert!(!slot_path.join("reservation.json").exists());
         assert!(modern.join("settlement.json").is_file());
+        // A repeated reconcile changes nothing.
+        let repeated = store.reconcile_with_observer(
+            run.attempt_id,
+            &crate::dispatch_tests::Fake::default(),
+            &call,
+            &provenant_supervisor::fixture::RecordedBootObserver,
+        )?;
+        assert!(
+            !repeated
+                .iter()
+                .any(|(_, state)| matches!(state, crate::Reconciled::Uncertain { .. })),
+            "{mode}: {repeated:?}"
+        );
+        assert_eq!(store.record(id, &call)?.state, terminal.state, "{mode}");
+        assert!(store.writer_fences()?.is_empty(), "{mode}");
         assert_eq!(
             private_git(&["rev-parse", "HEAD"])?,
             head,
@@ -1425,11 +1504,6 @@ fn stopped_writer_preserves_work_and_arbitrates_steer_continuation()
                 assert_eq!(store.record(id, &call)?.superseded_by, Some(child));
                 continue;
             }
-            if marker == DeliveredSteerAdopted {
-                assert!(matches!(child, Err(RunError::WriterLineage(_))));
-                assert_eq!(store.record(id, &call)?.superseded_by, None);
-                continue;
-            }
             let child = child?;
             if explicit {
                 assert_eq!(
@@ -1446,7 +1520,7 @@ fn stopped_writer_preserves_work_and_arbitrates_steer_continuation()
                 let current: provenant_core::GitOid =
                     crate::delivery_tests::worktree_git(&fixture, &git, &["rev-parse", "HEAD"])?
                         .parse()?;
-                if marker == DeliveredSteerDescendant {
+                if matches!(marker, DeliveredSteerDescendant | DeliveredSteerAdopted) {
                     let sealed = shared_head.ok_or("sealed head")?;
                     assert_ne!(current, sealed);
                     assert_eq!(task.head, Some(current.to_string()));
@@ -2619,9 +2693,11 @@ fn budget_stop_case(case: BudgetStopCase) -> std::result::Result<(), Box<dyn std
         )?;
         assert_eq!(report["code"], "WRITE_SCOPE");
         assert_eq!(report["strength"], "refuse");
-        // The strict scope comes from the request's sealed dispatch
-        // override, not a project rule.
-        assert_eq!(report["source"], "dispatch");
+        // The sealed dispatch override is reported at the route layer.
+        assert_eq!(
+            report["source"],
+            serde_json::json!({"layer": "route", "origin": "dispatch#policy.WRITE_SCOPE"})
+        );
         assert!(
             !report["out_of_scope_paths"]
                 .as_array()

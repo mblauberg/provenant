@@ -532,6 +532,8 @@ pub(in crate::graph) fn validate_checkpoint<R: Error + 'static, J: Error + 'stat
             && plans::writer(node)
             && !peer_owned_writer(node.access, node.worktree.as_deref(), node.attempt.as_ref())
             && !progress.writer_binding_pending
+            && !(progress.state == NodeState::Failed
+                && progress.advance_code.as_deref() == Some("writer_binding_unavailable"))
         {
             return Err(bad("writer must retain its binding"));
         }
@@ -874,6 +876,12 @@ pub(in crate::graph) fn validate_checkpoint<R: Error + 'static, J: Error + 'stat
                 "preparation refusals must respect the sealed retry bound",
             ));
         }
+        // A sealed delta round launches from the last reviewed head, so its
+        // manifest pins that base rather than the node's authored one.
+        let launch_review_base = match &progress.review_round_scope {
+            Some(ReviewRoundScope::Delta { base, .. }) => Some(base),
+            _ => progress.review_base.as_ref(),
+        };
         for (index, attempt) in progress.attempts.iter().enumerate() {
             if document.schema_version >= 2 && attempt.input_manifest.is_none() {
                 return Err(bad("attempt must retain its input manifest"));
@@ -884,7 +892,7 @@ pub(in crate::graph) fn validate_checkpoint<R: Error + 'static, J: Error + 'stat
                     || manifest.inputs.len() > MANIFEST_INPUT_LIMIT
                     || manifest.inputs.len().saturating_add(manifest.omitted) != count
                     || manifest.source_commit != progress.source_commit
-                    || manifest.review_base != progress.review_base
+                    || manifest.review_base.as_ref() != launch_review_base
                     || manifest
                         .inputs
                         .iter()
@@ -921,7 +929,10 @@ pub(in crate::graph) fn validate_checkpoint<R: Error + 'static, J: Error + 'stat
                         .get(expected_route_index)
                         .is_some_and(|route| attempt.route == loops::tier_route(Some(route), alias))
                 }),
-                (None, None) => node.routes.get(expected_route_index) == Some(&attempt.route),
+                (None, None) => node
+                    .routes
+                    .get(expected_route_index)
+                    .is_some_and(|route| route.launched_as(&attempt.route)),
                 _ => false,
             };
             if attempt.key.graph_id != plan.graph_id

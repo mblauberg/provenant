@@ -747,7 +747,7 @@ fn writer_preparation_steps(
         );
         assert_eq!(
             skipped_routes[0].guard_boundary,
-            Some(provenant_records::diagnostic::BoundaryClass::Authority)
+            Some(provenant_records::policy::Boundary::Authority)
         );
         assert_eq!(
             skipped_routes[0].confinement_guard,
@@ -828,8 +828,8 @@ fn writer_preparation_steps(
     std::fs::remove_file(readiness_path)?;
     std::fs::remove_file(attempt.join("availability.json"))?;
 
-    // A clean writer that moved after graph source preparation must be
-    // refused before provider probing or any launch artefact is written.
+    // An unresolved head reference must be refused before provider probing or
+    // any launch artefact is written.
     let mut stale_source = task.clone();
     stale_source.head = Some("a".repeat(40));
     let error = prepare_with(
@@ -846,7 +846,7 @@ fn writer_preparation_steps(
     assert!(
         error
             .to_string()
-            .contains("does not match pinned commit"),
+            .contains("invalid Git base"),
         "{error}"
     );
     assert!(error.to_string().contains(&"a".repeat(40)), "{error}");
@@ -1436,9 +1436,7 @@ printf 'agy 1.0.0\n'
         .insert("lanes.publish".into(), serde_json::json!(true));
     // This fixture pins the advisory project github.json label policy, which
     // the gh shim only reaches when the lane's own PR policy forwards writes.
-    // Leaf implement lanes default to lanes.pr=never and are refused by the
-    // wrapper (pinned in the_gh_wrapper_enforces_the_lane_pull_request_policy);
-    // opt this lane in so the advisory warning stays under test.
+    // Set this explicitly so the receipt also records the launch source.
     publishing_task
         .profile
         .knobs
@@ -1555,8 +1553,7 @@ printf 'agy 1.0.0\n'
     );
     assert_eq!(credential.mediation, "gh wrapper (advisory)");
     assert!(!serde_json::to_string(credential)?.contains("fixture-host-token"));
-    // The opt-in above must reach the prepared lane as a sourced receipt; the
-    // default would be never and the gh shim would refuse the advisory check.
+    // The explicit setting must reach the prepared lane as a sourced receipt.
     let lane_pr = publishing
         .route
         .pr_policy
@@ -1878,8 +1875,7 @@ printf 'agy 1.0.0\n'
     phase("gh shim policy");
     // With lanes.pr=allowed (set on this fixture above), project github.json
     // denials are advisory: the shim forwards the call and warns with its
-    // source; it does not refuse the invocation. Under the default never
-    // policy the wrapper would exit 2 instead.
+    // source; it does not refuse the invocation.
     let warned = run_shim("ci")?;
     assert_eq!(warned.termination, provenant_os::exec::Termination::Exit(0));
     assert_eq!(warned.stdout.bytes, b"forwarded\n");

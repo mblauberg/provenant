@@ -1734,7 +1734,10 @@ chmod +x "$2/bin/provenant"
         String::from_utf8_lossy(&built.stderr.bytes)
     );
     let target = fs::read_to_string(record)?;
-    assert_eq!(built.stdout.bytes, b"SOURCE_COMPLETE\n");
+    assert_eq!(
+        built.stdout.bytes,
+        b"Warning: This checkout has no bundled app archive; the app is left as-is and may be behind the CLI.\nSOURCE_COMPLETE\n"
+    );
     assert!(
         !Path::new(target.trim())
             .parent()
@@ -2010,7 +2013,7 @@ fn upgrade_retries_a_dropped_release_checksum() -> Result {
     rig.set_env("PROVENANT_TEST_DROP_CHECKSUM_ONCE", "1");
     let (outcome, report) = rig.upgrade(&[])?;
     // Local host upgrades; the configured Fabric peer still fails by design.
-    assert_eq!(report["data"][0]["success"], true, "{report}");
+    assert_eq!(report["data"]["hosts"][0]["success"], true, "{report}");
     assert_ne!(code(&outcome), 0, "{report}");
     let log = fs::read_to_string(&rig.curl_log)?;
     let fetches = log
@@ -2026,9 +2029,9 @@ fn upgrade_retries_a_dropped_release_checksum() -> Result {
 fn upgrade_rejects_release_checksum_mismatch_and_keeps_the_installed_release() -> Result {
     let mut rig = UpgradeRig::new()?;
     rig.set_env("PROVENANT_TEST_CHECKSUM", &"0".repeat(64));
-    let (outcome, value) = rig.upgrade(&["--hosts", "all"])?;
+    let (outcome, value) = rig.upgrade(&["--host", "all"])?;
     assert_ne!(code(&outcome), 0, "{value}");
-    assert_eq!(value["data"][0]["success"], false, "{value}");
+    assert_eq!(value["data"]["hosts"][0]["success"], false, "{value}");
     assert!(rig.receipt_is_first_release()?);
     rig.assert_old_app_untouched();
     Ok(())
@@ -2041,7 +2044,13 @@ fn assert_app_fetch_failure_warns_and_keeps_installed_app(key: &str, value: &str
     rig.set_env(key, value);
     let (outcome, report) = rig.upgrade(&[])?;
     // The local host still upgrades the CLI; only the app refresh is skipped.
-    assert_eq!(report["data"][0]["success"], true, "{report}");
+    assert_eq!(report["data"]["hosts"][0]["success"], true, "{report}");
+    assert!(
+        report["data"]["hosts"][0]["output"]
+            .as_str()
+            .is_some_and(|output| output.contains("Warning: ")),
+        "{report}"
+    );
     // The configured Fabric peer fails by design in this rig.
     assert_ne!(code(&outcome), 0, "{report}");
     rig.assert_old_app_untouched();
@@ -2092,7 +2101,7 @@ fn upgrade_failed_app_swap_keeps_installed_app_and_leaves_no_retained_copy() -> 
     fs::set_permissions(&mv, fs::Permissions::from_mode(0o755))?;
     let (outcome, value) = rig.upgrade(&[])?;
     assert_ne!(code(&outcome), 0, "{value}");
-    assert_eq!(value["data"][0]["success"], false, "{value}");
+    assert_eq!(value["data"]["hosts"][0]["success"], false, "{value}");
     rig.assert_old_app_untouched();
     // The release itself was applied; only the app swap failed.
     assert!(!rig.receipt_is_first_release()?);
@@ -2117,7 +2126,7 @@ fn upgrade_failed_agent_restart_rolls_back_app_and_agent() -> Result {
     rig.set_env("PROVENANT_TEST_BOOTSTRAP_FAIL", "1");
     let (outcome, value) = rig.upgrade(&[])?;
     assert_ne!(code(&outcome), 0, "{value}");
-    assert_eq!(value["data"][0]["success"], false, "{value}");
+    assert_eq!(value["data"]["hosts"][0]["success"], false, "{value}");
     assert_eq!(fs::read_to_string(&rig.agent)?, before_plist);
     rig.assert_old_app_untouched();
     Ok(())
@@ -2128,9 +2137,9 @@ fn upgrade_peer_preflight_refusal_changes_nothing() -> Result {
     let mut rig = UpgradeRig::new()?;
     rig.set_env("PROVENANT_TEST_PEER_REFUSE", "1");
     let before = snapshot(&rig.rig.state)?;
-    let (outcome, value) = rig.upgrade(&["--hosts", "all"])?;
-    assert_eq!(value["data"][0]["host"], "worker", "{value}");
-    assert_eq!(value["data"][0]["success"], false, "{value}");
+    let (outcome, value) = rig.upgrade(&["--host", "all"])?;
+    assert_eq!(value["data"]["hosts"][0]["host"], "worker", "{value}");
+    assert_eq!(value["data"]["hosts"][0]["success"], false, "{value}");
     assert_ne!(code(&outcome), 0);
     assert_eq!(snapshot(&rig.rig.state)?, before);
     assert!(rig.receipt_is_first_release()?);
@@ -2141,11 +2150,11 @@ fn upgrade_peer_preflight_refusal_changes_nothing() -> Result {
 #[test]
 fn upgrade_pins_one_release_replays_settings_and_reports_peer_failure() -> Result {
     let rig = UpgradeRig::new()?;
-    let (outcome, value) = rig.upgrade(&["--hosts", "all"])?;
-    assert_eq!(value["data"][0]["host"], "local", "{value}");
-    assert_eq!(value["data"][0]["success"], true, "{value}");
-    assert_eq!(value["data"][1]["host"], "worker", "{value}");
-    assert_eq!(value["data"][1]["success"], false, "{value}");
+    let (outcome, value) = rig.upgrade(&["--host", "all"])?;
+    assert_eq!(value["data"]["hosts"][0]["host"], "local", "{value}");
+    assert_eq!(value["data"]["hosts"][0]["success"], true, "{value}");
+    assert_eq!(value["data"]["hosts"][1]["host"], "worker", "{value}");
+    assert_eq!(value["data"]["hosts"][1]["success"], false, "{value}");
     assert_ne!(code(&outcome), 0);
     let arguments: Vec<String> = fs::read_to_string(&rig.ssh_args)?
         .lines()
@@ -2242,12 +2251,18 @@ fn upgrade_to_a_release_without_an_app_archive_keeps_the_migrated_app_and_agent(
     let mut rig = UpgradeRig::new()?;
     // The configured peer is upgraded too and fails by design, so judge the local host.
     let (_, value) = rig.upgrade(&[])?;
-    assert_eq!(value["data"][0]["host"], "local", "{value}");
-    assert_eq!(value["data"][0]["success"], true, "{value}");
+    assert_eq!(value["data"]["hosts"][0]["host"], "local", "{value}");
+    assert_eq!(value["data"]["hosts"][0]["success"], true, "{value}");
     rig.set_env("PROVENANT_TEST_MISSING_APPS", "1");
     let (_, older_value) = rig.upgrade(&[])?;
-    assert_eq!(older_value["data"][0]["host"], "local", "{older_value}");
-    assert_eq!(older_value["data"][0]["success"], true, "{older_value}");
+    assert_eq!(
+        older_value["data"]["hosts"][0]["host"], "local",
+        "{older_value}"
+    );
+    assert_eq!(
+        older_value["data"]["hosts"][0]["success"], true,
+        "{older_value}"
+    );
     assert!(rig.installed_app.join(MENU_EXECUTABLE).is_file());
     if cfg!(target_os = "macos") {
         // A repeated upgrade leaves the already-migrated agent pointing at the same helper.
@@ -2264,8 +2279,8 @@ fn upgrade_unregisters_the_old_menu_login_item_and_keeps_one_launch_path() -> Re
     fs::create_dir_all(&stale)?;
     rig.set_env("PROVENANT_TEST_MENU_LOGIN_ITEM", "1");
     let (_, value) = rig.upgrade(&[])?;
-    assert_eq!(value["data"][0]["host"], "local", "{value}");
-    assert_eq!(value["data"][0]["success"], true, "{value}");
+    assert_eq!(value["data"]["hosts"][0]["host"], "local", "{value}");
+    assert_eq!(value["data"]["hosts"][0]["success"], true, "{value}");
     assert!(!stale.exists());
     assert!(rig.installed_app.join(MENU_EXECUTABLE).is_file());
     let launches = fs::read_to_string(&rig.launch_log)?;
@@ -2305,7 +2320,10 @@ fn upgrade_unregisters_the_old_menu_login_item_and_keeps_one_launch_path() -> Re
     rig.set_env("PROVENANT_TEST_MISSING_APPS", "1");
     fs::create_dir_all(&stale)?;
     let (_, older_value) = rig.upgrade(&[])?;
-    assert_eq!(older_value["data"][0]["success"], true, "{older_value}");
+    assert_eq!(
+        older_value["data"]["hosts"][0]["success"], true,
+        "{older_value}"
+    );
     assert!(!stale.exists());
     Ok(())
 }
@@ -2320,8 +2338,8 @@ fn upgrade_without_a_refreshed_app_keeps_the_login_item_when_the_app_has_no_help
     let stale = rig.installed_app.join(STALE_LOGIN_ITEM);
     fs::create_dir_all(&stale)?;
     let (_, value) = rig.upgrade(&[])?;
-    assert_eq!(value["data"][0]["host"], "local", "{value}");
-    assert_eq!(value["data"][0]["success"], true, "{value}");
+    assert_eq!(value["data"]["hosts"][0]["host"], "local", "{value}");
+    assert_eq!(value["data"]["hosts"][0]["success"], true, "{value}");
     assert!(stale.exists());
     assert!(!rig.installed_app.join(MENU_EXECUTABLE).exists());
     // Neither the bundle nor its launchd registration may be touched.
@@ -2491,8 +2509,8 @@ exec env HOME='{}' PROVENANT_STATE_DIR='{}' CODEX_HOME='{}' CLAUDE_CONFIG_DIR='{
     ])?;
     let value: serde_json::Value = serde_json::from_slice(&upgraded.stdout.bytes)?;
     assert_eq!(code(&upgraded), 0, "{value}");
-    assert_eq!(value["data"][0]["success"], true);
-    assert_eq!(value["data"][1]["success"], true);
+    assert_eq!(value["data"]["hosts"][0]["success"], true);
+    assert_eq!(value["data"]["hosts"][1]["success"], true);
     let listing = rig.execute_os(
         Path::new("/usr/bin/tar"),
         &["-tzf".into(), archive.into()],
@@ -2593,9 +2611,9 @@ fn invalid_install_home_names_the_repair() -> Result {
         assert_eq!(value["status"], "invalid", "{value}");
         assert_eq!(value["error"]["code"], "HOME", "{value}");
         assert!(
-            value["error"]["repair"]
+            value["next"][0]["why"]
                 .as_str()
-                .is_some_and(|repair| !repair.is_empty())
+                .is_some_and(|why| !why.is_empty())
         );
     }
     Ok(())

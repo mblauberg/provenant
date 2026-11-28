@@ -30,7 +30,11 @@ fn run(inv: &Call) -> Result<Outcome, CommandError> {
     let command = inv.command.clone();
     let status = match command {
         Command::Install(args) => crate::install::run_install(args, globals),
-        Command::Upgrade(args) => crate::install::run_upgrade(args, globals),
+        Command::Upgrade(args) => crate::install::run_upgrade(
+            args,
+            globals,
+            inv.common.as_ref().map(|common| common.deadline),
+        ),
         Command::Uninstall(args) => crate::install::run_uninstall(args, globals),
         _ => return crate::commands::mismatched(),
     };

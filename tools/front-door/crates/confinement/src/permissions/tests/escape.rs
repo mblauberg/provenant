@@ -410,17 +410,24 @@ fn native_sandbox_blocks_path_escape_probes() -> Result<(), Box<dyn std::error::
     assert!(rule_index(&sbpl, RuleAction::Allow, "sysctl-read", None).is_some());
     assert!(rule_index_without_strings(&sbpl, RuleAction::Allow, "process-exec").is_some());
     std::fs::remove_file(alias)?;
-    // A second name for a protected Git control file refuses compilation.
-    // (Repository revalidation also refuses a second name for `config`.)
+    // A second name for a Git control file is advisory: settlement moves
+    // hard-linked handoffs aside, so compilation warns and proceeds. Strict
+    // refusal stays with credential stores and operation errors.
+    // (Repository revalidation still refuses a second name for `config`.)
     std::fs::create_dir_all(common.join("hooks"))?;
     let hook = common.join("hooks/pre-commit");
     std::fs::write(&hook, b"#!/bin/sh\n")?;
     let hook_alias = linked.path().join("hook-alias");
     std::fs::hard_link(&hook, &hook_alias)?;
-    assert!(matches!(
-        backend.compile(&plan, &profile, &anchors),
-        Err(PermissionError::GitControlHardLinked(path)) if path == hook
-    ));
+    let (compiled, warnings) =
+        provenant_records::warning::capture(|| backend.compile(&plan, &profile, &anchors));
+    compiled?;
+    assert!(
+        warnings.iter().any(|warning| warning.code
+            == "VALIDATION_VERIFY_GIT_CONTROL_LINKS_GIT_ISOLATION"
+            && warning.message.contains(&hook.display().to_string())),
+        "{warnings:?}"
+    );
     std::fs::remove_file(hook_alias)?;
     std::fs::remove_file(hook)?;
     // The native probes below exercise the compiled policy's link, execution
@@ -558,7 +565,7 @@ fn native_sandbox_blocks_path_escape_probes() -> Result<(), Box<dyn std::error::
         refused_runtime,
         Err(error)
             if error.boundary_class()
-                == provenant_records::diagnostic::BoundaryClass::Credentials
+                == provenant_records::policy::Boundary::Credentials
     ));
     let connect = |sbpl: &str, socket: &Path| {
         run_in(

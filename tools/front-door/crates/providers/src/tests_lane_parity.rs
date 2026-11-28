@@ -40,6 +40,7 @@ fn registered_adapters_render_common_lane_capabilities() -> Result<(), Box<dyn s
                     .read_roots
                     .push(crate::launch::subtree("/fixture/shared-read"));
                 let plan = ConfinedPlan::new(PlanRequest {
+                    policy: provenant_records::policy::Policy::default(),
                     scope: base.scope(),
                     permissions,
                     codex: provenant_confinement::CodexPolicy::Clean,

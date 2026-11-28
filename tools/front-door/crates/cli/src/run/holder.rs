@@ -1415,7 +1415,7 @@ mod tests {
     fn recovery_stream_without_host_context_uses_the_compiled_default()
     -> Result<(), Box<dyn std::error::Error>> {
         use provenant_providers::Adapter;
-        use provenant_records::policy::{Source, Strength};
+        use provenant_records::policy::Strength;
         let dir = tempfile::tempdir()?;
         let (_, child) = child_fixture(dir.path(), &SystemClock::new())?;
         // A request carries dispatch overrides, never a resolved policy snapshot;
@@ -1428,8 +1428,8 @@ mod tests {
             Strength::Warn
         );
         assert_eq!(
-            stream.policy.rule("STREAM_IDENTITY_MISMATCH").source,
-            Source::CompiledDefault
+            stream.policy.rule("STREAM_IDENTITY_MISMATCH").source.layer,
+            provenant_records::Layer::Default
         );
         Ok(())
     }
@@ -1439,7 +1439,7 @@ mod tests {
     fn recovery_stream_without_host_context_applies_the_sealed_dispatch_override()
     -> Result<(), Box<dyn std::error::Error>> {
         use provenant_providers::Adapter;
-        use provenant_records::policy::{Source, Strength};
+        use provenant_records::policy::Strength;
         let dir = tempfile::tempdir()?;
         let (_, mut child) = child_fixture(dir.path(), &SystemClock::new())?;
         child
@@ -1456,8 +1456,35 @@ mod tests {
             Strength::Refuse
         );
         assert_eq!(
-            stream.policy.rule("STREAM_IDENTITY_MISMATCH").source,
-            Source::Dispatch
+            stream.policy.rule("STREAM_IDENTITY_MISMATCH").source.layer,
+            provenant_records::Layer::Route
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn recovery_stream_without_host_context_preserves_explicit_checks_mode()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_records::policy::Strength;
+        let dir = tempfile::tempdir()?;
+        let (_, mut child) = child_fixture(dir.path(), &SystemClock::new())?;
+        child.request.task.profile.checks_mode = Some("strict".into());
+        child
+            .request
+            .task
+            .profile
+            .policy_overrides
+            .insert("default".into(), Strength::Warn);
+
+        let recovered = super::super::settlement_policy(None, Some(&child.request.task));
+        let (key, source) =
+            provenant_records::policy::resolve_setting("LANE_DEPTH", None, &recovered.settings);
+        assert_eq!(key, "policy.default");
+        assert_eq!(source.value, Strength::Refuse);
+        assert_eq!(source.source.layer, provenant_records::Layer::Launch);
+        assert_eq!(
+            source.source.origin.as_deref(),
+            Some("--checks/--strict#policy.default")
         );
         Ok(())
     }

@@ -71,24 +71,49 @@ pub(crate) fn snapshot(state: &Path, project: &Path, numbers: &[u64]) -> Batch {
 
 /// Reuse a fresh row only when it satisfies the caller's required fields.
 /// A rejected cached row triggers one GraphQL read, not a second cache lookup.
-#[allow(
-    clippy::disallowed_methods,
-    reason = "the batch cache TTL boundary owns the wall clock"
-)]
 fn snapshot_with_cache_filter(
     state: &Path,
     project: &Path,
     numbers: &[u64],
     accepts: impl Fn(&Entry) -> bool,
 ) -> Batch {
+    let request = provenant_config::ports::Request::within(READ_BUDGET);
+    snapshot_with_request(state, project, numbers, &request, accepts)
+}
+
+fn snapshot_with_request(
+    state: &Path,
+    project: &Path,
+    numbers: &[u64],
+    request: &provenant_config::ports::Request,
+    accepts: impl Fn(&Entry) -> bool,
+) -> Batch {
     if numbers.is_empty() {
         return Batch::Entries(Vec::new());
     }
-    let repository = match repository(state, project) {
+    let repository = match repository_with_request(state, project, request) {
         Ok(repository) => repository,
         Err(message) => return Batch::Unavailable(message),
     };
-    let dir = match shared_dir(state, &repository) {
+    snapshot_for_repository_with_request(state, project, &repository, numbers, request, accepts)
+}
+
+#[allow(
+    clippy::disallowed_methods,
+    reason = "the batch cache TTL boundary owns the wall clock"
+)]
+fn snapshot_for_repository_with_request(
+    state: &Path,
+    project: &Path,
+    repository: &str,
+    numbers: &[u64],
+    request: &provenant_config::ports::Request,
+    accepts: impl Fn(&Entry) -> bool,
+) -> Batch {
+    if numbers.is_empty() {
+        return Batch::Entries(Vec::new());
+    }
+    let dir = match shared_dir(state, repository) {
         Ok(dir) => dir,
         Err(message) => return Batch::Unavailable(message),
     };
@@ -99,7 +124,7 @@ fn snapshot_with_cache_filter(
     {
         return Batch::Entries(entries);
     }
-    match read(state, project, &repository, numbers) {
+    match read(state, project, repository, numbers, request) {
         Ok(entries) => {
             store_cache(&dir, &entries, now);
             Batch::Entries(entries)
@@ -111,6 +136,18 @@ fn snapshot_with_cache_filter(
 /// `snapshot` for exactly one pull request, used when a REST read is limited.
 pub(crate) fn single(state: &Path, project: &Path, number: u64) -> Batch {
     snapshot(state, project, &[number])
+}
+
+/// One-row GraphQL fallback scoped to the repository already resolved by the
+/// caller, sharing that caller's deadline and cancellation.
+pub(crate) fn single_for_repository_with_request(
+    state: &Path,
+    project: &Path,
+    repository: &str,
+    number: u64,
+    request: &provenant_config::ports::Request,
+) -> Batch {
+    snapshot_for_repository_with_request(state, project, repository, &[number], request, |_| true)
 }
 
 /// A single row whose cached form must satisfy the caller's needs.
@@ -125,6 +162,15 @@ pub(crate) fn single_with_cache_filter(
 
 /// The canonical repository name, one cheap read shared with every transport.
 pub(crate) fn repository(state: &Path, project: &Path) -> Result<String, String> {
+    let request = provenant_config::ports::Request::within(READ_BUDGET);
+    repository_with_request(state, project, &request)
+}
+
+pub(crate) fn repository_with_request(
+    state: &Path,
+    project: &Path,
+    request: &provenant_config::ports::Request,
+) -> Result<String, String> {
     #[derive(Deserialize)]
     struct Repo {
         #[serde(rename = "nameWithOwner")]
@@ -135,7 +181,7 @@ pub(crate) fn repository(state: &Path, project: &Path) -> Result<String, String>
             state,
             project,
             &["gh", "repo", "view", "--json", "nameWithOwner"],
-            &provenant_config::ports::Request::within(READ_BUDGET),
+            request,
             false,
             None,
         )
@@ -232,20 +278,20 @@ fn read(
     project: &Path,
     repository: &str,
     numbers: &[u64],
+    request: &provenant_config::ports::Request,
 ) -> Result<Vec<Entry>, Batch> {
     let Some((owner, name)) = repository.split_once('/') else {
         return Err(Batch::Unavailable(format!(
             "not a GitHub repository: {repository}"
         )));
     };
-    let request = provenant_config::ports::Request::within(READ_BUDGET);
     let ports = PortTable::read_for(Some(project), state).map_err(|error| {
         Batch::Unavailable(format!("forge port configuration unavailable: {error}"))
     })?;
     let policy = provenant_config::operation_policy(state, project, &ports);
     let mut forge = ForgePort::new(ports.forge, "forge", project, state, policy)
         .map_err(|error| Batch::Unavailable(format!("cannot start forge adapter: {error}")))?;
-    forge.bind(&request);
+    forge.bind(request);
     let query = rollup_query(owner, name, numbers);
     let response = <ForgePort as Forge>::request(
         &mut forge,
@@ -487,7 +533,6 @@ pub(crate) fn line_from_entry(entry: &Entry, review_gate_contexts: &[String]) ->
             merge: entry.merge.clone(),
             review: entry.review.clone(),
             draft: entry.draft,
-            url: entry.url.clone(),
         },
         (!entry.truncated && entry.state != "UNAVAILABLE").then_some(checks.as_slice()),
         review_gate_contexts,
@@ -495,6 +540,64 @@ pub(crate) fn line_from_entry(entry: &Entry, review_gate_contexts: &[String]) ->
     if entry.state == "UNAVAILABLE" {
         line.error = Some("pull request was missing from the batch response".into());
     }
+    line
+}
+
+/// Keep the batch transport for PR metadata, while binding its displayed CI
+/// result to the shared head observation and check pages.
+pub(crate) fn line_from_entry_observed(
+    state: &Path,
+    project: &Path,
+    entry: &Entry,
+    review_gate_contexts: &[String],
+) -> Line {
+    let base = line_from_entry(entry, review_gate_contexts);
+    if entry.state != "OPEN" {
+        return base;
+    }
+    let Some(repository) =
+        crate::ci::repository_of(&entry.url).or_else(|| repository(state, project).ok())
+    else {
+        return unavailable_ci(base);
+    };
+    let Ok(expected) = provenant_core::GitOid::parse(&entry.head) else {
+        return unavailable_ci(base);
+    };
+    let request = provenant_config::ports::Request::within(READ_BUDGET);
+    let reading = observer::observe_head(
+        state,
+        project,
+        &repository,
+        entry.number,
+        expected,
+        &request,
+    );
+    super::line_from_head_reading(
+        entry.number,
+        View {
+            state: entry.state.clone(),
+            head: entry.head.clone(),
+            merge: entry.merge.clone(),
+            review: entry.review.clone(),
+            draft: entry.draft,
+        },
+        reading,
+        review_gate_contexts,
+    )
+}
+
+fn unavailable_ci(mut line: Line) -> Line {
+    line.completion = Some(super::CiCompletion::Unavailable);
+    line.checks_passed = None;
+    line.checks_total = None;
+    line.checks_failed = None;
+    line.checks_pending = None;
+    line.failing_checks.clear();
+    line.pending_checks.clear();
+    line.failed_check_details.clear();
+    line.required_checks.clear();
+    line.required_pending.clear();
+    line.required_unreadable = true;
     line
 }
 
@@ -520,6 +623,52 @@ mod tests {
     fn missing_pull_rows_remain_unavailable() {
         let line = line_from_entry(&entry(7, None), &[]);
         assert_eq!(line.class(), "unavailable");
+        assert_eq!(line.verdict(), None);
+    }
+
+    #[test]
+    fn moved_head_discards_a_green_batch_rollup() {
+        let old = "a".repeat(40);
+        let new = "b".repeat(40);
+        let batch_entry = entry(
+            7,
+            Some(serde_json::from_value(pull(
+                &old,
+                json!([{"__typename":"CheckRun","name":"build","status":"COMPLETED","conclusion":"SUCCESS"}]),
+                1,
+            ))
+            .unwrap()),
+        );
+        let base = line_from_entry(&batch_entry, &[]);
+        assert_eq!(base.verdict(), Some(true));
+        let reading = observer::HeadReading {
+            expected_head: provenant_core::GitOid::parse(&old).unwrap(),
+            branch_ref: Some("feature".into()),
+            pr_head: Some(provenant_core::GitOid::parse(&new).unwrap()),
+            mergeable: observer::MergeState::Mergeable,
+            required_policy: Vec::new(),
+            observed: Vec::new(),
+            required: Vec::new(),
+            observed_at: jiff::Timestamp::UNIX_EPOCH,
+            complete: false,
+            pending_reason: Some("pull head moved".into()),
+            retry_at: None,
+        };
+        let line = super::super::line_from_head_reading(
+            batch_entry.number,
+            View {
+                state: batch_entry.state.clone(),
+                head: batch_entry.head.clone(),
+                merge: batch_entry.merge.clone(),
+                review: batch_entry.review.clone(),
+                draft: batch_entry.draft,
+            },
+            reading,
+            &[],
+        );
+        assert_eq!(line.class(), "pending");
+        assert_eq!(line.awaiting.as_deref(), Some(new.as_str()));
+        assert_eq!(line.checks_total, None);
         assert_eq!(line.verdict(), None);
     }
 

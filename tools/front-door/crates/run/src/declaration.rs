@@ -4,8 +4,11 @@
 //! declaration over its relay; the host binds the attempt from its own holder
 //! context, validates the payload and seals the result as a canonical line.
 use crate::*;
-use provenant_core::AttemptId;
-use provenant_os::fs::{Directory, FsError, LockGuard, LockMode};
+use provenant_core::{AttemptId, CancelToken, Clock as _};
+use provenant_os::{
+    clock::SystemClock,
+    fs::{Directory, LockGuard, LockMode},
+};
 use provenant_records::{
     CanonicalV1,
     declaration::{
@@ -110,18 +113,19 @@ impl JournalState {
     }
 }
 
-// A zero-budget flock interrupted by a signal is surfaced as LockTimeout.
-// A few immediate probes distinguish that transient refusal without waiting on
-// another owner or spending a declaration attempt, mirroring settlement.rs.
-fn try_declaration_lock(attempt: &Directory) -> provenant_os::fs::Result<LockGuard> {
-    let mut result = attempt.try_lock(OsStr::new(LOCK), LockMode::Exclusive);
-    for _ in 0..2 {
-        if !matches!(result, Err(FsError::LockTimeout { .. })) {
-            break;
-        }
-        result = attempt.try_lock(OsStr::new(LOCK), LockMode::Exclusive);
-    }
-    result
+// Appends to one attempt's journal serialise on this lock. A concurrent
+// append waits out the holder for the run store's lock allowance, the same
+// bound SQLite's busy timeout gives; refusing at once would fail a lane whose
+// call merely overlapped another's.
+fn declaration_lock(attempt: &Directory) -> provenant_os::fs::Result<LockGuard> {
+    let clock = SystemClock::new();
+    attempt.lock(
+        OsStr::new(LOCK),
+        LockMode::Exclusive,
+        provenant_sqlite::lock_budget(clock.mono_now()),
+        &CancelToken::new(),
+        &clock,
+    )
 }
 
 fn read_lines(attempt: &Directory) -> Result<Vec<DeclarationLine>> {
@@ -186,7 +190,7 @@ impl RunStore {
         limit: &DeclarationLimit,
     ) -> std::result::Result<DeclarationReceipt, DeclarationError> {
         let dir = self.attempt_dir(attempt, false).map_err(io)?;
-        let _lock = try_declaration_lock(&dir).map_err(io)?;
+        let _lock = declaration_lock(&dir).map_err(io)?;
         let lines = read_lines(&dir).map_err(io)?;
         let state = JournalState::from_lines(&lines);
         if state.closed {
@@ -249,7 +253,7 @@ impl RunStore {
         &self,
         attempt: &Directory,
     ) -> Result<(DeclarationEvidence, DeclarationCounts)> {
-        let _lock = try_declaration_lock(attempt)?;
+        let _lock = declaration_lock(attempt)?;
         let lines = read_lines(attempt)?;
         let state = JournalState::from_lines(&lines);
         if !state.closed {
@@ -270,7 +274,7 @@ fn lines_bytes(attempt: &Directory) -> u64 {
 mod tests {
     use super::*;
     use crate::tests::{call, clock, context};
-    use provenant_core::{CancelToken, Clock as _, OperationId};
+    use provenant_core::OperationId;
     use provenant_records::{handoff::HandoffStatus, run::CanonicalRequest};
     use serde_json::json;
     use std::result::Result as StdResult;
@@ -381,7 +385,7 @@ mod tests {
         Ok(found)
     }
 
-    // Spec: docs/specs/run-settlement.md, test 7 (a lane cannot write
+    // Spec: docs/specs/run-settlement.md#settlement, test 7 (a lane cannot write
     // settlement records).
     #[test]
     fn a_declaration_writes_only_the_bound_attempts_journal() -> TestResult {

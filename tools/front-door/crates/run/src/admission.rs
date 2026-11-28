@@ -947,7 +947,7 @@ impl RunStore {
                 Effect::Proceed => {}
                 Effect::Warn(message) => {
                     // Spec: docs/specs/cli.md#warnings-are-typed-values
-                    warn(message);
+                    warn(*message);
                 }
                 Effect::Refuse(_) | Effect::Stop(_) => {
                     return Err(RunError::Admission(AdmissionError::Disk {
@@ -1005,7 +1005,7 @@ impl RunStore {
                 Effect::Proceed => {}
                 Effect::Warn(message) => {
                     // Spec: docs/specs/cli.md#warnings-are-typed-values
-                    warn(message);
+                    warn(*message);
                 }
                 Effect::Refuse(_) | Effect::Stop(_) => return Err(error),
             }

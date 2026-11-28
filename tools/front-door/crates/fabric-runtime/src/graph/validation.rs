@@ -1054,6 +1054,7 @@ fn validate_flat_plan_inner(
             loop_body: node.loop_body.clone(),
             escalate: node.escalate.clone(),
             delivery_review: node.delivery_review.clone(),
+            effective_review_policy: node.effective_review_policy.clone(),
             delivery_adoption: node.delivery_adoption.clone(),
             decide: node.decide.clone(),
             continues: node.continues.clone(),
@@ -1304,16 +1305,12 @@ fn attempt_error(node: &GraphNode, spec: &AttemptSpec) -> Option<&'static str> {
     if !spec.preset_known() {
         return Some("unknown attempt preset");
     }
-    for (value, allowed) in [
-        (&spec.isolation, ["private", "shared"]),
-        (&spec.receipts, ["delivery", "none"]),
-    ] {
-        if value.as_deref().is_some_and(|v| !allowed.contains(&v)) {
-            return Some("invalid attempt isolation or receipts");
-        }
-    }
-    if node.access == AccessMode::WorktreeWrite && spec.effective_isolation() == "shared" {
-        return Some("a writer keeps its own worktree; shared isolation is for read-only nodes");
+    if spec
+        .receipts
+        .as_deref()
+        .is_some_and(|value| value != "delivery" && value != "none")
+    {
+        return Some("invalid attempt receipts");
     }
     if spec.capabilities.iter().any(|capability| {
         capability.is_empty() || capability.len() > 64 || capability.contains('\0')

@@ -1,0 +1,70 @@
+# Path, attribute, reason; one entry per occurrence.
+crates/cli/src/accounts.rs	#[cfg_attr(not(test), allow(dead_code))]	credential store helper used by tests
+crates/cli/src/check/dates.rs	#[allow(dead_code)]	literal fixture used to parse test attributes
+crates/cli/src/metadata.rs	#[cfg_attr(not(test), allow(dead_code))]	target grammar field used by catalogue invariant
+crates/cli/src/run/provider/preparation.rs	#[allow(dead_code)]	pin mismatch shape retained for fixture
+crates/confinement/src/worktrees/census.rs	#[cfg_attr(not(test), allow(dead_code))]	holder audit used by tests
+crates/os/src/admission.rs	#[allow(dead_code, reason = "the open descriptor is the held lock")]	the open descriptor is the held lock
+crates/os/src/lane_ports.rs	#[allow(dead_code, reason = "the open descriptor is the held lock")]	the open descriptor is the held lock
+crates/providers/src/claude.rs	#[allow(dead_code)]	deserialize plain text content by shape
+crates/providers/src/quota_live.rs	#[allow(dead_code)]	quota fixture helper
+crates/providers/src/swift.rs	#[cfg_attr(not(target_os = "macos"), allow(dead_code))]	macOS toolchain discovery on other targets
+crates/providers/src/swift.rs	#[cfg_attr(not(target_os = "macos"), allow(dead_code))]	macOS toolchain discovery on other targets
+crates/providers/src/swift.rs	#[cfg_attr(not(target_os = "macos"), allow(dead_code))]	macOS toolchain discovery on other targets
+crates/run/src/build/queue.rs	#[allow(dead_code, reason = "holding this guard publishes wait status")]	holding this guard publishes wait status
+crates/supervisor/src/guardian.rs	#[cfg_attr(not(target_os = "macos"), allow(dead_code))]	macOS guardian state on other targets
+crates/supervisor/src/guardian.rs	#[cfg_attr(not(target_os = "macos"), allow(dead_code))]	macOS guardian state on other targets
+crates/supervisor/src/process_os.rs	#[allow(dead_code)]	unsupported backend exercised on macOS tests
+src/admit.rs	#[allow(dead_code)]	guard variants hold locks for their lifetime
+src/chair_log_retention.rs	#[allow(unused_imports, dead_code)]	The worktree driver includes the library without a test harness.
+src/commands/init.rs	#[allow(unused_imports, dead_code)]	The worktree driver includes the library without a test harness.
+src/fabric/graph_execution.rs	#[allow( dead_code, unused_imports, reason = "the custom worktree driver includes this module without libtest" )]	the custom worktree driver includes this module without libtest
+src/fabric/graph_human.rs	#[allow( dead_code, reason = "the custom worktree driver omits libtest functions" )]	the custom worktree driver omits libtest functions
+src/fabric/graph_human.rs	#[allow( dead_code, reason = "the custom worktree driver omits libtest functions" )]	the custom worktree driver omits libtest functions
+src/fabric/interface.rs	#[allow( dead_code, unused_imports, reason = "the custom worktree driver omits libtest functions" )]	the custom worktree driver omits libtest functions
+src/fabric/interface.rs	#[allow( dead_code, unused_imports, reason = "the custom worktree driver omits libtest functions" )]	the custom worktree driver omits libtest functions
+src/fabric/queue_registry.rs	#[allow( dead_code, reason = "the custom worktree driver omits libtest functions" )]	the custom worktree driver omits libtest functions
+src/fabric/queue_registry.rs	#[allow( dead_code, reason = "the custom worktree driver omits libtest functions" )]	the custom worktree driver omits libtest functions
+src/fabric/queue_registry.rs	#[allow( dead_code, reason = "the custom worktree driver omits libtest functions" )]	the custom worktree driver omits libtest functions
+src/fabric/unified.rs	#[allow( dead_code, unused_imports, reason = "the custom worktree driver omits libtest functions" )]	the custom worktree driver omits libtest functions
+src/fabric.rs	#[allow( dead_code, reason = "the custom worktree driver omits libtest functions" )]	the custom worktree driver omits libtest functions
+src/gc_sweep.rs	#[allow(dead_code)]	The worktree driver includes the library without a test harness.
+src/gc_sweep.rs	#[allow(unused_imports, dead_code)]	The worktree driver includes the library without a test harness.
+src/hooks.rs	#[allow(dead_code)]	Unused when the worktree driver drops the #[test] items.
+src/hooks.rs	#[allow(dead_code)]	The worktree driver strips the #[test] items.
+src/hooks.rs	#[allow(dead_code)]	Also built by the worktree driver without unit tests.
+src/install.rs	#[allow(dead_code, unused_imports)]	test module included by custom worktree driver
+src/lane_cleanup.rs	#[allow(dead_code)]	Also compiled by the harness=false worktree driver.
+src/lane_cleanup.rs	#[allow(dead_code, clippy::too_many_arguments)]	Also compiled by the harness=false worktree driver.
+src/lane_cleanup.rs	#[allow(dead_code, unused_imports)]	test module included by custom worktree driver
+src/lib.rs	#[allow(dead_code, unused_imports)]	test module included by custom worktree driver
+src/pr/git.rs	#[allow(unused_imports, dead_code)]	The custom worktree driver compiles without a test harness.
+src/pr/git.rs	#[allow(unused_imports, dead_code)]	The custom worktree driver compiles without a test harness.
+src/pr/land.rs	#[allow(unused_imports, dead_code)]	The custom worktree driver compiles without a test harness.
+src/pr/land.rs	#[allow(unused_imports, dead_code)]	The custom worktree driver compiles without a test harness.
+src/pr/landing/mod.rs	#![cfg_attr( test, allow( dead_code, reason = "the custom worktree harness includes tests without running them" ) )]	the custom worktree harness includes tests without running them
+src/pr/observer/retry.rs	#[allow(dead_code, reason = "available to every waiter that reports a pause")]	available to every waiter that reports a pause
+src/pr/observer/retry.rs	#[allow(dead_code)]	The worktree driver includes the library without a test harness.
+src/pr/status/batch.rs	#[allow(dead_code, reason = "diagnostic retained for fallback failures")]	diagnostic retained for fallback failures
+src/pr/status/batch.rs	#[allow(dead_code, reason = "reset retained for fallback failures")]	reset retained for fallback failures
+src/pr/status/batch.rs	#[allow( dead_code, reason = "worktree driver includes this module without libtest" )]	worktree driver includes this module without libtest
+src/pr/status/ci.rs	#[allow(unused_imports, dead_code)]	The worktree driver includes this module without libtest.
+src/pr/status/membership.rs	#[allow(dead_code)]	The worktree driver includes this module without libtest.
+src/pr/status/membership.rs	#[allow(dead_code)]	The worktree driver includes this module without libtest.
+src/pr/status.rs	#[allow(dead_code)]	The worktree driver includes this module without libtest.
+src/pr/status.rs	#[allow(dead_code)]	The worktree driver includes this module without libtest.
+src/pr/sync.rs	#[allow(unused_imports, dead_code)]	The custom worktree driver compiles without a test harness.
+src/pr/wait.rs	#[allow(dead_code, unused_imports)]	Also compiled, unrun, by the harness-less worktrees driver.
+src/pr.rs	#[allow(unused_imports, dead_code)]	The custom worktree driver compiles without a test harness.
+src/pr.rs	#[allow(unused_imports, dead_code)]	The custom worktree driver compiles without a test harness.
+src/release_smoke.rs	#[allow(dead_code, unused_imports)]	test module included by custom worktree driver
+src/session_handoff.rs	#[allow( dead_code, unused_imports, reason = "the custom worktree driver omits libtest functions" )]	the custom worktree driver omits libtest functions
+src/settlement.rs	#[allow(dead_code)]	test module included by custom worktree driver
+src/state_handoff.rs	#[allow( dead_code, unused_imports, reason = "the worktree driver includes this module without registering its tests" )]	the worktree driver includes this module without registering its tests
+src/status_wait.rs	#[allow(dead_code)]	Also included by the worktree driver without libtest.
+src/tick.rs	#[allow(dead_code)]	The worktree driver includes this module without libtest.
+src/tick.rs	#[allow(dead_code)]	test helper included by custom worktree driver
+src/usage.rs	#[allow(dead_code, unused_imports)]	test module included by custom worktree driver
+src/worktrees.rs	#[allow(dead_code)]	The harness=false driver compiles only the helpers.
+src/worktrees.rs	#[allow(dead_code)]	test helpers included by custom worktree driver
+src/worktrees.rs	#[allow(dead_code)]	test helpers included by custom worktree driver

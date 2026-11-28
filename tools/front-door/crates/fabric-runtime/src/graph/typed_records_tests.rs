@@ -585,10 +585,22 @@ fn graph_attempt_prelaunch_refusal_round_trips_and_rejects_malformed_values() {
 
 #[test]
 fn writer_binding_identity_round_trips_and_rejects_malformed_values() {
-    let wire = serde_json::json!({"worktree":"checkout","head":"1".repeat(40),"source_directory_identity":{"device":7,"inode":9}});
+    let legacy_wire = serde_json::json!({"worktree":"checkout","head":"1".repeat(40)});
+    let legacy_bytes = serde_json::to_vec(&legacy_wire).unwrap();
+    let legacy: WriterWorktreeBinding = provenant_records::decode(
+        legacy_bytes.as_slice(),
+        provenant_records::Limits::default(),
+    )
+    .unwrap();
+    assert!(!legacy.carry_examined);
+    assert!(legacy.carried_paths.is_empty());
+
+    let wire = serde_json::json!({"worktree":"checkout","head":"1".repeat(40),"source_directory_identity":{"device":7,"inode":9},"carry_examined":true,"carried_paths":["src/edited.rs"]});
     let bytes = serde_json::to_vec(&wire).unwrap();
     let binding: WriterWorktreeBinding =
         provenant_records::decode(bytes.as_slice(), provenant_records::Limits::default()).unwrap();
+    assert!(binding.carry_examined);
+    assert_eq!(binding.carried_paths, vec!["src/edited.rs".to_owned()]);
     assert_eq!(serde_json::to_value(binding).unwrap(), wire);
     let mut malformed = wire;
     malformed["source_directory_identity"]["device"] = serde_json::json!(false);

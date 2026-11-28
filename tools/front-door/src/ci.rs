@@ -25,9 +25,14 @@ const MAX_TESTS_PER_JOB: usize = 20;
 const MAX_LINES_PER_TEST: usize = 8;
 const MAX_ERROR_LINES: usize = 20;
 
-pub(crate) fn run(command: provenant_cli::Ci, globals: &Globals) -> u8 {
+pub(crate) fn run(
+    command: provenant_cli::Ci,
+    globals: &Globals,
+    timeout: Option<std::time::Duration>,
+) -> u8 {
+    let read_budget = timeout.map_or(READ_BUDGET, |timeout| READ_BUDGET.min(timeout));
     match command {
-        provenant_cli::Ci::Failures { pr, target } => {
+        provenant_cli::Ci::Failures { pr, target, .. } => {
             let target = match (pr.is_empty(), target) {
                 (false, None) => provenant_cli::ci::FailureTarget::Pr { numbers: pr },
                 (true, Some(target)) => target,
@@ -58,10 +63,15 @@ pub(crate) fn run(command: provenant_cli::Ci, globals: &Globals) -> u8 {
                 }
             };
             match target {
-                provenant_cli::ci::FailureTarget::Pr { numbers } => failures_pr(numbers, globals),
-                provenant_cli::ci::FailureTarget::Run { run } => failures_run(run, globals),
+                provenant_cli::ci::FailureTarget::Pr { numbers } => {
+                    failures_pr(numbers, globals, read_budget)
+                }
+                provenant_cli::ci::FailureTarget::Run { run } => {
+                    failures_run(run, globals, read_budget)
+                }
             }
         }
+        provenant_cli::Ci::Patch(patch) => crate::ci_patch::run(patch, globals, read_budget),
     }
 }
 
@@ -174,14 +184,14 @@ pub(crate) struct RunFailures {
     pub error: Option<String>,
 }
 
-fn failures_pr(numbers: Vec<u64>, globals: &Globals) -> u8 {
+fn failures_pr(numbers: Vec<u64>, globals: &Globals, read_budget: std::time::Duration) -> u8 {
     const LEAF: &str = "ci failures";
     let result = (|| -> Result<Vec<Report>, Box<dyn std::error::Error>> {
         let project = roots::selected_project(globals.project.as_deref(), true)?;
         let state = roots::resolve(globals, roots::Workspace::Project, roots::Product::Optional)?
             .roots
             .state;
-        let request = provenant_config::ports::Request::within(READ_BUDGET);
+        let request = provenant_config::ports::Request::within(read_budget);
         let batch_result = batch::snapshot(state.as_path(), &project, &numbers);
         let try_graphql = !matches!(batch_result, batch::Batch::RateLimited(_));
         let entries_by_num: BTreeMap<u64, &batch::Entry> = match &batch_result {
@@ -219,14 +229,14 @@ fn failures_pr(numbers: Vec<u64>, globals: &Globals) -> u8 {
     emit_reports(LEAF, result, globals)
 }
 
-fn failures_run(run: u64, globals: &Globals) -> u8 {
+fn failures_run(run: u64, globals: &Globals, read_budget: std::time::Duration) -> u8 {
     const LEAF: &str = "ci failures";
     let result = (|| -> Result<Report, Box<dyn std::error::Error>> {
         let project = roots::selected_project(globals.project.as_deref(), true)?;
         let state = roots::resolve(globals, roots::Workspace::Project, roots::Product::Optional)?
             .roots
             .state;
-        let request = provenant_config::ports::Request::within(READ_BUDGET);
+        let request = provenant_config::ports::Request::within(read_budget);
         let repository = batch::repository(state.as_path(), &project)?;
         let RunDigest { jobs, error } =
             run_digest(state.as_path(), &project, &repository, run, None, &request);

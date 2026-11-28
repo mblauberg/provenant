@@ -237,7 +237,7 @@ fn a_lane_reads_quota_but_cannot_mutate_it() -> Result {
             report["error"]["code"], "QUOTA_UNAVAILABLE_IN_LANE",
             "{report}"
         );
-        let repair = report["error"]["repair"]
+        let repair = report["next"][0]["why"]
             .as_str()
             .ok_or("mutating quota refusal has a repair")?;
         assert!(repair.contains("chair's session"), "{repair}");
@@ -466,10 +466,39 @@ fn oversized_show_returns_a_bounded_envelope_and_filter_remains_usable() -> Resu
         fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
     }
     let out = rig.command(&["quota", "show", "--json"])?;
-    assert_eq!(code(&out), 3);
-    assert!(out.stdout.bytes.len() < 1024);
+    assert_eq!(code(&out), 0);
+    assert!(out.stdout.bytes.len() < provenant_records::command_result::COMMAND_RESULT_MAX_BYTES);
     let value: serde_json::Value = serde_json::from_slice(&out.stdout.bytes)?;
-    assert_eq!(value["error"]["code"], "RESULT_TOO_LARGE");
+    assert!(value["error"].is_null(), "{value}");
+    let artifact: provenant_records::AbsolutePath =
+        serde_json::from_value(value["data"]["artifact"].clone())?;
+    let artifact = artifact.to_path_buf()?;
+    assert_eq!(artifact.parent(), Some(rig.state.join("reports").as_path()));
+    assert!(artifact.is_file(), "{artifact:?}");
+    assert_eq!(fs::metadata(&artifact)?.permissions().mode() & 0o777, 0o600);
+    let artifact_text = artifact.to_str().ok_or("report path encoding")?;
+    assert!(
+        artifact
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with("quota-") && name.ends_with(".json"))
+    );
+    assert!(
+        value["warnings"]
+            .as_array()
+            .is_some_and(|warnings| warnings.iter().any(|warning| warning["code"]
+                == "RESULT_TOO_LARGE"
+                && warning["message"]
+                    .as_str()
+                    .is_some_and(|message| message.contains(artifact_text)))),
+        "{value}"
+    );
+    assert!(
+        value["warnings"].as_array().is_some_and(|warnings| warnings
+            .iter()
+            .any(|warning| warning["code"] == "RESULT_TOO_LARGE")),
+        "{value}"
+    );
     assert_eq!(
         code(&rig.command(&["quota", "show", "--adapter", "codex", "--json"])?),
         0

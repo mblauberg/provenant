@@ -180,6 +180,9 @@ pub(super) fn graph_stop_cancels_live_delivery_fetch() -> Result {
         &["remote", "add", "origin", remote.to_str().ok_or("remote")?],
     )?;
     git(&rig, &["push", "origin", "HEAD:refs/heads/main"])?;
+    // A delivery names its destination from the remote's declared default
+    // branch; the bare remote has no HEAD to learn it from.
+    git(&rig, &["remote", "set-head", "origin", "main"])?;
     ok(
         &rig,
         &[

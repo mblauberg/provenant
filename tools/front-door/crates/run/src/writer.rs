@@ -547,8 +547,11 @@ impl WriterLaunch {
         Ok(())
     }
 
-    /// Bind a graph writer continuation to its predecessor head, verifying that
-    /// the predecessor head descends from the original lineage source commit.
+    /// Bind a graph writer continuation to its predecessor head. The
+    /// predecessor must descend from the original lineage source; a head that
+    /// moved forward on the writer's own branch re-pins with `WRITER_HEAD_MOVED`
+    /// instead of refusing, because a moved head is not destruction. A head
+    /// that does not descend is a typed operation error naming both ids.
     pub fn require_continuation_source(
         &self,
         git: &Path,
@@ -556,45 +559,44 @@ impl WriterLaunch {
         predecessor: GitOid,
         policy: &provenant_records::policy::Policy,
     ) -> Result<()> {
-        if self.base != predecessor {
-            return Err(policy.boundary_error(
-                "WRITER_WRITERLAUNCH_REQUIRE_CONTINUATION_SOURCE_GIT_ISOLATION",
-                provenant_records::policy::Facts::violation(
-                    "prepared writer base does not match the pinned predecessor head",
-                ),
-                RunError::WriterSourceMismatch {
-                    expected: predecessor,
-                    actual: self.base,
-                },
-            ));
-        }
         let repo = self.worktree.repo();
-        let descends = crate::objects::command(
-            git,
-            repo.common_git_dir(),
-            repo.root_path(),
-            &[
-                "merge-base".into(),
-                "--is-ancestor".into(),
-                source.to_string().into(),
-                predecessor.to_string().into(),
-            ],
-            None,
-        )
-        .is_ok();
-        if !descends {
-            return Err(policy.boundary_error(
-                "WRITER_WRITERLAUNCH_REQUIRE_CONTINUATION_SOURCE_GIT_ISOLATION",
-                provenant_records::policy::Facts::violation(
-                    "pinned predecessor head does not descend from the writer source",
-                ),
-                RunError::WriterSourceMismatch {
-                    expected: source,
-                    actual: self.base,
-                },
+        let is_ancestor = |older: GitOid, newer: GitOid| -> bool {
+            crate::objects::command(
+                git,
+                repo.common_git_dir(),
+                repo.root_path(),
+                &[
+                    "merge-base".into(),
+                    "--is-ancestor".into(),
+                    older.to_string().into(),
+                    newer.to_string().into(),
+                ],
+                None,
+            )
+            .is_ok()
+        };
+        if !is_ancestor(source, predecessor) {
+            return Err(RunError::Validation(
+                "pinned predecessor head does not descend from the writer source",
             ));
         }
-        Ok(())
+        if self.base == predecessor {
+            return Ok(());
+        }
+        if is_ancestor(predecessor, self.base) {
+            policy.warn_or(
+                provenant_records::policy::WRITER_HEAD_MOVED,
+                provenant_records::policy::Facts::violation(format!(
+                    "writer head moved from {predecessor} to {}",
+                    self.base
+                )),
+                |_| RunError::Validation("WRITER_HEAD_MOVED was configured to stop"),
+            )?;
+            return Ok(());
+        }
+        Err(RunError::Validation(
+            "prepared writer base does not descend from the pinned predecessor head",
+        ))
     }
 
     /// Commit the worktree's retained edits locally as WIP before a plan node
@@ -706,6 +708,29 @@ impl WriterLaunch {
         let repo = self.worktree.repo();
         let output = crate::objects::command(
             git,
+            repo.private_git_dir(),
+            repo.root_path(),
+            &[
+                "--work-tree".into(),
+                repo.root_path().into(),
+                "status".into(),
+                "--porcelain".into(),
+                "-z".into(),
+            ],
+            None,
+        )?;
+        status_paths(&output)
+    }
+
+    /// List uncommitted paths in a verified worktree directly, for a lease
+    /// handover where there is no prepared writer for the prior attempt.
+    pub(crate) fn uncommitted_worktree_paths(
+        tree: &provenant_confinement::VerifiedWorktree,
+    ) -> Result<Vec<String>> {
+        let git = provenant_os::git::git_executable().ok_or(RunError::GitUnavailable)?;
+        let repo = tree.repo();
+        let output = crate::objects::command(
+            &git,
             repo.private_git_dir(),
             repo.root_path(),
             &[
@@ -2905,7 +2930,7 @@ impl WriterLaunch {
         scope: provenant_records::custody::Scope,
         policy: &provenant_records::policy::Policy,
     ) -> Result<()> {
-        seal_writer_ownership(attempt, &self.worktree)?;
+        seal_worktree_lease(self.custody.as_ref(), &self.worktree, scope)?;
         let utility = runtime(state)?;
         let head = self
             .worktree
@@ -3133,7 +3158,7 @@ impl WriterLaunch {
             );
             if let provenant_records::policy::Effect::Warn(warning) = &effect {
                 // Spec: docs/specs/cli.md#warnings-are-typed-values
-                provenant_records::warning::warn(warning.clone());
+                provenant_records::warning::warn((**warning).clone());
             }
             if effect.blocks() {
                 return Err(RunError::Validation("WRITE_SCOPE: strict scope policy"));
@@ -3180,14 +3205,14 @@ impl WriterLaunch {
                 base: base.to_string(),
                 head: head.to_string(),
                 strength: policy.rule("WRITE_SCOPE").rule.strength,
-                source: policy.rule("WRITE_SCOPE").source,
+                source: policy.rule("WRITE_SCOPE").source.clone(),
                 out_of_scope_paths: paths,
             })?,
             provenant_records::run::TERMINAL_RECORD_LIMIT,
         )?;
         if let provenant_records::policy::Effect::Warn(warning) = &effect {
             // Spec: docs/specs/cli.md#warnings-are-typed-values
-            provenant_records::warning::warn(warning.clone());
+            provenant_records::warning::warn((**warning).clone());
         }
         if effect.blocks() {
             return Err(RunError::Validation("WRITE_SCOPE: strict scope policy"));
@@ -3413,7 +3438,7 @@ impl WriterLaunch {
             source.as_ref(),
             enforcement,
         ) {
-            if error.boundary_class() != provenant_records::diagnostic::BoundaryClass::None {
+            if error.boundary_class() != provenant_records::policy::Boundary::None {
                 return Err(error);
             }
             let effect = enforcement.check(
@@ -3427,7 +3452,7 @@ impl WriterLaunch {
             }
             if let provenant_records::policy::Effect::Warn(warning) = &effect {
                 // Spec: docs/specs/cli.md#warnings-are-typed-values
-                provenant_records::warning::warn(warning.clone());
+                provenant_records::warning::warn((**warning).clone());
             }
         }
         self.report_tool_state_paths(work_base, verified_tip, source.as_ref(), enforcement)?;
@@ -4159,72 +4184,11 @@ struct WriterManifest {
 #[path = "writer_stored_shape_tests.rs"]
 mod stored_shape_tests;
 
-/// Remove the empty generated staging directory under attempt exclusion.
-/// Provider state/history and unclassified contents remain retained.
-pub(crate) fn settle_launch_staging(attempt: &Directory) -> Result<()> {
-    let name = OsStr::new("scratch");
-    let scratch = match attempt.open_verified_directory(name) {
-        Ok(directory) => directory,
-        Err(error) if error.is_not_found() => return Ok(()),
-        Err(error) => return Err(error.into()),
-    };
-    if scratch.entries()?.next().transpose()?.is_none() {
-        attempt.rmdir(name)?;
-        attempt.sync()?;
-    }
-    Ok(())
-}
-
-/// Preserve sealed current launch ownership evidence on replay.
-pub(crate) fn seal_writer_ownership(
-    attempt: &Directory,
-    tree: &provenant_confinement::VerifiedWorktree,
-) -> Result<()> {
-    let owner = worktrees::load_owner(tree)?;
-    let owned = owner
-        .as_ref()
-        .is_some_and(|owner| owner.origin == worktrees::WorktreeOrigin::Lane);
-    let ownership = WriterOwnership {
-        extra: Default::default(),
-        schema_version: 1,
-        lane_owned: owned,
-        owner,
-    };
-    if let Some(raw) =
-        crate::artifacts::read_sealed(attempt, "writer-owned.json", crate::RECORD_LIMIT)?
-    {
-        let prior: WriterOwnership = crate::db::decode(&raw)?;
-        if prior.schema_version != 1
-            || prior.lane_owned != ownership.lane_owned
-            || prior.owner != ownership.owner
-        {
-            return Err(RunError::Conflict);
-        }
-        Ok(())
-    } else {
-        crate::artifacts::seal(
-            attempt,
-            "writer-owned.json",
-            &crate::db::bytes(&ownership)?,
-            crate::RECORD_LIMIT,
-        )
-    }
-}
-
-/// Launch-time lifecycle evidence, sealed while writer custody is held.
-#[derive(serde::Serialize, serde::Deserialize)]
-pub(crate) struct WriterOwnership {
-    #[serde(default, flatten)]
-    pub extra: provenant_records::ExtraFields,
-    pub schema_version: u64,
-    pub lane_owned: bool,
-    #[serde(deserialize_with = "serde::Deserialize::deserialize")]
-    pub owner: Option<worktrees::WorktreeOwner>,
-}
-
-#[cfg(test)]
-#[path = "writer_ownership_shape_tests.rs"]
-mod writer_ownership_shape_tests;
+#[path = "writer_staging.rs"]
+mod staging;
+pub(crate) use staging::{
+    read_handover, seal_handover, seal_worktree_lease, settle_launch_staging,
+};
 
 #[cfg(test)]
 #[path = "writer_custody_admission_tests.rs"]

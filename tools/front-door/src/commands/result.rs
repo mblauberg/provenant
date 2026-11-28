@@ -17,8 +17,14 @@ fn run(inv: &Call) -> Result<Outcome, CommandError> {
     let globals = inv.globals;
     let command = inv.command.clone();
     let status = match command {
-        Command::Result { target } => crate::run_edge(inv.leaf, globals, |edge| {
-            crate::fabric::unified_graph_result(&target, edge)
+        Command::Result { target, .. } => crate::run_edge(inv.leaf, globals, |edge| {
+            crate::fabric::unified_graph_result(
+                &target,
+                edge,
+                inv.common
+                    .as_ref()
+                    .map_or(std::time::Duration::from_secs(30), |common| common.deadline),
+            )
         }),
         _ => return crate::commands::mismatched(),
     };

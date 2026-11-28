@@ -47,6 +47,7 @@ fn document(nodes: Vec<GraphNode>) -> GraphDocument {
     GraphDocument {
         queue_ci_wait: None,
         review: None,
+        review_policy: None,
         subject: None,
         graph_id: "when".into(),
         submission_patch: None,

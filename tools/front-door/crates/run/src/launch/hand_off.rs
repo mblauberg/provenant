@@ -3,6 +3,10 @@ use super::*;
 #[cfg(test)]
 thread_local! {
     static TEST_UNCERTAIN_HANDOFF: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    pub(super) static TEST_CANCEL_INSIDE_LAUNCH: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Obstruct the attempt's exit path with a directory after its publication
+    /// reservation, so every never-spawned exit write fails until removed.
+    pub(super) static TEST_OBSTRUCT_EXIT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static TEST_HANDOFF_FAILURE: std::cell::RefCell<Option<RunError>> = const { std::cell::RefCell::new(None) };
 }
 
@@ -41,21 +45,21 @@ fn typed_local(
     };
     let message = format!("{phase}: {error}");
     let class = error.boundary_class();
-    if class != provenant_records::diagnostic::BoundaryClass::None {
+    if class != provenant_records::policy::Boundary::None {
         let code = match class {
-            provenant_records::diagnostic::BoundaryClass::Credentials => {
+            provenant_records::policy::Boundary::Credentials => {
                 "PREPARATION_PREPARE_WITH_CREDENTIALS"
             }
-            provenant_records::diagnostic::BoundaryClass::LaneGit => {
+            provenant_records::policy::Boundary::OtherWork => {
                 "HAND_OFF_RUNSTORE_HAND_OFF_GIT_ISOLATION"
             }
-            provenant_records::diagnostic::BoundaryClass::Integrity => {
+            provenant_records::policy::Boundary::Operation => {
                 "ARTIFACTS_RUNSTORE_ARTIFACT_BYTES_DATA_INTEGRITY"
             }
-            provenant_records::diagnostic::BoundaryClass::Authority => {
+            provenant_records::policy::Boundary::Authority => {
                 "HAND_OFF_RUNSTORE_HAND_OFF_AUTHORITY"
             }
-            provenant_records::diagnostic::BoundaryClass::None => {
+            provenant_records::policy::Boundary::None => {
                 return HandOff::Local(message);
             }
         };
@@ -92,23 +96,20 @@ fn typed_preparation(
     }
 }
 
-/// Classify a writer-lineage check under launch custody. A lineage mismatch is
-/// a local preparation step that the operator can repair; recording it as a
-/// corrupt run record or a handoff failure hides the repair behind a generic
-/// `provenant reconcile` instruction (#3987). An unfinished predecessor still
-/// keeps its authority boundary, because no successor may take its worktree.
+/// Classify a writer-lineage check under launch custody. Custody is a lease:
+/// an unreadable predecessor or a foreign lineage is a typed preparation step
+/// the operator can repair, never an authority boundary. A lapsed or shared
+/// lease proceeds with a warning instead of reaching this classifier.
 fn launch_lineage_refusal(policy: &provenant_records::policy::Policy, error: &RunError) -> HandOff {
     match error {
-        RunError::Nonterminal => boundary_handoff(
-            policy,
-            "CONTROLS_RUNSTORE_CHECK_WRITER_LINEAGE_AUTHORITY",
-            format!("writer lineage: {error}"),
-            provenant_records::diagnostic::BoundaryClass::Authority,
-        ),
-        RunError::WriterLineage(detail) => HandOff::TypedLocal {
-            message: format!("writer lineage mismatch: {detail}"),
-            cause: CauseKind::PreparationRefused,
-        },
+        // An unreadable predecessor or a foreign lineage is a typed operation
+        // error: the operator repairs the input, not an authority boundary.
+        RunError::Validation(_) | RunError::NotFound | RunError::WriterSourceMismatch { .. } => {
+            HandOff::TypedLocal {
+                message: format!("writer lineage: {error}"),
+                cause: CauseKind::PreparationRefused,
+            }
+        }
         _ => typed_local(policy, "writer lineage", error),
     }
 }
@@ -117,7 +118,7 @@ fn boundary_handoff(
     policy: &provenant_records::policy::Policy,
     code: &str,
     message: String,
-    class: provenant_records::diagnostic::BoundaryClass,
+    class: provenant_records::policy::Boundary,
 ) -> HandOff {
     let message = policy.boundary_error(
         code,
@@ -142,12 +143,12 @@ fn custody_local(
         | custody::CustodyError::UnknownIdentity
         | custody::CustodyError::InvalidRecord
         | custody::CustodyError::Decode(_)
-        | custody::CustodyError::HandoffUnknown
-        | custody::CustodyError::ProfileHandoffUnknown => boundary_handoff(
+        | custody::CustodyError::HandoffUnknown(_)
+        | custody::CustodyError::ProfileHandoffUnknown(_) => boundary_handoff(
             policy,
             "HAND_OFF_RUNSTORE_HAND_OFF_AUTHORITY",
             message,
-            provenant_records::diagnostic::BoundaryClass::Authority,
+            provenant_records::policy::Boundary::Authority,
         ),
         _ => HandOff::Local(message),
     }
@@ -233,7 +234,7 @@ impl RunStore {
                 &policy,
                 "HAND_OFF_RUNSTORE_HAND_OFF_AUTHORITY",
                 "writer confinement: does not match the task".into(),
-                provenant_records::diagnostic::BoundaryClass::Authority,
+                provenant_records::policy::Boundary::Authority,
             ));
         }
         let writer_path = writer
@@ -246,7 +247,7 @@ impl RunStore {
                         &policy,
                         "HAND_OFF_RUNSTORE_HAND_OFF_AUTHORITY",
                         "writer custody: missing".into(),
-                        provenant_records::diagnostic::BoundaryClass::Authority,
+                        provenant_records::policy::Boundary::Authority,
                     )
                 })?;
                 self.acquire_writer_fenced(directory, scope, binding, acquire_writer, call)
@@ -316,7 +317,7 @@ impl RunStore {
                     &policy,
                     "HAND_OFF_RUNSTORE_HAND_OFF_GIT_ISOLATION",
                     "shared writer checkout differs from its owning lane's grant".into(),
-                    provenant_records::diagnostic::BoundaryClass::LaneGit,
+                    provenant_records::policy::Boundary::OtherWork,
                 )));
             }
         }
@@ -349,7 +350,7 @@ impl RunStore {
                     &policy,
                     "HAND_OFF_RUNSTORE_HAND_OFF_AUTHORITY_2",
                     "attempt: changed before handoff".into(),
-                    provenant_records::diagnostic::BoundaryClass::Authority,
+                    provenant_records::policy::Boundary::Authority,
                 )));
             }
             Err(error) => {
@@ -641,6 +642,24 @@ impl RunStore {
         if local_or_withdraw!(cancel_requested()) {
             local_or_withdraw!(Err::<(), _>(local("launch", &CANCELLED_BEFORE_LAUNCH)));
         }
+        // Simulate a cancel landing after the last check, inside custody.
+        #[cfg(test)]
+        if TEST_CANCEL_INSIDE_LAUNCH.with(|fault| fault.replace(false)) {
+            call.cancel.cancel();
+        }
+        #[cfg(test)]
+        if TEST_OBSTRUCT_EXIT.with(|fault| fault.replace(false)) {
+            let exit = local_or_withdraw!(
+                reservation
+                    .directory()
+                    .current_path()
+                    .map_err(|error| local("test exit obstruction", &error))
+            )
+            .join("process-exit.json");
+            local_or_withdraw!(
+                std::fs::create_dir(exit).map_err(|error| local("test exit obstruction", &error))
+            );
+        }
         let launched = custody::launch(
             OwnedLaunch {
                 command,
@@ -653,7 +672,22 @@ impl RunStore {
             reservation,
         );
         if let Err(failure) = launched {
-            match launch_failure(&failure.error) {
+            let phase = lease.phase();
+            // A never-spawned launch owes its exit before custody is withdrawn.
+            // The publication is idempotent; while it stays unrecorded the
+            // attempt keeps protected custody, never a withdrawal that would
+            // terminalise it without its exit, and reconcile settles it later.
+            if phase == custody::LaunchPhase::NeverSpawned
+                && let Err(unrecorded) = failure
+                    .retry_exit_publication()
+                    .and_then(|publication| publication.require_durable().map_err(Into::into))
+            {
+                return Err(HandOff::Protected(format!(
+                    "{}; never-spawned exit unrecorded: {unrecorded}; custody retained",
+                    never_spawned_cause(&failure.error)
+                )));
+            }
+            match launch_failure(&policy, &failure.error, phase) {
                 uncertain @ HandOff::Uncertain(_) => return Err(uncertain),
                 refused => local_or_withdraw!(Err::<(), _>(refused)),
             }
@@ -662,17 +696,35 @@ impl RunStore {
     }
 }
 
-/// A launch failure is uncertain once the reservation may record a handoff.
-/// A host that cannot hold provider custody refuses before that point, so the
-/// attempt ends with a typed cause instead of waiting for a receipt that never
-/// comes.
-fn launch_failure(error: &custody::CustodyError) -> HandOff {
-    match error {
-        custody::CustodyError::UnsupportedPlatform => HandOff::TypedLocal {
+/// A launch failure is uncertain only once a guardian may hold custody.
+/// Before that no guardian was contacted: the failure is a local refusal
+/// under its own cause and the caller withdraws the lease, instead of fencing
+/// an attempt for a receipt that never comes. A never-spawned launch is such
+/// a refusal: its exit is recorded as evidence and its reservation withdrawn,
+/// so the attempt settles here rather than as `LAUNCH_UNKNOWN`. A host that
+/// cannot hold provider custody keeps its typed cause.
+fn launch_failure(
+    policy: &provenant_records::policy::Policy,
+    error: &custody::CustodyError,
+    phase: custody::LaunchPhase,
+) -> HandOff {
+    use custody::LaunchPhase;
+    match (phase, error) {
+        (_, custody::CustodyError::UnsupportedPlatform) => HandOff::TypedLocal {
             message: format!("provider custody: {error}"),
             cause: CauseKind::UnsupportedPlatform,
         },
-        _ => HandOff::Uncertain(error.to_string()),
+        (LaunchPhase::Unlaunched, _) => custody_local(policy, "provider custody", error),
+        (LaunchPhase::NeverSpawned, _) => HandOff::Local(never_spawned_cause(error)),
+        (LaunchPhase::HandedOff, _) => HandOff::Uncertain(error.to_string()),
+    }
+}
+
+/// The cause a never-spawned launch settles under.
+fn never_spawned_cause(error: &custody::CustodyError) -> String {
+    match error {
+        custody::CustodyError::Cancelled => format!("launch: {CANCELLED_BEFORE_LAUNCH}"),
+        _ => format!("provider custody: {error}; the provider never spawned"),
     }
 }
 
@@ -904,7 +956,7 @@ mod tests {
     fn writer_lineage_is_a_typed_preparation_refusal() {
         let refusal = super::launch_lineage_refusal(
             &test_policy(),
-            &RunError::WriterLineage("graph predecessor writer or source"),
+            &RunError::Validation("graph predecessor writer or source"),
         );
         let HandOff::TypedLocal { cause, message } = refusal else {
             panic!("writer lineage was not a typed local preparation refusal");
@@ -912,7 +964,7 @@ mod tests {
         assert_eq!(cause, CauseKind::PreparationRefused);
         assert_eq!(
             message,
-            "writer lineage mismatch: graph predecessor writer or source"
+            "writer lineage: invalid run record: graph predecessor writer or source"
         );
         let (failure, note) = crate::launch::handoff_preparation(
             &HandOff::TypedLocal {
@@ -929,8 +981,9 @@ mod tests {
         assert!(note.contains("retained writer worktree"), "{note}");
         assert!(!note.contains("provenant reconcile"), "{note}");
 
-        // An unfinished predecessor still refuses at the authority boundary.
-        assert!(matches!(
+        // A live lease is shared, not seized: the lineage classifier never
+        // turns it into an authority boundary.
+        assert!(!matches!(
             super::launch_lineage_refusal(&test_policy(), &RunError::Nonterminal),
             HandOff::Boundary { .. }
         ));
@@ -939,24 +992,24 @@ mod tests {
     #[test]
     fn custody_refusals_distinguish_authority_from_operational_failures() {
         use crate::writer::WriterCustodyError;
-        use provenant_records::diagnostic::BoundaryClass;
+        use provenant_records::policy::Boundary;
         for error in [
             custody::CustodyError::Fenced,
             custody::CustodyError::UnknownIdentity,
             custody::CustodyError::InvalidRecord,
-            custody::CustodyError::HandoffUnknown,
+            custody::CustodyError::HandoffUnknown("fixture".into()),
         ] {
             assert!(matches!(
                 custody_local(&test_policy(), "publication reservation", &error),
                 HandOff::Boundary {
-                    class: BoundaryClass::Authority,
+                    class: Boundary::Authority,
                     ..
                 }
             ));
             assert!(matches!(
                 custody_refusal(&test_policy(), WriterCustodyError::Admission(error), None),
                 HandOff::Boundary {
-                    class: BoundaryClass::Authority,
+                    class: Boundary::Authority,
                     ..
                 }
             ));
@@ -1000,7 +1053,7 @@ mod tests {
         assert!(matches!(
             custody_local(&test_policy(), "publication reservation", &error),
             HandOff::Boundary {
-                class: provenant_records::diagnostic::BoundaryClass::Authority,
+                class: provenant_records::policy::Boundary::Authority,
                 ..
             }
         ));
@@ -1010,37 +1063,77 @@ mod tests {
     // Spec: docs/specs/run-launch.md#admission-and-custody
     #[test]
     fn only_a_possible_handoff_makes_a_launch_failure_uncertain() {
-        assert!(matches!(
-            launch_failure(&custody::CustodyError::UnsupportedPlatform),
-            HandOff::TypedLocal {
-                cause: CauseKind::UnsupportedPlatform,
-                ..
-            }
-        ));
+        use custody::LaunchPhase::{HandedOff, NeverSpawned, Unlaunched};
+        let policy = test_policy();
+        for phase in [Unlaunched, NeverSpawned, HandedOff] {
+            assert!(matches!(
+                launch_failure(&policy, &custody::CustodyError::UnsupportedPlatform, phase),
+                HandOff::TypedLocal {
+                    cause: CauseKind::UnsupportedPlatform,
+                    ..
+                }
+            ));
+        }
         for error in [
-            custody::CustodyError::HandoffUnknown,
-            custody::CustodyError::ProfileHandoffUnknown,
+            custody::CustodyError::HandoffUnknown("fixture".into()),
+            custody::CustodyError::ProfileHandoffUnknown("fixture".into()),
             custody::CustodyError::Timeout,
             custody::CustodyError::InvalidRecord,
         ] {
             assert!(
-                matches!(launch_failure(&error), HandOff::Uncertain(_)),
+                matches!(
+                    launch_failure(&policy, &error, HandedOff),
+                    HandOff::Uncertain(_)
+                ),
                 "{error}"
             );
+            // Before the lease records a handoff no guardian was contacted:
+            // the refusal is local, keeps its cause and can be withdrawn.
+            let refused = launch_failure(&policy, &error, Unlaunched);
+            assert!(!matches!(refused, HandOff::Uncertain(_)), "{error}");
+            let (HandOff::Local(message) | HandOff::Boundary { message, .. }) = refused else {
+                panic!("{error}: unexpected refusal kind");
+            };
+            assert!(message.contains(&error.to_string()), "{message}");
+        }
+        assert!(matches!(
+            launch_failure(
+                &policy,
+                &custody::CustodyError::Io(std::io::Error::other("fixture")),
+                Unlaunched,
+            ),
+            HandOff::Local(_)
+        ));
+        // A never-spawned launch whose exit is recorded is a local refusal
+        // under its own cause. One whose exit is unrecorded never reaches this
+        // classification: it keeps protected custody (never_spawned_tests).
+        let plan = custody::CustodyError::CapturePlan {
+            field: "wall_ms",
+            value: 0,
+            bound: "1..=86400000".into(),
+        };
+        for (error, expected) in [
+            (&plan, "capture plan wall_ms is 0"),
+            (&custody::CustodyError::Cancelled, CANCELLED_BEFORE_LAUNCH),
+        ] {
+            let HandOff::Local(message) = launch_failure(&policy, error, NeverSpawned) else {
+                panic!("{error}: a never-spawned launch must refuse locally");
+            };
+            assert!(message.contains(expected), "{message}");
         }
     }
 
     #[test]
     fn typed_handoff_preserves_boundary_and_terminal_cause() {
         use provenant_confinement::permissions::{AvailabilityReason, PermissionError};
-        use provenant_records::diagnostic::BoundaryClass;
+        use provenant_records::policy::Boundary;
         let error = RunError::Confinement(PermissionError::BackendNotAvailable(
             AvailabilityReason::UnsupportedPlatform,
         ));
         assert!(matches!(
             typed_local(&test_policy(), "confinement command", &error),
             HandOff::Boundary {
-                class: BoundaryClass::Authority,
+                class: Boundary::Authority,
                 cause: Some(CauseKind::UnsupportedPlatform),
                 ..
             }
@@ -1053,7 +1146,7 @@ mod tests {
         assert!(matches!(
             typed_local(&test_policy(), "Git setup", &credential),
             HandOff::Boundary {
-                class: BoundaryClass::Credentials,
+                class: Boundary::Credentials,
                 cause: None,
                 ..
             }
@@ -1084,7 +1177,7 @@ mod tests {
                 assert!(matches!(
                     handoff,
                     HandOff::Boundary {
-                        class: BoundaryClass::Credentials,
+                        class: Boundary::Credentials,
                         cause: Some(CauseKind::DeliveryPrepareCredentialHelper),
                         ..
                     }
@@ -1111,7 +1204,7 @@ mod tests {
         assert!(matches!(
             typed_local(&test_policy(), "lane Git objects", &retained),
             HandOff::Boundary {
-                class: BoundaryClass::LaneGit,
+                class: Boundary::OtherWork,
                 cause: None,
                 ..
             }
@@ -1123,7 +1216,7 @@ mod tests {
                 &RunError::WriterHeadNotLaneBranch
             ),
             HandOff::Boundary {
-                class: BoundaryClass::LaneGit,
+                class: Boundary::OtherWork,
                 cause: None,
                 ..
             }
@@ -1172,7 +1265,7 @@ mod tests {
             &call,
         );
         assert!(
-            matches!(result, Err(HandOff::Boundary { message, class: provenant_records::diagnostic::BoundaryClass::Authority, .. }) if message.contains("writer confinement"))
+            matches!(result, Err(HandOff::Boundary { message, class: provenant_records::policy::Boundary::Authority, .. }) if message.contains("writer confinement"))
         );
         Ok(())
     }
@@ -1345,7 +1438,7 @@ mod tests {
             matches!(
                 result,
                 Err(HandOff::Boundary {
-                    class: provenant_records::diagnostic::BoundaryClass::LaneGit,
+                    class: provenant_records::policy::Boundary::OtherWork,
                     ..
                 })
             ),
@@ -1480,6 +1573,12 @@ mod tests {
             .operation(&request.operation_id, &call)?
             .ok_or("operation")?;
         assert_eq!(operation.state, OperationState::LaunchUnknown);
+        assert!(
+            operation
+                .blocked_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("lost acknowledgement"))
+        );
         let record = store.record(request.attempt_id, &call)?;
         assert!(matches!(record.state, AttemptState::Starting { .. }));
         let recorded_route = record.resolved_route.as_ref().ok_or("resolved route")?;
@@ -1708,13 +1807,13 @@ mod tests {
             .ok_or("operation")?;
         store.db.execute_batch("CREATE TEMP TRIGGER fail_unknown BEFORE UPDATE OF operation_record ON attempts BEGIN SELECT RAISE(ABORT, 'fixture unknown write'); END;")?;
         assert!(matches!(
-            store.launch_unknown(request.attempt_id, &call),
+            store.launch_unknown(request.attempt_id, "fixture lost acknowledgement", &call),
             Err(RunError::Sqlite(_))
         ));
         assert_eq!(store.operation(&request.operation_id, &call)?, Some(prior));
         assert!(custody::reservation_present(&directory, scope)?);
         store.db.execute_batch("DROP TRIGGER fail_unknown")?;
-        store.launch_unknown(request.attempt_id, &call)?;
+        store.launch_unknown(request.attempt_id, "fixture lost acknowledgement", &call)?;
         assert_eq!(
             store
                 .operation(&request.operation_id, &call)?

@@ -4,7 +4,150 @@ use clap::{Args, Parser, Subcommand, ValueEnum, builder::TypedValueParser};
 use provenant_core::{AttemptId, GitOid, OperationId};
 pub use provenant_records::Harness;
 use provenant_records::warning::{Warning, warn};
-use std::{ffi::OsString, path::PathBuf};
+use std::{ffi::OsString, path::PathBuf, time::Duration};
+
+/// Options shared by verbs that can be served by a peer and bounded by a deadline.
+#[derive(Clone, Debug, Default, Args)]
+pub struct CommonArgs {
+    /// Host that serves this command (repeatable; `all` aggregates across hosts)
+    #[arg(long = "host", global = true, value_parser = host_arg)]
+    pub host: Vec<HostArg>,
+    /// Bound the full command invocation (for example 90s, 10m or 2h)
+    #[arg(long, global = true, value_parser = parse_duration_arg)]
+    pub timeout: Option<DurationArg>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum HostArg {
+    All,
+    Named(String),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DurationArg(u64);
+
+impl DurationArg {
+    pub fn seconds(self) -> u64 {
+        self.0
+    }
+}
+
+fn parse_duration_arg(value: &str) -> Result<DurationArg, &'static str> {
+    positive_span_seconds(value).map(DurationArg)
+}
+
+fn host_arg(value: &str) -> Result<HostArg, String> {
+    if value == "all" {
+        return Ok(HostArg::All);
+    }
+    host_alias(value).map(HostArg::Named).map_err(str::to_owned)
+}
+
+/// The hosts a peer-servable verb acts on, resolved once from `CommonArgs`.
+/// Readers and `gc` use this to decide between a local read, a single peer and
+/// an aggregated fan-out; `run` validates that it never exceeds `Named`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum HostSelection {
+    /// No `--host`: the caller acts locally, preserving its existing path.
+    Local,
+    /// Exactly one named peer serves the command.
+    Named(String),
+    /// Several named peers: fan out and aggregate.
+    Many(Vec<String>),
+    /// `--host all`: fan out to the local host and every registered peer.
+    All,
+}
+
+impl HostSelection {
+    /// Whether this selection needs the multi-host aggregation envelope.
+    pub fn is_aggregate(&self) -> bool {
+        matches!(self, Self::Many(_) | Self::All)
+    }
+}
+
+impl CommonArgs {
+    /// The host target resolved once from `--host`. `all` wins over named
+    /// hosts, repeated names collapse, and no flag stays local.
+    pub fn target(&self) -> HostSelection {
+        if self.host.is_empty() {
+            return HostSelection::Local;
+        }
+        if self.host.iter().any(|host| matches!(host, HostArg::All)) {
+            return HostSelection::All;
+        }
+        let mut named: Vec<String> = self
+            .host
+            .iter()
+            .filter_map(|host| match host {
+                HostArg::Named(name) => Some(name.clone()),
+                HostArg::All => None,
+            })
+            .collect();
+        named.sort();
+        named.dedup();
+        match named.len() {
+            0 => HostSelection::Local,
+            1 => HostSelection::Named(named.remove(0)),
+            _ => HostSelection::Many(named),
+        }
+    }
+
+    /// The bounded invocation budget: an explicit `--timeout` wins over the
+    /// verb's configured default. Nested calls receive what remains.
+    pub fn deadline(&self, default: Duration) -> Duration {
+        self.timeout
+            .map(|timeout| Duration::from_secs(timeout.seconds()))
+            .unwrap_or(default)
+    }
+
+    /// The bounded invocation deadline, in seconds, when `--timeout` was set.
+    pub fn timeout_seconds(&self) -> Option<u64> {
+        self.timeout.map(DurationArg::seconds)
+    }
+}
+
+impl Command {
+    /// The shared flags for verbs that flatten `CommonArgs`. Every such verb
+    /// resolves its deadline and host target through this one path; verbs that
+    /// do not flatten it return `None`. Spec: docs/specs/agent-native.md#34-consistent-verbs-and-flags.
+    pub fn common(&self) -> Option<&CommonArgs> {
+        match self {
+            Self::Events { common, .. } | Self::Result { common, .. } => Some(common),
+            Self::Upgrade(args) => Some(&args.common),
+            Self::Run(args) => Some(&args.common),
+            Self::Output(args) => Some(&args.common),
+            Self::Queue(args) => Some(&args.common),
+            Self::Gc(args) => Some(&args.common),
+            Self::Status(args) => Some(&args.common),
+            Self::Wait(args) => Some(&args.common),
+            Self::Tick(args) => Some(&args.common),
+            Self::Retire(args) => Some(&args.common),
+            Self::Ci(Ci::Failures { common, .. }) => Some(common),
+            Self::Ci(Ci::Patch(args)) => Some(&args.common),
+            _ => None,
+        }
+    }
+}
+
+/// The two values every `CommonArgs` verb resolves before it acts: the bounded
+/// invocation budget and the host target. One resolution path keeps the flags
+/// from being accepted and ignored (spec §3.4).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VerbCommon {
+    pub deadline: Duration,
+    pub target: HostSelection,
+}
+
+impl Command {
+    /// Resolve both shared fields for a verb that flattens `CommonArgs`.
+    pub fn resolve_common(&self, default: Duration) -> Option<VerbCommon> {
+        let common = self.common()?;
+        Some(VerbCommon {
+            deadline: common.deadline(default),
+            target: common.target(),
+        })
+    }
+}
 
 #[derive(Debug, Parser)]
 #[command(name = "provenant", disable_help_subcommand = true)]
@@ -119,6 +262,8 @@ pub enum Command {
     Wait(Wait),
     /// Replay project observations as JSON lines
     Events {
+        #[command(flatten)]
+        common: CommonArgs,
         /// Resume after this project sequence cursor
         #[arg(long, catalog_i64_range = 0..)]
         from: Option<i64>,
@@ -169,6 +314,8 @@ pub enum Command {
     /// Summarise a lane's handoff, branch, head and verification
     #[command(add = crate::metadata::CoreCommand(11, "provenant result fix-login/implement"))]
     Result {
+        #[command(flatten)]
+        common: CommonArgs,
         /// Graph, node or attempt, as NAME[/NODE[#N]]
         #[arg(value_name = "TARGET", catalog_graph_target())]
         target: Target,
@@ -196,6 +343,8 @@ pub enum Command {
     /// Deliver a settled writer attempt
     #[command(subcommand)]
     Lane(Lane),
+    /// Control delivery queue items
+    Queue(QueueArgs),
     /// Settle open attempts, reclaim dead leases behind undecodable records, and report uncertain custody
     Reconcile(Reconcile),
     /// Report local usage and cost
@@ -228,7 +377,9 @@ pub enum Command {
     /// Collect lane caches, ignored output, merged worktrees and expired captures
     Gc(Gc),
     /// Advance due graphs and run scheduled host tasks
-    Tick,
+    Tick(TickArgs),
+    /// Retire an unreadable graph or fence an unreachable project
+    Retire(RetireArgs),
     /// Inspect disk use without changing files
     #[command(subcommand)]
     Disk(Disk),
@@ -610,6 +761,8 @@ pub enum Config {
         #[arg(long, default_value = "50", catalog_u64_range = 1..=500)]
         limit: u64,
     },
+    /// Explain the winning value and losing candidates for a setting key
+    Explain { key: String },
     /// Set `profile` (balanced or economy) or a registry knob such
     /// as `lanes.max_concurrency`.
     Set {
@@ -674,6 +827,8 @@ impl Access {
 }
 #[derive(Clone, Debug, Args)]
 pub struct GraphRunArgs {
+    #[command(flatten)]
+    pub common: CommonArgs,
     /// Template to run (see `provenant templates`)
     #[arg(catalog_required_unless = "file", conflicts_with = "file")]
     pub template: Option<String>,
@@ -681,8 +836,8 @@ pub struct GraphRunArgs {
     #[arg(conflicts_with_all = ["file", "brief_file", "brief_text"])]
     pub brief: Option<String>,
     /// Brief for the template (alternative to the positional brief)
-    #[arg(long = "brief", value_name = "TEXT", conflicts_with_all = ["file", "brief", "brief_file"])]
-    pub brief_text: Option<String>,
+    #[arg(long = "brief", value_name = "TEXT", action = clap::ArgAction::Append, conflicts_with_all = ["file", "brief", "brief_file"])]
+    pub brief_text: Vec<String>,
     /// Handle for the graph: `status`, `wait` and `output` take it. The same
     /// input under the same name finds its graph; changed input starts NAME-2.
     #[arg(long, value_parser = graph_name)]
@@ -693,9 +848,6 @@ pub struct GraphRunArgs {
     /// Standing lane rules to append to every lane's preamble as its launch layer
     #[arg(long = "preamble-file", value_name = "PATH")]
     pub preamble_file: Option<PathBuf>,
-    /// Place attempts on this peer name or host ID
-    #[arg(long)]
-    pub host: Option<String>,
     /// Use this exact adapter/model instead of a route; a bare model name works when one provider offers it
     #[arg(long, conflicts_with = "route")]
     pub model: Option<String>,
@@ -713,7 +865,8 @@ pub struct GraphRunArgs {
     /// Access for a plain task; writer targets imply worktree-write
     #[arg(long, value_parser = ["read-only", "worktree-write"])]
     pub mode: Option<String>,
-    /// Read source: auto, live, default_branch, or a Git ref
+    /// Tree a read-only task reads: the checkout (`live`), default branch
+    /// (`default_branch`), an automatic choice (`auto`), or an explicit Git ref
     #[arg(long, value_parser = parse_read_source)]
     pub source: Option<String>,
     /// Existing writer worktree
@@ -737,6 +890,15 @@ pub struct GraphRunArgs {
     /// Copy the node over comma-separated items, or a resolver such as @review-panel
     #[arg(long, value_delimiter = ',')]
     pub over: Vec<String>,
+    /// Adopt a pull request or branch as a delivery queue item
+    #[arg(long, value_name = "pr:N|branch:B")]
+    pub adopt: Option<String>,
+    /// Priority for queue submission
+    #[arg(long)]
+    pub priority: Option<i32>,
+    /// Batch manifest for `deliver.batch`
+    #[arg(long, value_name = "FILE")]
+    pub batch: Option<PathBuf>,
     /// Bind a template parameter or attempt.FIELD (NAME=VALUE), typed by its
     /// declaration: a string as written, a number or boolean as that type, a
     /// list or table as TOML; repeatable
@@ -751,6 +913,36 @@ pub struct GraphRunArgs {
     /// Let this child outlive parent and graph cancellation (inside a lane only)
     #[arg(long)]
     pub detached: bool,
+    /// Wait for this inline launch to settle
+    #[arg(long, conflicts_with = "no_wait")]
+    pub wait: bool,
+    /// Return after launch without waiting
+    #[arg(long, conflicts_with = "wait")]
+    pub no_wait: bool,
+    /// Inline context files (repeatable)
+    #[arg(long = "context", value_name = "FILE")]
+    pub context: Vec<PathBuf>,
+    /// Shared note names to inline (repeatable)
+    #[arg(long = "notes", value_name = "NAME")]
+    pub notes: Vec<String>,
+    /// Raise only refusable checks to refuse
+    #[arg(long)]
+    pub strict: bool,
+    /// Check policy override
+    #[arg(long, value_parser = ["on", "off", "warn", "refuse"])]
+    pub checks: Option<String>,
+    /// Set the standard isolated-lane bundle
+    #[arg(long)]
+    pub isolated: bool,
+    /// Writer destination choice
+    #[arg(long, value_parser = ["auto", "parent", "new"])]
+    pub destination: Option<String>,
+    /// Commit only the lane's own changed paths
+    #[arg(long, value_parser = ["own"])]
+    pub commit: Option<String>,
+    /// Behaviour when another live writer holds the worktree
+    #[arg(long = "worktree-sharing", value_parser = ["allow", "warn", "refuse"])]
+    pub worktree_sharing: Option<String>,
     /// Run the lane under the macOS sandbox (sets attempt.sandbox = "on")
     #[arg(long, conflicts_with = "no_sandbox")]
     pub sandbox: bool,
@@ -807,6 +999,8 @@ pub enum Part {
 }
 #[derive(Clone, Debug, Args)]
 pub struct Output {
+    #[command(flatten)]
+    pub common: CommonArgs,
     /// Output source, as NAME[/NODE[#N]]; composites expose their declared result
     #[arg(value_name = "TARGET", catalog_graph_target())]
     pub target: Target,
@@ -947,6 +1141,56 @@ pub enum Lane {
         #[arg(long)]
         accept_review: bool,
     },
+    /// Set the owning lane's worktree sharing rule
+    Share {
+        #[arg(value_parser = ["allow", "warn", "refuse"])]
+        mode: String,
+    },
+}
+
+#[derive(Clone, Debug, Subcommand)]
+pub enum Queue {
+    /// Hold an item after reconciling any in-flight effect
+    Hold {
+        item: String,
+        #[arg(long)]
+        reason: Option<String>,
+    },
+    /// Resume a held item
+    Resume {
+        item: String,
+        #[arg(long)]
+        stage: Option<String>,
+    },
+    /// Set an item's scheduling priority
+    Prioritise { item: String, priority: i32 },
+    /// List queue items
+    Status {
+        #[arg(long)]
+        parked: bool,
+    },
+    /// Accept the named findings for an item
+    Accept {
+        item: String,
+        #[arg(long = "findings", value_name = "FILE", required = true)]
+        findings: PathBuf,
+    },
+    /// Request a fix from the named findings for an item
+    Fix {
+        item: String,
+        #[arg(long = "findings", value_name = "FILE", required = true)]
+        findings: PathBuf,
+    },
+    /// Drop an item
+    Drop { item: String },
+}
+
+#[derive(Clone, Debug, Args)]
+pub struct QueueArgs {
+    #[command(flatten)]
+    pub common: CommonArgs,
+    #[command(subcommand)]
+    pub action: Queue,
 }
 #[derive(Clone, Debug, Subcommand)]
 pub enum Native {
@@ -983,156 +1227,11 @@ pub enum NativeSettlement {
     Cancelled,
 }
 
-#[derive(Clone, Debug, Subcommand)]
-pub enum Telemetry {
-    /// Summarise local attempts and usage
-    Stats(Stats),
-    /// Write attempts as a Chrome Trace Event file for ui.perfetto.dev
-    Trace(Trace),
-    /// Maintain the telemetry price sheet
-    Prices {
-        #[command(subcommand)]
-        command: Prices,
-    },
-    /// Record native chair and sub-agent token usage per account
-    Ingest(Ingest),
-    /// Report quota mileage from quota history and ingested usage
-    Mileage(Mileage),
-    /// Compare each account's API-equivalent lane usage with its plan price and quota readings
-    Value(crate::telemetry_args::TelemetryValue),
-    /// Report API-equivalent cost from the usage ledger, for one attempt or grouped
-    Cost(crate::telemetry_args::TelemetryCost),
-    /// Compare experiment arms using offline pipeline outcomes
-    #[command(subcommand, visible_alias = "exp")]
-    Experiments(Experiments),
-}
-#[derive(Clone, Debug, Subcommand)]
-pub enum Experiments {
-    /// Show one experiment's stratified arm comparison
-    Show(ExperimentShow),
-}
-#[derive(Clone, Debug, Args)]
-pub struct ExperimentShow {
-    /// Historical experiment name recorded in offline outcomes
-    pub id: String,
-    #[command(flatten)]
-    pub pipeline: PipelineOptions,
-}
-#[derive(Clone, Debug, Subcommand)]
-pub enum Prices {
-    /// Fetch market prices and write a proposed diff; never edits the sheet
-    Refresh(PricesRefresh),
-}
-#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
-pub enum PriceSource {
-    Openrouter,
-    Litellm,
-}
-#[derive(Clone, Debug, Args)]
-pub struct PricesRefresh {
-    /// Primary source; the other is the cross-check (default openrouter)
-    #[arg(long, value_enum, default_value = "openrouter")]
-    pub source: PriceSource,
-    /// Read the OpenRouter models document from this file instead of fetching it
-    #[arg(long)]
-    pub openrouter_file: Option<PathBuf>,
-    /// Read the LiteLLM price document from this file instead of fetching it
-    #[arg(long)]
-    pub litellm_file: Option<PathBuf>,
-    /// Proposal file (default `telemetry-prices.proposed.json`)
-    #[arg(long, default_value = "telemetry-prices.proposed.json")]
-    pub out: PathBuf,
-}
-#[derive(Clone, Debug, Args)]
-pub struct Ingest {
-    /// Ingest only this provider's sessions (only `claude` writes native transcripts)
-    #[arg(long)]
-    pub provider: Option<String>,
-    /// Ingest transcripts written, and messages stamped, from this date or timestamp, or a span such as 1d ago
-    #[arg(long, value_parser = since)]
-    pub since: Option<jiff::Timestamp>,
-    /// Resume from the durable cursor instead of rescanning a time window
-    #[arg(long)]
-    pub incremental: bool,
-}
-#[derive(Clone, Debug, Args)]
-pub struct Mileage {
-    /// Account label or key
-    #[arg(long)]
-    pub account: Option<String>,
-    /// Quota window, such as five_hour or weekly (default every window)
-    #[arg(long)]
-    pub window: Option<String>,
-    /// Count only usage of this exact model; quota deltas still cover every model, so mileage is understated
-    #[arg(long)]
-    pub model: Option<String>,
-    /// Use readings and usage from this date or timestamp, or a span such as 1d ago
-    #[arg(long, value_parser = since)]
-    pub since: Option<jiff::Timestamp>,
-    /// Runs needed on each side before a capacity trend is judged
-    #[arg(long, default_value_t = 10, catalog_u32_range = 2..=10_000)]
-    pub min_runs: u32,
-    /// Fall in capacity, in percent, that is flagged rather than inconclusive
-    #[arg(long, default_value_t = 20, catalog_u32_range = 1..=99)]
-    pub fall_percent: u32,
-    /// Days in the recent side of a capacity step change
-    #[arg(long, default_value_t = 7, catalog_u32_range = 1..=90)]
-    pub recent_days: u32,
-}
-#[derive(Clone, Debug, Args)]
-pub struct Trace {
-    /// Output file (default `provenant-trace.json`)
-    #[arg(long, default_value = "provenant-trace.json")]
-    pub out: std::path::PathBuf,
-    /// Include attempts finished from this date or timestamp, or a span such as 1d ago
-    #[arg(long, value_parser = since)]
-    pub since: Option<jiff::Timestamp>,
-    /// Restrict the trace to one graph, node or attempt (NAME[/NODE[#N]])
-    #[arg(value_name = "TARGET", catalog_graph_target())]
-    pub target: Option<Target>,
-    /// Also read the attempts of runs placed on peers, one SSH status read per peer
-    #[arg(long)]
-    pub peers: bool,
-}
-#[derive(Clone, Debug, Args)]
-pub struct Stats {
-    /// Include offline post-merge outcomes and stratified ranking
-    #[arg(long, conflicts_with = "usage")]
-    pub outcomes: bool,
-    /// Include advisory expiring suggestions from offline pipeline evidence
-    #[arg(long, conflicts_with = "usage")]
-    pub suggest: bool,
-    #[command(flatten)]
-    pub pipeline: PipelineOptions,
-    /// Count local CLI verbs, including unused installed units.
-    #[arg(long)]
-    pub usage: bool,
-    /// Count from this date or timestamp, or a span such as 1d ago
-    #[arg(long, value_parser = since)]
-    pub since: Option<jiff::Timestamp>,
-    /// Count up to this date or timestamp
-    #[arg(long, value_parser = timestamp)]
-    pub until: Option<jiff::Timestamp>,
-}
-
-#[derive(Clone, Debug, Args)]
-pub struct PipelineOptions {
-    /// Local main-line ref to analyse; no fetch is performed
-    #[arg(long, default_value = "main")]
-    pub main_ref: String,
-    /// Recorded gh main-branch run list JSON; absent means CI not_measured
-    #[arg(long)]
-    pub ci_file: Option<PathBuf>,
-    /// Days after a merge to attribute escaped defects
-    #[arg(long, default_value_t = 14, catalog_u32_range = 1..=3650)]
-    pub outcome_days: u32,
-    /// Independent graphs and mature merges required per arm
-    #[arg(long, default_value_t = 20, catalog_u32_range = 1..=100_000)]
-    pub min_samples: u32,
-    /// Days until a suggestion expires
-    #[arg(long, default_value_t = 14, catalog_u32_range = 1..=3650)]
-    pub expiry_days: u32,
-}
+pub use crate::telemetry_args::{
+    ExperimentShow, Experiments, Ingest, Mileage, PipelineOptions, PriceSource, Prices,
+    PricesRefresh, Stats, Telemetry, Trace,
+};
+pub use crate::wait_args::{PrWaitUntil, Wait};
 #[derive(Clone, Debug, Subcommand)]
 pub enum Worktree {
     /// Create a worktree on a new branch
@@ -1168,6 +1267,8 @@ pub enum Disk {
 }
 #[derive(Clone, Debug, Args)]
 pub struct Gc {
+    #[command(flatten)]
+    pub common: CommonArgs,
     /// Run for registered projects from the scheduled per-user agent
     #[arg(long, hide = true)]
     pub scheduled: bool,
@@ -1306,7 +1407,7 @@ pub(crate) fn reason(value: &str) -> Result<String, &'static str> {
     }
     Ok(value.into())
 }
-fn timestamp(value: &str) -> Result<jiff::Timestamp, &'static str> {
+pub(crate) fn timestamp(value: &str) -> Result<jiff::Timestamp, &'static str> {
     if value.len() == 10
         && let Ok(date) = value.parse::<jiff::civil::Date>()
     {
@@ -1461,6 +1562,8 @@ pub(crate) fn observation_wait_seconds(value: &str) -> Result<u64, &'static str>
 }
 #[derive(Clone, Debug, Args)]
 pub struct Status {
+    #[command(flatten)]
+    pub common: CommonArgs,
     /// Active custody of this chair and unattended items, across projects unless --project is set
     #[arg(long, conflicts_with_all = ["targets", "session_stream", "all", "adoptable"])]
     pub mine: bool,
@@ -1490,49 +1593,32 @@ pub struct Status {
     #[arg(long)]
     pub cursor: Option<u64>,
 }
-/// When a PR wait can settle after checks fail.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
-pub enum PrWaitUntil {
-    /// Settle as soon as a check fails.
-    Failure,
-    /// Wait for all observed checks to finish.
-    Complete,
+#[derive(Clone, Debug, Args)]
+pub struct TickArgs {
+    #[command(flatten)]
+    pub common: CommonArgs,
+    /// Limit this pass to selected tasks (repeatable)
+    #[arg(long = "task", value_name = "TASK", value_parser = ["settlement", "graphs", "forge_events", "gc", "steward"])]
+    pub task: Vec<String>,
 }
 
-/// `wait`: block until graph work or pull requests settle.
 #[derive(Clone, Debug, Args)]
-pub struct Wait {
-    /// Graphs, nodes or attempts (NAME[/NODE[#N]]); this project's running
-    /// graphs when neither a target nor --pr is given
-    #[arg(value_name = "TARGET", catalog_graph_target())]
-    pub targets: Vec<Target>,
-    /// Pull request whose required checks, merge or close ends the wait (repeatable)
-    #[arg(long = "pr", value_name = "NUMBER", catalog_u64_range = 1..)]
-    pub prs: Vec<u64>,
-    /// Wait until GitHub reports this exact head; never verdict another SHA
-    #[arg(long, value_name = "SHA", value_parser = parse_head_oid)]
-    pub head: Option<String>,
-    /// What this wait does when its pinned pull request head moves: pinned or follow_latest
-    #[arg(long, value_name = "POLICY", value_parser = parse_pr_head_policy, requires = "prs", conflicts_with = "head")]
-    pub pr_head_policy: Option<provenant_records::subject::SubjectPolicy>,
-    /// PR check settlement: failure (default) or complete (waits for all checks, with a 60-minute default budget)
-    #[arg(long, value_enum, requires = "prs")]
-    pub until: Option<PrWaitUntil>,
-    /// Wait until every target settles (the default)
-    #[arg(long, conflicts_with_all = ["any", "fail_fast"])]
-    pub all: bool,
-    /// Return at the first target to settle or need input
-    #[arg(long, conflicts_with_all = ["all", "fail_fast"])]
-    pub any: bool,
-    /// Return when a target fails, or when all targets settle
-    #[arg(long = "fail-fast", conflicts_with_all = ["all", "any"])]
-    pub fail_fast: bool,
-    /// Print one line per transition until the wait ends
-    #[arg(long)]
-    pub follow: bool,
-    /// Wait budget (default domains.wait.timeout_seconds, or domains.wait.pr_complete_timeout_seconds with --pr --until complete; clamped to domains.wait.max_timeout_seconds)
-    #[arg(long, value_name = "SPAN", value_parser = positive_span_seconds, catalog_bounds = (1, u64::MAX))]
-    pub timeout: Option<u64>,
+pub struct RetireArgs {
+    #[command(flatten)]
+    pub common: CommonArgs,
+    /// Graph or project, as graph:ID or project:ID
+    #[arg(value_name = "SUBJECT", value_parser = retire_subject)]
+    pub subject: String,
+}
+
+fn retire_subject(value: &str) -> Result<String, String> {
+    let (kind, id) = value
+        .split_once(':')
+        .ok_or_else(|| "expected graph:ID or project:ID".to_owned())?;
+    if !matches!(kind, "graph" | "project") || id.is_empty() {
+        return Err("expected graph:ID or project:ID".into());
+    }
+    Ok(value.to_owned())
 }
 /// `trace`: a graph's revisions and attempt timeline.
 #[derive(Clone, Debug, Args)]
@@ -1540,21 +1626,6 @@ pub struct GraphTrace {
     /// Graph, node or attempt, as NAME[/NODE[#N]]
     #[arg(value_name = "TARGET", catalog_graph_target())]
     pub target: Target,
-}
-
-fn parse_head_oid(value: &str) -> Result<String, String> {
-    GitOid::parse(value)
-        .map(|_| value.to_owned())
-        .map_err(|error| error.to_string())
-}
-
-/// Parse the declared wait policy, so a bad flag value is a grammar refusal
-/// with the allowed spellings rather than a runtime default.
-fn parse_pr_head_policy(value: &str) -> Result<provenant_records::subject::SubjectPolicy, String> {
-    serde_json::from_value::<provenant_records::subject::SubjectPolicy>(serde_json::Value::String(
-        value.to_owned(),
-    ))
-    .map_err(|_| "expected pinned or follow_latest".to_owned())
 }
 
 fn parse_landing_tier(value: &str) -> Result<String, String> {
@@ -1602,6 +1673,261 @@ fn edit_graph_name(value: &str) -> Result<String, String> {
         );
     }
     Ok(target.name)
+}
+
+#[cfg(test)]
+mod common_args_tests {
+    use super::*;
+    use clap::CommandFactory;
+
+    fn has_common(command: &clap::Command) -> bool {
+        let mut host = false;
+        let mut timeout = false;
+        for arg in command.get_arguments() {
+            match arg.get_id().as_str() {
+                "host" => host = true,
+                "timeout" => timeout = true,
+                _ => {}
+            }
+        }
+        host && timeout
+    }
+
+    /// Spec: docs/specs/agent-native.md#34-consistent-verbs-and-flags. The
+    /// exemption list is part of the contract: these verbs keep their own
+    /// option surface and must never inherit `--host` or `--timeout`.
+    #[test]
+    fn common_args_everywhere() {
+        let model = RawInvocation::command();
+        for verb in [
+            "status", "output", "result", "wait", "events", "gc", "run", "upgrade", "retire",
+            "queue",
+        ] {
+            let command = model
+                .find_subcommand(verb)
+                .unwrap_or_else(|| panic!("missing {verb} verb"));
+            assert!(has_common(command), "{verb} must flatten CommonArgs");
+        }
+        let ci = model.find_subcommand("ci").expect("ci verb");
+        for verb in ["failures", "patch"] {
+            let command = ci
+                .find_subcommand(verb)
+                .unwrap_or_else(|| panic!("missing ci {verb}"));
+            assert!(has_common(command), "ci {verb} must flatten CommonArgs");
+        }
+        for verb in ["help", "hook", "internal", "declare", "notes", "config"] {
+            let command = model
+                .find_subcommand(verb)
+                .unwrap_or_else(|| panic!("missing {verb} verb"));
+            assert!(
+                !command.get_arguments().any(|arg| arg.get_id() == "host"),
+                "{verb} is exempt from CommonArgs"
+            );
+        }
+    }
+
+    #[test]
+    fn common_args_resolve_host_target() {
+        let common = CommonArgs::default();
+        assert_eq!(common.target(), HostSelection::Local);
+        assert_eq!(common.timeout_seconds(), None);
+        assert_eq!(
+            common.deadline(Duration::from_secs(30)),
+            Duration::from_secs(30)
+        );
+
+        let one = CommonArgs {
+            host: vec![HostArg::Named("workshop".into())],
+            timeout: Some(DurationArg(90)),
+        };
+        assert_eq!(one.target(), HostSelection::Named("workshop".into()));
+        assert_eq!(one.timeout_seconds(), Some(90));
+        assert_eq!(
+            one.deadline(Duration::from_secs(30)),
+            Duration::from_secs(90)
+        );
+        assert!(!one.target().is_aggregate());
+
+        let many = CommonArgs {
+            host: vec![
+                HostArg::Named("workshop".into()),
+                HostArg::Named("laptop".into()),
+                HostArg::Named("workshop".into()),
+            ],
+            timeout: None,
+        };
+        assert_eq!(
+            many.target(),
+            HostSelection::Many(vec!["laptop".into(), "workshop".into()])
+        );
+        assert!(many.target().is_aggregate());
+
+        let all = CommonArgs {
+            host: vec![HostArg::Named("workshop".into()), HostArg::All],
+            timeout: None,
+        };
+        assert_eq!(all.target(), HostSelection::All);
+        assert!(all.target().is_aggregate());
+    }
+
+    /// Recording fake: every verb that flattens `CommonArgs` must resolve both
+    /// fields through `Command::common`, the one production path.
+    #[derive(Default)]
+    struct RecordingCommon {
+        deadlines: Vec<Duration>,
+        targets: Vec<HostSelection>,
+    }
+
+    impl RecordingCommon {
+        fn observe(&mut self, command: &Command, default: Duration) -> bool {
+            let Some(common) = command.common() else {
+                return false;
+            };
+            self.deadlines.push(common.deadline(default));
+            self.targets.push(common.target());
+            true
+        }
+    }
+
+    #[test]
+    fn every_common_args_verb_resolves_deadline_and_target() {
+        let default = Duration::from_secs(30);
+        // One argv per verb that flattens `CommonArgs`, parsed through the real
+        // clap grammar so this census cannot drift from the declared surface.
+        let invocations: &[&[&str]] = &[
+            &[
+                "provenant",
+                "status",
+                "--host",
+                "workshop",
+                "--timeout",
+                "90s",
+            ],
+            &[
+                "provenant",
+                "output",
+                "demo",
+                "--host",
+                "workshop",
+                "--timeout",
+                "90s",
+            ],
+            &[
+                "provenant",
+                "result",
+                "demo",
+                "--host",
+                "workshop",
+                "--timeout",
+                "90s",
+            ],
+            &[
+                "provenant",
+                "wait",
+                "--host",
+                "workshop",
+                "--timeout",
+                "90s",
+            ],
+            &[
+                "provenant",
+                "events",
+                "--host",
+                "workshop",
+                "--timeout",
+                "90s",
+            ],
+            &["provenant", "gc", "--host", "workshop", "--timeout", "90s"],
+            &[
+                "provenant",
+                "run",
+                "task",
+                "brief",
+                "--host",
+                "workshop",
+                "--timeout",
+                "90s",
+            ],
+            &[
+                "provenant",
+                "upgrade",
+                "--host",
+                "workshop",
+                "--timeout",
+                "90s",
+            ],
+            &[
+                "provenant",
+                "ci",
+                "failures",
+                "--host",
+                "workshop",
+                "--timeout",
+                "90s",
+            ],
+            &[
+                "provenant",
+                "ci",
+                "patch",
+                "pr",
+                "1",
+                "--host",
+                "workshop",
+                "--timeout",
+                "90s",
+            ],
+            &[
+                "provenant",
+                "retire",
+                "graph:demo",
+                "--host",
+                "workshop",
+                "--timeout",
+                "90s",
+            ],
+            &[
+                "provenant",
+                "queue",
+                "status",
+                "--host",
+                "workshop",
+                "--timeout",
+                "90s",
+            ],
+            &[
+                "provenant",
+                "tick",
+                "--host",
+                "workshop",
+                "--timeout",
+                "90s",
+            ],
+        ];
+        let mut recorder = RecordingCommon::default();
+        for argv in invocations {
+            let invocation = RawInvocation::try_parse_from(*argv)
+                .unwrap_or_else(|error| panic!("{}: {error}", argv.join(" ")));
+            assert!(
+                recorder.observe(&invocation.command, default),
+                "{} must expose CommonArgs",
+                argv.join(" ")
+            );
+        }
+        assert_eq!(recorder.deadlines.len(), invocations.len());
+        assert_eq!(recorder.targets.len(), invocations.len());
+        assert!(
+            recorder
+                .deadlines
+                .iter()
+                .all(|deadline| *deadline == Duration::from_secs(90))
+        );
+        assert!(
+            recorder
+                .targets
+                .iter()
+                .all(|target| *target == HostSelection::Named("workshop".into()))
+        );
+    }
 }
 
 /// Validate launch read sources using the same vocabulary as configuration.

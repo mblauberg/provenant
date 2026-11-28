@@ -628,13 +628,21 @@ fn children(
     Ok(expanded)
 }
 
+/// A composite's settled outputs, its decision cause, and the chain-owner
+/// ledger it persists with them.
+type CompositeOutputs = (
+    NodeOutputs,
+    Option<NodeDecisionCause>,
+    Option<(String, FindingLedger)>,
+);
+
 fn outputs(
     boundary: usize,
     spec: &CompositeSpec,
     plan: &PlannedGraph,
     checkpoint: &GraphCheckpoint,
     positions: &BTreeMap<String, usize>,
-) -> Result<(NodeOutputs, Option<NodeDecisionCause>), String> {
+) -> Result<CompositeOutputs, String> {
     let mut selected = NodeOutputs {
         extra: Default::default(),
         repair_design: None,
@@ -796,6 +804,7 @@ fn outputs(
         }
     }
     let mut split = false;
+    let mut finding_ledger = None;
     if spec.reduce_verdict {
         use provenant_records::workflow::ReviewVerdict;
         let rank = |verdict| match verdict {
@@ -828,22 +837,214 @@ fn outputs(
         // adjudication node resolves it. Flag the split so a reduced verdict
         // is never silently treated as an agreed changes-request.
         // Spec: docs/specs/fabric.md#fix-round-invariants-and-split-verdict-adjudication
-        split = verdicts
-            .first()
-            .is_some_and(|first| verdicts.iter().any(|verdict| verdict != first));
+        split = review::split_needs_adjudicator(&verdicts)
+            || review::contradictory_blocking_findings(&selected.findings);
         let verdict = verdicts.into_iter().max_by_key(|verdict| rank(*verdict));
         selected.verdict = verdict.map(|verdict| format!("VERDICT: {}", verdict.as_token()));
         selected.verdict_error = None;
     }
-    let review_members = spec
-        .exports
-        .iter()
-        .any(|export| template::review_behaviour(&plan.nodes[positions[&export.node]]).is_some());
+    let review_members = review::composite_review(spec, plan, positions);
     if (!unavailable.is_empty() && review_members)
         || !missing_review_lenses.is_empty()
         || review::partial(&selected)
     {
         review::mark_partial(&mut selected);
+    }
+    // Batch 1 slice 27: every review round reads and writes one finding ledger
+    // for the exact head. Scope, carry-forward and coverage all come from it.
+    let mut pending: Vec<_> = spec
+        .exports
+        .iter()
+        .map(|export| positions[&export.node])
+        .collect();
+    let mut settlements = Vec::new();
+    while let Some(index) = pending.pop() {
+        let progress = &checkpoint.nodes[index];
+        if progress.state != NodeState::Succeeded {
+            continue;
+        }
+        if let Some(settlement) = progress.review_settlement.as_ref() {
+            settlements.push(settlement);
+        }
+        if let Some(child) = plan.nodes[index].composite.as_ref() {
+            pending.extend(child.exports.iter().map(|export| positions[&export.node]));
+        }
+    }
+    if review_members && let Some(settlement) = settlements.first() {
+        if settlements
+            .iter()
+            .any(|member| member.head != settlement.head)
+        {
+            return Err("review members settled against different heads".into());
+        }
+        let head = settlement.head.to_string();
+        let owner_id = review::chain_owner_id(boundary, plan);
+        let persisted_ledger = positions
+            .get(&owner_id)
+            .and_then(|&owner| checkpoint.nodes.get(owner))
+            .and_then(|progress| progress.finding_ledger.clone());
+        let reconstructed = review::ledger_from_checkpoint(plan, checkpoint, boundary, &head);
+        // A partial panel is not a replacement snapshot. Its source rows may
+        // have been reset for a retry, so keep the durable owner ledger as the
+        // source of truth until a complete panel can replace this head.
+        let mut ledger = if selected.partial {
+            persisted_ledger.unwrap_or(reconstructed)
+        } else {
+            reconstructed
+        };
+        review::validate_ledger_blob(&ledger)?;
+        let scope = sealed_composite_scope(boundary, &head, plan, checkpoint, positions);
+        let previous_head = ledger.last_reviewed_head.clone();
+        let mut carried = Vec::new();
+        if let review::RoundScope::Delta { base, .. } = &scope {
+            carried = review::carried_findings(&ledger, base);
+            for finding in &carried {
+                if !selected
+                    .findings
+                    .iter()
+                    .any(|existing| existing.id == finding.id)
+                {
+                    selected.findings.push(finding.clone());
+                }
+            }
+        }
+        let ledger_findings = ledger
+            .heads
+            .get(&head)
+            .map_or_else(Vec::new, |entry| entry.unresolved.clone());
+        let existing = ledger.heads.get(&head).cloned().unwrap_or_default();
+        review::record_head(
+            &mut ledger,
+            &head,
+            &ledger_findings,
+            existing.dispositions,
+            existing.covered_lenses,
+            existing.invariant_coverage,
+        );
+        if let (Some(previous_head), review::RoundScope::Delta { base, .. }) =
+            (previous_head.as_deref(), &scope)
+        {
+            review::merge_carried_findings(&mut ledger, &head, base, &carried);
+            debug_assert_eq!(previous_head, base);
+        }
+        if !selected.partial
+            && let Some(entry) = ledger.heads.get(&head)
+        {
+            // The ledger carries the canonical structural IDs across the full
+            // review input. Keep this panel projection aligned with its durable
+            // evidence, including IDs preserved from the previous head.
+            selected.findings.clone_from(&entry.findings);
+        }
+        if let Some(entry) = ledger.heads.get_mut(&head)
+            && let Some(verdict) = selected
+                .verdict
+                .as_deref()
+                .and_then(provenant_records::workflow::ReviewVerdict::from_token)
+        {
+            entry
+                .dispositions
+                .insert("panel_verdict".to_owned(), verdict.as_token().to_owned());
+        }
+        if let Some(entry) = ledger.heads.get_mut(&head) {
+            entry.unavailable_lenses.extend(
+                review_lens_statuses(boundary, plan, checkpoint, positions)
+                    .into_iter()
+                    .filter_map(|(lens, instances)| {
+                        instances.iter().all(Option::is_some).then_some(lens)
+                    }),
+            );
+        }
+        review::validate_ledger_blob(&ledger)?;
+        let mut required_invariants = Vec::new();
+        for finding in &selected.findings {
+            if let Some(invariant) = finding.named_invariant()
+                && !required_invariants
+                    .iter()
+                    .any(|value: &String| value.as_str() == invariant)
+            {
+                required_invariants.push(invariant.to_owned());
+            }
+        }
+        let gaps = ledger.heads.get(&head).map_or_else(Vec::new, |entry| {
+            review::coverage_gaps(
+                &entry.covered_lenses,
+                &spec.required_review_lenses,
+                &entry.invariant_coverage,
+                &required_invariants,
+            )
+        });
+        if !selected.partial {
+            let owner_id = review::chain_owner_id(boundary, plan);
+            let current_round = plan.nodes[boundary]
+                .round
+                .as_ref()
+                .map_or(0, |round| round.round);
+            let stored_round = positions
+                .get(&owner_id)
+                .and_then(|&owner| checkpoint.nodes.get(owner))
+                .and_then(|progress| {
+                    let stored = progress.finding_ledger.as_ref()?;
+                    let head = stored.last_reviewed_head.as_deref()?;
+                    Some(stored.heads.get(head)?.round)
+                })
+                .unwrap_or(0);
+            // Reconciliation can revisit an earlier boundary after a later
+            // round or adjudicator has settled. Its projection is useful, but
+            // it must not roll the chain owner back to an older head snapshot.
+            if current_round >= stored_round {
+                finding_ledger = Some((owner_id, ledger));
+            }
+        }
+        if !gaps.is_empty() {
+            if selected.warnings.len() < MAX_WARNINGS {
+                selected.warnings.push(bounded(
+                    &format!("coverage_gaps: {}", gaps.join("; ")),
+                    WARNING_BYTES,
+                ));
+            }
+            if selected
+                .verdict
+                .as_deref()
+                .and_then(provenant_records::workflow::ReviewVerdict::from_token)
+                == Some(provenant_records::workflow::ReviewVerdict::Approve)
+            {
+                selected.verdict = Some("VERDICT: INCONCLUSIVE".into());
+            }
+        }
+        for finding in &selected.findings {
+            let (_, unknown) = review::finding_severity(finding);
+            if unknown && selected.warnings.len() < MAX_WARNINGS {
+                selected.warnings.push(bounded(
+                    &format!(
+                        "{}: finding {} used an unknown severity word; treated as high",
+                        review::FINDING_SEVERITY_UNKNOWN.as_str(),
+                        finding.id
+                    ),
+                    WARNING_BYTES,
+                ));
+            }
+        }
+        for export in &spec.exports {
+            if template::review_behaviour(&plan.nodes[positions[&export.node]]).is_none() {
+                continue;
+            }
+            let progress = &checkpoint.nodes[positions[&export.node]];
+            if !matches!(progress.state, NodeState::Failed | NodeState::Blocked) {
+                continue;
+            }
+            let end_code = progress
+                .advance_code
+                .as_deref()
+                .or(progress.advance_note.as_deref());
+            if review::lens_outcome(end_code, 0, 0, false) == review::LensOutcome::Unavailable
+                && selected.warnings.len() < MAX_WARNINGS
+            {
+                selected.warnings.push(bounded(
+                    &format!("review_lens_unavailable: {}", export.node),
+                    WARNING_BYTES,
+                ));
+            }
+        }
     }
     if !missing_review_lenses.is_empty() && selected.warnings.len() < MAX_WARNINGS {
         selected.warnings.push(bounded(
@@ -1007,7 +1208,70 @@ fn outputs(
             path: None,
         });
     }
-    Ok((selected, truncation_cause))
+    Ok((selected, truncation_cause, finding_ledger))
+}
+
+/// A composite carries a delta only when every review member has a persisted
+/// host-verified scope for the same head. Missing or disagreeing seals widen
+/// the whole panel to Full.
+fn sealed_composite_scope(
+    boundary: usize,
+    head: &str,
+    plan: &PlannedGraph,
+    checkpoint: &GraphCheckpoint,
+    positions: &BTreeMap<String, usize>,
+) -> review::RoundScope {
+    let Some(round) = plan
+        .nodes
+        .get(boundary)
+        .and_then(|node| node.round.as_ref())
+    else {
+        return review::RoundScope::Full {
+            head: head.to_owned(),
+        };
+    };
+    if round.round == 0 {
+        return review::RoundScope::Full {
+            head: head.to_owned(),
+        };
+    }
+    let prefix = format!("{}--", plan.nodes[boundary].id);
+    let members: Vec<_> = plan
+        .nodes
+        .iter()
+        .enumerate()
+        .filter(|(_, node)| {
+            node.id.starts_with(&prefix)
+                && node.round.as_ref().is_some_and(|candidate| {
+                    candidate.loop_id == round.loop_id && candidate.round == round.round
+                })
+                && template::review_node(node)
+        })
+        .map(|(index, _)| schedule::review_round_scope(index, plan, checkpoint, positions))
+        .collect();
+    let Some(Some(first)) = members.first() else {
+        return review::RoundScope::Full {
+            head: head.to_owned(),
+        };
+    };
+    if members.iter().any(|scope| scope.as_ref() != Some(first)) {
+        return review::RoundScope::Full {
+            head: head.to_owned(),
+        };
+    }
+    match first {
+        review::RoundScope::Delta {
+            head: sealed_head, ..
+        }
+        | review::RoundScope::Full { head: sealed_head }
+            if sealed_head == head =>
+        {
+            first.clone()
+        }
+        _ => review::RoundScope::Full {
+            head: head.to_owned(),
+        },
+    }
 }
 
 /// Reserve each member's strongest finding when all such reservations fit,
@@ -1116,9 +1380,12 @@ fn unavailable(
         .into_iter()
         .map(|member| &checkpoint.nodes[member])
         .filter(|progress| {
-            progress.state == NodeState::Failed
-                || (spec.reduce_verdict
-                    && matches!(progress.state, NodeState::Blocked | NodeState::Skipped))
+            // A repair lens skipped for having no open finding is a decision,
+            // not a gap in the panel's evidence.
+            !repair::intentionally_skipped_lens(positions[&progress.id], plan, checkpoint)
+                && (progress.state == NodeState::Failed
+                    || (spec.reduce_verdict
+                        && matches!(progress.state, NodeState::Blocked | NodeState::Skipped)))
         })
         .map(|progress| {
             let lens = plan.nodes[positions[&progress.id]]
@@ -1345,6 +1612,7 @@ fn reconcile_progress(
     }
     let mut exported = None;
     let mut export_error = None;
+    let mut finding_ledger_changed = false;
     if state == NodeState::Succeeded
         || (hard_shortfall && review::composite_review(spec, plan, positions))
     {
@@ -1364,6 +1632,13 @@ fn reconcile_progress(
                         ));
                     }
                 }
+                if let Some((owner_id, ledger)) = &value.2 {
+                    let owner = positions.get(owner_id).copied().unwrap_or(index);
+                    if checkpoint.nodes[owner].finding_ledger.as_ref() != Some(ledger) {
+                        checkpoint.nodes[owner].finding_ledger = Some(ledger.clone());
+                        finding_ledger_changed = true;
+                    }
+                }
                 exported = Some(value);
             }
             Err(reason) => {
@@ -1372,15 +1647,21 @@ fn reconcile_progress(
             }
         }
     }
-    let (exported, truncation_cause) =
-        exported.map_or((None, None), |(output, cause)| (Some(output), cause));
+    let (exported, truncation_cause) = exported.map_or((None, None), |(output, cause, _ledger)| {
+        (Some(output), cause)
+    });
     let (advance_code, advance_note) = if let Some(reason) = shortfall.filter(|_| hard_shortfall) {
         (
             Some("coverage_below_minimum".into()),
             Some(bounded(&reason, MAX_ADVANCE_NOTE_BYTES)),
         )
     } else if let Some(reason) = export_error {
-        (Some("composite_findings_exceed_cap".into()), Some(reason))
+        let code = if reason.starts_with("review finding ledger exceeds") {
+            "review_finding_ledger_exceeds_cap"
+        } else {
+            "composite_findings_exceed_cap"
+        };
+        (Some(code.into()), Some(reason))
     } else {
         (None, None)
     };
@@ -1389,7 +1670,8 @@ fn reconcile_progress(
         || progress.outputs != exported
         || progress.truncation_cause != truncation_cause
         || progress.advance_code != advance_code
-        || progress.advance_note != advance_note;
+        || progress.advance_note != advance_note
+        || finding_ledger_changed;
     progress.state = state;
     progress.outputs = exported;
     progress.truncation_cause = truncation_cause;
@@ -1531,7 +1813,7 @@ pub(super) fn validate_progress(
     if shortfall.is_some()
         && let Some(spec) = node.composite.as_ref()
         && spec.soft_review_coverage
-        && let Some(Ok((output, _))) = &mut export
+        && let Some(Ok((output, _, _))) = &mut export
     {
         let reason = coverage_shortfall(positions[&node.id], spec, plan, checkpoint, positions);
         if let Some(reason) = reason {
@@ -1544,13 +1826,16 @@ pub(super) fn validate_progress(
             }
         }
     }
-    if failed_for_coverage && let Some(Ok((output, _))) = &mut export {
+    if failed_for_coverage && let Some(Ok((output, _, _))) = &mut export {
         review::mark_partial(output);
     }
     let failed_for_export = progress.state == NodeState::Failed
         && state == NodeState::Succeeded
         && !hard_shortfall
-        && progress.advance_code.as_deref() == Some("composite_findings_exceed_cap")
+        && matches!(
+            progress.advance_code.as_deref(),
+            Some("composite_findings_exceed_cap" | "review_finding_ledger_exceeds_cap")
+        )
         && matches!(&export, Some(Err(reason)) if progress.advance_note.as_ref() == Some(reason));
     let valid = progress.attempts.is_empty()
         && (progress.state == NodeState::Succeeded
@@ -1566,7 +1851,7 @@ pub(super) fn validate_progress(
                     && export
                         .as_ref()
                         .and_then(|value| value.as_ref().ok())
-                        .is_some_and(|(output, cause)| {
+                        .is_some_and(|(output, cause, _)| {
                             progress.outputs.as_ref() == Some(output)
                                 && progress.truncation_cause == *cause
                         }))
@@ -1576,10 +1861,12 @@ pub(super) fn validate_progress(
             NodeState::Running => state == NodeState::Running && progress.outputs.is_none(),
             NodeState::Succeeded => {
                 state == NodeState::Succeeded && !hard_shortfall && {
-                    export.and_then(Result::ok).is_some_and(|(output, cause)| {
-                        progress.outputs.as_ref() == Some(&output)
-                            && progress.truncation_cause == cause
-                    })
+                    export
+                        .and_then(Result::ok)
+                        .is_some_and(|(output, cause, _)| {
+                            progress.outputs.as_ref() == Some(&output)
+                                && progress.truncation_cause == cause
+                        })
                 }
             }
             NodeState::Blocked => state == progress.state && progress.outputs.is_none(),
@@ -1591,51 +1878,5 @@ pub(super) fn validate_progress(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn bounded_findings_reserves_members_then_prefers_severity() {
-        let finding = |id: &str, severity: &str| {
-            serde_json::from_value::<Finding>(serde_json::json!({
-                "id": id, "severity": severity, "file": "a", "summary": "s", "status": "open"
-            }))
-            .unwrap()
-        };
-        let mut findings: Vec<_> = (0..40)
-            .map(|i| finding(&format!("a:F{i}"), if i < 34 { "high" } else { "low" }))
-            .collect();
-        findings.push(finding("b:F1", "low"));
-        let selected = bounded_findings(findings);
-        assert_eq!(selected.len(), MAX_FINDINGS);
-        assert!(selected.iter().any(|f| f.id == "b:F1"));
-        assert_eq!(selected.iter().filter(|f| f.severity == "high").count(), 31);
-        assert!(canonical_len(&selected) <= DISPOSITION_FINDINGS_BYTES);
-    }
-    #[test]
-    fn member_coverage_uses_smaller_entries_when_strongest_do_not_fit() {
-        let finding = |id: &str, severity: &str, summary: String| {
-            serde_json::from_value::<Finding>(serde_json::json!({
-                "id": id, "severity": severity, "file": "a", "summary": summary, "status": "open"
-            }))
-            .unwrap()
-        };
-        let mut findings = Vec::new();
-        for member in 0..10 {
-            findings.push(finding(
-                &format!("m{member}:strong"),
-                "high",
-                "x".repeat(1000),
-            ));
-            findings.push(finding(&format!("m{member}:small"), "low", "s".into()));
-        }
-        let kept = bounded_findings(findings);
-        assert!(canonical_len(&kept) <= DISPOSITION_FINDINGS_BYTES);
-        for member in 0..10 {
-            assert!(
-                kept.iter()
-                    .any(|f| f.id.starts_with(&format!("m{member}:")))
-            );
-        }
-    }
-}
+#[path = "composites_tests.rs"]
+mod tests;

@@ -1,11 +1,19 @@
 use super::EdgeError;
+use provenant_config::DomainConfig;
 use provenant_core::{CancelToken, Clock, HostId, Roots, WaitBudget};
 use provenant_fabric_runtime::{
     config::FabricConfig,
     coordination::facade::FacadeError,
+    graph::{
+        REVIEW_ACCEPT_BELOW_KEY, REVIEW_ADJUDICATOR_ROUTE_KEY, REVIEW_EVIDENCE_RETRIES_KEY,
+        REVIEW_LATER_ROUNDS_KEY, REVIEW_LENS_RETRY_KEY, ReviewPolicy,
+    },
     hosts::{
         PeerAction, PeerError, PeerRequest, PeerResult, PeerTransport, ProjectLocator,
         SshTransport, discover_ssh_executable,
+        mirror::{
+            self, PEER_PROJECT_UNLOCATABLE, PEER_SOURCE_SNAPSHOT, PROJECTION_KEY, ProjectionMode,
+        },
     },
     identity::{CrossHostProjectKey, Identity, IdentityError},
 };
@@ -14,7 +22,11 @@ use provenant_os::{
     exec::{Executor, SystemExecutor},
     fs::{Directory, PublishMode},
 };
-use provenant_records::{AbsolutePath, CommandResult, Outcome};
+use provenant_records::{
+    AbsolutePath, CommandResult, Outcome, Source, Sourced,
+    command_result::SettingRef,
+    warning::{Warning, WarningCode, warn},
+};
 use serde::Serialize;
 use std::{
     ffi::OsStr,
@@ -29,19 +41,133 @@ pub struct Context {
     pub roots: Roots,
     pub identity: Identity,
     pub config: FabricConfig,
+    /// Review settings resolved from host/project config and sealed on new graphs.
+    pub review_policy: ReviewPolicy,
     pub local_observation: provenant_fabric_runtime::coordination::ObservationSettings,
     /// Project ports resolved once from the discovered project root.
     pub port_table: provenant_config::PortTable,
     /// Verified owner for project-scoped worktree allocation.
     pub project_root: PathBuf,
     /// Origin captured with the effective graph configuration.
-    pub graph_prompt_limit_source: provenant_fabric_runtime::graph::InputCapSource,
-    pub graph_decide_timeout_source: provenant_fabric_runtime::graph::DecideTimeoutSource,
+    pub graph_prompt_limit_source: provenant_records::Layer,
+    pub graph_decide_timeout_source: provenant_records::Layer,
     /// Captured once from the host-set lane environment, never from arguments.
     pub in_lane: bool,
+    /// `domains.fabric.project_projection` with its resolved layer and origin.
+    pub projection: Sourced<ProjectionMode>,
     pub(super) executor: SystemExecutor,
     pub(super) home: PathBuf,
     pub(super) cwd: PathBuf,
+}
+
+fn review_policy(
+    settings: &provenant_fabric_runtime::config::ReviewSettings,
+    knobs: &std::collections::BTreeMap<String, Sourced<serde_json::Value>>,
+    origins: &std::collections::BTreeMap<String, provenant_config::Origin>,
+) -> ReviewPolicy {
+    fn effective<T>(
+        fallback: T,
+        key: &str,
+        knobs: &std::collections::BTreeMap<String, Sourced<serde_json::Value>>,
+        origins: &std::collections::BTreeMap<String, provenant_config::Origin>,
+    ) -> Sourced<T>
+    where
+        T: serde::de::DeserializeOwned,
+    {
+        let candidate = knobs.get(key);
+        let override_value = candidate
+            .filter(|candidate| candidate.source.layer != provenant_records::Layer::Default)
+            .and_then(|candidate| serde_json::from_value(candidate.value.clone()).ok());
+        let has_override = override_value.is_some();
+        let value = override_value.unwrap_or(fallback);
+        let source = if has_override {
+            candidate.map(|candidate| candidate.source.clone())
+        } else {
+            None
+        }
+        .unwrap_or_else(|| crate::config_reads::origin_source(origins.get(key), key));
+        Sourced { value, source }
+    }
+    ReviewPolicy {
+        later_rounds: effective(
+            settings.later_rounds,
+            REVIEW_LATER_ROUNDS_KEY,
+            knobs,
+            origins,
+        ),
+        adjudicator_route: effective(
+            settings.adjudicator_route.clone(),
+            REVIEW_ADJUDICATOR_ROUTE_KEY,
+            knobs,
+            origins,
+        ),
+        accept_below: effective(
+            settings.accept_below,
+            REVIEW_ACCEPT_BELOW_KEY,
+            knobs,
+            origins,
+        ),
+        evidence_retries: effective(
+            settings.evidence_retries,
+            REVIEW_EVIDENCE_RETRIES_KEY,
+            knobs,
+            origins,
+        ),
+        lens_retry: effective(settings.lens_retry, REVIEW_LENS_RETRY_KEY, knobs, origins),
+    }
+}
+
+fn project_review_policy(
+    mut policy: ReviewPolicy,
+    state: &Path,
+    project: Option<&Path>,
+) -> ReviewPolicy {
+    let (layers, _) = provenant_config::overlays::read_layers(state, project, "review");
+    for layer in layers {
+        if layer.path == state.join("config.toml") {
+            continue;
+        }
+        let Ok(document) = layer.text.parse::<toml_edit::DocumentMut>() else {
+            continue;
+        };
+        let Some(review_table) = document
+            .get("domains")
+            .and_then(toml_edit::Item::as_table)
+            .and_then(|domains| domains.get("review"))
+            .and_then(toml_edit::Item::as_table)
+            .cloned()
+        else {
+            continue;
+        };
+        let Ok(settings) = toml_edit::de::from_document::<
+            provenant_fabric_runtime::config::ReviewSettings,
+        >(toml_edit::DocumentMut::from(review_table.clone())) else {
+            continue;
+        };
+        if !settings.validate().is_empty() {
+            continue;
+        }
+        let source = |field: &str| Source {
+            layer: layer.source,
+            origin: Some(format!("{}#domains.review.{field}", layer.path.display())),
+        };
+        macro_rules! apply_field {
+            ($name:literal, $field:ident) => {
+                if review_table.get($name).is_some() {
+                    policy.$field = Sourced {
+                        value: settings.$field,
+                        source: source($name),
+                    };
+                }
+            };
+        }
+        apply_field!("later_rounds", later_rounds);
+        apply_field!("adjudicator_route", adjudicator_route);
+        apply_field!("accept_below", accept_below);
+        apply_field!("evidence_retries", evidence_retries);
+        apply_field!("lens_retry", lens_retry);
+    }
+    policy
 }
 pub(super) fn canonical(path: &Path) -> Result<PathBuf, EdgeError> {
     Ok(provenant_os::fs::canonicalize(path)?)
@@ -386,25 +512,48 @@ pub fn checkout_branch(roots: &Roots, path: &Path) -> Result<Option<String>, Edg
 
 fn decide_timeout_source(
     origins: &std::collections::BTreeMap<String, provenant_config::Origin>,
-) -> provenant_fabric_runtime::graph::DecideTimeoutSource {
-    use provenant_fabric_runtime::graph::DecideTimeoutSource;
+) -> provenant_records::Layer {
+    use provenant_records::Layer;
     match origins.get("domains.fabric.graph.decide_timeout_seconds") {
-        Some(provenant_config::Origin::User { .. }) => DecideTimeoutSource::Configured,
-        Some(provenant_config::Origin::Compiled { .. }) | None => {
-            DecideTimeoutSource::DomainDefault
-        }
+        Some(provenant_config::Origin::User { .. }) => Layer::Host,
+        Some(provenant_config::Origin::Compiled { .. }) | None => Layer::Default,
     }
 }
 
 fn prompt_limit_source(
     origins: &std::collections::BTreeMap<String, provenant_config::Origin>,
-) -> provenant_fabric_runtime::graph::InputCapSource {
-    use provenant_fabric_runtime::graph::InputCapSource;
+) -> provenant_records::Layer {
+    use provenant_records::Layer;
     match origins.get("domains.fabric.graph.limits.node_prompt_bytes") {
-        Some(provenant_config::Origin::Compiled { .. }) => InputCapSource::Default,
-        Some(provenant_config::Origin::User { .. }) => InputCapSource::Configured,
-        None => InputCapSource::EffectiveGraphLimits,
+        Some(provenant_config::Origin::Compiled { .. }) => Layer::Default,
+        Some(provenant_config::Origin::User { .. }) => Layer::Host,
+        None => Layer::Detected,
     }
+}
+
+/// Read the projection setting once, keeping its layer and origin so a
+/// mirrored read and an unlocatable writer can both name the setting that
+/// selected the behaviour.
+fn projection_from_knobs(
+    knobs: &std::collections::BTreeMap<String, Sourced<serde_json::Value>>,
+) -> Sourced<ProjectionMode> {
+    knobs
+        .get(PROJECTION_KEY)
+        .map(|knob| Sourced {
+            value: knob
+                .value
+                .as_str()
+                .map(ProjectionMode::parse)
+                .unwrap_or(ProjectionMode::Auto),
+            source: knob.source.clone(),
+        })
+        .unwrap_or_else(|| Sourced {
+            value: ProjectionMode::Auto,
+            source: Source {
+                layer: provenant_records::Layer::Default,
+                origin: None,
+            },
+        })
 }
 
 impl Context {
@@ -422,6 +571,8 @@ impl Context {
         let graph_prompt_limit_source = prompt_limit_source(&resolved.origins);
         let graph_decide_timeout_source = decide_timeout_source(&resolved.origins);
         let local_observation = crate::wait::observation_settings(&resolved);
+        let review_policy_base =
+            review_policy(&resolved.domains.review, &resolved.knobs, &resolved.origins);
         let config = resolved.domains.fabric;
         private_dir(roots.state.as_path(), roots.state.as_path())?;
         let utility_home = roots.state.as_path().join("tmp").join("git-home");
@@ -450,6 +601,11 @@ impl Context {
         } else {
             (common_dir.clone(), Some(common_dir.clone()))
         };
+        let review_policy = project_review_policy(
+            review_policy_base,
+            roots.state.as_path(),
+            Some(&project_root),
+        );
         let port_table = provenant_config::PortTable::read_for(
             project_config_root.as_deref(),
             roots.state.as_path(),
@@ -479,6 +635,8 @@ impl Context {
             roots,
             identity,
             config,
+            review_policy,
+            projection: projection_from_knobs(&resolved.knobs),
             local_observation,
             port_table,
             project_root,
@@ -499,6 +657,8 @@ impl Context {
         let graph_prompt_limit_source = prompt_limit_source(&resolved.origins);
         let graph_decide_timeout_source = decide_timeout_source(&resolved.origins);
         let local_observation = crate::wait::observation_settings(&resolved);
+        let review_policy_base =
+            review_policy(&resolved.domains.review, &resolved.knobs, &resolved.origins);
         let config = resolved.domains.fabric;
         let git = provenant_os::git::git_executable().ok_or(EdgeError::GitUnavailable)?;
         let runtime = provenant_confinement::UtilityRuntime::read_only(git, roots.state.as_path())?;
@@ -521,6 +681,11 @@ impl Context {
         } else {
             (common_dir.clone(), Some(common_dir.clone()))
         };
+        let review_policy = project_review_policy(
+            review_policy_base,
+            roots.state.as_path(),
+            Some(&project_root),
+        );
         let port_table = provenant_config::PortTable::read_for(
             project_config_root.as_deref(),
             roots.state.as_path(),
@@ -549,6 +714,8 @@ impl Context {
             roots,
             identity,
             config,
+            review_policy,
+            projection: projection_from_knobs(&resolved.knobs),
             local_observation,
             port_table,
             project_root,
@@ -567,6 +734,8 @@ impl Context {
         let graph_prompt_limit_source = prompt_limit_source(&resolved.origins);
         let graph_decide_timeout_source = decide_timeout_source(&resolved.origins);
         let local_observation = crate::wait::observation_settings(&resolved);
+        let review_policy_base =
+            review_policy(&resolved.domains.review, &resolved.knobs, &resolved.origins);
         let config = resolved.domains.fabric;
         let git = provenant_os::git::git_executable().ok_or(EdgeError::GitUnavailable)?;
         let runtime = provenant_confinement::UtilityRuntime::read_only(git, roots.state.as_path())?;
@@ -623,6 +792,11 @@ impl Context {
                 (root.clone(), Some(root))
             }
         };
+        let review_policy = project_review_policy(
+            review_policy_base,
+            roots.state.as_path(),
+            Some(&project_root),
+        );
         let port_table = provenant_config::PortTable::read_for(
             project_config_root.as_deref(),
             roots.state.as_path(),
@@ -662,6 +836,8 @@ impl Context {
             roots,
             identity,
             config,
+            review_policy,
+            projection: projection_from_knobs(&resolved.knobs),
             local_observation,
             port_table,
             project_root,
@@ -704,6 +880,11 @@ impl Context {
         let graph_prompt_limit_source = prompt_limit_source(&resolved.origins);
         let graph_decide_timeout_source = decide_timeout_source(&resolved.origins);
         let local_observation = crate::wait::observation_settings(&resolved);
+        let review_policy = project_review_policy(
+            review_policy(&resolved.domains.review, &resolved.knobs, &resolved.origins),
+            roots.state.as_path(),
+            Some(&project_root),
+        );
         let config = resolved.domains.fabric;
         let host = provenant_config::lookup_host(&roots)?.ok_or(EdgeError::Invalid)?;
         let key = match CrossHostProjectKey::from_home(home, binding.common_dir()) {
@@ -725,6 +906,8 @@ impl Context {
             roots,
             identity,
             config,
+            review_policy,
+            projection: projection_from_knobs(&resolved.knobs),
             local_observation,
             port_table,
             project_root,
@@ -921,6 +1104,56 @@ impl Context {
     ) -> Result<PeerResult, PeerFailure> {
         self.peer_bounded(executor, clock, host, action, budget, cancel, None)
     }
+
+    /// Resolve a project for a peer call when it is not home-relative. Writers
+    /// always need a locatable project; only readers may cross through a
+    /// mirrored snapshot under `auto` or `mirror`.
+    fn project_for_peer(
+        &self,
+        host: HostId,
+        action: &PeerAction,
+        peer: &str,
+        cancel: &CancelToken,
+    ) -> Result<ProjectLocator, PeerFailure> {
+        if !self
+            .projection
+            .value
+            .allows_mirror(is_reader_action(action))
+        {
+            return Err(unlocatable(&self.projection, host, peer));
+        }
+        let git = provenant_os::git::git_executable()
+            .ok_or_else(|| mirror_failure(&self.projection, "Git executable is unavailable"))?;
+        let snapshot = mirror::mirror_snapshot(
+            &self.executor,
+            mirror::MirrorRequest {
+                git_executable: &git,
+                worktree: &self.cwd,
+                scratch: &self.roots.state.as_path().join("tmp").join("mirror"),
+                state: self.roots.state.as_path(),
+                origin_host: &self.identity.host.to_string(),
+                project_id: &self.identity.project.to_string(),
+                cancel,
+            },
+        )
+        .map_err(|error| mirror_failure(&self.projection, &error.to_string()))?;
+        warn_mirror(&self.projection, &snapshot, peer);
+        // The peer binds the bundle advertised at the snapshot commit instead
+        // of locating a live checkout. The key is derived from that commit, so
+        // two snapshots of the same tree at different times are distinct.
+        let key_text = format!(
+            "mirror:{}:{}:{}",
+            self.identity.host, snapshot.project_id, snapshot.commit
+        );
+        let key: CrossHostProjectKey = serde_json::from_value(serde_json::Value::String(key_text))
+            .map_err(|_| mirror_failure(&self.projection, "mirror key could not be encoded"))?;
+        Ok(ProjectLocator {
+            extra: Default::default(),
+            key,
+            common_dir: format!("mirrors/{}", snapshot.project_id),
+        })
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn peer_bounded(
         &self,
@@ -940,29 +1173,10 @@ impl Context {
             .ok_or_else(|| {
                 PeerFailure::new(FacadeError::HomeUnavailable, "peer host is not configured")
             })?;
-        let project = ProjectLocator::new(&self.identity, &self.home).map_err(|_| {
-            // A peer call needs a home-relative project identity. A scratch
-            // project (for example the upgrade verify fixture) has none; name
-            // the rule and the path that could not be projected instead of
-            // collapsing every locator failure into a bare confinement refusal.
-            let rule = "peer_project_unprojectable";
-            let path = self
-                .identity
-                .common_dir
-                .to_path_buf()
-                .map(|path| path.display().to_string())
-                .unwrap_or_else(|_| "unavailable".to_owned());
-            PeerFailure::from(FacadeError::ConfinementRefused {
-                resource: Some(
-                    provenant_records::diagnostic::ResourceFact::ConfinementRule(Box::new(
-                        provenant_records::diagnostic::ConfinementRule {
-                            rule: rule.to_owned(),
-                            path,
-                        },
-                    )),
-                ),
-            })
-        })?;
+        let project = match ProjectLocator::new(&self.identity, &self.home) {
+            Ok(project) => project,
+            Err(_) => self.project_for_peer(host, &action, &peer.destination, cancel)?,
+        };
         // Graph operation replay is scoped to the actor that first launched
         // the attempt, even when another agent later resumes its graph.
         // Keep that namespace under the authenticated sending host rather
@@ -1072,6 +1286,7 @@ impl Context {
                 // An uncertain launch must name this locally frozen request.
                 if let FacadeError::LaunchUnknown {
                     operation_id: returned,
+                    ..
                 } = &error
                     && Some(returned) != request.operation().as_ref()
                 {
@@ -1089,8 +1304,12 @@ fn submit_after_probe(
     probe: impl FnOnce() -> Result<provenant_fabric_runtime::hosts::PeerResponse, PeerError>,
     submit: impl FnOnce() -> Result<provenant_fabric_runtime::hosts::PeerResponse, PeerError>,
 ) -> Result<provenant_fabric_runtime::hosts::PeerResponse, PeerFailure> {
-    if let Ok(response) = probe() {
-        check_submit_health(peer, response.result)?;
+    match probe() {
+        Ok(response) => check_submit_health(peer, response.result)?,
+        Err(error) if error.code() == provenant_fabric_runtime::hosts::PEER_UPGRADE_PENDING => {
+            return Err(peer_failure(peer, &error));
+        }
+        Err(_) => {}
     }
     submit().map_err(|error| peer_failure(peer, &error))
 }
@@ -1164,6 +1383,107 @@ impl From<FacadeError> for PeerFailure {
         }
     }
 }
+/// Read-only peer actions may be served from a mirrored snapshot. Everything
+/// that mutates state needs a locatable project on the peer.
+fn is_reader_action(action: &PeerAction) -> bool {
+    use provenant_fabric_runtime::hosts::HostReadInput;
+    match action {
+        PeerAction::HostRead {
+            input: HostReadInput::Events {
+                consumer: Some(_), ..
+            },
+            ..
+        } => false,
+        PeerAction::HostRead {
+            input: HostReadInput::EventsAck { .. },
+            ..
+        } => false,
+        PeerAction::HostRead { .. } => true,
+        PeerAction::Health { .. }
+        | PeerAction::Doctor { .. }
+        | PeerAction::ConsoleBoard { .. }
+        | PeerAction::ConsoleTree { .. }
+        | PeerAction::ConsoleDetail { .. }
+        | PeerAction::ConsoleInbox { .. }
+        | PeerAction::RunStatuses { .. }
+        | PeerAction::Output { .. }
+        | PeerAction::RunEvents { .. }
+        | PeerAction::Lanes { .. }
+        | PeerAction::LaneWaits { .. } => true,
+        _ => false,
+    }
+}
+
+fn setting_ref(projection: &Sourced<ProjectionMode>) -> SettingRef {
+    SettingRef {
+        key: PROJECTION_KEY.to_owned(),
+        value: projection.value.as_str().to_owned(),
+        layer: projection.source.layer,
+        origin: projection
+            .source
+            .origin
+            .clone()
+            .unwrap_or_else(|| "shipped default".to_owned()),
+    }
+}
+
+/// A writer whose project cannot be located: an operation error that names the
+/// setting and the way out, never a policy refusal.
+fn unlocatable(projection: &Sourced<ProjectionMode>, host: HostId, peer: &str) -> PeerFailure {
+    let setting = setting_ref(projection);
+    let detail = format!(
+        "{} = {} ({}); project is outside the peer's home on host {host}",
+        setting.key, setting.value, setting.origin
+    );
+    PeerFailure::new(
+        FacadeError::RunKind {
+            run_code: PEER_PROJECT_UNLOCATABLE.to_owned(),
+            next: "run without --host".to_owned(),
+            detail: Some(detail),
+            resource: None,
+        },
+        format!("{peer}: project is outside the peer's home"),
+    )
+}
+
+/// A snapshot could not be produced or verified. The transfer is retryable,
+/// so it stays an operation error rather than a refusal.
+fn mirror_failure(projection: &Sourced<ProjectionMode>, detail: &str) -> PeerFailure {
+    let setting = setting_ref(projection);
+    PeerFailure::new(
+        FacadeError::RunKind {
+            run_code: "PEER_MIRROR_FAILED".to_owned(),
+            next: "retry the read, or run without --host".to_owned(),
+            detail: Some(format!("{}: {detail}", setting.key)),
+            resource: None,
+        },
+        detail.to_owned(),
+    )
+}
+
+/// Tell a reader that it is seeing a snapshot, not live edits.
+fn warn_mirror(
+    projection: &Sourced<ProjectionMode>,
+    snapshot: &mirror::MirrorSnapshot,
+    peer: &str,
+) {
+    warn(
+        Warning::new(
+            WarningCode(PEER_SOURCE_SNAPSHOT),
+            format!(
+                "peer {peer} reads snapshot {} of project {}; live edits are not visible",
+                snapshot.commit, snapshot.project_id
+            ),
+            projection.source.clone(),
+        )
+        .setting(setting_ref(projection))
+        .repair(format!(
+            "rerun this read after a writer commits to {}",
+            snapshot.project_id
+        )),
+    );
+}
+
 /// The stable outcome and code for a peer refusal, shared by remote runs and
 /// session hand-off. `LaunchUnknown` is handled by each caller, which names
 /// its own recovery step. `TIMEOUT` is retryable.
@@ -1185,10 +1505,19 @@ pub fn facade_outcome(error: &FacadeError) -> (Outcome, provenant_run::ErrorKind
         FacadeError::NotTerminal => (Outcome::Refused, ErrorKind::Nonterminal),
         FacadeError::OperationConflict => (Outcome::Refused, ErrorKind::OperationConflict),
         FacadeError::Busy => (Outcome::Refused, ErrorKind::QueueFull),
+        FacadeError::RecordedRefusal { refusal_code, .. }
+            if refusal_code == "FORGE_QUOTA_EXHAUSTED" =>
+        {
+            (Outcome::Unavailable, ErrorKind::ForgeQuotaExhausted)
+        }
         FacadeError::ConfinementRefused { .. }
         | FacadeError::GraphRelayRefused { .. }
         | FacadeError::RecordedRefusal { .. } => (Outcome::Refused, ErrorKind::Refused),
+        // Custody is a lease: `admit_writer` only raises WriterBusy when the
+        // owning lane set `lanes.worktree.sharing = refuse`. Shared and warn
+        // modes proceed, so a refusal here always names that setting's owner.
         FacadeError::WriterBusy { .. } => (Outcome::Refused, ErrorKind::WriterBusy),
+        FacadeError::CustodyRefused { .. } => (Outcome::Refused, ErrorKind::Refused),
         FacadeError::WriterLeaseHeld { .. } => (Outcome::Refused, ErrorKind::WriterLeaseHeld),
         FacadeError::WriterLockBusy { .. } => (Outcome::Refused, ErrorKind::WriterLockBusy),
         FacadeError::WriterUnknown => (Outcome::Refused, ErrorKind::WriterUnknown),
@@ -1228,6 +1557,7 @@ pub fn facade_outcome(error: &FacadeError) -> (Outcome, provenant_run::ErrorKind
             let outcome = match kind.category() {
                 "invalid" => Outcome::Invalid,
                 "refused" => Outcome::Refused,
+                "transient" => Outcome::Unavailable,
                 _ => Outcome::Error,
             };
             (outcome, kind)
@@ -1281,677 +1611,5 @@ pub fn publish<T: Serialize>(value: &CommandResult<T>, roots: &Roots) -> io::Res
 }
 
 #[cfg(test)]
-mod tests {
-    #[test]
-    // Spec: docs/specs/fabric.md#graph-admission-and-refusal-causes
-    fn peer_call_names_the_rule_and_path_when_the_project_is_outside_home()
-    -> Result<(), Box<dyn std::error::Error>> {
-        use provenant_core::{CancelToken, Clock, RootInputs, WaitBudget};
-        use provenant_fabric_runtime::{config::Peer, hosts::PeerAction};
-        use provenant_records::{AbsolutePath, diagnostic::ResourceFact};
-
-        let root = tempfile::tempdir()?;
-        let home = root.path().join("home");
-        let project = home.join("project");
-        std::fs::create_dir_all(&project)?;
-        let mut inputs = RootInputs::new(home.clone(), project.clone());
-        inputs.state_dir = Some(root.path().join("state"));
-        let mut context = super::Context::open(
-            inputs.resolve(&provenant_os::fs::SystemPathResolver)?,
-            &home,
-            &project,
-        )?;
-        let host = context.identity.host;
-        context.config.peers.insert(
-            "worker".into(),
-            Peer {
-                host,
-                destination: "worker".into(),
-                remote_executable: None,
-                connect_timeout_seconds: 10,
-            },
-        );
-        // A scratch checkout outside the peer host's home has no cross-host
-        // project key. ProjectLocator::new refuses it before any transport is
-        // opened, exercising the real mapping in `peer_bounded`.
-        let outside = root.path().join("scratch").join("project");
-        context.identity.common_dir = AbsolutePath::new(&outside)?;
-        let clock = provenant_os::clock::SystemClock;
-        let budget = WaitBudget::cli(clock.mono_now(), 30)?;
-        let failure = context
-            .peer(
-                &clock,
-                host,
-                PeerAction::Health {
-                    extra: Default::default(),
-                },
-                budget,
-                &CancelToken::new(),
-            )
-            .expect_err("a project outside home must be refused before peer transport");
-        match *failure.error {
-            super::FacadeError::ConfinementRefused {
-                resource: Some(ResourceFact::ConfinementRule(rule)),
-            } => {
-                assert_eq!(rule.rule, "peer_project_unprojectable");
-                assert_eq!(rule.path, outside.display().to_string());
-            }
-            other => panic!("expected a named confinement refusal, got {other:?}"),
-        }
-        Ok(())
-    }
-
-    #[test]
-    // Spec: docs/specs/cli.md#every-name-refusal-lists-close-matches
-    fn a_one_edit_peer_label_typo_ranks_the_configured_label_first() {
-        let close = super::close_host_names("worksttion", ["workstation", "laptop"]);
-        assert_eq!(close.first().map(String::as_str), Some("workstation"));
-        assert!(super::close_host_names("zzzzzz", ["workstation"]).is_empty());
-    }
-
-    #[test]
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "An isolated child process supplies the harness markers to project context."
-    )]
-    // Spec: docs/specs/fabric.md#identity-and-store
-    fn project_context_uses_the_active_harness_actor() -> Result<(), Box<dyn std::error::Error>> {
-        use std::path::PathBuf;
-
-        const FIXTURE: &str = "PROVENANT_TEST_PROJECT_CONTEXT_IDENTITY";
-        if let Some(root) = std::env::var_os(FIXTURE) {
-            use provenant_core::RootInputs;
-            use std::fs;
-
-            let root = PathBuf::from(root);
-            let home = root.join("home");
-            let project = root.join("project");
-            let state = root.join("state");
-            let config = root.join("config");
-            for directory in [&home, &project, &state, &config] {
-                fs::create_dir_all(directory)?;
-            }
-            fs::set_permissions(&state, std::os::unix::fs::PermissionsExt::from_mode(0o700))?;
-            fs::write(
-                state.join("config.toml"),
-                "schema_version=1\n[gc]\nfree_floor='1B'\n[domains.fabric]\nclient_label='terminal'\n",
-            )?;
-            let mut inputs = RootInputs::new(home.clone(), project.clone());
-            inputs.state_dir = Some(state);
-            let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
-            let location = provenant_config::ProjectLocation::new(fs::canonicalize(&project)?)?;
-            let binding = provenant_config::bind_project(&roots, location)?;
-            provenant_config::bind_host(&roots)?;
-
-            let context = super::Context::open_for_project(roots, &home, &binding)?;
-            let expected = context.inbox_address(None)?;
-            assert_eq!(context.identity.inbox.actor, expected.actor);
-            let expected_label = std::env::var("PROVENANT_TEST_EXPECTED_LABEL")?;
-            assert_eq!(context.identity.inbox.agent, expected_label);
-            let chair = super::current_chair(&context)?;
-            assert_eq!(chair.actor, context.identity.inbox.actor);
-            assert_eq!(chair.host, context.identity.host);
-            return Ok(());
-        }
-
-        let temp = tempfile::tempdir()?;
-        let root = temp.path().canonicalize()?;
-        for (client, label) in [
-            ("codex", "codex"),
-            ("claude", "claude"),
-            ("labelled", "reviewer"),
-        ] {
-            let mut command = std::process::Command::new(std::env::current_exe()?);
-            command
-                .args([
-                    "--exact",
-                    "fabric::context::tests::project_context_uses_the_active_harness_actor",
-                    "--nocapture",
-                ])
-                .env(FIXTURE, root.join(client))
-                .env("HOME", root.join(client).join("home"))
-                .env("XDG_CONFIG_HOME", root.join(client).join("config"))
-                .env("XDG_CACHE_HOME", root.join(client).join("cache"))
-                .env("PROVENANT_ROOT", root.join(client).join("project"))
-                .env("PROVENANT_STATE_DIR", root.join(client).join("state"))
-                .env("PROVENANT_TEST_EXPECTED_LABEL", label)
-                .env_remove("PROVENANT_AGENT_LABEL")
-                .env_remove("PROVENANT_SESSION_ID")
-                .env_remove("CODEX_THREAD_ID")
-                .env_remove("CLAUDECODE")
-                .env_remove("CLAUDE_CODE_SESSION_ID")
-                .env_remove("CLAUDE_SESSION_ID");
-            if client == "codex" {
-                command.env("CODEX_THREAD_ID", "fixture");
-            } else {
-                command.env("CLAUDECODE", "1");
-                if client == "labelled" {
-                    command.env("PROVENANT_AGENT_LABEL", "reviewer");
-                }
-            }
-            let output = command.output()?;
-            assert!(
-                output.status.success(),
-                "{}{}",
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr)
-            );
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn registered_project_root_uses_external_common_hint_and_keeps_bare_projects_host_only()
-    -> Result<(), Box<dyn std::error::Error>> {
-        use super::{
-            registered_project_roots_for_repository, registered_project_roots_from_binding,
-        };
-        use provenant_core::{CancelToken, RootInputs};
-        use std::path::Path;
-        use std::time::Duration;
-
-        fn git(cwd: &Path, args: &[&str]) -> Result<(), Box<dyn std::error::Error>> {
-            let output = provenant_os::fixture::git_command()
-                .current_dir(cwd)
-                .args(args)
-                .output()?;
-            if !output.status.success() {
-                return Err(std::io::Error::other(format!(
-                    "git {:?} failed: {}",
-                    args,
-                    String::from_utf8_lossy(&output.stderr)
-                ))
-                .into());
-            }
-            Ok(())
-        }
-
-        // Spec: docs/specs/run-git.md#project-layout-ownership
-        let temp = tempfile::tempdir()?;
-        let base = temp.path().canonicalize()?;
-        let home = base.join("home");
-        let assets = base.join("assets");
-        let state = base.join("state");
-        std::fs::create_dir_all(&home)?;
-        std::fs::create_dir_all(&assets)?;
-        std::fs::create_dir_all(&state)?;
-        std::fs::set_permissions(&state, std::os::unix::fs::PermissionsExt::from_mode(0o700))?;
-        let mut inputs = RootInputs::new(home, assets);
-        inputs.state_dir = Some(state);
-        let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
-
-        let checkout = base.join("project");
-        let common = base.join("metadata").join("common-store");
-        std::fs::create_dir_all(&checkout)?;
-        std::fs::create_dir_all(common.parent().ok_or("metadata parent")?)?;
-        git(
-            &base,
-            &[
-                "init",
-                "-q",
-                "--separate-git-dir",
-                common.to_str().ok_or("common path")?,
-                checkout.to_str().ok_or("checkout path")?,
-            ],
-        )?;
-        let location =
-            provenant_config::ProjectLocation::from_verified_primary_checkout(&common, &checkout)?;
-        let binding = provenant_config::bind_project(&roots, location)?;
-        assert_eq!(binding.primary_checkout_hint(), Some(checkout.as_path()));
-        let git_program = provenant_os::git::git_executable().ok_or("Git unavailable")?;
-        let executor = provenant_os::exec::SystemExecutor::new(1)?;
-        std::fs::create_dir(base.join("utility-home"))?;
-        std::fs::set_permissions(
-            base.join("utility-home"),
-            std::os::unix::fs::PermissionsExt::from_mode(0o700),
-        )?;
-        let utility = provenant_confinement::UtilityRuntime::new(
-            &git_program,
-            base.join("utility-home"),
-            roots.state.as_path(),
-        )?;
-        let budget = provenant_confinement::UtilityBudget::bounded(Duration::from_secs(5))?;
-        let primary_repo = utility.open_repo(&executor, &checkout, budget, &CancelToken::new())?;
-        let (root, project) = registered_project_roots_for_repository(
-            &binding,
-            &primary_repo,
-            &executor,
-            &utility,
-            &CancelToken::new(),
-        )?;
-        assert_eq!(root, checkout);
-        assert_eq!(project.as_deref(), Some(checkout.as_path()));
-
-        // A hint is evidence only while Git re-proves the checkout/common pair.
-        std::fs::remove_dir_all(&checkout)?;
-        assert!(
-            provenant_confinement::worktrees::project_layout_for_binding(
-                &executor,
-                &binding,
-                &git_program,
-                &provenant_confinement::worktrees::project_layout_git_environment(),
-                Duration::from_secs(5),
-                &CancelToken::new(),
-            )
-            .is_err()
-        );
-
-        let source = base.join("source");
-        std::fs::create_dir(&source)?;
-        git(&source, &["init", "-q", "--initial-branch=main"])?;
-        git(&source, &["config", "user.name", "Fixture"])?;
-        git(
-            &source,
-            &["config", "user.email", "fixture@example.invalid"],
-        )?;
-        std::fs::write(source.join("README.md"), "bare owner fixture\n")?;
-        git(&source, &["add", "README.md"])?;
-        git(&source, &["commit", "-qm", "initial"])?;
-        let bare = base.join("metadata").join("bare-store");
-        git(
-            &base,
-            &[
-                "clone",
-                "--bare",
-                "-q",
-                source.to_str().ok_or("source path")?,
-                bare.to_str().ok_or("bare path")?,
-            ],
-        )?;
-        let linked = base.join("linked");
-        git(
-            &base,
-            &[
-                "--git-dir",
-                bare.to_str().ok_or("bare path")?,
-                "worktree",
-                "add",
-                "-q",
-                "-b",
-                "linked",
-                linked.to_str().ok_or("linked path")?,
-                "HEAD",
-            ],
-        )?;
-        let bare_binding =
-            provenant_config::bind_project(&roots, provenant_config::ProjectLocation::new(&bare)?)?;
-        assert_eq!(bare_binding.primary_checkout_hint(), None);
-        let (bare_root, bare_project) = registered_project_roots_from_binding(
-            &bare_binding,
-            &executor,
-            &utility,
-            &CancelToken::new(),
-        )?;
-        assert_eq!(bare_root, bare);
-        assert_eq!(bare_project, None);
-        assert_ne!(bare_root, linked);
-        Ok(())
-    }
-
-    #[test]
-    #[allow(clippy::disallowed_methods)] // Dedicated fixture subprocess isolates lane-only environment variables.
-    fn lane_publication_uses_private_scratch() -> Result<(), Box<dyn std::error::Error>> {
-        use provenant_core::RootInputs;
-        const FIXTURE: &str = "PROVENANT_TEST_LANE_PUBLICATION";
-        if let Some(base) = std::env::var_os(FIXTURE) {
-            let base = std::path::PathBuf::from(base);
-            let mut inputs = RootInputs::new(base.join("home"), base.join("assets"));
-            inputs.state_dir = Some(base.join("state"));
-            let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
-            let result = provenant_records::CommandResult::new(
-                "fixture",
-                provenant_records::Outcome::Ok,
-                "result",
-            );
-            let path = super::publish(&result, &roots)?;
-            assert!(
-                path.to_path_buf()?
-                    .starts_with(base.join("scratch/results"))
-            );
-            let bytes = std::fs::read(path.to_path_buf()?)?;
-            assert_eq!(
-                serde_json::from_slice::<serde_json::Value>(&bytes)?["data"],
-                "result"
-            );
-            assert!(!base.join("state").exists());
-            return Ok(());
-        }
-        let temp = tempfile::tempdir()?;
-        let base = temp.path().canonicalize()?;
-        for name in ["home", "assets", "scratch"] {
-            std::fs::create_dir(base.join(name))?;
-            std::fs::set_permissions(
-                base.join(name),
-                std::os::unix::fs::PermissionsExt::from_mode(0o700),
-            )?;
-        }
-        let output = std::process::Command::new(std::env::current_exe()?)
-            .args([
-                "--exact",
-                "fabric::context::tests::lane_publication_uses_private_scratch",
-                "--nocapture",
-            ])
-            .env(FIXTURE, &base)
-            .env(provenant_core::RUN_STATE_DIRECTORY_ENV, base.join("state"))
-            .env("TMPDIR", base.join("scratch"))
-            .output()?;
-        assert!(
-            output.status.success(),
-            "{}{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-        assert!(!base.join("state").exists());
-        Ok(())
-    }
-
-    #[test]
-    fn submit_preflight_refuses_old_or_incapable_stub_before_launch()
-    -> Result<(), Box<dyn std::error::Error>> {
-        use provenant_core::HostId;
-        use provenant_fabric_runtime::{
-            hosts::{PROTOCOL, PeerHealth, PeerResponse, PeerResult},
-            identity::CrossHostProjectKey,
-            runs::RunCapabilities,
-        };
-        use std::{cell::Cell, path::Path};
-        let host = HostId::from_bytes([2; 16]);
-        let project =
-            CrossHostProjectKey::from_home(Path::new("/home/a"), Path::new("/home/a/repo"))?;
-        for (submit, code) in [(false, Some("dispatch_refused")), (true, None)] {
-            let calls = Cell::new(0);
-            let stub = || {
-                calls.set(calls.get() + 1);
-                Ok(PeerResponse {
-                    extra: Default::default(),
-                    version: 1,
-                    protocol: PROTOCOL,
-                    host,
-                    project: project.clone(),
-                    result: PeerResult::Health {
-                        extra: Default::default(),
-                        data: PeerHealth {
-                            extra: Default::default(),
-                            host,
-                            available: true,
-                            execution: submit,
-                            release: env!("CARGO_PKG_VERSION").into(),
-                            run_capabilities: RunCapabilities {
-                                submit,
-                                list: true,
-                                status: true,
-                                wait: true,
-                                cancel: true,
-                                resume: true,
-                                output: true,
-                                events: true,
-                            },
-                            readiness: provenant_fabric_runtime::hosts::PeerReadiness::reporting(),
-                        },
-                    },
-                })
-            };
-            let result = super::submit_after_probe("worker", stub, stub);
-            if let Some(code) = code {
-                let error = result.unwrap_err();
-                assert_eq!(error.error.code(), code);
-                assert_eq!(calls.get(), 1);
-            } else {
-                assert!(result.is_ok());
-                assert_eq!(calls.get(), 2);
-            }
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn graph_setting_origins_distinguish_domain_default_from_explicit_same_value()
-    -> Result<(), Box<dyn std::error::Error>> {
-        use provenant_fabric_runtime::graph::{DecideTimeoutSource, InputCapSource};
-        let temp = tempfile::tempdir()?;
-        let mut inputs =
-            provenant_core::RootInputs::new(temp.path().join("home"), temp.path().join("repo"));
-        inputs.state_dir = Some(temp.path().join("state"));
-        let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
-        let default = provenant_config::load_with_domains::<&[u8], _>(
-            &roots,
-            None,
-            &crate::domains::SECTIONS,
-        )?;
-        assert_eq!(
-            super::prompt_limit_source(&default.origins),
-            InputCapSource::Default
-        );
-        assert_eq!(
-            super::decide_timeout_source(&default.origins),
-            DecideTimeoutSource::DomainDefault
-        );
-        let configured = b"schema_version = 1
-[domains.fabric.graph]
-decide_timeout_seconds = 300
-[domains.fabric.graph.limits]
-node_prompt_bytes = 262144
-";
-        let resolved = provenant_config::load_with_domains(
-            &roots,
-            Some(configured.as_slice()),
-            &crate::domains::SECTIONS,
-        )?;
-        assert_eq!(
-            resolved.domains.fabric.graph.limits.node_prompt_bytes,
-            default.domains.fabric.graph.limits.node_prompt_bytes
-        );
-        assert_eq!(
-            super::prompt_limit_source(&resolved.origins),
-            InputCapSource::Configured
-        );
-        assert_eq!(
-            super::decide_timeout_source(&resolved.origins),
-            DecideTimeoutSource::Configured
-        );
-        Ok(())
-    }
-    #[test]
-    fn protocol_mismatch_keeps_both_versions_and_the_cli_code() {
-        let failure = super::peer_failure(
-            "workshop",
-            &super::PeerError::ProtocolMismatch {
-                peer: "workshop".into(),
-                remote: 1,
-                expected: provenant_fabric_runtime::hosts::PROTOCOL,
-            },
-        );
-        assert_eq!(failure.error.code(), "peer_version");
-        assert_eq!(
-            failure.error.to_string(),
-            format!(
-                "peer workshop speaks protocol 1, this host expects protocol {}; upgrade both",
-                provenant_fabric_runtime::hosts::PROTOCOL
-            )
-        );
-        assert_eq!(
-            super::facade_outcome(&failure.error).1.code(),
-            "PEER_VERSION"
-        );
-    }
-
-    #[test]
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "Isolated child processes test chair session resolution across environment variables."
-    )]
-    fn host_chair_session_discovery() -> Result<(), Box<dyn std::error::Error>> {
-        use std::path::PathBuf;
-
-        const FIXTURE: &str = "PROVENANT_TEST_HOST_CHAIR_SESSION";
-        if let Some(mode) = std::env::var_os(FIXTURE) {
-            use provenant_core::{Clock, RootInputs};
-            use std::fs;
-
-            let root = PathBuf::from(std::env::var("PROVENANT_TEST_ROOT")?);
-            let home = root.join("home");
-            let project = root.join("project");
-            let state = root.join("state");
-            let mut inputs = RootInputs::new(home.clone(), project.clone());
-            inputs.state_dir = Some(state.clone());
-            let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
-            let location = provenant_config::ProjectLocation::new(fs::canonicalize(&project)?)?;
-            let binding = provenant_config::bind_project(&roots, location)?;
-            provenant_config::bind_host(&roots)?;
-
-            let context = super::Context::open_for_project(roots, &home, &binding)?;
-
-            if mode == "none_and_stored" {
-                // 1. None fallback: without PROVENANT_SESSION_ID and without stored session.
-                assert_eq!(context.host_chair_session(), None);
-
-                // Now store a chair session for this actor/project.
-                let session_id =
-                    provenant_workflow::session::HostSessionId::parse("saved-chair-456")?;
-                let clock = provenant_os::clock::SystemClock::new();
-                let budget = provenant_core::WaitBudget::cli(clock.mono_now(), 5)?;
-                provenant_workflow::session::SessionStore::new(
-                    context.roots.state.clone(),
-                    context.identity.project,
-                    session_id,
-                )
-                .with_chair(context.identity.host, context.identity.inbox.actor)
-                .with_workspace(context.project_root.clone())
-                .save(
-                    b"checkpoint",
-                    budget,
-                    &provenant_core::CancelToken::new(),
-                    &clock,
-                )?;
-
-                // 2. Stored chair session fallback:
-                let hs = context
-                    .host_chair_session()
-                    .expect("expected stored chair session");
-                assert_eq!(hs.session, "saved-chair-456");
-                assert_eq!(
-                    hs.source,
-                    format!(
-                        "saved chair session for actor {}",
-                        context.identity.inbox.actor
-                    )
-                );
-            } else if mode == "env_override" {
-                // 3. PROVENANT_SESSION_ID override takes precedence over stored session.
-                let hs = context
-                    .host_chair_session()
-                    .expect("expected session from env");
-                assert_eq!(hs.session, "env-override-789");
-                assert_eq!(
-                    hs.source,
-                    format!(
-                        "environment variable {}",
-                        provenant_core::consumer_env::SESSION_ID
-                    )
-                );
-            }
-            return Ok(());
-        }
-
-        let temp = tempfile::tempdir()?;
-        let root = temp.path().canonicalize()?;
-        let home = root.join("home");
-        let project = root.join("project");
-        let state = root.join("state");
-        let config = root.join("config");
-        for directory in [&home, &project, &state, &config] {
-            std::fs::create_dir_all(directory)?;
-        }
-        std::fs::set_permissions(&state, std::os::unix::fs::PermissionsExt::from_mode(0o700))?;
-        std::fs::write(
-            state.join("config.toml"),
-            "schema_version=1\n[gc]\nfree_floor='1B'\n[domains.fabric]\nclient_label='terminal'\n",
-        )?;
-
-        // Phase 1: verify None fallback, then save session and verify stored fallback.
-        let mut command = std::process::Command::new(std::env::current_exe()?);
-        command
-            .args([
-                "--exact",
-                "fabric::context::tests::host_chair_session_discovery",
-                "--nocapture",
-            ])
-            .env(FIXTURE, "none_and_stored")
-            .env("PROVENANT_TEST_ROOT", &root)
-            .env("HOME", &home)
-            .env("XDG_CONFIG_HOME", &config)
-            .env("XDG_CACHE_HOME", root.join("cache"))
-            .env("PROVENANT_ROOT", &project)
-            .env("PROVENANT_STATE_DIR", &state)
-            .env_remove("PROVENANT_SESSION_ID")
-            .env_remove("CODEX_THREAD_ID")
-            .env_remove("CLAUDECODE")
-            .env_remove("CLAUDE_CODE_SESSION_ID")
-            .env_remove("CLAUDE_SESSION_ID");
-        let output = command.output()?;
-        assert!(
-            output.status.success(),
-            "{}{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-
-        // Phase 2: verify PROVENANT_SESSION_ID override over the stored session.
-        let mut command = std::process::Command::new(std::env::current_exe()?);
-        command
-            .args([
-                "--exact",
-                "fabric::context::tests::host_chair_session_discovery",
-                "--nocapture",
-            ])
-            .env(FIXTURE, "env_override")
-            .env("PROVENANT_TEST_ROOT", &root)
-            .env("HOME", &home)
-            .env("XDG_CONFIG_HOME", &config)
-            .env("XDG_CACHE_HOME", root.join("cache"))
-            .env("PROVENANT_ROOT", &project)
-            .env("PROVENANT_STATE_DIR", &state)
-            .env("PROVENANT_SESSION_ID", "env-override-789")
-            .env_remove("CODEX_THREAD_ID")
-            .env_remove("CLAUDECODE")
-            .env_remove("CLAUDE_CODE_SESSION_ID")
-            .env_remove("CLAUDE_SESSION_ID");
-        let output = command.output()?;
-        assert!(
-            output.status.success(),
-            "{}{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-
-        Ok(())
-    }
-
-    #[test]
-    fn typed_run_facade_errors_map_back_to_their_run_kind() {
-        use provenant_fabric_runtime::coordination::facade::FacadeError;
-        use provenant_records::Outcome;
-        let run_kind = FacadeError::RunKind {
-            run_code: "DISK_FLOOR".into(),
-            next: "run provenant gc --apply".into(),
-            detail: None,
-            resource: None,
-        };
-        assert_eq!(run_kind.code(), "DISK_FLOOR");
-        assert_eq!(
-            super::facade_outcome(&run_kind),
-            (Outcome::Refused, provenant_run::ErrorKind::DiskFloor)
-        );
-        let lease = FacadeError::WriterLeaseHeld {
-            holder: None,
-            branch: None,
-            worktree: None,
-            age: None,
-            live: None,
-        };
-        assert_eq!(
-            super::facade_outcome(&lease),
-            (Outcome::Refused, provenant_run::ErrorKind::WriterLeaseHeld)
-        );
-    }
-}
+#[path = "context_tests.rs"]
+mod tests;

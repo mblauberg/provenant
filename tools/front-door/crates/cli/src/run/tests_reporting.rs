@@ -102,7 +102,7 @@ fn cli_safe_local_facts_are_bounded_and_escape_controls() {
         );
         assert!(detail.len() <= MAX_DIAGNOSTIC_BYTES);
         assert!(!detail.chars().any(char::is_control));
-        assert!(wire["error"]["next"].is_string());
+        assert!(wire["error"]["next"].is_array());
         let mut human = Vec::new();
         crate::render::render(
             &reply.result,
@@ -148,6 +148,7 @@ fn cli_recorded_remedies_preserve_typed_causes() {
         ),
         (
             FacadeError::LaunchUnknown {
+                detail: None,
                 operation_id: OperationId::parse("dispatch-17").unwrap(),
             },
             "dispatch-17",
@@ -160,8 +161,8 @@ fn cli_recorded_remedies_preserve_typed_causes() {
         )));
         let reply = super::reply("run", Err(failure));
         let wire = serde_json::to_value(&reply.result).unwrap();
-        assert_eq!(wire["error"]["next"], projection.next.unwrap());
-        let action = wire["error"]["next"].as_str().unwrap();
+        let action = wire["error"]["next"][0]["why"].as_str().unwrap();
+        assert_eq!(action, projection.next.unwrap());
         assert!(action.contains(condition), "{wire}");
         if condition == "dispatch-17" {
             assert!(action.contains("inspect") && action.contains("same operation ID"));
@@ -169,6 +170,35 @@ fn cli_recorded_remedies_preserve_typed_causes() {
         assert!(!wire.to_string().contains("TOKEN_SENTINEL"));
     }
 }
+
+#[test]
+fn review_command_keeps_transient_retry_metadata_in_its_error_envelope() {
+    use provenant_records::command_result::ErrorClass;
+    let reset = jiff::Timestamp::from_second(2_000_000_000).unwrap();
+    let projection = provenant_records::diagnostic::Diagnostic::new("FORGE_QUOTA_EXHAUSTED")
+        .category("transient")
+        .detail("forge rate limit")
+        .next("wait until reset, then retry")
+        .error_class(ErrorClass::Transient {
+            retry_at: Some(reset),
+        });
+    let mut failure = super::Fail::new(
+        Status::Unavailable,
+        ErrorKind::ForgeQuotaExhausted,
+        "forge rate limit",
+    );
+    failure.projection = Some(Box::new(projection));
+
+    let reply = super::reply("review", Err(failure));
+    let wire = serde_json::to_value(reply.result).unwrap();
+    assert_eq!(wire["command"], "review");
+    assert_eq!(wire["status"], "unavailable");
+    assert_eq!(
+        wire["error"]["class"]["transient"]["retry_at"],
+        serde_json::to_value(reset).unwrap()
+    );
+}
+
 #[test]
 fn malformed_claude_result_preserves_provider_error_in_settlement() {
     let route = run::RouteRecord {
@@ -237,7 +267,7 @@ fn output_retains_safe_refusal_remedies() -> Result<(), Box<dyn std::error::Erro
             _: Option<&run::AttemptRecord>,
         ) -> Result<run::PreparedLaunch, Box<run::PrepareRefusal>> {
             Err(Box::new(run::PrepareRefusal {
-                boundary_class: provenant_records::diagnostic::BoundaryClass::None,
+                boundary_class: provenant_records::policy::Boundary::None,
                 policy_code: None,
                 resource: None,
                 cause: provenant_records::run::CauseKind::AccessPolicyRefused,
@@ -288,6 +318,7 @@ fn output_retains_safe_refusal_remedies() -> Result<(), Box<dyn std::error::Erro
             );
             let attempt = prepared.attempt_id;
             let output_command = || Output {
+                common: Default::default(),
                 target: crate::Target::parse("g/n").expect("fixture target"),
                 part: Part::Result,
                 to: None,

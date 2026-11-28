@@ -33,6 +33,7 @@ fn run(inv: &Call) -> Result<Outcome, CommandError> {
             },
             globals,
             process.workers(),
+            None,
         ),
         _ => return crate::commands::mismatched(),
     };

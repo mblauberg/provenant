@@ -9,6 +9,7 @@ use sha2::{Digest as _, Sha256};
 use std::ffi::{OsStr, OsString};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Component, Path, PathBuf};
+use std::time::Duration;
 use thiserror::Error;
 
 const GIT_MARKER: &str = ".git";
@@ -50,6 +51,16 @@ pub enum RepoError {
     ConfigNormalisation(&'static str),
     #[error("alternate Git object stores are not accepted for protected history")]
     AlternateObjects,
+    #[error(
+        "GITDIR_HELD_BY_OTHER_LANE: worktree registration is held by live lane {holder}; repair would rewrite its lease"
+    )]
+    GitdirHeldByOtherLane { holder: String },
+    #[error("GITDIR_REGISTRATION_STALE_NONE: stale worktree registration: {detail}")]
+    GitdirRegistrationStale { detail: String },
+    #[error("GITDIR_LAYOUT_INVALID: Git worktree layout is invalid: {detail}")]
+    GitdirLayoutInvalid { detail: String },
+    #[error("Git worktree repair failed: {detail}")]
+    GitRepairFailed { detail: String },
     #[error("verified repository path or Git metadata changed")]
     IdentityChanged,
     #[error("Git metadata file exceeds its bound")]
@@ -73,6 +84,10 @@ impl RepoError {
             Self::AlternateObjects => {
                 "alternate Git object stores are not accepted for protected history"
             }
+            Self::GitdirHeldByOtherLane { .. }
+            | Self::GitdirRegistrationStale { .. }
+            | Self::GitdirLayoutInvalid { .. }
+            | Self::GitRepairFailed { .. } => return None,
             Self::IdentityChanged => "verified repository path or Git metadata changed",
             Self::MetadataTooLarge => "Git metadata file exceeds its bound",
             Self::Unprobed => "repository has not passed its open-time Git probes",
@@ -94,6 +109,10 @@ impl RepoError {
             Self::ConfigNormalisationExecution(_) => "ConfigNormalisationExecution",
             Self::ConfigNormalisation(_) => "ConfigNormalisation",
             Self::AlternateObjects => "AlternateObjects",
+            Self::GitdirHeldByOtherLane { .. } => "GitdirHeldByOtherLane",
+            Self::GitdirRegistrationStale { .. } => "GitdirRegistrationStale",
+            Self::GitdirLayoutInvalid { .. } => "GitdirLayoutInvalid",
+            Self::GitRepairFailed { .. } => "GitRepairFailed",
             Self::IdentityChanged => "IdentityChanged",
             Self::MetadataTooLarge => "MetadataTooLarge",
             Self::Unprobed => "Unprobed",
@@ -190,6 +209,12 @@ impl RepoPath {
 /// revision syntax.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct GitRefName(String);
+
+impl std::fmt::Display for GitRefName {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Error)]
 #[error("Git ref must be a valid local branch name")]
@@ -478,9 +503,12 @@ impl VerifiedRepo {
         }
 
         if !native_alternates {
-            reject_alternates(&private)?;
+            // Borrowed objects are dissociated into the lane store by the
+            // snapshot before history is used. The declaration itself is a
+            // warn-level fact; only an unreadable declaration blocks.
+            admit_alternates(&private, "REPO_REJECT_ALTERNATES_DATA_INTEGRITY")?;
             if !private_identity.same_identity(&common_identity) {
-                reject_alternates(&common)?;
+                admit_alternates(&common, "REPO_REJECT_ALTERNATES_DATA_INTEGRITY_2")?;
             }
         }
 
@@ -639,7 +667,7 @@ impl VerifiedRepo {
                 Err(error) => return Err(error.into()),
             }
         }
-        reject_alternates(&common)?;
+        admit_alternates(&common, "REPO_REJECT_ALTERNATES_DATA_INTEGRITY_2")?;
 
         Ok(Self {
             kind: RepoKind::BoundBare,
@@ -932,17 +960,78 @@ impl VerifiedWorktree {
     }
 }
 
+/// The custody fact a host knows about a worktree registration. A live holder
+/// means repairing the registration would rewrite a lease another lane still
+/// holds; callers that have not loaded leases pass `None` and a stale
+/// registration is repaired and warned instead.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct GitdirCustody {
+    pub live_holder: Option<String>,
+}
+
+/// Verify a worktree with an explicit live-lease fact. See [`verify_worktree`]
+/// for the default path; hosts with a custody store should pass the holder
+/// their lease says owns this registration.
+pub fn verify_worktree_with(
+    repo: &VerifiedRepo,
+    path: impl AsRef<Path>,
+    custody: GitdirCustody,
+) -> Result<VerifiedWorktree, RepoError> {
+    verify_worktree_inner(repo, path.as_ref(), &custody)
+        .map_err(|error| git_boundary_error("REPO_VERIFY_WORKTREE_GIT_ISOLATION", error))
+}
+
 pub fn verify_worktree(
     repo: &VerifiedRepo,
     path: impl AsRef<Path>,
 ) -> Result<VerifiedWorktree, RepoError> {
-    verify_worktree_inner(repo, path.as_ref())
-        .map_err(|error| git_boundary_error("REPO_VERIFY_WORKTREE_GIT_ISOLATION", error))
+    verify_worktree_with(repo, path, GitdirCustody::default())
 }
 
-fn verify_worktree_inner(repo: &VerifiedRepo, path: &Path) -> Result<VerifiedWorktree, RepoError> {
+fn verify_worktree_inner(
+    repo: &VerifiedRepo,
+    path: &Path,
+    custody: &GitdirCustody,
+) -> Result<VerifiedWorktree, RepoError> {
     repo.revalidate()?;
-    let mut worktree = VerifiedRepo::open_structure(path, false)?;
+    let mut worktree = match VerifiedRepo::open_structure(path, false) {
+        Ok(worktree) => worktree,
+        Err(error) => {
+            // A stale backlink fails as a not-found filesystem error before
+            // the registration identity is compared. Classify the layout
+            // rather than guessing from the raw error kind, and keep other
+            // failures (unsafe metadata, oversized files, races) as they are.
+            match classify_gitdir(repo, path) {
+                Ok(GitdirRegistration::Stale { detail }) => {
+                    if let Some(holder) = custody.live_holder.as_deref() {
+                        return Err(RepoError::GitdirHeldByOtherLane {
+                            holder: holder.to_owned(),
+                        });
+                    }
+                    Policy::default().warn_or(
+                        "GITDIR_REGISTRATION_STALE_NONE",
+                        Facts::violation(detail.clone()),
+                        |_| RepoError::GitdirRegistrationStale {
+                            detail: detail.clone(),
+                        },
+                    )?;
+                    repair_gitdir(repo, path)?;
+                    VerifiedRepo::open_structure(path, false)?
+                }
+                Ok(GitdirRegistration::Invalid { detail }) => {
+                    return Err(if matches!(&error, RepoError::InvalidRegistration) {
+                        git_boundary_error(
+                            "GITDIR_LAYOUT_INVALID",
+                            RepoError::GitdirLayoutInvalid { detail },
+                        )
+                    } else {
+                        error
+                    });
+                }
+                Err(_) => return Err(error),
+            }
+        }
+    };
     if repo.probe_data.is_none() || repo.config_digest.is_none() {
         return Err(RepoError::Unprobed);
     }
@@ -984,6 +1073,175 @@ fn verify_worktree_inner(repo: &VerifiedRepo, path: &Path) -> Result<VerifiedWor
         repo: worktree,
         project_root,
     })
+}
+
+/// Why a worktree's Git directory registration did not verify.
+enum GitdirRegistration {
+    /// A genuine Git registration whose backlink can be rewritten in place.
+    Stale { detail: String },
+    /// A fabricated layout or a backlink naming another worktree: no repair
+    /// can turn it into a registration for this worktree.
+    Invalid { detail: String },
+}
+
+/// Read-only classification of a failing registration. It reopens the same
+/// markers a valid registration needs; it never repairs or mutates them.
+fn classify_gitdir(repo: &VerifiedRepo, path: &Path) -> Result<GitdirRegistration, RepoError> {
+    let invalid = |detail: String| Ok::<_, RepoError>(GitdirRegistration::Invalid { detail });
+    let (root_path, root) = match open_canonical_anchor(path, false) {
+        Ok(opened) => opened,
+        Err(error) => return invalid(format!("worktree cannot be opened: {error}")),
+    };
+    let marker_identity = match root.metadata_at(OsStr::new(GIT_MARKER), false) {
+        Ok(identity) => identity,
+        Err(error) => return invalid(format!("worktree .git marker is unreadable: {error}")),
+    };
+    if marker_identity.kind != FileKind::Regular {
+        return invalid("worktree .git marker is not a regular gitfile".to_owned());
+    }
+    let marker_bytes = match read_bounded(&root, OsStr::new(GIT_MARKER), GITFILE_LIMIT) {
+        Ok(bytes) => bytes,
+        Err(error) => return invalid(format!("worktree .git marker cannot be read: {error}")),
+    };
+    let Some(gitdir) = parse_git_path(&marker_bytes, b"gitdir: ") else {
+        return invalid("worktree .git marker has no gitdir pointer".to_owned());
+    };
+    let private_candidate = match resolve_git_path(&root_path, &gitdir) {
+        Ok(candidate) => candidate,
+        Err(error) => return invalid(format!("gitdir pointer cannot be resolved: {error}")),
+    };
+    let (private_path, private) = match open_canonical_anchor(&private_candidate, false) {
+        Ok(opened) => opened,
+        Err(error) => return invalid(format!("private Git directory is unreadable: {error}")),
+    };
+    let private_identity = private.metadata()?;
+    let commondir_bytes = read_optional_bounded(&private, OsStr::new("commondir"), GITFILE_LIMIT)?;
+    let common_candidate = if let Some(bytes) = commondir_bytes.as_deref() {
+        let Some(common) = parse_git_path(bytes, b"") else {
+            return invalid("commondir has no path".to_owned());
+        };
+        match resolve_git_path(&private_path, &common) {
+            Ok(candidate) => candidate,
+            Err(error) => return invalid(format!("commondir cannot be resolved: {error}")),
+        }
+    } else {
+        private_path.clone()
+    };
+    let (common_path, common) = match open_canonical_anchor(&common_candidate, false) {
+        Ok(opened) => opened,
+        Err(error) => return invalid(format!("common Git directory is unreadable: {error}")),
+    };
+    let common_identity = common.metadata()?;
+    if !common_identity.same_identity(&repo.common_identity) {
+        return invalid("worktree belongs to a different common Git directory".to_owned());
+    }
+    if private_identity.same_identity(&common_identity) {
+        return invalid("registration has no separate private Git directory".to_owned());
+    }
+    let worktrees = common_path.join("worktrees");
+    if private_path.parent() != Some(worktrees.as_path()) {
+        return invalid("private Git directory is not in the common worktree registry".to_owned());
+    }
+    let Some(name) = private_path.file_name() else {
+        return invalid("private Git directory has no registry name".to_owned());
+    };
+    let registry = common.open_verified_directory(OsStr::new("worktrees"))?;
+    let registered = match registry.open_verified_directory(name) {
+        Ok(directory) => directory,
+        Err(error) => return invalid(format!("worktree is not registered: {error}")),
+    };
+    if !registered.metadata()?.same_identity(&private_identity) {
+        return invalid("worktree registration names a different private directory".to_owned());
+    }
+
+    let backlink = match read_optional_bounded(&private, OsStr::new("gitdir"), GITFILE_LIMIT) {
+        Ok(Some(bytes)) => bytes,
+        Ok(None) => {
+            return Ok(GitdirRegistration::Stale {
+                detail: "worktree registration has no backlink".to_owned(),
+            });
+        }
+        Err(error) => return Err(error),
+    };
+    let Some(target) = parse_git_path(&backlink, b"") else {
+        return invalid("worktree backlink has no path".to_owned());
+    };
+    let target_path = match resolve_git_path(&private_path, &target) {
+        Ok(resolved) => resolved,
+        Err(error) => return invalid(format!("worktree backlink cannot be resolved: {error}")),
+    };
+    let marker_path = root_path.join(GIT_MARKER);
+    match canonicalize(&target_path) {
+        Ok(resolved) if resolved == marker_path => {
+            invalid("backlink names this worktree but its registration is inconsistent".to_owned())
+        }
+        Ok(resolved) => {
+            // A backlink that names another worktree's gitfile cannot be
+            // repaired into this one's registration: that is a mismatch.
+            let named = resolved
+                .parent()
+                .and_then(|parent| resolved.file_name().map(|name| (parent, name)));
+            if let Some((parent, name)) = named
+                && let Ok(directory) = Directory::open_anchor(parent)
+                && let Ok(Some(bytes)) = read_optional_bounded(&directory, name, GITFILE_LIMIT)
+                && parse_git_path(&bytes, b"gitdir: ").is_some()
+            {
+                return invalid("worktree backlink names a different worktree".to_owned());
+            }
+            Ok(GitdirRegistration::Stale {
+                detail: "worktree backlink does not name this worktree's marker".to_owned(),
+            })
+        }
+        Err(_) => Ok(GitdirRegistration::Stale {
+            detail: "worktree backlink names a missing marker".to_owned(),
+        }),
+    }
+}
+
+/// `git worktree repair` rewrites only this worktree's backlink; it runs under
+/// a bounded wall deadline and never touches another registration.
+fn repair_gitdir(repo: &VerifiedRepo, path: &Path) -> Result<(), RepoError> {
+    use provenant_os::exec::{ExecOptions, Executor, StreamPolicy, SystemExecutor, Termination};
+    let Some(git) = provenant_os::git::git_executable() else {
+        return Err(RepoError::GitRepairFailed {
+            detail: "Git executable is unavailable".to_owned(),
+        });
+    };
+    let worktree = canonicalize(path).map_err(|error| RepoError::GitRepairFailed {
+        detail: format!("worktree path cannot be bound for repair: {error}"),
+    })?;
+    let argv: Vec<OsString> = vec![
+        git.into_os_string(),
+        OsString::from("worktree"),
+        OsString::from("repair"),
+        worktree.into_os_string(),
+    ];
+    let mut options = ExecOptions::new(&argv, repo.common_git_dir(), Duration::from_secs(5));
+    options.stdout = StreamPolicy::Capture { limit: 4096 };
+    options.stderr = StreamPolicy::Capture { limit: 4096 };
+    let executor = SystemExecutor::new(1).map_err(|error| RepoError::GitRepairFailed {
+        detail: format!("could not start the process runner: {error}"),
+    })?;
+    let outcome = executor
+        .execute(options)
+        .map_err(|error| RepoError::GitRepairFailed {
+            detail: format!("git worktree repair could not execute: {error}"),
+        })?;
+    if outcome.timed_out {
+        return Err(RepoError::GitRepairFailed {
+            detail: "git worktree repair timed out".to_owned(),
+        });
+    }
+    if !matches!(outcome.termination, Termination::Exit(0)) {
+        return Err(RepoError::GitRepairFailed {
+            detail: format!(
+                "git worktree repair exited {:?}: {}",
+                outcome.termination,
+                String::from_utf8_lossy(&outcome.stderr.bytes)
+            ),
+        });
+    }
+    Ok(())
 }
 
 /// Hash each file with the path it resolves to, so retargeting a symlink or
@@ -1226,14 +1484,21 @@ fn verify_git_directory(metadata: Metadata, owner: u32) -> Result<(), RepoError>
     Ok(())
 }
 
-fn reject_alternates(common: &Directory) -> Result<(), RepoError> {
-    reject_alternates_inner(common).map_err(|error| {
-        let code = if matches!(&error, RepoError::AlternateObjects) {
-            "REPO_REJECT_ALTERNATES_DATA_INTEGRITY"
-        } else {
-            "REPO_REJECT_ALTERNATES_DATA_INTEGRITY_2"
-        };
-        git_boundary_error(code, error)
+/// An alternates declaration is not a boundary: the snapshot copies borrowed
+/// objects into the lane store and proceeds. The declaration warns under its
+/// own `none`/`git` row, which `--strict` or `policy.git=refuse` may raise. A
+/// declaration that cannot be read completely is a typed operation error,
+/// because a partial read cannot establish which objects are borrowed.
+fn admit_alternates(directory: &Directory, code: &'static str) -> Result<(), RepoError> {
+    let detail = match reject_alternates_inner(directory) {
+        Ok(()) => return Ok(()),
+        Err(RepoError::AlternateObjects) => format!(
+            "Git object alternates are borrowed; the snapshot dissociates them into the lane store ({code})"
+        ),
+        Err(error) => return Err(git_boundary_error("REPO_READ_BOUNDED_GIT_ISOLATION", error)),
+    };
+    Policy::default().warn_or(code, Facts::violation(detail), |_| {
+        RepoError::AlternateObjects
     })
 }
 
@@ -1394,634 +1659,4 @@ fn open_canonical_anchor(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::{
-        GitRefName, GitRevision, GitRevisionError, RepoError, RepoObjectFormat, RepoProbeData,
-        SiblingTrackingKeys, VerifiedRepo, verify_worktree,
-    };
-    use provenant_records::policy::{Facts, Policy};
-    use std::fs;
-
-    /// Each row is `git check-ref-format --branch <name>` (git-check-ref-format(1),
-    /// "--branch"), observed with Git 2.53: true when it exits 0. `@{` forms
-    /// are excluded because `--branch` treats them as shorthand to expand.
-    const BRANCH_TABLE: &[(&str, bool)] = &[
-        ("feat/a+b", true),
-        ("fix#12", true),
-        ("user@x", true),
-        ("@", true),
-        ("@a", true),
-        ("a@", true),
-        ("a/@", true),
-        ("@/a", true),
-        ("@@", true),
-        ("head", true),
-        ("caf\u{e9}", true),
-        ("a\"b", true),
-        ("a{b", true),
-        ("a}b", true),
-        ("a.lock.b", true),
-        ("lock", true),
-        ("x/y.z", true),
-        ("v1.0", true),
-        ("a/-b", true),
-        ("", false),
-        ("HEAD", false),
-        ("-x", false),
-        ("--x", false),
-        ("/x", false),
-        ("x/", false),
-        ("x//y", false),
-        (".", false),
-        ("..", false),
-        (".x", false),
-        ("x/.y", false),
-        ("x.", false),
-        ("a/b.", false),
-        ("a..b", false),
-        ("a@{b", false),
-        ("a b", false),
-        ("a~b", false),
-        ("a^b", false),
-        ("a:b", false),
-        ("a?b", false),
-        ("a*b", false),
-        ("a[b", false),
-        ("a\\b", false),
-        ("a\u{7f}b", false),
-        ("a\nb", false),
-        ("a\tb", false),
-        ("x.lock", false),
-        ("x.lock/y", false),
-        ("a/b.lock", false),
-        (".lock", false),
-        ("a/..", false),
-    ];
-
-    #[test]
-    fn sibling_tracking_keys_follow_the_checked_out_head() {
-        let branch = SiblingTrackingKeys::for_head(b"ref: refs/heads/main\n");
-        assert!(branch.matches(b"branch.lane.remote"));
-        assert!(branch.matches(b"branch.lane.merge"));
-        assert!(!branch.matches(b"branch.main.remote"));
-        assert!(!branch.matches(b"remote.origin.url"));
-        let detached = format!("{}\n", "a".repeat(40));
-        assert!(SiblingTrackingKeys::for_head(detached.as_bytes()).matches(b"branch.main.merge"));
-        let malformed = SiblingTrackingKeys::for_head(b"garbage\n");
-        assert!(!malformed.matches(b"branch.lane.remote"));
-        assert!(!SiblingTrackingKeys::for_head(b"").matches(b"branch.lane.remote"));
-    }
-
-    #[test]
-    fn branch_names_follow_git_ref_format() {
-        for (name, accepted) in BRANCH_TABLE {
-            assert_eq!(GitRefName::branch(name).is_ok(), *accepted, "{name:?}");
-        }
-    }
-
-    /// The table above can drift from Git; ask the installed Git directly.
-    #[test]
-    fn branch_names_match_the_installed_git() {
-        let Some(git) = provenant_os::git::git_executable() else {
-            return;
-        };
-        let temp = tempfile::tempdir().unwrap();
-        let run = |args: &[&str]| {
-            provenant_os::fixture::git_command_at(&git)
-                .current_dir(temp.path())
-                .env("GIT_CONFIG_GLOBAL", "/dev/null")
-                .env("GIT_CONFIG_SYSTEM", "/dev/null")
-                .args(args)
-                .output()
-                .unwrap()
-        };
-        assert!(run(&["init", "--quiet"]).status.success());
-        for (name, accepted) in BRANCH_TABLE {
-            let output = run(&["check-ref-format", "--branch", name]);
-            assert_eq!(output.status.success(), *accepted, "{name:?}");
-        }
-    }
-
-    #[test]
-    fn verify_worktree_refuses_the_primary_checkout() {
-        let temp = tempfile::tempdir().unwrap();
-        fs::create_dir(temp.path().join(".git")).unwrap();
-        fs::write(temp.path().join(".git/HEAD"), b"ref: refs/heads/main\n").unwrap();
-        let repo = VerifiedRepo::open(temp.path(), |_| {
-            Ok::<_, RepoError>(RepoProbeData::without_includes(
-                RepoObjectFormat::Sha1,
-                String::new(),
-                Vec::new(),
-            ))
-        })
-        .unwrap();
-
-        let error = verify_worktree(&repo, temp.path())
-            .err()
-            .expect("primary checkout is not a lane");
-        assert!(matches!(error, RepoError::InvalidRegistration));
-        let policy = Policy::default();
-        let rule = policy.rule("REPO_VERIFY_WORKTREE_GIT_ISOLATION");
-        assert_eq!(
-            rule.rule.boundary,
-            provenant_records::policy::Boundary::OtherWork
-        );
-        assert_eq!(
-            rule.rule.strength,
-            provenant_records::policy::Strength::Refuse
-        );
-        assert!(matches!(
-            policy.check(
-                "REPO_VERIFY_WORKTREE_GIT_ISOLATION",
-                Facts::violation("guard failed"),
-            ),
-            provenant_records::policy::Effect::Refuse(_)
-        ));
-    }
-
-    #[test]
-    fn git_revision_accepts_frozen_base_refs_and_refuses_option_injection() {
-        assert_eq!(
-            GitRevision::new("origin/main").unwrap().as_str(),
-            "origin/main"
-        );
-        assert_eq!(GitRevision::new("HEAD~2").unwrap().as_str(), "HEAD~2");
-        assert!(matches!(
-            GitRevision::new("--upload-pack=evil"),
-            Err(GitRevisionError)
-        ));
-        assert!(matches!(
-            GitRevision::new("origin/main\nHEAD"),
-            Err(GitRevisionError)
-        ));
-    }
-
-    #[test]
-    fn normalisation_reuses_only_the_exact_successful_snapshot_and_executable() {
-        use std::cell::Cell;
-        let temp = tempfile::tempdir().unwrap();
-        let git = temp.path().join("git");
-        let other_git = temp.path().join("other-git");
-        fs::write(&git, b"parser").unwrap();
-        fs::hard_link(&git, &other_git).unwrap();
-        let calls = Cell::new(0);
-        let parse = || {
-            calls.set(calls.get() + 1);
-            Ok(b"core.bare\nfalse\0".to_vec())
-        };
-        let cache = super::ConfigNormalisationCache::default();
-        let first = cache.normalise(&git, b"first", parse).unwrap();
-        assert_eq!(cache.normalise(&git, b"first", parse).unwrap(), first);
-        assert_eq!(calls.get(), 1);
-        cache.normalise(&git, b"second", parse).unwrap();
-        // A single-entry cache evicts the first snapshot.
-        cache.normalise(&git, b"first", parse).unwrap();
-        assert_eq!(calls.get(), 3);
-        cache.normalise(&other_git, b"first", parse).unwrap();
-        assert_eq!(calls.get(), 4);
-        fs::remove_file(&other_git).unwrap();
-        fs::write(&other_git, b"replacement parser").unwrap();
-        cache.normalise(&other_git, b"first", parse).unwrap();
-        assert_eq!(calls.get(), 5);
-        for _ in 0..2 {
-            assert!(matches!(
-                cache.normalise(&other_git, b"changed", || {
-                    calls.set(calls.get() + 1);
-                    Err(RepoError::ConfigNormalisation("parser timed out"))
-                }),
-                Err(RepoError::ConfigNormalisation(_))
-            ));
-        }
-        assert_eq!(calls.get(), 7);
-        // A parser replacement during a miss must not publish under its old identity.
-        assert!(matches!(
-            cache.normalise(&other_git, b"changed", || {
-                fs::rename(&other_git, temp.path().join("old-git")).unwrap();
-                fs::write(&other_git, b"new parser").unwrap();
-                parse()
-            }),
-            Err(RepoError::ConfigNormalisation(_))
-        ));
-        cache.normalise(&other_git, b"changed", parse).unwrap();
-        assert_eq!(calls.get(), 9);
-        assert!(matches!(
-            cache.normalise(&git, &vec![0; super::CONFIG_LIMIT as usize + 1], parse),
-            Err(RepoError::MetadataTooLarge)
-        ));
-        assert_eq!(calls.get(), 9);
-        assert!(matches!(
-            cache.normalise(&git, b"oversized", || Ok(vec![
-                0;
-                super::CONFIG_LIMIT as usize
-                    * 2
-                    + 1
-            ])),
-            Err(RepoError::ConfigNormalisation(_))
-        ));
-        cache.normalise(&git, b"oversized", parse).unwrap();
-        assert_eq!(calls.get(), 10);
-    }
-
-    #[test]
-    fn concurrent_cache_misses_do_not_hold_the_cache_lock() {
-        use std::sync::mpsc;
-        use std::time::Duration;
-        let temp = tempfile::tempdir().unwrap();
-        let git = temp.path().join("git");
-        fs::write(&git, b"parser").unwrap();
-        let cache = super::ConfigNormalisationCache::default();
-        let (entered, parsing) = mpsc::channel();
-        std::thread::scope(|scope| {
-            let mut releases = Vec::new();
-            let handles: Vec<_> = (0..8)
-                .map(|_| {
-                    let (release, wait) = mpsc::channel();
-                    releases.push(release);
-                    let entered = entered.clone();
-                    let cache = &cache;
-                    let git = &git;
-                    scope.spawn(move || {
-                        cache
-                            .normalise(git, b"snapshot", || {
-                                entered.send(()).unwrap();
-                                wait.recv_timeout(Duration::from_secs(5)).unwrap();
-                                Ok(b"core.bare\nfalse\0".to_vec())
-                            })
-                            .unwrap()
-                    })
-                })
-                .collect();
-            // A blocked parser must not keep other misses from entering. Release
-            // every worker before asserting, so a regression fails without hanging.
-            let all_entered = (0..8).all(|_| parsing.recv_timeout(Duration::from_secs(2)).is_ok());
-            for release in releases {
-                let _ = release.send(());
-            }
-            for handle in handles {
-                assert_eq!(handle.join().unwrap(), b"core.bare\nfalse\0");
-            }
-            assert!(all_entered, "cache readers queued behind a parser");
-        });
-        assert_eq!(
-            cache
-                .normalise(&git, b"snapshot", || panic!("warm cache miss"))
-                .unwrap(),
-            b"core.bare\nfalse\0"
-        );
-    }
-
-    #[test]
-    fn warm_normalisation_still_refuses_unsafe_git_metadata() {
-        use std::os::unix::fs::PermissionsExt;
-        let temp = tempfile::tempdir().unwrap();
-        let git = temp.path().join(".git");
-        fs::create_dir(&git).unwrap();
-        fs::write(git.join("config"), b"[core]\nrepositoryformatversion = 0\n").unwrap();
-        fs::write(git.join("HEAD"), b"ref: refs/heads/main\n").unwrap();
-        let repo = VerifiedRepo::open(temp.path(), |_| {
-            Ok::<_, RepoError>(RepoProbeData::without_includes(
-                RepoObjectFormat::Sha1,
-                String::new(),
-                Vec::new(),
-            ))
-        })
-        .unwrap();
-        fs::hard_link(git.join("config"), git.join("alias")).unwrap();
-        assert!(matches!(
-            repo.revalidate(),
-            Err(RepoError::InvalidGitDirectory)
-        ));
-        fs::remove_file(git.join("alias")).unwrap();
-        fs::rename(git.join("config"), git.join("saved-config")).unwrap();
-        std::os::unix::fs::symlink("saved-config", git.join("config")).unwrap();
-        assert!(matches!(
-            repo.revalidate(),
-            Err(RepoError::InvalidGitDirectory)
-        ));
-        fs::remove_file(git.join("config")).unwrap();
-        fs::rename(git.join("saved-config"), git.join("config")).unwrap();
-        fs::set_permissions(&git, fs::Permissions::from_mode(0o720)).unwrap();
-        assert!(matches!(
-            repo.revalidate(),
-            Err(RepoError::InvalidGitMarker)
-        ));
-    }
-
-    #[test]
-    fn normalisation_failures_refuse_without_claiming_unsafe_metadata() {
-        use provenant_os::exec::{CapturedStream, ExecError, ExecOutcome, Termination};
-        let complete = ExecOutcome {
-            termination: Termination::Exit(0),
-            stdout: CapturedStream {
-                bytes: b"core.bare\nfalse\0".to_vec(),
-                ..Default::default()
-            },
-            stderr: CapturedStream::default(),
-            timed_out: false,
-            drain_truncated: false,
-            overflow_stopped: false,
-            cancelled: false,
-            elapsed_micros: 1,
-        };
-        assert_eq!(
-            super::normalised_config_output(Ok(complete.clone())).unwrap(),
-            complete.stdout.bytes
-        );
-        let mut failures = Vec::new();
-        let mut timed_out = complete.clone();
-        timed_out.termination = Termination::Signal(15);
-        timed_out.timed_out = true;
-        failures.push(timed_out);
-        let mut read_failed = complete.clone();
-        read_failed.stdout.read_failed = true;
-        failures.push(read_failed);
-        let mut truncated = complete.clone();
-        truncated.stdout.truncated = true;
-        failures.push(truncated);
-        failures.push(ExecOutcome {
-            drain_truncated: true,
-            ..complete.clone()
-        });
-        failures.push(ExecOutcome {
-            termination: Termination::Exit(128),
-            ..complete
-        });
-        for failure in failures {
-            assert!(matches!(
-                super::normalised_config_output(Ok(failure)),
-                Err(RepoError::ConfigNormalisation(_))
-            ));
-        }
-        assert!(matches!(
-            super::normalised_config_output(Err(ExecError::Io {
-                operation: "spawn",
-                source: std::io::Error::from(std::io::ErrorKind::Interrupted),
-            })),
-            Err(RepoError::ConfigNormalisationExecution(ExecError::Io {
-                operation: "spawn",
-                ..
-            }))
-        ));
-    }
-
-    #[test]
-    fn git_directory_still_refuses_wrong_owner_writable_modes_and_wrong_kinds() {
-        use provenant_os::fs::{FileKind, Metadata};
-        let temp = tempfile::tempdir().unwrap();
-        let safe = Metadata::from_std(fs::metadata(temp.path()).unwrap());
-        assert!(super::verify_git_directory(safe, safe.uid).is_ok());
-        for unsafe_metadata in [
-            Metadata {
-                uid: safe.uid.wrapping_add(1),
-                ..safe
-            },
-            Metadata {
-                mode: safe.mode | 0o020,
-                ..safe
-            },
-            Metadata {
-                mode: safe.mode | 0o002,
-                ..safe
-            },
-            Metadata {
-                kind: FileKind::Regular,
-                ..safe
-            },
-            Metadata {
-                kind: FileKind::Symlink,
-                ..safe
-            },
-            Metadata {
-                kind: FileKind::Other,
-                ..safe
-            },
-        ] {
-            assert!(matches!(
-                super::verify_git_directory(unsafe_metadata, safe.uid),
-                Err(RepoError::InvalidGitDirectory)
-            ));
-        }
-    }
-
-    #[test]
-    fn repo_revalidation_detects_config_changes() {
-        let temp = tempfile::tempdir().unwrap();
-        let git = temp.path().join(".git");
-        fs::create_dir(&git).unwrap();
-        fs::write(git.join("config"), b"[core]\nrepositoryformatversion = 0\n").unwrap();
-        fs::write(git.join("HEAD"), b"ref: refs/heads/main\n").unwrap();
-        let repo = VerifiedRepo::open(temp.path(), |_| {
-            Ok::<_, RepoError>(RepoProbeData::without_includes(
-                RepoObjectFormat::Sha1,
-                String::new(),
-                Vec::new(),
-            ))
-        })
-        .unwrap();
-        fs::write(
-            git.join("config"),
-            b"[filter.poison]\nclean = touch /tmp/pwned\n",
-        )
-        .unwrap();
-
-        assert!(matches!(repo.revalidate(), Err(RepoError::IdentityChanged)));
-    }
-
-    #[test]
-    fn repo_revalidation_accepts_a_tracked_sibling_worktree() {
-        let temp = tempfile::tempdir().unwrap();
-        let root = temp.path().join("project");
-        fs::create_dir(&root).unwrap();
-        let git = |args: &[&str]| {
-            let result = provenant_os::fixture::git_command()
-                .current_dir(&root)
-                .args(args)
-                .output()
-                .unwrap();
-            assert!(
-                result.status.success(),
-                "{}",
-                String::from_utf8_lossy(&result.stderr)
-            );
-        };
-        git(&["init", "-q"]);
-        git(&["commit", "--allow-empty", "-qm", "fixture"]);
-        git(&["remote", "add", "origin", "https://example.invalid/repo"]);
-        git(&["update-ref", "refs/remotes/origin/main", "HEAD"]);
-        git(&[
-            "worktree",
-            "add",
-            "-q",
-            "-b",
-            "first",
-            temp.path().join("first").to_str().unwrap(),
-            "HEAD",
-        ]);
-        let repo = VerifiedRepo::open(&root, |_| {
-            Ok::<_, RepoError>(RepoProbeData::without_includes(
-                RepoObjectFormat::Sha1,
-                String::new(),
-                Vec::new(),
-            ))
-        })
-        .unwrap();
-        let tree = verify_worktree(&repo, temp.path().join("first")).unwrap();
-        git(&[
-            "worktree",
-            "add",
-            "-q",
-            "--track",
-            "-b",
-            "second",
-            temp.path().join("second").to_str().unwrap(),
-            "origin/main",
-        ]);
-        assert!(tree.repo().revalidate().is_ok());
-        git(&["config", "branch.third.remote", "origin"]);
-        assert!(tree.repo().revalidate().is_ok());
-        let partial = VerifiedRepo::open(&root, |_| {
-            Ok::<_, RepoError>(RepoProbeData::without_includes(
-                RepoObjectFormat::Sha1,
-                String::new(),
-                Vec::new(),
-            ))
-        })
-        .unwrap();
-        let partial_tree = verify_worktree(&partial, temp.path().join("first")).unwrap();
-        git(&["config", "branch.third.merge", "refs/heads/main"]);
-        assert!(partial_tree.repo().revalidate().is_ok());
-        assert!(tree.repo().revalidate().is_ok());
-        // Writer delivery records a sibling lane's push remote too.
-        git(&["config", "branch.third.pushRemote", "origin"]);
-        assert!(partial_tree.repo().revalidate().is_ok());
-        assert!(tree.repo().revalidate().is_ok());
-        // Any variable recorded for a sibling branch leaves the digest unchanged.
-        git(&["config", "branch.third.rebase", "true"]);
-        assert!(partial_tree.repo().revalidate().is_ok());
-        assert!(tree.repo().revalidate().is_ok());
-        let delivered = VerifiedRepo::open(&root, |_| {
-            for (key, value) in [
-                ("remote", "origin"),
-                ("merge", "refs/heads/delivered"),
-                ("pushRemote", "origin"),
-                ("rebase", "true"),
-            ] {
-                git(&[
-                    "config",
-                    "--local",
-                    &format!("branch.delivered.{key}"),
-                    value,
-                ]);
-            }
-            Ok::<_, RepoError>(RepoProbeData::without_includes(
-                RepoObjectFormat::Sha1,
-                String::new(),
-                Vec::new(),
-            ))
-        });
-        assert!(delivered.is_ok());
-        let opened = VerifiedRepo::open(&root, |_| {
-            git(&[
-                "worktree",
-                "add",
-                "-q",
-                "--track",
-                "-b",
-                "fourth",
-                temp.path().join("fourth").to_str().unwrap(),
-                "origin/main",
-            ]);
-            Ok::<_, RepoError>(RepoProbeData::without_includes(
-                RepoObjectFormat::Sha1,
-                String::new(),
-                Vec::new(),
-            ))
-        });
-        assert!(opened.is_ok());
-        git(&[
-            "worktree",
-            "add",
-            "-q",
-            "-b",
-            "dotted.branch",
-            temp.path().join("dotted").to_str().unwrap(),
-            "HEAD",
-        ]);
-        let dotted_tree = verify_worktree(&repo, temp.path().join("dotted")).unwrap();
-        let config_path = root.join(".git/config");
-        let config = fs::read(&config_path).unwrap();
-        // Git decodes quoted subsection names before the comparison.
-        let mut escaped = config.clone();
-        escaped.extend_from_slice(
-            b"[branch \"sibling\\\"quoted\"]\n remote = origin\n merge = refs/heads/main\n",
-        );
-        fs::write(&config_path, &escaped).unwrap();
-        assert!(tree.repo().revalidate().is_ok());
-        escaped.extend_from_slice(b"[branch \"first\"]\n remote = elsewhere\n");
-        fs::write(&config_path, &escaped).unwrap();
-        assert!(tree.repo().revalidate().is_err());
-        fs::write(&config_path, b"[broken\n").unwrap();
-        assert!(tree.repo().revalidate().is_err());
-        // A two-part branch key with no subsection still invalidates the digest.
-        let mut auto_setup = config.clone();
-        auto_setup.extend_from_slice(b"[branch]\n autosetupmerge = always\n");
-        fs::write(&config_path, auto_setup).unwrap();
-        assert!(matches!(
-            tree.repo().revalidate(),
-            Err(RepoError::IdentityChanged)
-        ));
-        fs::write(&config_path, &config).unwrap();
-        // The checked-out branch's own rebase still matters.
-        let mut own_rebase = config.clone();
-        own_rebase.extend_from_slice(b"[branch \"first\"]\n rebase = true\n");
-        fs::write(&config_path, own_rebase).unwrap();
-        assert!(matches!(
-            tree.repo().revalidate(),
-            Err(RepoError::IdentityChanged)
-        ));
-        fs::write(&config_path, &config).unwrap();
-        // The checked-out branch's own push remote still matters.
-        let mut own_push = config.clone();
-        own_push.extend_from_slice(b"[branch \"first\"]\n pushRemote = elsewhere\n");
-        fs::write(&config_path, own_push).unwrap();
-        assert!(matches!(
-            tree.repo().revalidate(),
-            Err(RepoError::IdentityChanged)
-        ));
-        fs::write(&config_path, &config).unwrap();
-        // A dotted branch name matches its own keys and ignores sibling keys.
-        let mut dotted = config.clone();
-        dotted.extend_from_slice(b"[branch \"dotted.branch\"]\n rebase = true\n");
-        fs::write(&config_path, &dotted).unwrap();
-        assert!(tree.repo().revalidate().is_ok());
-        assert!(matches!(
-            dotted_tree.repo().revalidate(),
-            Err(RepoError::IdentityChanged)
-        ));
-        fs::write(&config_path, &config).unwrap();
-        let mut dotted_siblings = config.clone();
-        dotted_siblings.extend_from_slice(
-            b"[branch \"dotted.branch.extra\"]\n rebase = true\n[branch \"dotted\"]\n rebase = true\n",
-        );
-        fs::write(&config_path, dotted_siblings).unwrap();
-        assert!(dotted_tree.repo().revalidate().is_ok());
-        assert!(tree.repo().revalidate().is_ok());
-        fs::write(&config_path, &config).unwrap();
-        let mut poisoned = config.clone();
-        poisoned.extend_from_slice(b"[core]\n\thooksPath = /tmp/poison\n");
-        fs::write(&config_path, poisoned).unwrap();
-        assert!(matches!(
-            tree.repo().revalidate(),
-            Err(RepoError::IdentityChanged)
-        ));
-        fs::write(&config_path, config).unwrap();
-        let marker = temp.path().join("first/.git");
-        let marker_bytes = fs::read(&marker).unwrap();
-        fs::write(&marker, b"gitdir: /tmp/not-the-original\n").unwrap();
-        assert!(tree.repo().revalidate().is_err());
-        assert!(tree.repo().revalidate_identity().is_err());
-        fs::write(&marker, marker_bytes).unwrap();
-        fs::rename(temp.path().join("first"), temp.path().join("moved")).unwrap();
-        assert!(tree.repo().revalidate().is_err());
-    }
-}
+mod tests;

@@ -1,0 +1,7 @@
+repo = "mblauberg/provenant"
+parent_sha = "8083b93517e69fb1b4d257875edfc1938e7d6384"
+merge_sha = "5a01c3180eabf2cf597f33298fed78e37f765049"
+prompt = "Accept one review verdict after a valid closed handoff, per the review result contract in reliability controls."
+hidden_test_command = "cargo test --manifest-path tools/front-door/Cargo.toml -p provenant-fabric-runtime --lib review_contract_accepts_one_verdict_after_a_valid_closed_handoff"
+split = "acceptance"
+family = "review"

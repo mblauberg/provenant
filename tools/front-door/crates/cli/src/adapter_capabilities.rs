@@ -265,7 +265,7 @@ pub fn explain_capability_gaps(
             continue;
         }
         let spec = node.attempt.clone().unwrap_or_default();
-        let profile = match config.dispatch_profile(&spec.lane_knobs()) {
+        let mut profile = match config.dispatch_profile(&spec.lane_knobs()) {
             Ok(profile) => profile,
             Err(error) => {
                 rows.push(json!({
@@ -276,11 +276,10 @@ pub fn explain_capability_gaps(
                 continue;
             }
         };
-        let policy = provenant_config::policy::read(
-            roots.state.as_path(),
-            project,
-            &provenant_config::policy::dispatch(&profile),
-        );
+        profile.checks_mode = spec.checks_mode.clone();
+        profile.policy_overrides = spec.policy_overrides.clone();
+        let policy =
+            provenant_config::policy::for_profile(roots.state.as_path(), project, &profile);
         let routes: Vec<Option<&provenant_fabric_runtime::graph::GraphRoute>> = node
             .routes
             .as_ref()

@@ -31,8 +31,15 @@ pub fn set_busy_timeout(timeout: Duration) {
 pub fn busy_timeout() -> Duration {
     THREAD_TIMEOUT
         .with(Cell::get)
-        .or_else(|| CONFIGURED.get().copied())
-        .unwrap_or(DEFAULT_BUSY_TIMEOUT)
+        .unwrap_or_else(configured_busy_timeout)
+}
+
+/// The host's process-wide busy timeout, ignoring a thread's scoped override.
+/// A wait that is not a store lock wait, such as a process handshake, reads
+/// this so a caller that made its own store reads nonblocking does not also
+/// make that wait nonblocking.
+pub fn configured_busy_timeout() -> Duration {
+    CONFIGURED.get().copied().unwrap_or(DEFAULT_BUSY_TIMEOUT)
 }
 
 /// Run `f` with another busy timeout for connections and locks this thread

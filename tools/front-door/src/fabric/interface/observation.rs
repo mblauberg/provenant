@@ -1,23 +1,5 @@
 use super::*;
 
-pub(in crate::fabric) fn advance_after_remote_terminal(
-    run: &provenant_fabric_runtime::graph::GraphRun,
-    remote_terminal: bool,
-    advance: impl FnOnce() -> Result<provenant_fabric_runtime::graph::GraphRun, FacadeError>,
-) -> Result<provenant_fabric_runtime::graph::GraphRun, FacadeError> {
-    if remote_terminal
-        && run
-            .checkpoint
-            .nodes
-            .iter()
-            .any(|node| !node.state.settled())
-    {
-        advance()
-    } else {
-        Ok(run.clone())
-    }
-}
-
 /// Status retains the unknown projection; a wait also needs the typed peer failure.
 pub(in crate::fabric) fn remote_status_reading(
     rows: &[serde_json::Value],
@@ -66,17 +48,38 @@ impl Factory {
         // status path only reads a checkpoint, so it cannot settle a node whose
         // earlier advancement failed while the home endpoint was unavailable.
         let remote_terminal = remote_status_reading(&rows, peer_error)?;
-        let advanced = advance_after_remote_terminal(run, remote_terminal, || {
-            self.graph(
-                GraphInput::Resume {
-                    extra: Default::default(),
-                    document: run.checkpoint.graph_id.clone().into(),
-                    extend: Vec::new(),
-                },
+        let advanced = if remote_terminal
+            && run
+                .checkpoint
+                .nodes
+                .iter()
+                .any(|node| !node.state.settled())
+        {
+            let outcome = super::super::unified::graph_wait::wake_graph_for_reader(
+                self,
+                &run.checkpoint.graph_id,
+                crate::fabric::progress::WakeReason::InlineRun,
                 budget,
                 cancel,
-            )
-        })?;
+            );
+            if matches!(
+                outcome,
+                crate::fabric::progress::WakeOutcome::Advanced { .. }
+            ) {
+                self.graph(
+                    GraphInput::Status {
+                        extra: Default::default(),
+                        id: run.checkpoint.graph_id.clone(),
+                    },
+                    budget,
+                    cancel,
+                )?
+            } else {
+                run.clone()
+            }
+        } else {
+            run.clone()
+        };
         // A successful reading of a finished lane supersedes the transport
         // failure held while its home endpoint was unreachable.
         if remote_terminal

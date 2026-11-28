@@ -800,12 +800,12 @@ fn lane_cap_refusal_retains_the_setting_through_both_adapters() {
 #[test]
 fn pacing_dispatch_refusal_keeps_the_route_and_monthly_window_note() {
     use provenant_records::diagnostic::{
-        Diagnostic, DiagnosticFact, PacingReserveSetting, PacingSettingSource, ResourceFact,
+        Diagnostic, DiagnosticFact, Layer, PacingReserveSetting, ResourceFact,
     };
     let fact = ResourceFact::PacingReserve {
         percent: 10,
         setting: PacingReserveSetting::Account,
-        origin: PacingSettingSource::Configuration,
+        origin: Layer::Host,
         hold: Box::new(provenant_records::diagnostic::PacingHold {
             account: "codex/opaque-account".into(),
             window: "five_hour".into(),
@@ -936,6 +936,55 @@ pub(crate) mod peer_tests {
     }
 
     const HOST_TEST_CEILING: std::time::Duration = std::time::Duration::from_secs(120);
+
+    /// A fake `ssh` for a peer: it answers the release probe that precedes
+    /// every non-health action with the health frame stored in `health`, and
+    /// hands the frame itself to `body` as `$request`.
+    pub(crate) fn probing_ssh(health: &std::path::Path, body: &str) -> String {
+        format!(
+            "#!/bin/sh\nrequest=$(cat)\ncase \"$request\" in *'\"action\":\"health\"'*) cat '{}'; exit 0;; esac\n{body}",
+            health.display()
+        )
+    }
+
+    /// The reply of a healthy peer on this release, as the probe expects it.
+    pub(crate) fn write_health_reply(
+        path: &std::path::Path,
+        host: provenant_core::HostId,
+        project: provenant_fabric_runtime::identity::CrossHostProjectKey,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_fabric_runtime::hosts::{PeerHealth, PeerReadiness, PeerResponse, PeerResult};
+        let reply = PeerResponse {
+            extra: Default::default(),
+            version: 1,
+            protocol: provenant_fabric_runtime::hosts::PROTOCOL,
+            host,
+            project,
+            result: PeerResult::Health {
+                data: PeerHealth {
+                    extra: Default::default(),
+                    host,
+                    available: true,
+                    execution: true,
+                    release: env!("CARGO_PKG_VERSION").into(),
+                    run_capabilities: provenant_fabric_runtime::runs::RunCapabilities {
+                        submit: true,
+                        list: true,
+                        status: true,
+                        wait: true,
+                        cancel: true,
+                        resume: true,
+                        output: true,
+                        events: true,
+                    },
+                    readiness: PeerReadiness::reporting(),
+                },
+                extra: Default::default(),
+            },
+        };
+        std::fs::write(path, serde_json::to_vec(&reply)?)?;
+        Ok(())
+    }
 
     // The host test forwards its child's stderr as the harness's own report.
     #[allow(clippy::disallowed_methods)]

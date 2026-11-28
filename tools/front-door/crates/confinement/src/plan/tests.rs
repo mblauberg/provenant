@@ -2,6 +2,8 @@ use super::*;
 use crate::permissions::{AccessMode, NetworkAccess, PathGrant, PathScope, PlanPermissions};
 use provenant_core::{ProjectId, WorkScope};
 use provenant_os::home::HomeError;
+use provenant_records::policy::{Boundary, Strength};
+use provenant_records::warning;
 use std::{
     fs,
     os::unix::fs::{PermissionsExt, symlink},
@@ -15,6 +17,7 @@ fn request(root: &Path) -> PlanRequest {
         scope: PathScope::Subtree,
     };
     PlanRequest {
+        policy: provenant_records::policy::Policy::default(),
         scope: WorkScope::Project(ProjectId::from_bytes([1; 16])),
         permissions: PlanPermissions {
             credential_roots: provenant_core::CredentialRoots::for_home(std::path::Path::new(
@@ -55,10 +58,17 @@ fn unsupported_nested_confinement_is_reported_as_a_capability_error() {
         &error,
         PlanError::Permission(PermissionError::NestedConfinementUnsupported)
     ));
-    assert_eq!(
-        error.boundary_class(),
-        provenant_records::diagnostic::BoundaryClass::None
-    );
+    assert_eq!(error.boundary_class(), Boundary::None);
+    // Split from the warn half: the nested claim is an immutable operation
+    // row, so an explicit policy code cannot override it.
+    let policy = Policy::default();
+    let rule = policy
+        .rule("PLAN_NESTED_CONFINEMENT_UNSUPPORTED")
+        .rule
+        .clone();
+    assert_eq!(rule.boundary, Boundary::Operation);
+    assert_eq!(rule.strength, Strength::Refuse);
+    assert!(rule.knob.is_none());
 }
 
 #[test]
@@ -119,7 +129,7 @@ fn private_state_cannot_expose_credentials_or_alias_the_source() {
 }
 
 #[test]
-fn write_roots_stay_clear_of_credentials_and_private_roots() {
+fn write_roots_warn_on_private_overlaps_and_refuse_credentials() {
     let temp = fixture();
     let root = fs::canonicalize(temp.path()).unwrap();
     let credential_home = root.join("credential-home");
@@ -136,6 +146,16 @@ fn write_roots_stay_clear_of_credentials_and_private_roots() {
         ConfinedPlan::new(input)
     };
     assert!(with_write(root.join("repo/.agent-run")).is_ok());
+
+    let rule = Policy::default()
+        .rule("PLAN_CONFINEDPLAN_NEW_DATA_INTEGRITY")
+        .rule
+        .clone();
+    assert_eq!(rule.boundary, Boundary::None);
+    assert_eq!(rule.group.as_deref(), Some("confinement"));
+    assert_eq!(rule.strength, Strength::Warn);
+    assert!(rule.refusable);
+
     for credential in credentials.entries() {
         assert!(
             with_write(credential.path.clone()).is_err(),
@@ -143,11 +163,33 @@ fn write_roots_stay_clear_of_credentials_and_private_roots() {
             credential.path.display()
         );
     }
-    for refused in [root.join("scratch/locks"), root.join("provider-state")] {
+
+    let scratch_overlap = root.join("scratch/locks");
+    let (plan, warnings) = warning::capture(|| with_write(scratch_overlap.clone()));
+    let plan = plan.expect("overlapping extra write grant proceeds");
+    assert_eq!(plan.permissions().write_roots[0].path, scratch_overlap);
+    assert_eq!(warnings.len(), 1);
+    assert_eq!(
+        warnings[0].code.as_ref(),
+        "PLAN_CONFINEDPLAN_NEW_DATA_INTEGRITY"
+    );
+
+    let private_overlap = root.join("provider-state");
+    let (plan, warnings) = warning::capture(|| with_write(private_overlap.clone()));
+    let plan = plan.expect("private state overlap proceeds");
+    assert_eq!(plan.permissions().write_roots[0].path, private_overlap);
+    assert_eq!(warnings.len(), 1);
+    assert_eq!(
+        warnings[0].code.as_ref(),
+        "PLAN_CONFINEDPLAN_NEW_DATA_INTEGRITY"
+    );
+
+    for refused in [
+        credential_home.clone(),
+        credential_home.parent().unwrap().to_owned(),
+    ] {
         assert!(with_write(refused).is_err());
     }
-    assert!(with_write(credential_home.clone()).is_err());
-    assert!(with_write(credential_home.parent().unwrap().to_owned()).is_err());
     assert!(with_write(std::path::PathBuf::from("/Users/alice")).is_err());
 }
 
@@ -264,16 +306,37 @@ fn copy_back_refuses_links_and_private_home_replacement() {
 }
 
 #[test]
-fn read_only_plans_refuse_unconfined_extensions_and_inherited_codex_config() {
+fn read_only_plans_warn_and_proceed_on_extensions_and_inherited_codex_config() {
+    let policy = Policy::default();
+    let rule = policy.rule("PLAN_CONFINEDPLAN_NEW_AUTHORITY").rule.clone();
+    assert_eq!(rule.boundary, Boundary::None);
+    assert_eq!(rule.group.as_deref(), Some("confinement"));
+    assert_eq!(rule.strength, Strength::Warn);
+    assert!(rule.refusable);
+
     let temp = fixture();
     let mut input = request(temp.path());
     input.extensions = ExtensionPolicy::Unconfined;
-    assert!(matches!(
-        ConfinedPlan::new(input),
-        Err(PlanError::UnconfinedExtensions)
-    ));
+    let (plan, warnings) = warning::capture(|| ConfinedPlan::new(input));
+    assert!(plan.is_ok(), "{:?}", plan.as_ref().err());
+    let warning = warnings.first().expect("confinement warning");
+    assert_eq!(warning.code.as_ref(), "PLAN_CONFINEDPLAN_NEW_AUTHORITY");
+    let setting = warning.setting.as_ref().expect("losing setting");
+    assert_eq!(setting.key, "policy.PLAN_CONFINEDPLAN_NEW_AUTHORITY");
+
     let mut input = request(temp.path());
     input.codex = CodexPolicy::Inherited;
+    let (plan, warnings) = warning::capture(|| ConfinedPlan::new(input));
+    assert!(plan.is_ok(), "{:?}", plan.as_ref().err());
+    assert_eq!(warnings.len(), 1);
+    assert_eq!(warnings[0].code.as_ref(), "PLAN_CONFINEDPLAN_NEW_AUTHORITY");
+
+    let mut input = request(temp.path());
+    input.codex = CodexPolicy::Inherited;
+    input.policy.overlay(
+        &std::collections::BTreeMap::from([("default".into(), Strength::Refuse)]),
+        provenant_records::Layer::Launch,
+    );
     assert!(matches!(
         ConfinedPlan::new(input),
         Err(PlanError::UnconfinedExtensions)

@@ -14,6 +14,14 @@ use provenant_supervisor::{
 use rusqlite::{OptionalExtension, params};
 use serde::Serialize;
 
+#[path = "controls_reasons.rs"]
+mod reasons;
+use reasons::{LostReason, attributed_orphan_warning, reservation_issue_blocks_report};
+pub use reasons::{
+    RebootProofCause, TemporaryReason, TemporaryReasonKind, UncertainReason, UnreadableAttempt,
+    UnreadableSource, unreadable_record_warning,
+};
+
 pub(crate) const STEER_PROMPT_PREFIX: &str =
     "Continue the existing task and provider session, then apply these steering instructions:\n\n";
 pub(crate) const STEER_TEXT_SEPARATOR: &str = "\n\n";
@@ -766,293 +774,6 @@ pub enum Reconciled {
         source: UnreadableSource,
         locks: Vec<std::path::PathBuf>,
     },
-}
-
-/// The identity of a stored attempt record that no longer decodes. This is
-/// evidence for a host-side typed warning, never a substitution for the bytes:
-/// the bytes stay in the run database and a copy is sealed under `quarantine/`.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-pub struct UnreadableSource {
-    pub attempt: AttemptId,
-    pub path: std::path::PathBuf,
-    pub schema_version: Option<u64>,
-    pub error: String,
-}
-
-impl std::fmt::Display for UnreadableSource {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{} attempt {}", self.path.display(), self.attempt)?;
-        if let Some(version) = self.schema_version {
-            write!(f, " (schema version {version})")?;
-        }
-        write!(f, ": {}", self.error)
-    }
-}
-
-/// A decode failure plus the original bytes, held together so recovery can
-/// preserve the record before it releases the lease it fenced.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct UnreadableAttempt {
-    pub source: UnreadableSource,
-    pub(crate) raw: Vec<u8>,
-}
-
-/// The one typed warning for an undecodable attempt record. Its subject carries
-/// the source path, schema and error; admission refusals stay fixed text.
-pub fn unreadable_record_warning(source: &UnreadableSource, released: bool) -> Warning {
-    use provenant_records::warning::{
-        UNREADABLE_RECORD_HELD, UNREADABLE_RECORD_RELEASED, detected_source,
-    };
-    let code = if released {
-        UNREADABLE_RECORD_RELEASED
-    } else {
-        UNREADABLE_RECORD_HELD
-    };
-    Warning::new(
-        code,
-        format!(
-            "stored record for attempt {} could not be decoded; {}",
-            source.attempt,
-            if released {
-                "its writer lease was released after liveness was disproved and the bytes were preserved"
-            } else {
-                "its writer lease is retained because liveness could not be disproved"
-            }
-        ),
-        detected_source(code),
-    )
-    .subject(source.to_string())
-    .repair("inspect the preserved copy under quarantine/, then rerun reconcile")
-}
-
-fn attributed_orphan_warning(message: String, attempt: impl ToString) -> Warning {
-    let code = warning::ORPHAN_PROCESS_ATTRIBUTED;
-    Warning::new(code, message, warning::detected_source(code))
-        .subject(attempt.to_string())
-        .once_per_change()
-}
-
-fn reservation_issue_blocks_report(reservation: &std::path::Path, issue: &std::path::Path) -> bool {
-    reservation.starts_with(issue)
-        || reservation
-            .parent()
-            .and_then(std::path::Path::parent)
-            .is_some_and(|slot| issue == slot.join("reservation.json"))
-}
-
-impl std::fmt::Display for Reconciled {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Queued => f.write_str("queued"),
-            Self::Held => f.write_str("held"),
-            Self::DeadlineStop => f.write_str("deadline_stop"),
-            Self::StallStop { policy } => write!(f, "stall_stop ({})", policy.as_str()),
-            Self::Settling { phase, held_reason } => {
-                write!(f, "settling ({phase})")?;
-                if let Some(reason) = held_reason {
-                    write!(f, ": {reason}")?;
-                }
-                Ok(())
-            }
-            Self::Abandoned { reason } => write!(f, "abandoned: {reason}"),
-            Self::Finished => f.write_str("finished"),
-            Self::WriterLeaseReleased { locks } => write!(
-                f,
-                "writer_lease_released {}",
-                locks
-                    .iter()
-                    .map(|lock| lock.display().to_string())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ),
-            Self::TemporaryRemoved => f.write_str("temporary_removed"),
-            Self::TemporaryRetained { path, reason } => {
-                write!(f, "temporary_retained {}: {reason}", path.display())
-            }
-            Self::Withdrawn => f.write_str("withdrawn"),
-            Self::Escaped { pids } => write!(
-                f,
-                "escaped: {}",
-                pids.iter()
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ),
-            Self::Uncertain { reason } => write!(f, "uncertain: {reason}"),
-            Self::UnreadableReleased { source, locks } => write!(
-                f,
-                "unreadable_record_released {source}; writer leases {}",
-                locks
-                    .iter()
-                    .map(|lock| lock.display().to_string())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ),
-        }
-    }
-}
-/// Stable reason for retaining terminal temporary data.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum TemporaryReasonKind {
-    Error,
-    ReservationUnreadable,
-    ReservationRetained,
-    NotPrivate,
-}
-
-/// A typed reason that remains a string in reconcile output.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-#[serde(transparent)]
-pub struct TemporaryReason {
-    text: String,
-    #[serde(skip)]
-    pub kind: TemporaryReasonKind,
-}
-impl TemporaryReason {
-    fn new(kind: TemporaryReasonKind, text: impl Into<String>) -> Self {
-        Self {
-            kind,
-            text: text.into(),
-        }
-    }
-}
-impl From<String> for TemporaryReason {
-    fn from(text: String) -> Self {
-        Self::new(TemporaryReasonKind::Error, text)
-    }
-}
-impl From<&str> for TemporaryReason {
-    fn from(text: &str) -> Self {
-        Self::from(text.to_owned())
-    }
-}
-impl std::ops::Deref for TemporaryReason {
-    type Target = str;
-    fn deref(&self) -> &str {
-        &self.text
-    }
-}
-impl std::fmt::Display for TemporaryReason {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.text)
-    }
-}
-
-/// Why custody could not be proven. The text of an underlying error rides
-/// along as `error`; the kind is what a caller matches on.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum UncertainReason {
-    /// Reconciling the attempt failed before it could be settled.
-    ReconcileFailed { error: String },
-    /// Reboot evidence could not be established; the wire kind is unchanged.
-    #[serde(rename = "reconcile_failed")]
-    RebootProofUnavailable {
-        error: String,
-        #[serde(skip)]
-        cause: RebootProofCause,
-    },
-    /// Custody could not be reattached, acquired or observed.
-    CustodyUnavailable { error: String },
-    /// A running attempt has no launch summary.
-    NoLaunchSummary,
-    /// The launch custody is neither held nor provably absent.
-    CustodyNotProvablyAbsent,
-    /// A process exit exists although no launch was recorded.
-    ExitWithoutLaunchSummary,
-    /// The guardian is neither alive nor finished as far as can be seen.
-    GuardianNotObservable,
-    /// A recorded supervisor is stuck in uninterruptible sleep.
-    HostStalled,
-    /// A launch was handed to a writer whose custody is unconfirmed.
-    WriterCustodyUnconfirmed { reservation: std::path::PathBuf },
-    /// A writer reservation outlived the attempt's terminal commit.
-    WriterReservationRetained { reservation: std::path::PathBuf },
-    /// Another holder kept the writer lock past settlement's bounded wait.
-    /// Settlement retries; contention never consumes the recovery budget.
-    WriterLockBusy {
-        lock: std::path::PathBuf,
-        holder: String,
-        holder_live: bool,
-    },
-    /// The record is unreadable and no liveness disproof was possible, so the
-    /// writer lease stays fenced and the evidence is retained.
-    UnreadableLivenessUnknown { source: UnreadableSource },
-}
-/// The source of an unavailable reboot proof.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum RebootProofCause {
-    Filesystem,
-    Other,
-}
-
-/// Causes of an attempt lost during custody recovery.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum LostReason {
-    Holderless,
-    RemovedWorktree,
-    StaleReservation,
-}
-impl LostReason {
-    pub(crate) const fn message(self) -> &'static str {
-        match self {
-            Self::Holderless => {
-                "no live holder: the guardian and provider ended before the attempt settled"
-            }
-            Self::RemovedWorktree => {
-                "machine rebooted before settlement and the writer worktree was removed"
-            }
-            Self::StaleReservation => {
-                "writer reservation was gone or stale and the recorded process tree predates this boot"
-            }
-        }
-    }
-}
-impl RebootProofCause {
-    fn from_error(error: &RunError) -> Self {
-        if matches!(error, RunError::Filesystem(_)) {
-            Self::Filesystem
-        } else {
-            Self::Other
-        }
-    }
-}
-impl std::fmt::Display for UncertainReason {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::ReconcileFailed { error }
-            | Self::RebootProofUnavailable { error, .. }
-            | Self::CustodyUnavailable { error } => f.write_str(error),
-            Self::NoLaunchSummary => f.write_str("running attempt has no launch summary"),
-            Self::CustodyNotProvablyAbsent => f.write_str("launch custody is not provably absent"),
-            Self::ExitWithoutLaunchSummary => f.write_str("exit exists without a launch summary"),
-            Self::GuardianNotObservable => f.write_str("guardian is not observable"),
-            Self::HostStalled => {
-                f.write_str("host_stalled: supervisor is in uninterruptible sleep")
-            }
-            Self::WriterCustodyUnconfirmed { reservation } => write!(
-                f,
-                "writer custody is unconfirmed; reservation retained at {}; chair recovery required",
-                reservation.display()
-            ),
-            Self::WriterReservationRetained { reservation } => write!(
-                f,
-                "writer reservation retained after terminal commit: {}; chair recovery required",
-                reservation.display()
-            ),
-            Self::WriterLockBusy { lock, holder, .. } => write!(
-                f,
-                "waiting for writer lock {}, held by {holder}",
-                lock.display()
-            ),
-            Self::UnreadableLivenessUnknown { source } => {
-                write!(
-                    f,
-                    "unreadable attempt record still fenced: {source}; liveness not disproved"
-                )
-            }
-        }
-    }
 }
 
 /// How long recovery waits after each of TERM and KILL for an orphan to go.
@@ -3596,9 +3317,8 @@ impl RunStore {
         )?;
         self.check_writer_lineage(&prior, &launch.worktree, call)
     }
-    /// Whether a successor head is the writer's own descendant of its pinned
-    /// head. Only a lane-owned writer may advance the pin this way; the git
-    /// probe is bounded to the verified worktree and reads no untrusted input.
+    /// Whether a successor head descends from its pinned head. The git probe
+    /// is bounded to the verified worktree and reads no untrusted input.
     fn repinned_head_descends(
         tree: &provenant_confinement::VerifiedWorktree,
         pinned: provenant_core::GitOid,
@@ -3624,6 +3344,11 @@ impl RunStore {
     }
     /// Called after writer custody is acquired. Graph retries are separate runs,
     /// so their sealed predecessor must be checked independently of `retry_of`.
+    ///
+    /// Custody is a lease: a terminal predecessor's lease lapses and any lane
+    /// may continue it, while a live predecessor is admitted by the shared
+    /// writer rule. A head that moved on from the pin re-pins with a warning;
+    /// only an unreadable or foreign lineage is a typed operation error.
     pub(crate) fn check_launch_writer_lineage(
         &self,
         record: &AttemptRecord,
@@ -3639,44 +3364,24 @@ impl RunStore {
                 != record.retry_of
         {
             // Manual continuations without a graph predecessor follow the
-            // immediate run's owner chain. Graph continuations also recheck
-            // their sealed source and head below.
-            return self.check_writer_lineage(record, tree, call).map(|_| ());
+            // immediate run's owner chain.
+            self.check_writer_lineage_with_lock(record, tree, call, true)?;
+            return Ok(());
         }
         let Some(context) = task.context.as_ref() else {
+            self.check_writer_lineage_with_lock(record, tree, call, true)?;
             return Ok(());
         };
         let Some(prior) = context.writer_predecessor else {
+            self.check_writer_lineage_with_lock(record, tree, call, true)?;
             return Ok(());
         };
+        // An unreadable predecessor record is a typed operation error, never
+        // an authority refusal.
         let previous = self.record(prior, call)?;
-        if !matches!(previous.state, AttemptState::Terminal { .. })
-            || !self.custody_released(&previous, call)?
-        {
-            return Err(RunError::Nonterminal);
-        }
-        let previous_context = previous.context.as_ref();
-        let same_node = context.graph_id.is_some()
-            && context.node_id.is_some()
-            && previous_context.is_some_and(|previous| {
-                previous.graph_id == context.graph_id && previous.node_id == context.node_id
-            });
-        // A new graph can adopt a retained writer worktree whose lane owner
-        // belongs to a finished attempt in an earlier graph. It inherits the
-        // worktree and the writer's own commits, not the earlier graph's source
-        // and head pins: those describe the old graph, not the adopted tree.
-        // Writer identity, terminal custody and the lane-owner chain below stay
-        // authoritative; ordinary same-node retries keep their pin check.
-        let adopted_prior_graph = context.graph_id.is_some()
-            && context.node_id.is_some()
-            && previous_context.is_some_and(|previous| {
-                previous.graph_id.is_some()
-                    && previous.node_id.is_some()
-                    && previous.graph_id != context.graph_id
-            });
-        if !same_node && !adopted_prior_graph {
-            return Err(RunError::WriterLineage("graph predecessor context"));
-        }
+        // Take the lease for the launching attempt, not the predecessor: the
+        // handover fact is sealed in the successor's record.
+        self.check_writer_lineage_with_lock(record, tree, call, true)?;
         let request = self.request(previous.attempt_id, call)?;
         let previous_task = request.task;
         let source = previous_task
@@ -3687,132 +3392,460 @@ impl RunStore {
             .head
             .map(|head| head.to_string())
             .or_else(|| previous_task.head.clone());
-        let owner = self.check_writer_lineage(&previous, tree, call)?;
         if !task
             .writer
             .as_ref()
             .zip(previous_task.writer.as_ref())
             .is_some_and(|(writer, previous)| equivalent_writer(previous, writer))
-            || (!adopted_prior_graph
-                && (task.source_head.is_none()
-                    || task.source_head.as_ref() != source
-                    || task.head.is_none()))
         {
-            return Err(RunError::WriterLineage(
-                "graph predecessor writer or source",
-            ));
+            return Err(RunError::Validation("graph predecessor writer or source"));
         }
-        // A retained writer may commit after its predecessor was sealed. The
-        // continuation re-pins to that descendant under the verified custody of
-        // the same lane-owned writer; a moved head from anywhere else still
-        // fails this check. An adopted prior graph inherits the writer's own
-        // commits, not the earlier graph's pins, so it keeps its inherited head.
-        let head_matches = adopted_prior_graph
-            || task.head == head
-            || owner.is_some_and(|owner| {
-                owner.origin == provenant_confinement::worktrees::WorktreeOrigin::Lane
-            }) && head
+        // A new graph can adopt a retained writer worktree whose lane owner
+        // belongs to a finished attempt in an earlier graph. It inherits the
+        // worktree and the writer's own commits, not the earlier graph's source
+        // and head pins: those describe the old graph, not the adopted tree.
+        let adopted_prior_graph = context.graph_id.is_some()
+            && context.node_id.is_some()
+            && previous.context.as_ref().is_some_and(|previous| {
+                previous.graph_id.is_some()
+                    && previous.node_id.is_some()
+                    && previous.graph_id != context.graph_id
+            });
+        if adopted_prior_graph {
+            return Ok(());
+        }
+        if task.source_head.is_none()
+            || source.is_some_and(|source| task.source_head.as_deref() != Some(source.as_str()))
+        {
+            return Err(RunError::Validation("graph predecessor writer or source"));
+        }
+        let (Some(pinned), Some(current)) = (
+            head.as_deref()
+                .and_then(|head| provenant_core::GitOid::parse(head).ok()),
+            task.head
                 .as_deref()
-                .and_then(|pinned| provenant_core::GitOid::parse(pinned).ok())
-                .zip(
-                    task.head
-                        .as_deref()
-                        .and_then(|current| provenant_core::GitOid::parse(current).ok()),
-                )
-                .is_some_and(|(pinned, current)| {
-                    Self::repinned_head_descends(tree, pinned, current)
-                });
-        if !head_matches {
-            return Err(RunError::WriterLineage(
-                "graph predecessor writer or source",
-            ));
+                .and_then(|head| provenant_core::GitOid::parse(head).ok()),
+        ) else {
+            return Err(RunError::Validation("graph predecessor writer or source"));
+        };
+        if current == pinned {
+            return Ok(());
         }
+        // A head that moved on from the pin is not destruction: the successor
+        // re-pins to the current head and reports WRITER_HEAD_MOVED. Only a
+        // foreign lineage stays a typed operation error.
+        if !Self::repinned_head_descends(tree, pinned, current) {
+            return Err(RunError::Validation("graph predecessor writer or source"));
+        }
+        Self::warn_head_moved(&previous, pinned, current);
         Ok(())
     }
+    /// A lease holder's attempt state, named for the handover and sharing
+    /// notices. A terminal holder has a lapsed lease; every other state is live.
+    fn lease_holder_state(state: &AttemptState) -> String {
+        match state {
+            AttemptState::Terminal { outcome, .. } => format!("terminal ({outcome:?})"),
+            AttemptState::Queued { .. } => "queued".to_owned(),
+            AttemptState::Starting { .. } => "starting".to_owned(),
+            AttemptState::Running { .. } => "running".to_owned(),
+            AttemptState::Settling { .. } => "settling".to_owned(),
+        }
+    }
+
+    /// Build a typed warning for a lease event. The code is one of the declared
+    /// custody codes and the subject names the lane whose lease changed.
+    fn lease_warning(code: &'static str, message: String, holder: AttemptId) -> Warning {
+        Warning::new(
+            provenant_records::warning::WarningCode(code),
+            message,
+            provenant_records::Source {
+                layer: provenant_records::Layer::Default,
+                origin: Some("run store writer lease".to_owned()),
+            },
+        )
+        .subject(holder.to_string())
+    }
+
+    /// Report `WRITER_HEAD_MOVED` for a continuation whose predecessor head
+    /// moved forward. The re-pin itself keeps the original source pin; only the
+    /// head pin is advanced to the current descendant.
+    fn warn_head_moved(
+        previous: &AttemptRecord,
+        pinned: provenant_core::GitOid,
+        current: provenant_core::GitOid,
+    ) {
+        warning::warn(Self::lease_warning(
+            provenant_records::policy::WRITER_HEAD_MOVED,
+            format!(
+                "WRITER_HEAD_MOVED: predecessor {} moved from {pinned} to {current}; re-pinned to the current head",
+                previous.attempt_id
+            ),
+            previous.attempt_id,
+        ));
+    }
+
+    /// Take a lapsed lease. The prior lane's uncommitted files stay in place,
+    /// are named in the notice and are sealed as a durable `Handover` fact in
+    /// the successor's attempt directory. Replay is idempotent: one fact per
+    /// successor, so a re-check never duplicates the notice.
+    fn take_lapsed_lease(
+        &self,
+        record: &AttemptRecord,
+        holder: &AttemptRecord,
+        tree: &provenant_confinement::VerifiedWorktree,
+        call: &Request<'_>,
+        shared_occupancy_held: bool,
+        observed_unreachable_lapse: Option<&provenant_records::custody::LeaseObservation>,
+    ) -> Result<()> {
+        use provenant_confinement::worktrees::state_dir_name;
+        use provenant_os::fs::LockMode;
+        use std::ffi::OsStr;
+
+        let slot_path = self
+            .writer_registry
+            .join("worktrees")
+            .join(record.project_id.to_string())
+            .join(state_dir_name(tree.repo().root_path()));
+        let slot = provenant_os::fs::Directory::open_anchor(&slot_path)?;
+        let _writer = if shared_occupancy_held {
+            None
+        } else {
+            Some(slot.try_lock(OsStr::new("writer.lock"), LockMode::Exclusive)?)
+        };
+        let project_state_path = self
+            .writer_registry
+            .join("worktrees")
+            .join(record.project_id.to_string());
+        let project_state = provenant_os::fs::Directory::open_anchor(&project_state_path)?;
+        let grace = provenant_confinement::worktrees::configured_unreachable_grace_at(
+            &self.writer_registry,
+        );
+        let handover_guard = provenant_confinement::worktrees::lock_writer_lease_handover(
+            &project_state,
+            tree.repo().root_path(),
+            call.clock.wall_now()?,
+            &grace,
+            Self::scope(record),
+        )?;
+        let current = handover_guard.observation().cloned();
+        let handover_slot = handover_guard.slot().unwrap_or(&slot);
+        if handover_guard.has_other_protected_holder() {
+            // A current or unobservable sibling reservation may still be
+            // writing this shared worktree. Do not rewrite its lease owner.
+            return Ok(());
+        }
+        if observed_unreachable_lapse.is_some()
+            && !matches!(
+                current.as_ref(),
+                Some(observation)
+                    if observation.lease.holder == holder.attempt_id
+                        && matches!(
+                            &observation.state,
+                            provenant_records::custody::LeaseState::LapsedUnreachable { .. }
+                        )
+            )
+        {
+            // A vanished or changed reservation is not proof that an
+            // unreachable holder has lapsed. Only the fresh shared
+            // classification can authorise this handover.
+            return Ok(());
+        }
+        if let Some(current) = &current
+            && (current.lease.holder != holder.attempt_id
+                || !matches!(
+                    &current.state,
+                    provenant_records::custody::LeaseState::Lapsed { .. }
+                        | provenant_records::custody::LeaseState::LapsedUnreachable { .. }
+                ))
+        {
+            return Ok(());
+        }
+        let unreachable_lapse = match current.as_ref() {
+            Some(observation)
+                if matches!(
+                    &observation.state,
+                    provenant_records::custody::LeaseState::LapsedUnreachable { .. }
+                ) =>
+            {
+                Some(observation)
+            }
+            _ => None,
+        };
+        let attempt = self.attempt_dir(record.attempt_id, false)?;
+        if crate::writer::read_handover(&attempt)?.is_some() {
+            // A replay must still name the successor at the slot path, even if
+            // a previous pass sealed the receipt before the lease transfer.
+            self.transfer_slot_lease(record, handover_slot, call.clock.wall_now()?)?;
+            return Ok(());
+        }
+        let head = holder.head.or_else(|| {
+            self.request(holder.attempt_id, call)
+                .ok()
+                .and_then(|request| request.task.head.clone())
+                .and_then(|head| provenant_core::GitOid::parse(&head).ok())
+        });
+        let uncommitted = crate::writer::WriterLaunch::uncommitted_worktree_paths(tree)?;
+        let at = call.clock.wall_now()?;
+        let handover = provenant_records::custody::Handover {
+            from: holder.attempt_id,
+            to: record.attempt_id,
+            at,
+            head,
+            uncommitted: uncommitted.clone(),
+        };
+        crate::writer::seal_handover(&attempt, &handover)?;
+        // The receipt names the prior lane; the durable lease must name the
+        // successor, or the next admission would read a holder that already
+        // finished. Both live at the one slot path confinement reads.
+        self.transfer_slot_lease(record, handover_slot, at)?;
+        if let Some(observation) = unreachable_lapse
+            && let provenant_records::custody::LeaseState::LapsedUnreachable { retry_at, setting } =
+                &observation.state
+        {
+            warning::warn(
+                Self::lease_warning(
+                    provenant_records::policy::LEASE_HOLDER_UNREACHABLE,
+                    format!(
+                        "LEASE_HOLDER_UNREACHABLE: worktree holder {} remained unreachable through grace ending at {retry_at}",
+                        observation.lease.holder
+                    ),
+                    observation.lease.holder,
+                )
+                .setting(setting.clone()),
+            );
+        }
+        let files = if uncommitted.is_empty() {
+            "none".to_owned()
+        } else {
+            uncommitted.join(", ")
+        };
+        warning::warn(Self::lease_warning(
+            provenant_records::policy::WRITER_HANDOVER,
+            format!(
+                "WRITER_HANDOVER: lane {} ({}) left {} with head {}; uncommitted files kept in place: {files}",
+                holder.attempt_id,
+                if unreachable_lapse.is_some()
+                    && !matches!(&holder.state, AttemptState::Terminal { .. })
+                {
+                    "unreachable after grace".to_owned()
+                } else {
+                    Self::lease_holder_state(&holder.state)
+                },
+                tree.repo().root_path().display(),
+                head.map_or_else(|| "unknown".to_owned(), |head| head.to_string()),
+            ),
+            holder.attempt_id,
+        ));
+        Ok(())
+    }
+
+    /// Rewrite the worktree slot lease so later admissions observe the
+    /// successor as holder. Launch admission retains its shared occupancy and
+    /// observation gate; a stand-alone continuation takes exclusive occupancy
+    /// here when free. The publication is an atomic replace of the one lease file.
+    fn transfer_slot_lease(
+        &self,
+        record: &AttemptRecord,
+        slot: &provenant_os::fs::Directory,
+        at: provenant_core::WallTime,
+    ) -> Result<()> {
+        use provenant_confinement::worktrees::LEASE_FILE;
+        use provenant_os::fs::PublishMode;
+        use std::ffi::OsStr;
+
+        let name = OsStr::new(LEASE_FILE);
+        let sharing = slot
+            .read_stable(name, 4096)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+            .and_then(|value| {
+                serde_json::from_value::<provenant_records::custody::Sharing>(
+                    value["sharing"].clone(),
+                )
+                .ok()
+            })
+            .unwrap_or_default();
+        let lease = provenant_records::custody::WorktreeLease {
+            holder: record.attempt_id,
+            since: at,
+            sharing,
+        };
+        let bytes = serde_json::to_vec(&lease)
+            .map_err(|_| RunError::Validation("worktree lease could not be encoded"))?;
+        slot.atomic_write(name, ".lease-", &bytes, PublishMode::Replace)?
+            .require_durable()?;
+        Ok(())
+    }
+
+    /// Check that a continuation can take a worktree's lease. Custody is a
+    /// lease derived from the holder's attempt state: a terminal holder's
+    /// lease lapses and any lane may continue it with `WRITER_HANDOVER`; a live
+    /// holder is admitted by the shared-writer rule. Ownership alone never
+    /// refuses, and a lapsed holder's uncommitted files are kept in place.
     pub(crate) fn check_writer_lineage(
         &self,
         record: &AttemptRecord,
         tree: &provenant_confinement::VerifiedWorktree,
         call: &Request<'_>,
     ) -> Result<Option<provenant_confinement::worktrees::WorktreeOwner>> {
+        self.check_writer_lineage_with_lock(record, tree, call, false)
+    }
+
+    fn check_writer_lineage_with_lock(
+        &self,
+        record: &AttemptRecord,
+        tree: &provenant_confinement::VerifiedWorktree,
+        call: &Request<'_>,
+        shared_occupancy_held: bool,
+    ) -> Result<Option<provenant_confinement::worktrees::WorktreeOwner>> {
+        let observation = self.current_writer_lease_observation(
+            record.project_id,
+            tree.repo().root_path(),
+            call.clock.wall_now()?,
+            Self::scope(record),
+        )?;
+        self.check_writer_lineage_observed(record, tree, call, observation, shared_occupancy_held)
+    }
+
+    fn current_writer_lease_observation(
+        &self,
+        project: provenant_core::ProjectId,
+        path: &std::path::Path,
+        now: WallTime,
+        adopter: provenant_records::custody::Scope,
+    ) -> Result<Option<provenant_records::custody::LeaseObservation>> {
+        let host_state = &self.writer_registry;
+        let project_state_path = host_state.join("worktrees").join(project.to_string());
+        let project_state = match provenant_os::fs::Directory::open_anchor(&project_state_path) {
+            Ok(directory) => directory,
+            Err(error) if error.is_not_found() => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+        let grace = provenant_confinement::worktrees::configured_unreachable_grace_at(host_state);
+        Ok(
+            provenant_confinement::worktrees::writer_lease_observation_for_adopter(
+                &project_state,
+                path,
+                now,
+                &grace,
+                adopter,
+            )?,
+        )
+    }
+
+    fn check_writer_lineage_observed(
+        &self,
+        record: &AttemptRecord,
+        tree: &provenant_confinement::VerifiedWorktree,
+        call: &Request<'_>,
+        observation: Option<provenant_records::custody::LeaseObservation>,
+        shared_occupancy_held: bool,
+    ) -> Result<Option<provenant_confinement::worktrees::WorktreeOwner>> {
         use provenant_confinement::worktrees::{WorktreeOrigin, load_owner};
         let owner = load_owner(tree)?;
-        let lane = owner
+        let Some(lane) = owner
             .as_ref()
-            .filter(|owner| owner.origin == WorktreeOrigin::Lane);
+            .filter(|owner| owner.origin == WorktreeOrigin::Lane)
+            .cloned()
+        else {
+            // Explicit and adopted trees retain their existing lifecycle:
+            // there is no lane lease to hand over.
+            return Ok(owner);
+        };
+        // Walk the retry chain to find which attempt owns this tree. An
+        // unreadable record is a typed operation error, not an authority
+        // refusal.
         let mut current = record.clone();
         let mut seen = std::collections::HashSet::new();
-        let mut was_owned = false;
-        let mut initial_owner = None;
+        let mut holder = None;
         loop {
             if !seen.insert(current.attempt_id) || seen.len() > 128 {
-                return Err(RunError::WriterLineage("continuation parent chain"));
+                return Err(RunError::Validation("writer continuation chain is cyclic"));
             }
-            if lane.is_some_and(|owner| {
-                owner.attempt_id == Some(current.attempt_id)
-                    || self
-                        .attempt_operation(current.attempt_id, call)
-                        .is_ok_and(|operation| {
-                            owner.operation_id.as_ref() == Some(&operation.operation_id)
-                        })
-            }) {
-                let owner_id =
-                    lane.and_then(|owner| owner.attempt_id)
-                        .ok_or(RunError::WriterLineage(
-                            "continuation owner attempt missing",
-                        ))?;
-                if owner_id != record.attempt_id && !self.writer_owner_terminal(owner_id, call)? {
-                    return Err(RunError::Nonterminal);
-                }
-                return Ok(owner);
-            }
-            let directory = self.attempt_dir(current.attempt_id, false)?;
-            if let Some(raw) = read_sealed(&directory, "writer-owned.json", crate::RECORD_LIMIT)? {
-                // Recorded under custody before launch. A later owner removal or
-                // adoption cannot turn an owned lane into an explicit tree.
-                let ownership = crate::db::decode::<crate::writer::WriterOwnership>(&raw)?;
-                was_owned |= ownership.lane_owned;
-                if ownership.lane_owned
-                    && ownership
-                        .owner
-                        .as_ref()
-                        .is_some_and(|saved| Some(saved) == lane)
-                {
-                    let owner_id =
-                        lane.and_then(|owner| owner.attempt_id)
-                            .ok_or(RunError::WriterLineage(
-                                "continuation owner attempt missing",
-                            ))?;
-                    if !self.writer_owner_terminal(owner_id, call)? {
-                        return Err(RunError::Nonterminal);
-                    }
-                    return Ok(owner);
-                }
-                let snapshot = ownership;
-                was_owned |= snapshot.lane_owned;
-                if current.retry_of.is_none() {
-                    initial_owner = snapshot.owner;
-                }
+            if lane.attempt_id == Some(current.attempt_id)
+                || self
+                    .attempt_operation(current.attempt_id, call)
+                    .is_ok_and(|operation| {
+                        lane.operation_id.as_ref() == Some(&operation.operation_id)
+                    })
+            {
+                holder = Some(current);
+                break;
             }
             let Some(parent) = current.retry_of else {
                 break;
             };
             current = self.record(parent, call)?;
         }
-        if lane.is_some() && owner == initial_owner {
+        if holder
+            .as_ref()
+            .is_some_and(|holder| holder.attempt_id == record.attempt_id)
+        {
+            // Re-claiming one's own lease needs no handover.
             return Ok(owner);
         }
-        if lane.is_some() {
-            return Err(RunError::WriterLineage(
-                "continuation worktree belongs to another lane",
-            ));
-        }
-        if was_owned {
-            return Err(RunError::WriterLineage(
-                "continuation worktree has no lane owner",
-            ));
-        }
-        // Explicit unowned and adopted trees retain their existing lifecycle.
+
+        let (handover_holder, unreachable_observation) = match observation.as_ref() {
+            Some(observation) => match &observation.state {
+                provenant_records::custody::LeaseState::Lapsed { .. }
+                | provenant_records::custody::LeaseState::LapsedUnreachable { .. } => {
+                    let current = match self.record(observation.lease.holder, call) {
+                        Ok(current) => current,
+                        Err(RunError::NotFound) => return Ok(owner),
+                        Err(error) => return Err(error),
+                    };
+                    let unreachable_observation = matches!(
+                        &observation.state,
+                        provenant_records::custody::LeaseState::LapsedUnreachable { .. }
+                    )
+                    .then(|| observation.clone());
+                    if unreachable_observation.is_some()
+                        || matches!(&current.state, AttemptState::Terminal { .. })
+                    {
+                        (Some(current), unreachable_observation)
+                    } else {
+                        (None, None)
+                    }
+                }
+                // Live and within-grace holders stay protected, even when a
+                // run record says terminal. Custody owns the current fact.
+                _ => (None, None),
+            },
+            None => {
+                let fallback = match holder {
+                    Some(holder) => Some(holder),
+                    None => match lane.attempt_id {
+                        Some(id) => match self.record(id, call) {
+                            Ok(holder) => Some(holder),
+                            Err(RunError::NotFound) => None,
+                            Err(error) => return Err(error),
+                        },
+                        None => None,
+                    },
+                };
+                if fallback
+                    .as_ref()
+                    .is_some_and(|holder| matches!(&holder.state, AttemptState::Terminal { .. }))
+                {
+                    (fallback, None)
+                } else {
+                    (None, None)
+                }
+            }
+        };
+        let Some(handover_holder) = handover_holder else {
+            // A different lane may be adopted only when the current slot
+            // lease itself proves that its holder has lapsed.
+            return Ok(owner);
+        };
+        self.take_lapsed_lease(
+            record,
+            &handover_holder,
+            tree,
+            call,
+            shared_occupancy_held,
+            unreachable_observation.as_ref(),
+        )?;
         Ok(owner)
     }
     fn resume_mode(
@@ -4587,9 +4620,7 @@ impl RunStore {
     ) -> Result<Option<Reconciled>> {
         let scope = Self::scope(record);
         let attempt = self.attempt_dir(record.attempt_id, false)?;
-        if fence.scope != scope
-            || read_sealed(&attempt, "process-exit.json", RECORD_LIMIT)?.is_some()
-        {
+        if fence.scope != scope {
             return Ok(None);
         }
         let directory = fence.custody_directory().ok_or_else(|| {
@@ -4611,9 +4642,23 @@ impl RunStore {
         {
             return Ok(None);
         }
-        // No canonical exit exists to import the writer's private head.
-        // Lost-without-exit retains it through both cleanup and GC. Repeating
-        // this transaction also finishes a release interrupted after commit.
+        // The never-spawned exit is owed before the attempt settles: record it,
+        // or keep custody until it can be. An exit already recorded for this
+        // scope is kept, so a repeat finishes a commit or release interrupted
+        // after it; any other exit is not this transaction's to settle.
+        let reason = crate::store::cancel_requested(&attempt, scope)
+            .then_some(StopReason::ExplicitCancellation);
+        match recovery
+            .record_never_spawned_exit(&attempt, reason)
+            .and_then(|publication| publication.require_durable().map_err(Into::into))
+        {
+            Ok(()) => {}
+            Err(CustodyError::InvalidRecord) => return Ok(None),
+            Err(error) => return Ok(Some(Reconciled::custody_unavailable(&error))),
+        }
+        // A never-spawned exit has nothing to import, so the terminal record
+        // carries no exit evidence: Lost-without-exit-evidence retains the
+        // writer's private head through both cleanup and GC.
         self.commit_lost(
             scope,
             "launch interrupted: provider never spawned; private evidence retained",
@@ -4731,7 +4776,21 @@ impl RunStore {
                         UncertainReason::CustodyNotProvablyAbsent,
                     ));
                 }
-                if read_sealed(&attempt, "process-exit.json", RECORD_LIMIT)?.is_some() {
+                // A refused launch whose exit could not be recorded kept its
+                // custody for this: record the never-spawned exit before the
+                // withdrawal, or keep custody until it can be recorded.
+                if recovery
+                    .never_spawned(&attempt)
+                    .map_err(|error| RunError::Io(std::io::Error::other(error)))?
+                {
+                    let reason = cancelled.then_some(StopReason::ExplicitCancellation);
+                    if let Err(error) = recovery
+                        .record_never_spawned_exit(&attempt, reason)
+                        .and_then(|publication| publication.require_durable().map_err(Into::into))
+                    {
+                        return Ok(Reconciled::custody_unavailable(&error));
+                    }
+                } else if read_sealed(&attempt, "process-exit.json", RECORD_LIMIT)?.is_some() {
                     return Ok(Reconciled::uncertain(
                         UncertainReason::ExitWithoutLaunchSummary,
                     ));

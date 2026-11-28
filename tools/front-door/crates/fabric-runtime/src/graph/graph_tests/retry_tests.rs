@@ -1293,6 +1293,7 @@ fn retry_of_explicit_launch_refusal_preserves_pending_siblings_and_rejects_uncer
         &mut unknown,
         work_index,
         &crate::coordination::facade::FacadeError::LaunchUnknown {
+            detail: None,
             operation_id: provenant_core::OperationId::parse("unknown-operation").unwrap(),
         },
         LaunchTiming {
@@ -2766,6 +2767,8 @@ fn retry_of_launch_blocked_writer_starts_a_new_attempt_in_the_same_worktree() {
     // The launch created its writer checkout before the lock wait expired.
     let binding = WriterWorktreeBinding {
         extra: Default::default(),
+        carry_examined: false,
+        carried_paths: Vec::new(),
         source_directory_identity: None,
         shared_worktree: None,
         worktree: "/fixture/launch-blocked".into(),

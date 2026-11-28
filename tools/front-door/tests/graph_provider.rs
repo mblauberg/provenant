@@ -2971,7 +2971,9 @@ fn pending_graph_reports_pre_attempt_writer_failure() -> Result {
             let waited = rig.command(&["wait", "mixed-failure", "--timeout", "1s", "--json"])?;
             assert_ne!(code(&waited), 0, "{waited:?}");
         }
-        assert_eq!(response["status"], "waiting", "{response}");
+        // Composite launches return an accepted handle while the graph runs.
+        assert_eq!(response["status"], "ok", "{response}");
+        assert_eq!(response["data"]["status"], "pending", "{response}");
         let nodes = response["data"]["checkpoint"]["nodes"]
             .as_array()
             .ok_or("nodes")?;
@@ -2984,6 +2986,22 @@ fn pending_graph_reports_pre_attempt_writer_failure() -> Result {
             "{response}"
         );
         assert_eq!(writer["attempts"], json!([]), "{response}");
+        assert!(
+            !writer["writer_binding_pending"].as_bool().unwrap_or(false),
+            "{response}"
+        );
+        let slow = nodes
+            .iter()
+            .find(|node| node["id"] == "slow")
+            .ok_or("slow")?;
+        assert_eq!(slow["state"], "running", "{response}");
+        assert!(
+            slow["warnings"].as_array().is_some_and(|warnings| warnings
+                .iter()
+                .any(|warning| warning["code"] == "SETTING_LAYER_IGNORED"
+                    && warning["source"]["layer"] == "detected")),
+            "{response}"
+        );
         assert_eq!(
             response["error"]["code"],
             writer["advance_owner_code"]
@@ -5095,7 +5113,7 @@ fn nested_writer_fixture_child() -> Result {
             "graph_id": "nested-graph",
             "nodes": [{"id":"writer", "prompt":"fixture writer shell", "access":"worktree_write",
                 "worktree":".worktrees/nested-writer", "delivery":"push",
-                "attempt":{"preset":"light","isolation":"private"},
+                "attempt":{"preset":"light"},
                 "route":{"adapter":"codex","model":"gpt-6-luna","effort":"low"}}]
         }))?,
     )?;
@@ -5517,7 +5535,7 @@ fn light_graph_delivers_and_applies_preset_per_node() -> Result {
         &document,
         serde_json::to_vec(
             &json!({"schema_version":support::GRAPH_DOCUMENT_SCHEMA_VERSION,"graph_id":"light-graph","nodes":[
-                {"id":"writer","prompt":"fixture writer shell","access":"worktree_write","worktree":".worktrees/light-writer","delivery":"push","attempt":{"preset":"light","isolation":"private"},"route":route},
+                {"id":"writer","prompt":"fixture writer shell","access":"worktree_write","worktree":".worktrees/light-writer","delivery":"push","attempt":{"preset":"light"},"route":route},
                 {"id":"reader","prompt":"fixture read only","access":"read_only","route":route}
             ]}),
         )?,
@@ -5818,7 +5836,7 @@ fn writer_shell_edits_instructions_and_keeps_private_logs(adapter: &str) -> Resu
         let mut node = json!({
             "id":"writer", "prompt":"fixture writer shell", "access":"worktree_write",
             "worktree":".worktrees/shell-evidence", "delivery":"none",
-            "attempt":{"preset":"light", "isolation":"private"},
+            "attempt":{"preset":"light"},
             "route": if adapter == "claude" {
                 json!({"adapter":"claude","model":"claude-sonnet-5-5","effort":"medium"})
             } else {

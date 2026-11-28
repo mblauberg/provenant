@@ -367,8 +367,11 @@ pub(crate) fn spawn_branch_scratch(
 /// The land command already removed the exact worktree. Its branch index
 /// selects attempts; publication/custody locks and absent-owner proof are
 /// rechecked by RunStore at mutation. No shared cache adapters run here.
-pub(crate) fn run_branch_scratch(globals: &provenant_cli::Globals, branch: &str) -> u8 {
-    let collect = || -> Result<(), Box<dyn std::error::Error>> {
+pub(crate) fn collect_branch_scratch(
+    globals: &provenant_cli::Globals,
+    branch: &str,
+) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+    let collect = || -> Result<serde_json::Value, Box<dyn std::error::Error>> {
         if provenant_cli::fabric::in_lane() {
             return Err("branch scratch collection requires host custody".into());
         }
@@ -414,7 +417,11 @@ pub(crate) fn run_branch_scratch(globals: &provenant_cli::Globals, branch: &str)
             .filter(|id| indexed.contains(id))
             .collect();
         if ids.is_empty() {
-            return Ok(());
+            return Ok(serde_json::json!({
+                "branch": branch,
+                "matched_attempts": 0,
+                "completed": true,
+            }));
         }
         let clock = SystemClock;
         let cancel = CancelToken::new();
@@ -495,9 +502,21 @@ pub(crate) fn run_branch_scratch(globals: &provenant_cli::Globals, branch: &str)
                 "branch scratch collection incomplete; retry with provenant gc --apply".into(),
             );
         }
-        Ok(())
+        Ok(serde_json::json!({
+            "branch": branch,
+            "matched_attempts": ids.len(),
+            "completed": true,
+        }))
     };
-    if collect().is_ok() { 0 } else { 1 }
+    collect()
+}
+
+pub(crate) fn run_branch_scratch(globals: &provenant_cli::Globals, branch: &str) -> u8 {
+    if collect_branch_scratch(globals, branch).is_ok() {
+        0
+    } else {
+        1
+    }
 }
 
 #[cfg(any(test, feature = "fixture"))]

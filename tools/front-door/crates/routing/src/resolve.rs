@@ -13,6 +13,10 @@ use provenant_records::{
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 
+#[path = "resolve_pin.rs"]
+mod pin;
+pub use pin::{FallbackFact, RoutePin};
+
 /// The readiness of one route at a time, in unix seconds.
 pub type ReadinessLookup<'a> =
     &'a dyn Fn(&provenant_quota::ReadinessScope, i64) -> provenant_quota::ReadinessRead;
@@ -2919,9 +2923,7 @@ fn candidate(
         .0 == PacingPolicy::Pace
         && let Some(quota) = latest_reading(model, availability, context, true)
     {
-        use provenant_records::diagnostic::{
-            PacingReserveSetting, PacingSettingSource, ResourceFact,
-        };
+        use provenant_records::diagnostic::{PacingReserveSetting, ResourceFact};
         let (_, profile, _, _) = account_pacing(
             context.catalogue,
             context.config,
@@ -2960,11 +2962,9 @@ fn candidate(
                 PacingReserveSetting::Free
             };
             let origin = if window.profile {
-                PacingSettingSource::Configuration
-            } else if context.config.pacing_reserve.contains_key(model.adapter()) {
-                PacingSettingSource::Unresolved
+                Layer::Host
             } else {
-                PacingSettingSource::ShippedDefault
+                Layer::Default
             };
             let window_name = window.name();
             let account = format!(

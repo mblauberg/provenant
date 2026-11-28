@@ -706,6 +706,7 @@ fn host_probe_budget_is_shared_fairly() {
 #[test]
 fn forwarded_unobservable_cancel_keeps_its_operation() -> Result<(), Box<dyn std::error::Error>> {
     let error = super::FacadeError::LaunchUnknown {
+        detail: None,
         operation_id: provenant_core::OperationId::parse("stop")?,
     };
     let reply = super::peer_result::<()>(Err(error), |()| super::PeerResult::Error {
@@ -723,7 +724,7 @@ fn forwarded_unobservable_cancel_keeps_its_operation() -> Result<(), Box<dyn std
         return Err("expected error".into());
     };
     assert!(
-        matches!(error, super::FacadeError::LaunchUnknown { operation_id } if operation_id.as_str() == "stop")
+        matches!(error, super::FacadeError::LaunchUnknown { operation_id, .. } if operation_id.as_str() == "stop")
     );
     Ok(())
 }

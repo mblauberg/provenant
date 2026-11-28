@@ -142,6 +142,9 @@ pub struct DepletionFacts {
     pub intent: provenant_routing::RouteIntent,
     pub confidential: bool,
     pub now: provenant_core::WallTime,
+    /// The resolved `routing.pin` (H/P/R/L, default `family`). Only a
+    /// model-unavailable fallback reads it: other depletions keep their ladder.
+    pub pin: provenant_routing::RoutePin,
 }
 
 /// The host's routing facts for one depleted stop: `Ok(None)` when the host
@@ -159,7 +162,10 @@ const HOST_NATIVE: &str = "host-native";
 pub(super) struct Successor {
     pub(super) routes: Vec<GraphRoute>,
     /// What the ladder chose, when it handed the work off.
-    choice: Option<patch::LadderChoice>,
+    pub(super) choice: Option<patch::LadderChoice>,
+    /// An `exact` pin refuses a model-unavailable fallback outright. The note
+    /// names `routing.pin` and its resolved value so a reader can change it.
+    pub(super) refusal: Option<String>,
 }
 
 /// The ladder key of a route the graph itself ran, when the route names one.
@@ -223,6 +229,8 @@ fn target_route(target: &ladder::Target, effort: Option<String>) -> GraphRoute {
             effort,
             account: account.clone(),
             tier: None,
+            review_policy: None,
+            effective_review_policy: None,
         },
         ladder::Target::HostNative { name } => GraphRoute {
             required_family: None,
@@ -241,6 +249,8 @@ fn target_route(target: &ladder::Target, effort: Option<String>) -> GraphRoute {
             effort: None,
             account: None,
             tier: None,
+            review_policy: None,
+            effective_review_policy: None,
         },
     }
 }
@@ -260,6 +270,7 @@ pub(super) fn depletion_successor(
     let declared = || Successor {
         routes: restart_routes(node, progress),
         choice: None,
+        refusal: None,
     };
     // The ladder reads readiness only for the adapters the stopped attempt
     // probed, so a chair answer may only mean it could not see another route:
@@ -297,6 +308,17 @@ pub(super) fn depletion_successor(
     };
     if let Some(tier) = attempt.route.tier.as_ref() {
         facts.stopped.tier = Some(tier.clone());
+    }
+    // `routing.pin` scopes only a model-unavailable fallback. An exact pin
+    // refuses instead of falling back; the stop fails naming the setting.
+    let model_pin = cause == StopCause::ModelUnavailable;
+    if model_pin && facts.pin.refuses() {
+        let mut successor = declared();
+        successor.refusal = Some(format!(
+            "node {} stopped (model_unavailable); routing.pin = exact admits no fallback; set routing.pin to family or tier to allow one",
+            node.id
+        ));
+        return successor;
     }
     let mut tried = facts.tried.clone();
     for target in launched
@@ -341,8 +363,24 @@ pub(super) fn depletion_successor(
         confidential: facts.confidential,
         now: facts.now,
     });
+    // A hand-off outside the pin's scope is not a fallback: keep the node's
+    // declared routes and leave the chair as the last resort, without an
+    // `exact`-style refusal (only `exact` refuses).
+    let step = match step {
+        ladder::DepletionStep::Handoff(handoff)
+            if model_pin && !facts.pin.admits(&facts.catalogue, &facts.stopped, &handoff) =>
+        {
+            ladder::DepletionStep::Chair
+        }
+        other => other,
+    };
     match step {
         ladder::DepletionStep::Handoff(handoff) => {
+            // Record `fallback{from,to,cause}` for a model-unavailable hand-off
+            // before `tier` moves into the launched route.
+            let fallback = model_pin.then(|| {
+                provenant_routing::FallbackFact::of(&facts.stopped, &handoff, "model_unavailable")
+            });
             let choice = patch::LadderChoice {
                 rung: handoff.rung,
                 target: match &handoff.target {
@@ -355,6 +393,7 @@ pub(super) fn depletion_successor(
                     ladder::Target::HostNative { name } => format!("{HOST_NATIVE}/{name}"),
                 },
                 tier: handoff.tier.clone(),
+                fallback,
             };
             // The ladder route first; the node's untried routes stay behind it
             // as fallbacks, and a host-native route keeps a launchable one
@@ -390,6 +429,7 @@ pub(super) fn depletion_successor(
             Successor {
                 routes,
                 choice: Some(choice),
+                refusal: None,
             }
         }
         ladder::DepletionStep::Chair => chair(),
@@ -399,9 +439,15 @@ pub(super) fn depletion_successor(
 enum Settle {
     Restart {
         routes: Vec<GraphRoute>,
-        restart: patch::Restart,
+        restart: Box<patch::Restart>,
         /// Why the restart took the step it did, when that needs saying.
         detail: Option<String>,
+    },
+    /// A configured setting refused the stop (today only `routing.pin = exact`):
+    /// the node fails with a stable advance code and a note naming the setting.
+    Fail {
+        code: String,
+        message: String,
     },
     Pause(String),
     Chair,
@@ -518,6 +564,12 @@ fn decide(
         }
         NextStep::NewRoute if cause.depleted() => {
             let successor = depletion_successor(node, progress, cause, ladder_facts);
+            if let Some(message) = successor.refusal {
+                return Some(Settle::Fail {
+                    code: "routing_pin_exact".into(),
+                    message,
+                });
+            }
             ladder = successor.choice;
             successor.routes
         }
@@ -594,13 +646,13 @@ fn decide(
     });
     Some(Settle::Restart {
         routes,
-        restart: patch::Restart {
+        restart: Box::new(patch::Restart {
             node: node.id.clone(),
             cause,
             step,
             ladder,
             progress: Some(patch::StopProgress::of(progress)),
-        },
+        }),
         detail,
     })
 }
@@ -687,6 +739,11 @@ pub(super) fn settle_stop(
             plans::set_expansion_pause(&mut next, index, reason, false, None, None);
             return Some((index, next));
         }
+        Settle::Fail { code, message } => {
+            next_attempt::fail_node(&mut next.nodes[index], Some(code), Some(message));
+            fence_stopped(&mut next.nodes[index]);
+            return Some((index, next));
+        }
         Settle::Restart {
             routes,
             restart,
@@ -703,7 +760,7 @@ pub(super) fn settle_stop(
         &node.id,
         brief.as_deref(),
         &routes,
-        restart,
+        *restart,
         detail.as_deref(),
         &PatchContext {
             catalogue: None,

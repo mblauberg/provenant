@@ -1277,6 +1277,7 @@ mod tests {
                         Err(ServiceError::Mutation {
                             operation_id: operation_id.clone(),
                             source: Box::new(ServiceError::Facade(FacadeError::LaunchUnknown {
+                                detail: None,
                                 operation_id: operation_id.clone(),
                             })),
                         })
@@ -1318,7 +1319,7 @@ mod tests {
             let error = exchange(&mut client, &request(), &CancelToken::new()).unwrap_err();
             assert!(matches!(
                 &error,
-                ServiceError::Facade(FacadeError::LaunchUnknown { operation_id: actual })
+                ServiceError::Facade(FacadeError::LaunchUnknown { operation_id: actual, .. })
                     if actual == &operation_id
             ));
             let value = error.structured_error();

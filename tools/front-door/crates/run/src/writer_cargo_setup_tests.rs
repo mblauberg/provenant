@@ -814,15 +814,53 @@ fn writer_source_binding_rejects_unrelated_lineage() -> FixtureResult<()> {
         &provenant_records::policy::Policy::default(),
     )?;
     assert!(matches!(
-        writer.require_continuation_source(utility.git_program_path(), unrelated, child, &provenant_records::policy::Policy::default()),
-        Err(RunError::WriterSourceMismatch { expected, actual })
-            if expected == unrelated && actual == child
+        writer.require_continuation_source(
+            utility.git_program_path(),
+            unrelated,
+            child,
+            &provenant_records::policy::Policy::default()
+        ),
+        Err(RunError::Validation(_))
     ));
-    assert!(matches!(
-        writer.require_continuation_source(utility.git_program_path(), source, source, &provenant_records::policy::Policy::default()),
-        Err(RunError::WriterSourceMismatch { expected, actual })
-            if expected == source && actual == child
-    ));
+    Ok(())
+}
+
+#[test]
+fn moved_head_repins_with_warning() -> FixtureResult<()> {
+    if clean_environment_child(stringify!(moved_head_repins_with_warning))? {
+        return Ok(());
+    }
+    let fixture = WriterFixture::new()?;
+    let lane = fixture.add_worktree("chore/moved", "lane")?;
+    let mut writer = fixture.prepare(&lane)?;
+    let source = GitOid::parse(&fixture.source)?;
+    let tree = fixture.run_git(&["rev-parse", "HEAD^{tree}"])?;
+    let child = GitOid::parse(&fixture.run_git(&[
+        "commit-tree",
+        &tree,
+        "-p",
+        &fixture.source,
+        "-m",
+        "child commit",
+    ])?)?;
+    writer.base = child;
+    let utility = runtime(&fixture.state)?;
+    let ((), warnings) = provenant_records::warning::capture(|| {
+        writer
+            .require_continuation_source(
+                utility.git_program_path(),
+                source,
+                source,
+                &provenant_records::policy::Policy::default(),
+            )
+            .expect("a descendant head re-pins instead of refusing")
+    });
+    assert!(
+        warnings
+            .iter()
+            .any(|w| w.code.as_ref() == provenant_records::policy::WRITER_HEAD_MOVED),
+        "a moved head must warn WRITER_HEAD_MOVED"
+    );
     Ok(())
 }
 

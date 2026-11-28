@@ -685,6 +685,7 @@ fn project_lane_inner(
 pub fn status_session_stream(
     command: crate::Status,
     edge: &Edge<'_>,
+    deadline: provenant_core::Deadline,
     out: &mut dyn std::io::Write,
 ) -> Reply {
     let result = session_inventory_page(
@@ -692,6 +693,7 @@ pub fn status_session_stream(
         command.limit,
         command.cursor.unwrap_or(0),
         edge,
+        deadline,
         &mut |line| {
             out.write_all(line.as_bytes())
                 .and_then(|_| out.flush())
@@ -714,14 +716,19 @@ fn session_inventory_page(
     limit: u64,
     after: u64,
     edge: &Edge<'_>,
+    deadline: provenant_core::Deadline,
     out: &mut dyn FnMut(&str) -> Result<(), Fail>,
 ) -> Result<(Value, String), Fail> {
     let clock = SystemClock::new();
+    let open_budget = status_stream_budget(deadline, clock.mono_now())?;
     let cancel = CancelToken::new();
     let call = request(&clock, &cancel)?;
-    let (context, store) = open_read_only(edge, &call)?;
+    let (context, store) = open_read_only_within(edge, &call, open_budget)?;
+    status_stream_budget(deadline, clock.mono_now())?;
     let Some(store) = store else {
+        status_stream_budget(deadline, clock.mono_now())?;
         out("{\"total\":0,\"next\":null}\n")?;
+        status_stream_budget(deadline, clock.mono_now())?;
         return Ok((json!({}), String::new()));
     };
     let session = Session {
@@ -734,8 +741,27 @@ fn session_inventory_page(
     let mut query = lane_query(all, limit, after);
     query.newest_first = all;
     let mut failed = false;
-    session.store.lanes_streaming(&query, &call, |total, entry, next| {
-        if failed { return; }
+    let timed_out = std::cell::Cell::new(false);
+    let page = session.store.lanes_streaming_with_budget(
+        &query,
+        &call,
+        || match status_stream_budget(deadline, clock.mono_now()) {
+            Ok(remaining) => remaining,
+            Err(_) => {
+                timed_out.set(true);
+                cancel.cancel();
+                Duration::ZERO
+            }
+        },
+        |total, entry, next| {
+            if failed || timed_out.get() {
+                return;
+            }
+            if status_stream_budget(deadline, clock.mono_now()).is_err() {
+                timed_out.set(true);
+                cancel.cancel();
+                return;
+            }
         let event = match entry {
             None => json!({"total": total, "next": next}),
             // The settled digest filters non-terminal rows. Advance its cursor
@@ -790,8 +816,18 @@ fn session_inventory_page(
                 }})
             }
         };
-        failed = out(&format!("{event}\n")).is_err();
-    })?;
+        if status_stream_budget(deadline, clock.mono_now()).is_err() {
+            timed_out.set(true);
+            cancel.cancel();
+        } else {
+            failed = out(&format!("{event}\n")).is_err();
+        }
+        },
+    );
+    if timed_out.get() || status_stream_budget(deadline, clock.mono_now()).is_err() {
+        return Err(status_stream_timeout());
+    }
+    page?;
     if failed {
         return Err(Fail::new(
             Status::Error,
@@ -800,6 +836,26 @@ fn session_inventory_page(
         ));
     }
     Ok((json!({}), String::new()))
+}
+
+fn status_stream_budget(
+    deadline: provenant_core::Deadline,
+    now: provenant_core::MonoTime,
+) -> Result<Duration, Fail> {
+    let remaining = deadline.remaining(now).as_micros();
+    if remaining == 0 {
+        Err(status_stream_timeout())
+    } else {
+        Ok(Duration::from_micros(remaining))
+    }
+}
+
+fn status_stream_timeout() -> Fail {
+    Fail::new(
+        Status::Error,
+        ErrorKind::Timeout,
+        "status session stream deadline expired",
+    )
 }
 
 /// What a pull request body needs from one local attempt's own record.
@@ -965,6 +1021,62 @@ mod tests {
     use provenant_records::wire::LastEventSource;
 
     const ID: &str = "11111111111111111111111111111111";
+
+    #[test]
+    fn status_stream_budget_shrinks_with_the_invocation_deadline() {
+        let deadline =
+            provenant_core::Deadline::at(provenant_core::MonoTime::from_micros(12_000_000));
+        assert_eq!(
+            status_stream_budget(deadline, provenant_core::MonoTime::from_micros(7_000_000))
+                .unwrap(),
+            Duration::from_secs(5)
+        );
+        assert_eq!(
+            status_stream_budget(deadline, provenant_core::MonoTime::from_micros(12_000_000))
+                .unwrap_err()
+                .kind,
+            ErrorKind::Timeout
+        );
+    }
+
+    #[test]
+    fn expired_session_stream_deadline_returns_timeout_before_store_access() {
+        let temp = tempfile::tempdir().unwrap();
+        let base = std::fs::canonicalize(temp.path()).unwrap();
+        let inputs = provenant_test_support::root_inputs(&base).unwrap();
+        let roots = inputs
+            .resolve(&provenant_os::fs::SystemPathResolver)
+            .unwrap();
+        let edge = Edge {
+            roots: &roots,
+            home: &base,
+            assets: &base,
+            cwd: &base,
+        };
+        let command = crate::Status {
+            common: Default::default(),
+            mine: false,
+            adoptable: false,
+            custody_session: None,
+            session_stream: true,
+            custody_stream: false,
+            targets: Vec::new(),
+            all: false,
+            limit: 20,
+            cursor: None,
+        };
+        let mut output = Vec::new();
+        let reply = status_session_stream(
+            command,
+            &edge,
+            provenant_core::Deadline::at(provenant_core::MonoTime::from_micros(0)),
+            &mut output,
+        );
+
+        assert_eq!(reply.result.status, Status::Error);
+        assert_eq!(reply.result.error.as_ref().unwrap().code, "TIMEOUT");
+        assert!(output.is_empty());
+    }
 
     /// A running attempt whose only write grant is a lane scratch directory.
     fn running_lane(scratch: &Path) -> run::AttemptRecord {

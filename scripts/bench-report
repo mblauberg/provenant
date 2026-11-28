@@ -1,0 +1,235 @@
+#!/usr/bin/env python3
+"""Ledger rows and aggregation for the replay bench.
+
+`row` builds one bench.jsonl entry. `report` folds that ledger into per-family
+and per-task summaries. Both are called by scripts/bench and are separately
+testable with fixture telemetry documents and fixture ledger rows.
+"""
+
+import argparse
+import json
+import math
+import statistics
+import sys
+
+CATEGORIES = {
+    "input": "uncached_input",
+    "cache_read": "cache_read",
+    "cache_write": "cache_write",
+    "output": "output_excluding_reasoning",
+    "reasoning": "reasoning",
+}
+
+
+def load_document(path):
+    try:
+        with open(path, "rb") as source:
+            document = json.load(source)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(document, dict):
+        return None
+    return document.get("data")
+
+
+def token_values(usage_document):
+    """Return provider token categories, or null when they are not measured.
+
+    A category is a number only when the provider reported every unit in it.
+    `known` on its own is a lower bound: reporting it as the category total
+    would turn missing usage into zero or a partial total.
+    """
+    totals = usage_document.get("totals") if isinstance(usage_document, dict) else None
+    usage = totals.get("usage") if isinstance(totals, dict) else None
+    tokens = {}
+    for category, field in CATEGORIES.items():
+        entry = usage.get(field) if isinstance(usage, dict) else None
+        known = entry.get("known") if isinstance(entry, dict) else None
+        missing = entry.get("missing") if isinstance(entry, dict) else None
+        measured = (
+            isinstance(known, int)
+            and not isinstance(known, bool)
+            and known >= 0
+            and isinstance(missing, int)
+            and not isinstance(missing, bool)
+            and missing == 0
+        )
+        tokens[category] = known if measured else None
+    return tokens
+
+
+def build_row(args):
+    cost = load_document(args.stats)
+    totals = cost.get("totals") if isinstance(cost, dict) else None
+    totals = totals if isinstance(totals, dict) else None
+    cost_usd = None
+    turns = None
+    if totals is not None:
+        complete = totals.get("complete")
+        if complete is True and isinstance(totals.get("usd"), (int, float)):
+            cost_usd = totals["usd"]
+        attempts = totals.get("attempts")
+        if isinstance(attempts, int) and not isinstance(attempts, bool):
+            turns = attempts
+    passed = None if args.reason else args.passed == "true"
+    return {
+        "task": args.task,
+        "family": args.family,
+        "route": args.route,
+        "model": args.model,
+        "pass": passed,
+        "reason": args.reason or None,
+        "tokens": token_values(load_document(args.usage)),
+        "cost": cost_usd,
+        "turns": turns,
+        "seconds": int(args.seconds),
+        "repeat": int(args.repeat),
+        "repeats": int(args.repeats),
+    }
+
+
+def read_ledger(path):
+    rows = []
+    try:
+        source = open(path, "r", encoding="utf-8")
+    except OSError as error:
+        raise SystemExit(f"cannot read bench ledger: {error}")
+    with source:
+        for number, line in enumerate(source, 1):
+            if not line.strip():
+                continue
+            try:
+                row = json.loads(line)
+            except ValueError as error:
+                raise SystemExit(f"invalid bench ledger row at line {number}: {error}")
+            if isinstance(row, dict):
+                rows.append(row)
+    return rows
+
+
+def mean(values):
+    return round(statistics.fmean(values), 3) if values else None
+
+
+def spread(values):
+    """Population standard deviation; null for a single observation."""
+    return round(statistics.pstdev(values), 3) if len(values) > 1 else None
+
+
+def number(value):
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+
+
+def summary(rows):
+    passed = sum(1 for row in rows if row.get("pass") is True)
+    failed = sum(1 for row in rows if row.get("pass") is False)
+    unknown = len(rows) - passed - failed
+    resolved = passed + failed
+    tokens = {}
+    for category in CATEGORIES:
+        values = []
+        for row in rows:
+            reported = row.get("tokens")
+            value = reported.get(category) if isinstance(reported, dict) else None
+            if number(value):
+                values.append(value)
+        tokens[category] = {
+            "mean": mean(values),
+            "reported": len(values),
+            "spread": spread(values) if len(values) == len(rows) else None,
+        }
+    seconds = [row["seconds"] for row in rows if number(row.get("seconds"))]
+    return {
+        "attempts": len(rows),
+        "pass": {
+            "passed": passed,
+            "failed": failed,
+            "unknown": unknown,
+            "rate": round(passed / resolved, 3) if resolved else None,
+        },
+        "tokens": tokens,
+        "seconds": {
+            "mean": mean(seconds),
+            "min": min(seconds) if seconds else None,
+            "max": max(seconds) if seconds else None,
+            "stdev": spread(seconds),
+        },
+    }
+
+
+def build_report(args):
+    rows = read_ledger(args.ledger)
+    families = set(args.family or [])
+    selected = [
+        row
+        for row in rows
+        if (not families or row.get("family") in families)
+        and (args.route is None or row.get("route") == args.route)
+        and (args.repeats is None or row.get("repeats") == args.repeats)
+    ]
+    grouped_families = {}
+    grouped_tasks = {}
+    for row in selected:
+        family = row.get("family") if isinstance(row.get("family"), str) else "unclassified"
+        grouped_families.setdefault(family, []).append(row)
+        task = row.get("task") if isinstance(row.get("task"), str) else "unclassified"
+        grouped_tasks.setdefault(task, []).append(row)
+    families_out = {name: summary(group) for name, group in sorted(grouped_families.items())}
+    tasks_out = {}
+    for name, group in sorted(grouped_tasks.items()):
+        row_summary = summary(group)
+        row_summary["family"] = group[0].get("family")
+        row_summary["repeats"] = max(
+            (row.get("repeats") for row in group if number(row.get("repeats"))),
+            default=None,
+        )
+        tasks_out[name] = row_summary
+    observed = [
+        row.get("repeats") for row in selected if number(row.get("repeats"))
+    ]
+    return {
+        "ledger": args.ledger,
+        "route": args.route,
+        "families": sorted(families) if families else None,
+        "repeats_filter": args.repeats,
+        "repeats": int(max(observed)) if observed else None,
+        "attempts": len(selected),
+        "family_summary": families_out,
+        "tasks": tasks_out,
+    }
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    commands = parser.add_subparsers(dest="command", required=True)
+    row = commands.add_parser("row", help="build one ledger row")
+    for name in (
+        "task",
+        "family",
+        "route",
+        "model",
+        "passed",
+        "seconds",
+        "stats",
+        "reason",
+        "usage",
+        "repeat",
+        "repeats",
+    ):
+        row.add_argument(name)
+    report = commands.add_parser("report", help="aggregate a bench ledger")
+    report.add_argument("--ledger", required=True)
+    report.add_argument("--family", action="append")
+    report.add_argument("--route")
+    report.add_argument("--repeats", type=int)
+    args = parser.parse_args()
+    if args.command == "row":
+        result = build_row(args)
+    else:
+        result = build_report(args)
+    json.dump(result, sys.stdout, separators=(",", ":"), sort_keys=False)
+    sys.stdout.write("\n")
+
+
+if __name__ == "__main__":
+    main()

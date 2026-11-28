@@ -27,20 +27,24 @@ The global rules own when and how to delegate. Any lane may launch child lanes.
 `implement` starts a junior writer; `--route` picks another tier and `--plan`
 sizes the brief first.
 
-`run implement --branch NAME --base REF` creates a single writer's worktree;
+`run implement --branch NAME --base REF` creates a writer worktree;
 `provenant worktree create BRANCH` and `--worktree` reuse one. `batch` gives
 each slice its own worktree and integrates slices as they settle (see the
 routing-and-templates runbook for `after` ordering and `max_parallel`). Name
-disjoint write scopes for parallel writers.
+disjoint write scopes for parallel writers; an overlap is an advisory
+`PATH_CLAIM_OVERLAP` warning, never a refusal.
 
 `lanes.writer_dirty` decides how a launch treats uncommitted edits already in
-an existing worktree. By default (`wip_commit`) an unheld tree's edits are
-committed as a local WIP commit and reported with *WORKTREE_ADOPTED_DIRTY*
-naming the commit; `refuse` stops the submission before a node spends tokens,
-and `continue_in_place` keeps the edits and warns. A tree another lane holds is
-always refused (boundary 2), whatever the value. The effective value and its
-source are named in each refusal and warning; override per run with `--knob
-lanes.writer_dirty=refuse`.
+an existing worktree. By default (`wip_commit`) a tree whose lease has lapsed
+has its edits committed as a local WIP commit and reported with
+*WORKTREE_ADOPTED_DIRTY* naming the commit; `refuse` stops the submission
+before a node spends tokens, and `continue_in_place` keeps the edits and warns.
+Custody is a lease, not an exclusive lock: a tree whose holder is still live is
+admitted under `lanes.worktree.sharing` (`warn` by default), and a tree whose
+holder has settled is continued with `WRITER_HANDOVER`, keeping the prior
+lane's uncommitted files in place. Only destruction of another live lane's work
+is refused. The effective values and their sources are named in each warning
+and refusal; override per run with `--knob lanes.writer_dirty=refuse`.
 
 Inside a lane, `provenant run TEMPLATE` adds a child node to the calling graph
 and `--name` names it. Attached children are cancelled when their parent
@@ -51,6 +55,44 @@ parent.
 and key; Provenant keeps no lifecycle for it. `cloud collect KEY` adds a
 worktree holding the branch it pushed, which then goes through review like any
 other.
+
+## Worktree custody is a lease
+
+A worktree and its branch carry a custody lease held by the launching attempt.
+The lease is live while that attempt is nonterminal and lapses when it settles
+(done, stopped, failed or cancelled); it is derived from the attempt state on
+every read, so a crash cannot leave a stale reservation and no sweeper is
+needed. A holder whose host is unreachable stays live until
+`domains.fabric.lanes.lease_unreachable_seconds` (900), then lapses with
+`LEASE_HOLDER_UNREACHABLE`.
+
+Continuing a lapsed lease needs no flag: `--worktree`, `--branch`, `retry`,
+`resume`, queue relaunch and `--adopt` all take the lease, warn `WRITER_HANDOVER`
+with the prior lane, its terminal state and last head, and record the handover.
+The prior lane's uncommitted files stay in place, listed in the warning and the
+new brief footer, never reset, stashed or discarded. A head that moved is
+re-pinned with `WRITER_HEAD_MOVED`, and an unreadable predecessor record is a
+typed operation error, not an ownership refusal.
+
+A second live writer follows `lanes.worktree.sharing` (host, project, launch or
+owning-lane layer; default `warn`): `allow` proceeds silently and records the
+co-writer, `warn` proceeds with `WORKTREE_SHARED` naming the holder, its state
+and the setting, and `refuse` stops with `WORKTREE_SHARING_REFUSED` naming the
+holder and source, with `next: provenant wait HOLDER` or `--destination new`.
+The owning lane decides for its own tree with `--worktree-sharing refuse` or
+`provenant lane share refuse`; stored in its lease, that wins over the other
+layers for that worktree only. Path claims (`--write-scope`, `path_claim`) stay
+advisory. Git's index lock and ref compare-and-swap protect concurrent commits;
+a lost index lock retries up to `domains.fabric.lanes.index_lock_retries` (5)
+before failing `Transient`.
+
+Only destruction is refused: a reset, checkout, stash, clean, force-push,
+non-fast-forward ref update, branch deletion or worktree removal that would
+destroy another live lane's files or ref fails `DESTROYS_LIVE_WORK`, naming the
+holder, its state and the files or ref, with `next: provenant wait HOLDER` or
+`provenant stop HOLDER`. Adding commits, fast-forward pushes and edits to other
+paths proceed. A lapsed lease never triggers that guard, but its uncommitted
+files are retained under `<state>/retained/<attempt>/` before removal.
 
 ## Brief preamble
 

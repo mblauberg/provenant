@@ -12,6 +12,7 @@ fn document(nodes: Vec<GraphNode>) -> GraphDocument {
         queue_ci_wait: None,
         queue: None,
         review: None,
+        review_policy: None,
         subject: None,
         exclude: Vec::new(),
         network: None,
@@ -224,6 +225,42 @@ fn over_binds_item_in_overrides_and_resolves_named_lists() {
         .unwrap();
     assert!(prose.prompt.contains("${item}"));
     assert!(prose.prompt.contains("${unknown}"));
+}
+
+#[test]
+fn review_fanout_explicit_minimum_survives_host_coverage_default() {
+    let library = library();
+    let resolvers = BTreeMap::from([
+        (
+            "review-panel".to_owned(),
+            vec!["security".to_owned(), "tests".to_owned()],
+        ),
+        ("review-advice-security".to_owned(), vec![String::new()]),
+        ("review-advice-tests".to_owned(), vec![String::new()]),
+        (
+            "review-coverage-floor".to_owned(),
+            vec![json!({"hard":false,"minimum":1,"required_lenses":[]}).to_string()],
+        ),
+    ]);
+    let compiler = Compiler {
+        library: &library,
+        resolvers: &resolvers,
+    };
+    for (minimum, expected) in [(Some(2), 2), (None, 1)] {
+        let mut input = json!({"id":"panel", "use":"review", "over":"@review-panel", "with":{"lens":"${item}"}});
+        if let Some(minimum) = minimum {
+            input["min_ok"] = json!(minimum);
+        }
+        assert_eq!(
+            compiler
+                .compile(&input)
+                .unwrap()
+                .composite
+                .unwrap()
+                .min_successful,
+            Some(expected)
+        );
+    }
 }
 
 #[test]
@@ -778,6 +815,14 @@ fn delivery_composites_compile_both_review_shapes() {
 #[test]
 fn delivery_review_waits_on_the_single_ci_outcome_boundary() {
     let doc = compiled_delivery(json!({"plan": false}), false);
+    let writer = find_compiled_node(&doc.nodes[0], "implement").unwrap();
+    assert_eq!(
+        writer
+            .attempt
+            .as_ref()
+            .and_then(|attempt| attempt.pr.as_deref()),
+        Some("never")
+    );
     let expanded = expanded_delivery(&doc, &limits());
     let ci = expanded
         .nodes
@@ -807,7 +852,7 @@ fn delivery_review_waits_on_the_single_ci_outcome_boundary() {
     assert_eq!(review.depends_on[0], "delivery--ci");
 }
 
-/// Sourced queue knobs resolve over the declared layers and seal the winning
+/// Sourced settings resolve over the declared layers and seal the winning
 /// value with its source; undeclared layers are ignored with a warning.
 #[test]
 fn delivery_queue_knobs_resolve_and_seal_with_sources() {
@@ -819,6 +864,12 @@ fn delivery_queue_knobs_resolve_and_seal_with_sources() {
             origin: Some(origin.into()),
         },
     };
+    let shipped = QueueKnobs::default();
+    let defaults = BTreeMap::from([
+        (QUEUE_MAX_PARALLEL_KEY, shipped.max_parallel.value),
+        (QUEUE_CI_SLOTS_KEY, shipped.ci_slots.value),
+        (QUEUE_PREP_RETRIES_KEY, shipped.prep_retries.value),
+    ]);
     let overrides = BTreeMap::from([(
         QUEUE_MAX_PARALLEL_KEY,
         vec![
@@ -827,31 +878,81 @@ fn delivery_queue_knobs_resolve_and_seal_with_sources() {
             sourced(9, Layer::Project, ".provenant/config.toml"),
         ],
     )]);
-    let knobs = seal_queue_knobs(&overrides);
-    assert_eq!(knobs.max_parallel.value, 9);
-    assert_eq!(knobs.max_parallel.source.layer, Layer::Project);
+    let sealed = seal_settings(&defaults, &overrides);
+    let max_parallel = &sealed[QUEUE_MAX_PARALLEL_KEY];
+    assert_eq!(max_parallel.value, 9);
+    assert_eq!(max_parallel.source.layer, Layer::Project);
     assert_eq!(
-        knobs.max_parallel.source.origin.as_deref(),
+        max_parallel.source.origin.as_deref(),
         Some(".provenant/config.toml")
     );
     // Absent keys keep their shipped value and source.
-    assert_eq!(knobs.ci_slots.value, 1);
-    assert_eq!(knobs.ci_slots.source.layer, Layer::Default);
-    assert_eq!(knobs.prep_retries.value, 2);
-    assert!(knobs.validate().is_ok());
-    let launch = seal_queue_knobs(&BTreeMap::from([(
-        QUEUE_CI_SLOTS_KEY,
-        vec![sourced(3, Layer::Launch, "--ci-slots")],
-    )]));
-    assert_eq!(launch.ci_slots.value, 3);
-    assert_eq!(launch.ci_slots.source.layer, Layer::Launch);
-    assert_eq!(launch.ci_slots.source.origin.as_deref(), Some("--ci-slots"));
+    assert_eq!(sealed[QUEUE_CI_SLOTS_KEY].value, 1);
+    assert_eq!(sealed[QUEUE_CI_SLOTS_KEY].source.layer, Layer::Default);
+    assert_eq!(sealed[QUEUE_PREP_RETRIES_KEY].value, 2);
+    let launch = seal_settings(
+        &defaults,
+        &BTreeMap::from([(
+            QUEUE_CI_SLOTS_KEY,
+            vec![sourced(3, Layer::Launch, "--ci-slots")],
+        )]),
+    );
+    assert_eq!(launch[QUEUE_CI_SLOTS_KEY].value, 3);
+    assert_eq!(launch[QUEUE_CI_SLOTS_KEY].source.layer, Layer::Launch);
+    assert_eq!(
+        launch[QUEUE_CI_SLOTS_KEY].source.origin.as_deref(),
+        Some("--ci-slots")
+    );
     // Zero CI slots disables the cap; zero max_parallel is refused.
+    let knobs = QueueKnobs {
+        max_parallel: max_parallel.clone(),
+        ci_slots: launch[QUEUE_CI_SLOTS_KEY].clone(),
+        prep_retries: sealed[QUEUE_PREP_RETRIES_KEY].clone(),
+    };
+    assert!(knobs.validate().is_ok());
     let mut invalid = knobs.clone();
     invalid.ci_slots.value = 0;
     assert!(invalid.validate().is_ok());
     invalid.max_parallel.value = 0;
     assert!(invalid.validate().is_err());
+}
+
+/// Every shipped default is sealed, including settings added without overrides.
+#[test]
+fn seal_settings_includes_every_shipped_default() {
+    use provenant_records::Layer;
+    let defaults = BTreeMap::from([("first", 1), ("new_setting", 2)]);
+    let sealed = seal_settings(&defaults, &BTreeMap::new());
+    assert_eq!(sealed.len(), defaults.len());
+    assert_eq!(sealed["first"].value, 1);
+    assert_eq!(sealed["new_setting"].value, 2);
+    assert_eq!(sealed["new_setting"].source.layer, Layer::Default);
+}
+
+/// Graph setting origins use the shared provenance layer vocabulary, not a
+/// local setting-origin enum. The wire spelling is the layer's snake_case name.
+/// Spec: docs/specs/agent-native.md#33-error-and-warning-contract
+#[test]
+fn graph_setting_sources_use_the_provenance_layer() {
+    use provenant_records::Layer;
+    let timeout: DecideTimeout =
+        serde_json::from_value(json!({"seconds": 30, "source": "host"})).unwrap();
+    assert_eq!(timeout.source, Layer::Host);
+    assert_eq!(
+        serde_json::to_value(timeout).unwrap(),
+        json!({"seconds": 30, "source": "host"})
+    );
+    let policy: CiFailedChecksPolicy = serde_json::from_value(json!({
+        "max_bytes": 150, "max_bytes_source": "template",
+        "max_checks": 2, "max_checks_source": "default"
+    }))
+    .unwrap();
+    assert_eq!(policy.max_bytes_source, Layer::Template);
+    assert_eq!(policy.max_checks_source, Layer::Default);
+    assert_eq!(
+        serde_json::to_value(Layer::Detected).unwrap(),
+        json!("detected")
+    );
 }
 
 /// The optional scope is a read-only planner whose result joins the writer
@@ -1113,18 +1214,26 @@ fn renamed_composites_keep_their_behaviour_and_bindings() {
             .extend(extra.as_object().unwrap().clone());
         let mut renamed = original.clone();
         renamed["use"] = format!("copy-{name}").into();
-        assert_eq!(
-            compiler.compile(&original).unwrap(),
-            compiler.compile(&renamed).unwrap(),
-            "{name}"
-        );
+        let mut compiled = compiler.compile(&original).unwrap();
+        let mut copied = compiler.compile(&renamed).unwrap();
+        // A composite boundary records the template it came from, so the host
+        // can resolve that template's review policy. Provenance names the
+        // layer entry used; everything else must be identical.
+        if compiled.composite.is_some() {
+            assert_eq!(compiled.template.as_deref(), Some(name), "{name}");
+            assert_eq!(copied.template, Some(format!("copy-{name}")), "{name}");
+        }
+        compiled.template = None;
+        copied.template = None;
+        assert_eq!(compiled, copied, "{name}");
     }
 }
 
 #[test]
 // Spec: docs/specs/fabric.md#fix-round-invariants-and-split-verdict-adjudication
 fn split_verdict_yields_one_adjudication_node_and_no_new_round() {
-    let patch = super::repair::split_verdict_patch("panel", None, 2);
+    let panels = ["panel".to_owned()];
+    let patch = super::repair::split_verdict_patch("item", &panels, None, 2, "principal");
     assert_eq!(
         patch.nodes.len(),
         1,
@@ -1145,8 +1254,15 @@ fn split_verdict_yields_one_adjudication_node_and_no_new_round() {
     );
     assert_eq!(
         patch.idempotency_key,
-        super::repair::split_verdict_patch("panel", None, 2).idempotency_key,
-        "split detection is idempotent per panel and head"
+        super::repair::split_verdict_patch(
+            "item",
+            &["another-panel".to_owned()],
+            None,
+            3,
+            "principal",
+        )
+        .idempotency_key,
+        "split detection is idempotent per item and head"
     );
 }
 
@@ -2326,7 +2442,7 @@ fn delivery_contracts_round_trip_and_admit_execution() {
                 "depends_on":["writer"], "condition":{"type":"budget"}}
         ], "until":"done", "max_rounds":2},
         "escalate":{"ladder":["junior","principal"],"max_ci_rounds":3},
-        "delivery_review":{"shape":"panel","accept_inconclusive_without_blocking":false}});
+        "delivery_review":{"shape":"panel","accept_below":"off"}});
     let compiled = Compiler::new(&library()).compile(&raw).unwrap();
     let wire = serde_json::to_value(&compiled).unwrap();
     assert_eq!(wire["escalate"], raw["escalate"]);
@@ -2439,7 +2555,7 @@ fn compiler_lowers_and_admits_a_queue_delivery_composite() {
                             ]}},
                     {"id":"review", "kind":"composite", "access":"read_only",
                         "depends_on":["repair","publish"], "source":{"type":"head", "node":"publish"},
-                        "delivery_review":{"shape":"single", "accept_inconclusive_without_blocking":false},
+                        "delivery_review":{"shape":"single", "accept_below":"off"},
                         "composite":{"nodes":[
                             {"id":"lens", "access":"read_only", "prompt":"review the published head",
                                 "route":{"alias":"senior"}, "require_findings":true,
@@ -2686,5 +2802,9 @@ fn delivery_settings_require_v2_and_validate_overrides() {
         DeliveryReviewSpec::default().shape,
         provenant_records::graph::ReviewShape::Single
     );
-    assert!(DeliveryReviewSpec::default().accept_inconclusive_without_blocking);
+    assert_eq!(
+        DeliveryReviewSpec::default().accept_below,
+        None,
+        "an unset ceiling inherits the resolved domains.review.accept_below"
+    );
 }

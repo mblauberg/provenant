@@ -630,6 +630,8 @@ fn exhausted_pool_names_the_cause_and_the_pool() {
         effort: None,
         account: None,
         tier: None,
+        review_policy: None,
+        effective_review_policy: None,
     };
     let mut lens = node("lens", route("first"));
     lens.route = None;

@@ -1,7 +1,11 @@
 use super::*;
 use provenant_confinement::worktrees::{self, WorktreeCreate, WorktreeOrigin, WorktreeOwner};
-use provenant_core::Clock;
+use provenant_confinement::worktrees::{LEASE_FILE, lease_path};
+use provenant_core::{Clock, WallTime};
 use provenant_os::fixture::run_git;
+use provenant_os::fs::{Directory, PublishMode};
+use provenant_records::custody::{Sharing, WorktreeLease};
+use std::ffi::OsStr;
 use std::os::unix::fs::DirBuilderExt;
 use std::path::Path;
 
@@ -20,7 +24,7 @@ fn init_base_repository(project: &Path) -> std::io::Result<()> {
 
 #[test]
 // Spec: docs/specs/fabric.md#session-ready-steering
-fn graph_writer_resume_uses_the_committed_terminal_head_and_original_source()
+fn stopped_lane_branch_continues_with_handover_warning()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;
     let mut execution = crate::tests::context(temp.path())?;
@@ -92,6 +96,38 @@ fn graph_writer_resume_uses_the_committed_terminal_head_and_original_source()
         },
     )?;
     let parent_record = store.record(prior, &call)?;
+    // Custody is acquired by a launching attempt, whose generation starts at 1;
+    // a queued record is still generation 0 and has no custody scope.
+    let mut launching = parent_record.clone();
+    launching.generation = 1;
+    let first_slot = store.writer_slot(&writer)?;
+    assert!(
+        !lease_path(&first_slot).exists(),
+        "first writer custody must not have a lease snapshot yet"
+    );
+    let first_launch_custody = provenant_supervisor::custody::acquire_writer(
+        Directory::open_anchor(&first_slot)?,
+        RunStore::scope(&launching),
+        provenant_supervisor::custody::WriterBinding::read_only(),
+        call.lock_budget(),
+        call.cancel,
+        call.clock,
+    )?;
+    let (first_launch, first_launch_warnings) = provenant_records::warning::capture(|| {
+        store.check_launch_writer_lineage(
+            &launching,
+            &original.request.task,
+            &initial.worktree,
+            &call,
+        )
+    });
+    first_launch?;
+    assert!(
+        !first_launch_warnings
+            .iter()
+            .any(|warning| { warning.code.as_ref() == provenant_records::policy::WRITER_HANDOVER })
+    );
+    first_launch_custody.withdraw_unlaunched()?;
     initial.snapshot(
         store.context.state_root.as_path(),
         &store.attempt_dir(prior, false)?,
@@ -192,12 +228,61 @@ fn graph_writer_resume_uses_the_committed_terminal_head_and_original_source()
         predecessor,
         &provenant_records::policy::Policy::default(),
     )?;
-    store.check_launch_writer_lineage(
-        &store.record(child.attempt_id, &call)?,
-        &child_task,
-        &resumed.worktree,
-        &call,
-    )?;
+    let (launched, warnings) = provenant_records::warning::capture(|| {
+        store.check_launch_writer_lineage(
+            &store.record(child.attempt_id, &call)?,
+            &child_task,
+            &resumed.worktree,
+            &call,
+        )
+    });
+    launched?;
+    let handover_warning = warnings
+        .iter()
+        .find(|w| w.code.as_ref() == provenant_records::policy::WRITER_HANDOVER)
+        .ok_or("no WRITER_HANDOVER warning")?;
+    assert!(
+        handover_warning.message.contains(&prior.to_string()),
+        "handover did not name the prior lane: {}",
+        handover_warning.message
+    );
+    assert!(
+        handover_warning.message.contains("terminal"),
+        "handover did not name the terminal state"
+    );
+    let fact = crate::writer::read_handover(&store.attempt_dir(child.attempt_id, false)?)?
+        .ok_or("no handover fact sealed for the successor")?;
+    assert_eq!(fact.from, prior);
+    assert_eq!(fact.to, child.attempt_id);
+    assert_eq!(fact.head, Some(predecessor));
+
+    // The handover also rewrote the slot lease: a later admission for C reads
+    // B as the holder at the one path confinement reads, not the terminal A.
+    let slot = store.writer_slot(&writer)?;
+    let lease: WorktreeLease = serde_json::from_slice(&std::fs::read(lease_path(&slot))?)?;
+    assert_eq!(lease.holder, child.attempt_id);
+    let observation = provenant_records::custody::LeaseObservation {
+        lease,
+        state: provenant_records::custody::LeaseState::Live {
+            attempt_state: "nonterminal".into(),
+        },
+    };
+    let subject = provenant_records::custody::Subject::worktree(
+        info.path.display().to_string(),
+        "generation",
+    );
+    assert!(
+        matches!(
+            provenant_records::custody::admit_writer(
+                &subject,
+                Some(&observation),
+                &provenant_records::Sourced { value: Sharing::Refuse, source: provenant_records::Source::at(provenant_records::Layer::Launch, "test") }
+            ),
+            provenant_records::custody::Admit::Refuse { error }
+                if error.message.contains(&child.attempt_id.to_string())
+        ),
+        "C must observe B as the slot holder after handover"
+    );
 
     // A resumed graph attempt has retry_of as well as a graph predecessor.
     // It must still verify the graph's sealed source rather than taking the
@@ -211,7 +296,7 @@ fn graph_writer_resume_uses_the_committed_terminal_head_and_original_source()
             &resumed.worktree,
             &call,
         ),
-        Err(RunError::WriterLineage(_))
+        Err(RunError::Validation(_))
     ));
 
     std::fs::write(
@@ -228,10 +313,162 @@ fn graph_writer_resume_uses_the_committed_terminal_head_and_original_source()
         &store.writer_registry,
         project_id,
     )?;
-    assert!(matches!(
-        drifted.require_continuation_source(&git, source, predecessor, &provenant_records::policy::Policy::default()),
-        Err(RunError::WriterSourceMismatch { expected, .. }) if expected == predecessor
-    ));
+    let (checked, warnings) = provenant_records::warning::capture(|| {
+        drifted.require_continuation_source(
+            &git,
+            source,
+            predecessor,
+            &provenant_records::policy::Policy::default(),
+        )
+    });
+    checked?;
+    assert!(
+        warnings
+            .iter()
+            .any(|w| w.code.as_ref() == provenant_records::policy::WRITER_HEAD_MOVED),
+        "a moved predecessor head must re-pin with WRITER_HEAD_MOVED"
+    );
+
+    // A lane outside the retry chain may adopt a foreign lane after its
+    // reservation stays unobservable through the configured grace. The
+    // launch path still checks custody when the task has no graph context.
+    let mut unrelated = crate::tests::input();
+    unrelated.attempt_id = AttemptId::from_bytes([214; 16]);
+    unrelated.operation_id = "unrelated-writer-adopter".parse()?;
+    crate::tests::rekey(&mut unrelated);
+    unrelated.request.task.writer = Some(writer.clone());
+    store.create(&unrelated, &call)?;
+    // As above, a launching attempt holds custody from generation 1.
+    let mut unrelated_record = store.record(unrelated.attempt_id, &call)?;
+    unrelated_record.generation = 1;
+    // The store keys every attempt by work, but the launch check also sees
+    // tasks that carry no graph context.
+    let mut unrelated_task = store.request(unrelated.attempt_id, &call)?.task;
+    unrelated_task.context = None;
+
+    let slot_path = store.writer_slot(&writer)?;
+    let slot = Directory::open_anchor(&slot_path)?;
+    let mut child_record = store.record(child.attempt_id, &call)?;
+    assert!(
+        !matches!(&child_record.state, AttemptState::Terminal { .. }),
+        "the unreachable foreign holder must remain nonterminal in run state"
+    );
+    child_record.generation = child_record.generation.max(1);
+    assert_eq!(unrelated_record.retry_of, None);
+    let _holder_custody = provenant_supervisor::custody::acquire_writer(
+        slot,
+        RunStore::scope(&child_record),
+        provenant_supervisor::custody::WriterBinding::read_only(),
+        call.lock_budget(),
+        call.cancel,
+        call.clock,
+    )?;
+    let adopter_custody = provenant_supervisor::custody::acquire_writer(
+        Directory::open_anchor(&slot_path)?,
+        RunStore::scope(&unrelated_record),
+        provenant_supervisor::custody::WriterBinding::read_only(),
+        call.lock_budget(),
+        call.cancel,
+        call.clock,
+    )?;
+
+    let (within_grace, within_grace_warnings) = provenant_records::warning::capture(|| {
+        store.check_launch_writer_lineage(
+            &unrelated_record,
+            &unrelated_task,
+            &drifted.worktree,
+            &call,
+        )
+    });
+    within_grace?;
+    assert!(
+        !within_grace_warnings
+            .iter()
+            .any(|warning| { warning.code.as_ref() == provenant_records::policy::WRITER_HANDOVER })
+    );
+
+    let sibling_id = AttemptId::from_bytes([215; 16]);
+    let sibling_custody = provenant_supervisor::custody::acquire_writer(
+        Directory::open_anchor(&slot_path)?,
+        provenant_records::custody::Scope {
+            attempt: sibling_id,
+            generation: 1,
+        },
+        provenant_supervisor::custody::WriterBinding::read_only(),
+        call.lock_budget(),
+        call.cancel,
+        call.clock,
+    )?;
+    let sibling_reservation_path = slot_path
+        .join(sibling_id.to_string())
+        .join("reservation.json");
+
+    let grace =
+        provenant_confinement::worktrees::configured_unreachable_grace_at(&store.writer_registry)
+            .value;
+    let mut later_clock = clock.clone();
+    later_clock.advance(provenant_core::DurationMicros::from_seconds(grace + 1)?)?;
+    let later_call = Request {
+        clock: &later_clock,
+        cancel: &cancel,
+    };
+    let (blocked_by_sibling, sibling_warnings) = provenant_records::warning::capture(|| {
+        store.check_launch_writer_lineage(
+            &unrelated_record,
+            &unrelated_task,
+            &drifted.worktree,
+            &later_call,
+        )
+    });
+    blocked_by_sibling?;
+    assert!(
+        !sibling_warnings
+            .iter()
+            .any(|warning| { warning.code.as_ref() == provenant_records::policy::WRITER_HANDOVER })
+    );
+    assert!(
+        crate::writer::read_handover(&store.attempt_dir(unrelated.attempt_id, false)?)?.is_none(),
+        "a protected sibling reservation must keep the handover from transferring"
+    );
+    let mut sibling_reservation: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&sibling_reservation_path)?)?;
+    let current_boot = sibling_reservation["boot"]
+        .as_str()
+        .ok_or("sibling reservation lacks a boot identity")?;
+    sibling_reservation["boot"] = if current_boot.starts_with("linux:") {
+        serde_json::json!("darwin:00000000-0000-0000-0000-000000000000")
+    } else {
+        serde_json::json!("linux:00000000-0000-0000-0000-000000000000")
+    };
+    std::fs::write(
+        &sibling_reservation_path,
+        serde_json::to_vec(&sibling_reservation)?,
+    )?;
+
+    let (adopted, lapse_warnings) = provenant_records::warning::capture(|| {
+        store.check_launch_writer_lineage(
+            &unrelated_record,
+            &unrelated_task,
+            &drifted.worktree,
+            &later_call,
+        )
+    });
+    adopted?;
+    assert!(lapse_warnings.iter().any(|warning| {
+        warning.code.as_ref() == provenant_records::policy::LEASE_HOLDER_UNREACHABLE
+    }));
+    assert!(lapse_warnings.iter().any(|warning| {
+        warning.code.as_ref() == provenant_records::policy::WRITER_HANDOVER
+            && warning.message.contains("unreachable after grace")
+    }));
+    let fact = crate::writer::read_handover(&store.attempt_dir(unrelated.attempt_id, false)?)?
+        .ok_or("unreachable holder handover fact was not sealed")?;
+    assert_eq!(fact.from, child.attempt_id);
+    assert_eq!(fact.to, unrelated.attempt_id);
+    let lease: WorktreeLease = serde_json::from_slice(&std::fs::read(lease_path(&slot_path))?)?;
+    assert_eq!(lease.holder, unrelated.attempt_id);
+    drop(adopter_custody);
+    drop(sibling_custody);
     Ok(())
 }
 
@@ -329,10 +566,12 @@ fn resume_preserves_explicit_worktrees_and_settled_lane_ownership()
         let mut prior_terminalized = false;
         if origin == Some(WorktreeOrigin::Lane) {
             let launch = crate::prepare_writer(&writer, &store.writer_registry, project_id)?;
-            assert!(matches!(
-                store.check_writer_lineage(&record, &launch.worktree, &call),
-                Err(RunError::NotFound)
-            ));
+            // A foreign lane owner is advisory: ownership alone never refuses.
+            assert!(
+                store
+                    .check_writer_lineage(&record, &launch.worktree, &call)?
+                    .is_some()
+            );
             let mut owner_context = execution.clone();
             owner_context.project_id = provenant_core::ProjectId::from_bytes([121; 16]);
             let owner_store = RunStore::open(&owner_context, &call)?;
@@ -342,10 +581,12 @@ fn resume_preserves_explicit_worktrees_and_settled_lane_ownership()
             owner.attempt_id = AttemptId::from_bytes([120; 16]);
             crate::tests::rekey(&mut owner);
             owner_store.create(&owner, &call)?;
-            assert!(matches!(
-                store.check_writer_lineage(&record, &launch.worktree, &call),
-                Err(RunError::Nonterminal)
-            ));
+            // A live owner is admitted under the shared-writer rule.
+            assert!(
+                store
+                    .check_writer_lineage(&record, &launch.worktree, &call)?
+                    .is_some()
+            );
             store.withdraw(
                 prior,
                 AttemptState::Queued {
@@ -375,10 +616,7 @@ fn resume_preserves_explicit_worktrees_and_settled_lane_ownership()
                 .head
                 .map(|head| head.to_string())
                 .or_else(|| queue_task.head.clone());
-            assert!(matches!(
-                store.check_launch_writer_lineage(&terminal, &queue_task, &launch.worktree, &call),
-                Err(RunError::Nonterminal)
-            ));
+            store.check_launch_writer_lineage(&terminal, &queue_task, &launch.worktree, &call)?;
             let owner_id = AttemptId::from_bytes([120; 16]);
             owner_store.withdraw(
                 owner_id,
@@ -408,13 +646,11 @@ fn resume_preserves_explicit_worktrees_and_settled_lane_ownership()
                     reference: None,
                 },
             )?;
-            assert!(matches!(
-                crate::writer::seal_writer_ownership(
-                    &store.attempt_dir(prior, false)?,
-                    &launch.worktree
-                ),
-                Err(RunError::Conflict)
-            ));
+            // An adopted checkout has no ownership record to conflict with; the
+            // slot lease written at launch still names this attempt.
+            let bytes = std::fs::read(lease_path(&store.writer_slot(&writer)?))?;
+            let current: WorktreeLease = serde_json::from_slice(&bytes)?;
+            assert_eq!(current.holder, prior);
             std::fs::remove_file(
                 launch
                     .worktree
@@ -424,29 +660,36 @@ fn resume_preserves_explicit_worktrees_and_settled_lane_ownership()
             )?;
         }
         if origin == Some(WorktreeOrigin::Lane) {
-            let attempt = store.attempt_dir(prior, false)?;
-            let snapshot = attempt.current_path()?.join("writer-owned.json");
-            let unobserved = crate::db::bytes(&crate::writer::WriterOwnership {
-                extra: Default::default(),
-                schema_version: 1,
-                lane_owned: true,
-                owner: None,
-            })?;
-            std::fs::write(&snapshot, &unobserved)?;
+            let slot = store.writer_slot(&writer)?;
+            let destination = lease_path(&slot);
+            let stale = WorktreeLease {
+                holder: AttemptId::from_bytes([124; 16]),
+                since: WallTime::from_micros(1)?,
+                sharing: Sharing::Refuse,
+            };
+            let stale_bytes = serde_json::to_vec(&stale)?;
+            Directory::open_anchor(&slot)?
+                .atomic_write(
+                    OsStr::new(LEASE_FILE),
+                    ".lease-",
+                    &stale_bytes,
+                    PublishMode::Replace,
+                )?
+                .require_durable()?;
             let launch = crate::prepare_writer(&writer, &store.writer_registry, project_id)?;
-            assert!(matches!(
-                crate::writer::seal_writer_ownership(&attempt, &launch.worktree),
-                Err(RunError::Conflict)
-            ));
-            assert_eq!(std::fs::read(&snapshot)?, unobserved);
-            assert!(matches!(
-                store.check_writer_lineage(&record, &launch.worktree, &call),
-                Err(RunError::WriterLineage(
-                    "continuation worktree belongs to another lane"
-                ))
-            ));
-            std::fs::remove_file(snapshot)?;
-            crate::writer::seal_writer_ownership(&attempt, &launch.worktree)?;
+            crate::writer::seal_worktree_lease(
+                launch.custody.as_ref(),
+                &launch.worktree,
+                RunStore::scope(&record),
+            )?;
+            let current: WorktreeLease = serde_json::from_slice(&std::fs::read(&destination)?)?;
+            assert_eq!(current.holder, prior, "launch took the slot lease");
+            assert_eq!(current.sharing, Sharing::Refuse, "owner decision preserved");
+            assert!(
+                store
+                    .check_writer_lineage(&record, &launch.worktree, &call)?
+                    .is_some()
+            );
         }
         std::fs::write(info.path.join("pending.txt"), "keep these edits")?;
         if !prior_terminalized {
@@ -499,10 +742,8 @@ fn resume_preserves_explicit_worktrees_and_settled_lane_ownership()
         )?;
         let mut other_node = graph.request.task.clone();
         other_node.context.as_mut().ok_or("graph context")?.node_id = Some("unrelated".into());
-        assert!(matches!(
-            store.check_launch_writer_lineage(&graph_record, &other_node, &tree.worktree, &call),
-            Err(RunError::WriterLineage("graph predecessor context"))
-        ));
+        // Node identity is not a boundary: any lane may continue a lapsed lease.
+        store.check_launch_writer_lineage(&graph_record, &other_node, &tree.worktree, &call)?;
         for field in ["writer", "source", "head"] {
             let mut mismatch = graph.request.task.clone();
             match field {
@@ -522,9 +763,7 @@ fn resume_preserves_explicit_worktrees_and_settled_lane_ownership()
                         &tree.worktree,
                         &call
                     ),
-                    Err(RunError::WriterLineage(
-                        "graph predecessor writer or source"
-                    ))
+                    Err(RunError::Validation("graph predecessor writer or source"))
                 ),
                 "graph predecessor accepted mismatched {field}"
             );
@@ -624,29 +863,24 @@ fn resume_preserves_explicit_worktrees_and_settled_lane_ownership()
                 reference: None,
             },
         )?;
-        assert!(matches!(
-            store.check_launch_writer_lineage(
-                &graph_record,
-                &graph.request.task,
-                &tree.worktree,
-                &call
-            ),
-            Err(RunError::WriterLineage(
-                "continuation worktree belongs to another lane"
-            ))
-        ));
-        assert!(matches!(
-            store.check_continuation_writer(next.attempt_id, &call),
-            Err(RunError::WriterLineage(
-                "continuation worktree belongs to another lane"
-            ))
-        ));
+        // A foreign lane owner is advisory: it does not refuse a continuation.
+        store.check_launch_writer_lineage(
+            &graph_record,
+            &graph.request.task,
+            &tree.worktree,
+            &call,
+        )?;
+        assert!(
+            store
+                .check_continuation_writer(next.attempt_id, &call)?
+                .is_some()
+        );
     }
     Ok(())
 }
 
 #[test]
-fn resume_refuses_a_worktree_reused_by_another_lane()
+fn retry_and_resume_on_lapsed_lease_need_no_flag()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
     let temp = tempfile::tempdir()?;
     let mut execution = crate::tests::context(temp.path())?;
@@ -729,10 +963,11 @@ fn resume_refuses_a_worktree_reused_by_another_lane()
         &provenant_records::policy::Policy::default(),
     )?;
     let queued = store.record(prior, &call)?;
-    assert!(matches!(
-        store.check_writer_lineage(&continuation, &launch.worktree, &call),
-        Err(RunError::Nonterminal)
-    ));
+    assert!(
+        store
+            .check_writer_lineage(&continuation, &launch.worktree, &call)?
+            .is_some()
+    );
     let mut running = queued.clone();
     running.state = AttemptState::Running {
         extra: Default::default(),
@@ -742,10 +977,11 @@ fn resume_refuses_a_worktree_reused_by_another_lane()
         "UPDATE attempts SET record=?1 WHERE id=?2",
         rusqlite::params![crate::db::bytes(&running)?, prior.to_string()],
     )?;
-    assert!(matches!(
-        store.check_writer_lineage(&continuation, &launch.worktree, &call),
-        Err(RunError::Nonterminal)
-    ));
+    assert!(
+        store
+            .check_writer_lineage(&continuation, &launch.worktree, &call)?
+            .is_some()
+    );
     store.db.execute(
         "UPDATE attempts SET record=?1 WHERE id=?2",
         rusqlite::params![crate::db::bytes(&queued)?, prior.to_string()],
@@ -785,12 +1021,8 @@ fn resume_refuses_a_worktree_reused_by_another_lane()
             .private_git_dir()
             .join("provenant-owner.json"),
     )?;
-    assert!(matches!(
-        store.check_continuation_writer(prior, &call),
-        Err(RunError::WriterLineage(
-            "continuation worktree has no lane owner"
-        ))
-    ));
+    // No owner means no lease: the tree stays usable as an explicit tree.
+    assert!(store.check_continuation_writer(prior, &call)?.is_none());
     worktrees::save_owner(
         &launch.worktree,
         &WorktreeOwner {
@@ -798,12 +1030,7 @@ fn resume_refuses_a_worktree_reused_by_another_lane()
             ..owner.clone()
         },
     )?;
-    assert!(matches!(
-        store.check_continuation_writer(prior, &call),
-        Err(RunError::WriterLineage(
-            "continuation worktree has no lane owner"
-        ))
-    ));
+    assert!(store.check_continuation_writer(prior, &call)?.is_some());
     worktrees::save_owner(&launch.worktree, &owner)?;
     assert!(store.check_continuation_writer(prior, &call)?.is_some());
     let first = Resume {
@@ -856,12 +1083,14 @@ fn resume_refuses_a_worktree_reused_by_another_lane()
             },
         )?;
         let queued = store.record(first.attempt_id, &call).unwrap();
-        assert!(matches!(
-            store.check_writer_lineage(&queued, &tree, &call),
-            Err(RunError::WriterLineage(
-                "continuation worktree belongs to another lane"
-            ))
-        ));
+        // Another lane's lease on the same path is advisory: a resume or retry
+        // proceeds under the shared-writer rule, with no special flag.
+        assert!(
+            store
+                .check_writer_lineage(&queued, &tree, &call)
+                .expect("lineage check")
+                .is_some()
+        );
         Ok(())
     })?;
     let next = Resume {
@@ -871,18 +1100,6 @@ fn resume_refuses_a_worktree_reused_by_another_lane()
         attempt_id: AttemptId::from_bytes([51; 16]),
         ..first
     };
-    assert!(matches!(
-        store.resume(&next, &call),
-        Err(RunError::WriterLineage(
-            "continuation worktree belongs to another lane"
-        ))
-    ));
-    assert!(matches!(
-        store.resume_fresh(&next, "fixture", &call),
-        Err(RunError::WriterLineage(
-            "continuation worktree belongs to another lane"
-        ))
-    ));
     let replacement =
         worktrees::with_context(&roots, &home, &project, &clock, &cancel, |context| {
             let replacement = worktrees::create(
@@ -937,4 +1154,152 @@ fn resume_refuses_a_worktree_reused_by_another_lane()
     );
     assert!(info.path.exists(), "foreign lane must retain its checkout");
     Ok(())
+}
+
+#[test]
+fn handover_keeps_and_reports_uncommitted_files()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let mut execution = crate::tests::context(temp.path())?;
+    let project = temp.path().join("checkout");
+    let home = temp.path().join("home");
+    let mut inputs = provenant_core::RootInputs::new(home.clone(), project.clone());
+    inputs.state_dir = Some(execution.state_root.as_path().into());
+    let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
+    create_private_state_root(roots.state.as_path())?;
+    init_base_repository(&project)?;
+    let clock = crate::tests::clock();
+    let cancel = provenant_core::CancelToken::new();
+    let (project_id, info) =
+        worktrees::with_context(&roots, &home, &project, &clock, &cancel, |context| {
+            let info = worktrees::create(
+                context,
+                WorktreeCreate {
+                    branch: "handover".into(),
+                    base: None,
+                },
+                &cancel,
+            )?;
+            Ok((context.binding.project_id(), info))
+        })?;
+    execution.project_id = project_id;
+    let call = Request {
+        clock: &clock,
+        cancel: &cancel,
+    };
+    let store = RunStore::open(&execution, &call)?;
+    let writer = WriterRequest {
+        extra: Default::default(),
+        custody_project: Some(project_id),
+        project: project.clone(),
+        worktree: info.path.clone(),
+    };
+    let mut prior = crate::tests::input();
+    prior.attempt_id = AttemptId::from_bytes([210; 16]);
+    prior.operation_id = "handover-prior".parse()?;
+    crate::tests::rekey(&mut prior);
+    let prior_id = prior.attempt_id;
+    prior.request.task.writer = Some(writer.clone());
+    prior.request.task.head = Some(info.head.to_string());
+    store.create(&prior, &call)?;
+    let launch = crate::prepare_writer(&writer, &store.writer_registry, project_id)?;
+    worktrees::save_owner(
+        &launch.worktree,
+        &WorktreeOwner {
+            attempt_id: Some(prior_id),
+            operation_id: Some(prior.operation_id.clone()),
+            branch: info.branch.clone().ok_or("writer branch missing")?,
+            base: info.head.to_string(),
+            host: provenant_core::HostId::from_bytes([3; 16]),
+            created_at: prior.created_at,
+            origin: WorktreeOrigin::Lane,
+            label: None,
+            reference: None,
+        },
+    )?;
+    launch.snapshot(
+        store.context.state_root.as_path(),
+        &store.attempt_dir(prior_id, false)?,
+        RunStore::scope(&store.record(prior_id, &call)?),
+        &provenant_records::policy::Policy::default(),
+    )?;
+    // Uncommitted predecessor work must survive the handover untouched.
+    std::fs::write(info.path.join("retained.txt"), "keep me")?;
+    let route = crate::tests::route();
+    let starting = store.mark_starting(
+        &store.record(prior_id, &call)?,
+        &route,
+        &[],
+        &Default::default(),
+        None,
+        &call,
+    )?;
+    let starting = store.record_starting_launch(
+        &starting,
+        &route,
+        None,
+        &[],
+        &Default::default(),
+        None,
+        0,
+        &Default::default(),
+        &call,
+    )?;
+    store.withdraw(
+        prior_id,
+        starting.state,
+        Outcome::Cancelled,
+        "fixture",
+        clock.wall_now()?,
+        &call,
+    )?;
+    let mut successor = crate::tests::input();
+    successor.attempt_id = AttemptId::from_bytes([211; 16]);
+    successor.operation_id = "handover-successor".parse()?;
+    successor.request.parent = Some(prior_id);
+    crate::tests::rekey(&mut successor);
+    successor.request.task.writer = Some(writer.clone());
+    store.create(&successor, &call)?;
+    let record = store.record(successor.attempt_id, &call)?;
+    let (checked, warnings) = provenant_records::warning::capture(|| {
+        store.check_writer_lineage(&record, &launch.worktree, &call)
+    });
+    checked?;
+    let notice = warnings
+        .iter()
+        .find(|w| w.code.as_ref() == provenant_records::policy::WRITER_HANDOVER)
+        .ok_or("no WRITER_HANDOVER warning")?;
+    assert!(
+        notice.message.contains("retained.txt"),
+        "handover did not list the uncommitted file: {}",
+        notice.message
+    );
+    let fact = crate::writer::read_handover(&store.attempt_dir(successor.attempt_id, false)?)?
+        .ok_or("no handover fact")?;
+    assert_eq!(fact.uncommitted, ["retained.txt"]);
+    assert_eq!(
+        std::fs::read_to_string(info.path.join("retained.txt"))?,
+        "keep me"
+    );
+    Ok(())
+}
+
+#[test]
+fn no_ownership_refusal_strings_remain() {
+    for source in [include_str!("controls.rs"), include_str!("writer.rs")] {
+        for banned in [
+            "belongs to another lane",
+            "has no lane owner",
+            "continuation owner attempt missing",
+        ] {
+            assert!(
+                !source.contains(banned),
+                "ownership refusal string {banned:?} still present"
+            );
+        }
+    }
+    assert!(
+        !include_str!("controls.rs").contains("WriterLineage"),
+        "the deleted RunError::WriterLineage is still referenced"
+    );
 }

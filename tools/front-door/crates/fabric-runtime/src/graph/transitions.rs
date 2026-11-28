@@ -128,51 +128,61 @@ pub(super) fn apply_gate_result(
 }
 
 /// Retain launch warnings supplied by the owner.
-pub(super) fn apply_launch_metadata(
-    checkpoint: &mut GraphCheckpoint,
-    node_index: usize,
-    warnings: Vec<String>,
-) {
-    if !warnings.is_empty() {
-        checkpoint.nodes[node_index].warnings = warnings;
-    }
-}
-
 pub(super) fn apply_route(progress: &mut NodeProgress, applied_route: Option<GraphRoute>) {
     if let Some(route) = applied_route {
-        fn warn_value(warnings: &mut Vec<String>, field: &str, value: &serde_json::Value) {
-            match value {
-                serde_json::Value::String(value) => {
-                    for (bad, reason) in [
-                        (value.len() > HOST_ID_BYTES, "exceeds 256 bytes"),
-                        (
-                            value.chars().any(char::is_control),
-                            "contains control characters",
-                        ),
-                    ] {
-                        let message = format!("route.{field} {reason}");
-                        if bad && !warnings.contains(&message) {
-                            warnings.push(message);
-                        }
-                    }
+        // Only host identifiers are bounded by HOST_ID_BYTES. A pool-selection
+        // receipt, a peer network or retry limit, and extra note fields are not
+        // identifiers: they are retained verbatim and never produce a warning.
+        fn warn_identifier(
+            warnings: &mut Vec<provenant_records::Warning>,
+            field: &'static str,
+            value: Option<&str>,
+        ) {
+            let Some(value) = value else { return };
+            for (bad, reason, code) in [
+                (
+                    value.len() > HOST_ID_BYTES,
+                    "exceeds 256 bytes",
+                    provenant_records::warning::ROUTE_IDENTIFIER_TOO_LONG,
+                ),
+                (
+                    value.chars().any(char::is_control),
+                    "contains control characters",
+                    provenant_records::warning::ROUTE_IDENTIFIER_CONTROL_CHAR,
+                ),
+            ] {
+                if !bad {
+                    continue;
                 }
-                serde_json::Value::Object(fields) => {
-                    for (key, value) in fields {
-                        warn_value(warnings, &format!("{field}.{key}"), value);
-                    }
+                let message = format!("route.{field} {reason}");
+                if warnings.iter().any(|warning| warning.message == message) {
+                    continue;
                 }
-                serde_json::Value::Array(values) => {
-                    for (index, value) in values.iter().enumerate() {
-                        warn_value(warnings, &format!("{field}[{index}]"), value);
-                    }
-                }
-                _ => {}
+                warnings.push(
+                    provenant_records::Warning::new(
+                        code,
+                        message,
+                        provenant_records::warning::detected_source(code),
+                    )
+                    .subject(format!("route.{field}")),
+                );
             }
         }
-        if let Ok(serde_json::Value::Object(fields)) = serde_json::to_value(&route) {
-            for (field, value) in fields {
-                warn_value(&mut progress.warnings, &field, &value);
-            }
+
+        for (field, value) in [
+            ("adapter", route.adapter.as_deref()),
+            ("name", route.name.as_deref()),
+            ("model", route.model.as_deref()),
+            ("alias", route.alias.as_deref()),
+            ("effort", route.effort.as_deref()),
+            ("account", route.account.as_deref()),
+            ("account_key", route.account_key.as_deref()),
+            ("source", route.source.as_deref()),
+            ("tier", route.tier.as_deref()),
+            ("required_family", route.required_family.as_deref()),
+            ("peer_source_head", route.peer_source_head.as_deref()),
+        ] {
+            warn_identifier(&mut progress.warnings, field, value);
         }
         if let Some(manifest) = progress
             .attempts
@@ -254,7 +264,12 @@ pub(super) fn apply_attempt_observation(
         review_range,
     } = facts;
     // Synthesis retains qualified evidence even without a disposition contract.
-    let upstream_findings: Vec<Finding> = if node.dispositions.is_empty()
+    let upstream_findings: Vec<Finding> = if node.kind == Some(NodeKind::Adjudicate) {
+        outputs::adjudication_input_findings(node_index, plan, checkpoint, positions)
+            .into_iter()
+            .map(|(source, finding)| upstream_finding(node, &source, finding))
+            .collect()
+    } else if node.dispositions.is_empty()
         && node.kind != Some(NodeKind::Synthesise)
         && !template::review_verifier(node)
         && !repair_writer(node)
@@ -280,9 +295,14 @@ pub(super) fn apply_attempt_observation(
     } else {
         truncated_finding_ids(node, plan, checkpoint, positions)
     };
+    let accept_below = schedule::effective_review_policy(node, checkpoint)
+        .accept_below
+        .value;
     let marker_inputs = propagation_inputs(node, plan, checkpoint, positions);
     let partial_review = template::review_behaviour(node).is_some()
         && review::partial_inputs(node, checkpoint, positions);
+    let effective_review_base =
+        schedule::review_base_for_attempt(node_index, plan, checkpoint, positions);
     let mut settled_result = None;
     let retry_was_pending;
     let should_continue = {
@@ -403,7 +423,7 @@ pub(super) fn apply_attempt_observation(
                 let review_contract_error = if stopped_without_reply {
                     None
                 } else {
-                    review::contract_error(node, &upstream_findings, &outputs)
+                    review::contract_error(node, &upstream_findings, &outputs, accept_below)
                 };
                 if node.access == AccessMode::ReadOnly
                     && template::review_node(node)
@@ -495,7 +515,14 @@ pub(super) fn apply_attempt_observation(
                     .or(propagation_error)
                     .or(review_contract_error)
                     .or_else(|| review::invariant_error(node, &outputs))
-                    .or_else(|| review::repair_result_error(node, &upstream_findings, &outputs));
+                    .or_else(|| {
+                        review::repair_result_error(
+                            node,
+                            &upstream_findings,
+                            &outputs,
+                            accept_below,
+                        )
+                    });
                 if template::review_behaviour(node).is_some() {
                     retain_synthesis_findings(&mut outputs, &upstream_findings);
                     if let Some((code, _)) = &disposition_error {
@@ -662,9 +689,9 @@ pub(super) fn apply_attempt_observation(
                                     _ => None,
                                 }
                                 .or_else(|| {
-                                    progress
-                                        .review_base
+                                    effective_review_base
                                         .as_deref()
+                                        .or(progress.review_base.as_deref())
                                         .or(graph_review_base.as_deref())
                                         .or(node.review_base.as_deref())
                                         .and_then(|b| GitOid::parse(b).ok())
@@ -740,6 +767,17 @@ pub(super) fn apply_attempt_observation(
                                 }
                             }
                         }
+                        false
+                    }
+                    GraphAttemptOutcome::ModelUnavailable
+                        if template::review_behaviour(node)
+                            == Some(template::ReviewBehaviour::Lens) =>
+                    {
+                        // Review lens route changes are bounded and journalled
+                        // by ReviewRetryState, not the generic route fallback.
+                        progress.advance_code = Some("model_unavailable".into());
+                        progress.advance_note = Some("review lens route is unavailable".into());
+                        progress.state = NodeState::Failed;
                         false
                     }
                     GraphAttemptOutcome::AuthRequired
@@ -901,6 +939,7 @@ pub(super) fn initial_checkpoint(
         // The caller resolves the configured defaults once at admission and
         // stamps them on the checkpoint after this skeleton is returned.
         on_stop_defaults: provenant_records::OnStop::default(),
+        review_policy: None,
         delivery_ci_superseded: Vec::new(),
         cancel_reason: None,
         integration_pin: None,
@@ -958,7 +997,6 @@ pub(super) fn initial_checkpoint(
                 container_retry: false,
                 concurrency_warning: None,
                 repair_growth: None,
-                review_verdict_correction_refused: None,
                 provisioned_source: None,
                 provisioned_owner: None,
                 warnings: Vec::new(),
@@ -967,6 +1005,10 @@ pub(super) fn initial_checkpoint(
                 blocked: false,
                 decisions: Vec::new(),
                 review_settlement: None,
+                review_adjudication_receipts: Vec::new(),
+                review_retry: None,
+                finding_ledger: None,
+                review_round_scope: None,
                 expansion_pause: None,
                 expansion_cause: None,
                 loop_pause: None,
@@ -1012,6 +1054,7 @@ pub(super) fn fail_with(progress: &mut NodeProgress, code: &str, message: String
 }
 
 pub(super) fn writer_binding_failed(progress: &mut NodeProgress, _id: &str, reason: &str) {
+    progress.writer_binding_pending = false;
     fail_with(progress, "writer_binding_unavailable", reason.to_owned());
 }
 
@@ -1192,6 +1235,17 @@ pub(super) fn admit_attempt(
     if checkpoint.pause.is_some() {
         return Admission::SaveAndWait;
     }
+    if outputs::repair_writer(node) && !repair::ledger_available(node, plan, checkpoint) {
+        fail_with(
+            &mut checkpoint.nodes[node_index],
+            "review_ledger_unavailable",
+            format!(
+                "node {}: the current review-chain finding ledger is unavailable; repair cannot use an individual reviewer's output",
+                node.id
+            ),
+        );
+        return Admission::SaveAndWait;
+    }
     if let Some(missing) = required_input_unavailable(node, plan, checkpoint, positions) {
         fail_with(
             &mut checkpoint.nodes[node_index],
@@ -1238,7 +1292,7 @@ pub(super) struct LaunchFacts {
     pub input_cap: usize,
     pub placement_host_id: Option<provenant_core::HostId>,
     pub launch_actor: String,
-    pub input_cap_source: InputCapSource,
+    pub input_cap_source: provenant_records::Layer,
     pub timing: Option<LaunchTiming>,
 }
 
@@ -2015,19 +2069,6 @@ fn recovery_pending(checkpoint: &GraphCheckpoint) -> bool {
                 node.state == NodeState::Blocked
                     && node.advance_code.as_deref() == Some("steer_continuation_refused")
             })
-        || checkpoint.nodes.iter().any(|node| {
-            node.state == NodeState::Failed
-                && node.advance_code.as_deref() == Some("review_verdict_invalid")
-                && node.review_verdict_correction_refused.is_none()
-                && !checkpoint
-                    .expansions
-                    .iter()
-                    .filter_map(|expansion| expansion.patch.as_ref())
-                    .any(|patch| {
-                        patch.reason.as_deref()
-                            == Some(format!("correct review verdict {}", node.id).as_str())
-                    })
-        })
 }
 
 pub(super) fn refresh_structure_pause(

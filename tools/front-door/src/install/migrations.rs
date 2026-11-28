@@ -11,7 +11,7 @@
 //! state path and the install proceeds; the id stays unrecorded so the next
 //! install retries the idempotent step.
 use provenant_config::PortEvidenceError;
-use provenant_os::fs::{Directory, FsError, PublishMode};
+use provenant_os::fs::{Directory, ForeignLock, FsError, LockMode, PublishMode};
 use provenant_records::migrate::{Migration, MigrationError, MigrationReport};
 use provenant_records::warning::{self, MIGRATION_STEP_FAILED, Warning};
 use provenant_records::{InstallReceipt, Limits};
@@ -21,8 +21,23 @@ use std::io::ErrorKind;
 use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 
+/// Marker spelling shared by store migrations while an interrupted cut-over
+/// is resumed. The marker is written beside the owning store.
+pub(crate) fn migrating_marker(to: u64) -> String {
+    format!("migrating-{to}")
+}
+
+/// Default bounded wait for the store cut-over's quiesce gate. The owner can
+/// override it at `domains.install.quiesce_seconds`.
+const DEFAULT_QUIESCE_SECONDS: u64 = 300;
+/// Version written by the config knob cut-over; the graph and run stores own
+/// their own markers beside their records.
+const CONFIG_KNOB_VERSION: u64 = 4;
+
 /// Ordered steps for this release. Steps are deleted in the release after the
-/// one that ships them.
+/// one that ships them. Store cut-over runs separately after publication: it
+/// quiesces once, then applies graph, run and config as independently recorded
+/// steps so an interrupted pass resumes at the first unfinished store.
 const STEPS: &[&dyn Migration] = &[
     &HostProjectDirs,
     &AttemptScratchMove,
@@ -766,9 +781,400 @@ impl Migration for UsageLedgerV4 {
     }
 }
 
+/// The bounded wait comes from `domains.install.quiesce_seconds`; an absent or
+/// malformed value keeps the 300 second default.
+fn quiesce_seconds(state_root: &Path) -> u64 {
+    let Ok(text) = std::fs::read_to_string(state_root.join("config.toml")) else {
+        return DEFAULT_QUIESCE_SECONDS;
+    };
+    let Ok(document) = text.parse::<toml_edit::DocumentMut>() else {
+        return DEFAULT_QUIESCE_SECONDS;
+    };
+    document
+        .get("domains")
+        .and_then(|item| item.get("install"))
+        .and_then(|item| item.get("quiesce_seconds"))
+        .and_then(toml_edit::Item::as_integer)
+        .filter(|seconds| *seconds >= 0)
+        .map(|seconds| seconds as u64)
+        .unwrap_or(DEFAULT_QUIESCE_SECONDS)
+}
+
+/// Every store lock a cut-over must see drain. `try_flock_foreign` observes an
+/// existing lock through a read-only descriptor: it never creates a lock file
+/// for an idle store, so a quiescence check changes nothing. The bounded loop
+/// in [`quiesce`] does the waiting.
+fn held_store_locks(state_root: &Path) -> Vec<String> {
+    let mut held = Vec::new();
+    let graphs = state_root.join("fabric").join("graphs");
+    if let Ok(projects) = std::fs::read_dir(&graphs) {
+        for project in projects.flatten() {
+            if !project.file_type().is_ok_and(|kind| kind.is_dir()) {
+                continue;
+            }
+            let Ok(directory) = Directory::open_anchor(&project.path()) else {
+                continue;
+            };
+            let Ok(entries) = directory.entries() else {
+                continue;
+            };
+            for name in entries.flatten() {
+                let Some(text) = name.to_str() else { continue };
+                // Probe the lock file itself: a pending graph holds its lock
+                // before any checkpoint exists, so deriving names from
+                // `graph-*.json` would miss it.
+                if !text.ends_with(".lock") {
+                    continue;
+                }
+                if matches!(
+                    directory.try_flock_foreign(OsStr::new(text), LockMode::Exclusive),
+                    Ok(ForeignLock::Held)
+                ) {
+                    held.push(format!("{} {text}", project.file_name().to_string_lossy()));
+                }
+            }
+        }
+    }
+    let queue_lock = crate::fabric::queue_registry::registry_lock_path(state_root);
+    if let (Some(parent), Some(name)) = (queue_lock.parent(), queue_lock.file_name())
+        && let Ok(directory) = Directory::open_anchor(parent)
+        && matches!(
+            directory.try_flock_foreign(name, LockMode::Exclusive),
+            Ok(ForeignLock::Held)
+        )
+    {
+        held.push("queue registry.lock".to_owned());
+    }
+    if let Ok(attempts) = std::fs::read_dir(state_root.join("attempts")) {
+        for attempt in attempts.flatten() {
+            if !attempt.file_type().is_ok_and(|kind| kind.is_dir()) {
+                continue;
+            }
+            let Ok(directory) = Directory::open_anchor(&attempt.path()) else {
+                continue;
+            };
+            for name in ["writer.lock", "custody.lock", "settlement.lock"] {
+                if matches!(
+                    directory.try_flock_foreign(OsStr::new(name), LockMode::Exclusive),
+                    Ok(ForeignLock::Held)
+                ) {
+                    held.push(format!("{} {name}", attempt.file_name().to_string_lossy()));
+                }
+            }
+        }
+    }
+    if let Ok(projects) = std::fs::read_dir(state_root.join("worktrees")) {
+        for project in projects.flatten() {
+            if !project.file_type().is_ok_and(|kind| kind.is_dir()) {
+                continue;
+            }
+            let Ok(slots) = std::fs::read_dir(project.path()) else {
+                continue;
+            };
+            for slot in slots.flatten() {
+                if !slot.file_type().is_ok_and(|kind| kind.is_dir()) {
+                    continue;
+                }
+                let Ok(directory) = Directory::open_anchor(&slot.path()) else {
+                    continue;
+                };
+                if matches!(
+                    directory.try_flock_foreign(OsStr::new("writer.lock"), LockMode::Exclusive),
+                    Ok(ForeignLock::Held)
+                ) {
+                    held.push(format!(
+                        "worktrees/{}/{}/writer.lock",
+                        project.file_name().to_string_lossy(),
+                        slot.file_name().to_string_lossy()
+                    ));
+                }
+            }
+        }
+    }
+    held.sort();
+    held.dedup();
+    held
+}
+
+/// A cut-over migrates nothing until the graph, queue and lease locks drain.
+/// A holder that outlives the window is named in `UPGRADE_NOT_QUIESCENT`, and
+/// every store step returns before touching a record.
+fn quiesce(state_root: &Path, seconds: u64) -> Result<(), MigrationError> {
+    // An explicit real-time boundary: use the OS monotonic coordinate and its
+    // bounded pause rather than sampling std time or sleeping directly.
+    let deadline = provenant_os::sys::monotonic_now()
+        .as_micros()
+        .saturating_add(seconds.saturating_mul(1_000_000));
+    loop {
+        let holders = held_store_locks(state_root);
+        if holders.is_empty() {
+            return Ok(());
+        }
+        if provenant_os::sys::monotonic_now().as_micros() >= deadline {
+            return Err(MigrationError::new(format!(
+                "UPGRADE_NOT_QUIESCENT: store locks are still held: {}",
+                holders.join(", ")
+            )));
+        }
+        provenant_os::sys::wait_pause(std::time::Duration::from_millis(50));
+    }
+}
+
+fn old_source_replacement(text: &str) -> Option<&'static str> {
+    match text {
+        "shipped_default" | "bundled" | "builtin" => Some("default"),
+        "dispatch" => Some("launch"),
+        _ => None,
+    }
+}
+
+/// Rewrite persisted source tags in one TOML table and every nested table.
+/// Only keys that name a source are touched, so an unrelated value that happens
+/// to spell `builtin` is left alone.
+fn rewrite_toml_sources(table: &mut dyn toml_edit::TableLike) -> bool {
+    let mut changed = false;
+    let names: Vec<String> = table.iter().map(|(name, _)| name.to_owned()).collect();
+    for name in names {
+        let Some(item) = table.get_mut(&name) else {
+            continue;
+        };
+        let is_source = name == "source" || name.ends_with("_source");
+        if let Some(value) = item.as_value_mut() {
+            if is_source && let Some(replacement) = value.as_str().and_then(old_source_replacement)
+            {
+                *value = toml_edit::Value::from(replacement);
+                changed = true;
+            }
+        } else if let Some(child) = item.as_table_like_mut() {
+            changed |= rewrite_toml_sources(child);
+        }
+    }
+    changed
+}
+
+/// The batch 1 config transform. `lanes.isolation` becomes `lanes.read_source`
+/// (`shared` becomes the live spelling, `private` is dropped because destination
+/// rules replace it); `lanes.pr = never` set by the owner is deliberately kept.
+fn rewrite_config_knobs(document: &mut toml_edit::DocumentMut) -> bool {
+    let mut changed = false;
+    if let Some(lanes) = document
+        .get_mut("lanes")
+        .and_then(toml_edit::Item::as_table_like_mut)
+    {
+        let isolation = lanes
+            .get("isolation")
+            .and_then(toml_edit::Item::as_str)
+            .map(str::to_owned);
+        match isolation.as_deref() {
+            Some("shared") => {
+                lanes.remove("isolation");
+                lanes.insert(
+                    "read_source",
+                    toml_edit::value(provenant_cli::run::ReadSource::Live.to_string()),
+                );
+                changed = true;
+            }
+            Some("private") => {
+                lanes.remove("isolation");
+                changed = true;
+            }
+            _ => {}
+        }
+    }
+    changed |= rewrite_toml_sources(document.as_table_mut());
+    changed
+}
+
+/// Edit one config file structurally, preserving comments and unrelated keys,
+/// and publish it atomically at mode 0600 like a normal config write.
+fn rewrite_config_file(path: &Path) -> Result<bool, MigrationError> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| MigrationError::new(format!("{}: no parent", path.display())))?;
+    let directory = Directory::open_anchor(parent)
+        .map_err(|error| MigrationError::new(format!("{}: {error}", parent.display())))?;
+    let name = path
+        .file_name()
+        .ok_or_else(|| MigrationError::new(format!("{}: no file name", path.display())))?;
+    let bytes = directory
+        .read_stable(name, Limits::CONFIG.max_bytes)
+        .map_err(|error| MigrationError::new(format!("{}: {error}", path.display())))?;
+    let text = String::from_utf8(bytes).map_err(|error| {
+        MigrationError::new(format!("{}: invalid UTF-8: {error}", path.display()))
+    })?;
+    let mut document: toml_edit::DocumentMut = text.parse().map_err(|error| {
+        MigrationError::new(format!("{}: invalid TOML: {error}", path.display()))
+    })?;
+    if !rewrite_config_knobs(&mut document) {
+        return Ok(false);
+    }
+    directory
+        .atomic_write_with_permissions(
+            name,
+            ".config-migrate.",
+            document.to_string().as_bytes(),
+            0o600,
+            PublishMode::Replace,
+        )
+        .map_err(|error| MigrationError::new(format!("{}: {error}", path.display())))?
+        .require_durable()
+        .map_err(|error| MigrationError::new(format!("{}: {error}", path.display())))?;
+    Ok(true)
+}
+
+/// Config-store transform: host and project config files, behind a marker so
+/// an interrupted pass resumes. Each file reads as a no-op on a second run.
+struct ConfigKnobRewrite;
+
+impl Migration for ConfigKnobRewrite {
+    fn id(&self) -> &'static str {
+        "config-knob-rewrite"
+    }
+
+    fn apply(&self, state_root: &Path) -> Result<MigrationReport, MigrationError> {
+        let mut report = MigrationReport::new(self.id());
+        if !state_root.exists() {
+            return Ok(report);
+        }
+        let mut paths = vec![state_root.join("config.toml")];
+        if let Ok(projects) = std::fs::read_dir(state_root.join("projects")) {
+            for project in projects {
+                let path = project?.path().join("config.toml");
+                if path.exists() {
+                    paths.push(path);
+                }
+            }
+        }
+        let marker = state_root.join(migrating_marker(CONFIG_KNOB_VERSION));
+        std::fs::write(&marker, b"")?;
+        for path in paths {
+            if !path.exists() {
+                continue;
+            }
+            match rewrite_config_file(&path) {
+                Ok(true) => report.changed.push(path.display().to_string()),
+                Ok(false) => {}
+                Err(error) => report.warnings.push(
+                    Warning::new(
+                        MIGRATION_STEP_FAILED,
+                        format!(
+                            "config knobs could not be migrated in {}: {error}",
+                            path.display()
+                        ),
+                        provenant_records::warning::detected_source(MIGRATION_STEP_FAILED),
+                    )
+                    .subject(path.display().to_string())
+                    .repair(format!(
+                        "repair {}, then rerun `provenant install`; the step is idempotent",
+                        path.display()
+                    )),
+                ),
+            }
+        }
+        if report.warnings.is_empty() {
+            std::fs::remove_file(&marker)?;
+        }
+        report.changed.sort();
+        Ok(report)
+    }
+}
+
+/// The batch 1 store cut-over has a receipt per store, so an interrupted run
+/// resumes at the first store whose transform did not finish.
+enum StoreCutover {
+    Graph,
+    Run,
+    Config,
+}
+
+impl StoreCutover {
+    fn id(&self) -> &'static str {
+        match self {
+            Self::Graph => "batch1-graph-store-cutover",
+            Self::Run => "batch1-run-store-cutover",
+            Self::Config => "batch1-config-store-cutover",
+        }
+    }
+
+    fn apply(&self, state_root: &Path) -> Result<MigrationReport, MigrationError> {
+        let mut report = MigrationReport::new(self.id());
+        match self {
+            Self::Graph => report.changed.extend(
+                provenant_fabric_runtime::graph::migrate_store(state_root).map_err(|error| {
+                    MigrationError::new(format!("graph store cut-over: {error}"))
+                })?,
+            ),
+            Self::Run => {
+                provenant_run::lease_migrate::migrate_database(state_root).map_err(|error| {
+                    MigrationError::new(format!("run database cut-over: {error}"))
+                })?;
+                report.changed.extend(
+                    provenant_run::lease_migrate::migrate_store(state_root).map_err(|error| {
+                        MigrationError::new(format!("run store cut-over: {error}"))
+                    })?,
+                );
+            }
+            Self::Config => {
+                let config = ConfigKnobRewrite.apply(state_root)?;
+                report.changed.extend(config.changed);
+                report.warnings.extend(config.warnings);
+                if !report.warnings.is_empty() {
+                    return Err(MigrationError::new(
+                        "config cut-over left records unmigrated",
+                    ));
+                }
+                report.changed.extend(
+                    crate::pr::landing::receipt::migrate_pending(state_root).map_err(|error| {
+                        MigrationError::new(format!("pending landing cut-over: {error}"))
+                    })?,
+                );
+            }
+        }
+        report.changed.sort();
+        Ok(report)
+    }
+}
+
 /// Run every pending step against the state root and return every recorded id.
-pub(super) fn run(state_root: &Path) -> Vec<String> {
-    run_steps(state_root, STEPS)
+pub(super) fn cutover_pending(state_root: &Path) -> Result<bool, String> {
+    let applied = read_receipt(state_root)?
+        .map(|receipt| receipt.migrations)
+        .unwrap_or_default();
+    Ok([
+        StoreCutover::Graph.id(),
+        StoreCutover::Run.id(),
+        StoreCutover::Config.id(),
+    ]
+    .iter()
+    .any(|id| !applied.iter().any(|applied| applied == id)))
+}
+
+pub(super) fn run(state_root: &Path) -> Result<Vec<String>, (&'static str, String)> {
+    if cutover_pending(state_root).map_err(|error| ("UPGRADE_MIGRATION_FAILED", error))? {
+        quiesce(state_root, quiesce_seconds(state_root)).map_err(|error| {
+            let message = error.to_string();
+            let code = if message.contains("UPGRADE_NOT_QUIESCENT") {
+                "UPGRADE_NOT_QUIESCENT"
+            } else {
+                "UPGRADE_MIGRATION_FAILED"
+            };
+            (code, message)
+        })?;
+        let mut applied = read_receipt(state_root)
+            .map_err(|error| ("UPGRADE_MIGRATION_FAILED", error))?
+            .map(|receipt| receipt.migrations)
+            .unwrap_or_default();
+        for step in [StoreCutover::Graph, StoreCutover::Run, StoreCutover::Config] {
+            if applied.iter().any(|id| id == step.id()) {
+                continue;
+            }
+            step.apply(state_root)
+                .map_err(|error| ("UPGRADE_MIGRATION_FAILED", error.to_string()))?;
+            applied.push(step.id().to_owned());
+            persist(state_root, &applied).map_err(|error| ("UPGRADE_MIGRATION_FAILED", error))?;
+        }
+    }
+    Ok(run_steps(state_root, STEPS))
 }
 
 /// Record ids on the receipt install just published, for a step that ran
@@ -904,718 +1310,4 @@ fn read_receipt(state_root: &Path) -> Result<Option<InstallReceipt>, String> {
 }
 
 #[cfg(test)]
-#[allow(dead_code, unused_imports)]
-mod tests {
-    use super::{
-        AttemptScratchMove, PortConfigSourceSpellings, PortSourceSpellings, ProjectGrantKeys,
-        read_receipt, run_steps,
-    };
-    use provenant_records::migrate::{Migration, MigrationError, MigrationReport};
-    use provenant_records::warning::{MIGRATION_STEP_FAILED, Warning, capture};
-    use provenant_records::{AbsolutePath, FileDigest, InstallReceipt, SourceDigest};
-    use serde_json::{Value, json};
-    use std::path::Path;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    /// Host and host-project configurations migrate once; unrelated settings survive.
-    #[test]
-    fn read_source_live_migrates_host_and_projects_idempotently() {
-        let root = tempfile::tempdir().unwrap();
-        let project = root.path().join("projects/one");
-        std::fs::create_dir_all(&project).unwrap();
-        let host = root.path().join("config.toml");
-        let scoped = project.join("config.toml");
-        std::fs::write(&host, "schema_version=1\n[knobs]\nlanes.read_source='checkout'\nlanes.read_source_fetch_first=true\n").unwrap();
-        std::fs::write(
-            &scoped,
-            "schema_version=1\n[knobs]\n'lanes.read_source'='checkout'\nother='kept'\n",
-        )
-        .unwrap();
-        let step = super::ReadSourceLiveSpelling;
-        let report = step.apply(root.path()).unwrap();
-        assert_eq!(report.changed.len(), 2);
-        for path in [&host, &scoped] {
-            let text = std::fs::read_to_string(path).unwrap();
-            assert_eq!(
-                provenant_config::read_source_value(&text).as_deref(),
-                Some("live")
-            );
-            assert!(text.contains(if path == &host {
-                "read_source_fetch_first=true"
-            } else {
-                "other='kept'"
-            }));
-        }
-        assert!(step.apply(root.path()).unwrap().changed.is_empty());
-    }
-
-    /// A merge that keeps only one side's migration silently drops the other's
-    /// state repair. Both colliding steps must stay registered exactly once.
-    #[test]
-    fn read_source_and_project_grant_steps_are_registered_once() {
-        let ids: Vec<&str> = super::STEPS.iter().map(|step| step.id()).collect();
-        for id in ["read-source-live", "project-grant-keys"] {
-            assert_eq!(
-                ids.iter().filter(|registered| **registered == id).count(),
-                1,
-                "{id} must be registered exactly once"
-            );
-        }
-    }
-
-    /// Spec: docs/specs/run-launch.md#lane-scratch-stays-outside-the-attempt-record
-    #[test]
-    fn attempt_scratch_move_renames_live_tmp_and_is_idempotent() {
-        let root = tempfile::tempdir().expect("tempdir");
-        let id = provenant_core::AttemptId::from_bytes([7; 16]);
-        let old = root
-            .path()
-            .join("attempts")
-            .join(id.to_string())
-            .join("tmp");
-        std::fs::create_dir_all(&old).expect("old tmp");
-        std::fs::write(old.join("git-objects"), "private objects").expect("write objects");
-        let new = root
-            .path()
-            .join(provenant_run::ATTEMPT_SCRATCH)
-            .join(id.to_string())
-            .join("tmp");
-
-        let report = AttemptScratchMove.apply(root.path()).expect("apply once");
-        assert_eq!(report.id, "attempt-scratch-move");
-        assert_eq!(report.changed, [new.display().to_string()]);
-        assert!(report.warnings.is_empty(), "{:?}", report.warnings);
-        assert!(!old.exists(), "old tmp was renamed, not copied");
-        assert_eq!(
-            std::fs::read_to_string(new.join("git-objects")).expect("read objects"),
-            "private objects"
-        );
-
-        let again = AttemptScratchMove.apply(root.path()).expect("apply twice");
-        assert!(again.changed.is_empty(), "second run must change nothing");
-        assert!(again.warnings.is_empty(), "{:?}", again.warnings);
-    }
-
-    /// Spec: docs/specs/run-launch.md#lane-scratch-stays-outside-the-attempt-record
-    #[test]
-    fn attempt_scratch_move_conflict_warns_and_leaves_both() {
-        let root = tempfile::tempdir().expect("tempdir");
-        let id = provenant_core::AttemptId::from_bytes([8; 16]);
-        let old = root
-            .path()
-            .join("attempts")
-            .join(id.to_string())
-            .join("tmp");
-        let new = root
-            .path()
-            .join(provenant_run::ATTEMPT_SCRATCH)
-            .join(id.to_string())
-            .join("tmp");
-        std::fs::create_dir_all(&old).expect("old tmp");
-        std::fs::create_dir_all(&new).expect("new tmp");
-        std::fs::write(old.join("old"), "old").expect("write old");
-        std::fs::write(new.join("new"), "new").expect("write new");
-
-        let report = AttemptScratchMove
-            .apply(root.path())
-            .expect("apply conflict");
-        assert!(report.changed.is_empty(), "{:?}", report.changed);
-        assert!(
-            report.warnings.iter().any(|warning| {
-                warning.code.as_ref() == MIGRATION_STEP_FAILED.0
-                    && warning.message.contains(&old.display().to_string())
-            }),
-            "{:?}",
-            report.warnings
-        );
-        assert_eq!(
-            std::fs::read_to_string(old.join("old")).expect("old kept"),
-            "old"
-        );
-        assert_eq!(
-            std::fs::read_to_string(new.join("new")).expect("new kept"),
-            "new"
-        );
-    }
-
-    /// Spec: docs/specs/state.md#format-changes-migrate-once-at-install
-    #[test]
-    fn port_source_spellings_round_trip_and_are_idempotent() {
-        let root = tempfile::tempdir().expect("tempdir");
-        let owner = root.path().join("port-receipts/admission");
-        std::fs::create_dir_all(&owner).expect("owner dir");
-        let receipt = owner.join("port-command-release-abc.json");
-        std::fs::write(
-            &receipt,
-            r#"{"schema_version":2,"source":"builtin","owner":"admission"}"#,
-        )
-        .expect("write receipt");
-        let report = PortSourceSpellings.apply(root.path()).expect("apply once");
-        assert_eq!(report.id, "port-source-spellings");
-        assert_eq!(report.changed, [receipt.display().to_string()]);
-        let bytes = std::fs::read(&receipt).expect("read receipt");
-        let value: Value = serde_json::from_slice(&bytes).expect("parse receipt");
-        assert_eq!(value["source"], json!("default"));
-        assert_eq!(value["schema_version"], json!(3));
-        let again = PortSourceSpellings.apply(root.path()).expect("apply twice");
-        assert!(again.changed.is_empty(), "second run must change nothing");
-    }
-
-    /// Spec: docs/specs/state.md#format-changes-migrate-once-at-install
-    #[test]
-    fn project_grant_keys_are_renamed_once_without_overwriting_a_grant() {
-        use std::os::unix::fs::MetadataExt;
-
-        let root = tempfile::tempdir().expect("tempdir");
-        let config = root.path().join("config.toml");
-        std::fs::write(
-            &config,
-            r#"schema_version = 1
-[domains.lanes.projects.writer]
-capabilities = ["postgres"] # keep this comment
-shared_paths = [".shared"]
-
-[domains.lanes.projects.both]
-capabilities = ["postgres"]
-grants = ["other"]
-
-[domains.lanes.projects.ready]
-grants = ["postgres"]
-"#,
-        )
-        .expect("write config");
-
-        let report = ProjectGrantKeys.apply(root.path()).expect("apply once");
-        assert_eq!(report.id, "project-grant-keys");
-        assert_eq!(report.changed, [config.display().to_string()]);
-        assert_eq!(report.warnings.len(), 1, "{report:?}");
-        assert!(
-            report.warnings[0].message.contains("project both"),
-            "{report:?}"
-        );
-        let text = std::fs::read_to_string(&config).expect("read config");
-        assert!(text.contains("# keep this comment"), "{text}");
-        let document: toml_edit::DocumentMut = text.parse().expect("parse config");
-        let projects = document["domains"]["lanes"]["projects"]
-            .as_table_like()
-            .expect("projects table");
-        let writer = projects
-            .get("writer")
-            .and_then(toml_edit::Item::as_table_like)
-            .expect("writer project");
-        assert!(!writer.contains_key("capabilities"), "{text}");
-        assert_eq!(
-            writer
-                .get("grants")
-                .and_then(toml_edit::Item::as_array)
-                .and_then(|array| array.iter().next())
-                .and_then(toml_edit::Value::as_str),
-            Some("postgres")
-        );
-        assert_eq!(
-            writer
-                .get("shared_paths")
-                .and_then(toml_edit::Item::as_array)
-                .and_then(|array| array.iter().next())
-                .and_then(toml_edit::Value::as_str),
-            Some(".shared")
-        );
-        let both = projects
-            .get("both")
-            .and_then(toml_edit::Item::as_table_like)
-            .expect("both project");
-        assert!(both.contains_key("capabilities"), "clash was kept: {text}");
-        assert_eq!(
-            both.get("grants")
-                .and_then(toml_edit::Item::as_array)
-                .and_then(|array| array.iter().next())
-                .and_then(toml_edit::Value::as_str),
-            Some("other")
-        );
-        assert_eq!(
-            std::fs::metadata(&config).expect("metadata").mode() & 0o777,
-            0o600
-        );
-
-        let again = ProjectGrantKeys.apply(root.path()).expect("apply twice");
-        assert!(again.changed.is_empty(), "second run must change nothing");
-        assert_eq!(again.warnings.len(), 1, "clash stays pending: {again:?}");
-    }
-
-    /// Spec: docs/specs/state.md#format-changes-migrate-once-at-install
-    #[test]
-    fn port_source_spellings_takes_the_lock_per_file() {
-        use std::cell::Cell;
-        use std::rc::Rc;
-
-        let root = tempfile::tempdir().expect("tempdir");
-        let owner = root.path().join("port-receipts/admission");
-        std::fs::create_dir_all(&owner).expect("owner dir");
-        for name in ["port-command-a.json", "port-command-b.json"] {
-            std::fs::write(
-                owner.join(name),
-                r#"{"schema_version":2,"source":"builtin","owner":"admission"}"#,
-            )
-            .expect("write receipt");
-        }
-
-        let acquisitions = Rc::new(Cell::new(0usize));
-        let counter = Rc::clone(&acquisitions);
-        provenant_os::fixture::on_owner_lock_acquire(move |name| {
-            if name.to_str() == Some(".port-receipts.lock") {
-                counter.set(counter.get() + 1);
-            }
-        });
-
-        let report = PortSourceSpellings.apply(root.path()).expect("apply");
-        assert_eq!(report.changed.len(), 2, "{report:?}");
-        assert!(report.warnings.is_empty(), "{report:?}");
-        // One acquisition per receipt, not one for the whole pass: a live
-        // publisher then waits at most one file rewrite for the lock.
-        assert_eq!(acquisitions.get(), 2);
-    }
-
-    /// Spec: docs/specs/state.md#format-changes-migrate-once-at-install
-    #[test]
-    fn port_source_spellings_busy_lock_skips_only_that_receipt() {
-        let root = tempfile::tempdir().expect("tempdir");
-        let owner = root.path().join("port-receipts/admission");
-        std::fs::create_dir_all(&owner).expect("owner dir");
-        let receipt = owner.join("port-command-a.json");
-        std::fs::write(
-            &receipt,
-            r#"{"schema_version":2,"source":"builtin","owner":"admission"}"#,
-        )
-        .expect("write receipt");
-        // A live publisher holds the receipt lock through this whole pass.
-        let _publisher =
-            provenant_config::try_lock_port_command_receipts(root.path()).expect("publisher lock");
-
-        let report = PortSourceSpellings.apply(root.path()).expect("apply");
-        assert!(report.changed.is_empty(), "{report:?}");
-        assert_eq!(report.warnings.len(), 1, "{report:?}");
-        let warning = &report.warnings[0];
-        assert_eq!(warning.code.as_ref(), MIGRATION_STEP_FAILED.0);
-        assert!(
-            warning.message.contains(&receipt.display().to_string()),
-            "{:?}",
-            warning.message
-        );
-        let value: Value =
-            serde_json::from_slice(&std::fs::read(&receipt).expect("read")).expect("parse");
-        assert_eq!(value["source"], json!("builtin"), "busy receipt untouched");
-    }
-
-    /// Spec: docs/specs/state.md#format-changes-migrate-once-at-install
-    #[test]
-    fn port_config_source_spellings_rewrite_host_and_project_tables() {
-        let root = tempfile::tempdir().expect("tempdir");
-        let host = root.path().join("ports.json");
-        std::fs::write(
-            &host,
-            r#"{"schema_version":2,"verify":{"source":"builtin"},"build":{"source":"host"}}"#,
-        )
-        .expect("write host table");
-        let project_dir = root.path().join("projects/key");
-        std::fs::create_dir_all(&project_dir).expect("project dir");
-        let project = project_dir.join("ports.json");
-        std::fs::write(
-            &project,
-            r#"{"schema_version":2,"land":{"source":"builtin"}}"#,
-        )
-        .expect("write project table");
-        let report = PortConfigSourceSpellings
-            .apply(root.path())
-            .expect("apply once");
-        assert_eq!(report.changed.len(), 2, "{report:?}");
-        for path in [&host, &project] {
-            let value: Value =
-                serde_json::from_slice(&std::fs::read(path).expect("read")).expect("parse");
-            assert_eq!(value["schema_version"], json!(3));
-            assert!(
-                serde_json::to_string(&value)
-                    .expect("serialise")
-                    .contains("\"default\""),
-                "{path:?}: {value}"
-            );
-        }
-        let again = PortConfigSourceSpellings
-            .apply(root.path())
-            .expect("apply twice");
-        assert!(again.changed.is_empty(), "second run must change nothing");
-    }
-
-    /// Spec: docs/specs/state.md#format-changes-migrate-once-at-install
-    #[test]
-    fn host_project_dirs_moves_the_old_key_directory() {
-        let root = tempfile::tempdir().expect("tempdir");
-        let old_key = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
-        let old = root.path().join("projects").join(old_key);
-        std::fs::create_dir_all(&old).expect("old project dir");
-        std::fs::write(old.join("config.toml"), "[admission.test]\nslots = 3\n")
-            .expect("write config");
-        let target = root.path().join("projects").join(&old_key[..32]);
-
-        let report = super::HostProjectDirs
-            .apply(root.path())
-            .expect("apply once");
-        assert_eq!(report.id, "host-project-dirs");
-        assert_eq!(report.changed, [target.display().to_string()]);
-        assert!(report.warnings.is_empty(), "{:?}", report.warnings);
-        assert!(!old.exists(), "old key directory was moved");
-        assert_eq!(
-            std::fs::read_to_string(target.join("config.toml")).expect("read moved config"),
-            "[admission.test]\nslots = 3\n"
-        );
-        let again = super::HostProjectDirs
-            .apply(root.path())
-            .expect("apply twice");
-        assert!(again.changed.is_empty(), "second run must change nothing");
-    }
-
-    /// Spec: docs/specs/state.md#format-changes-migrate-once-at-install
-    #[test]
-    fn host_project_dirs_conflict_warns_and_leaves_both() {
-        let root = tempfile::tempdir().expect("tempdir");
-        let old_key = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
-        let old = root.path().join("projects").join(old_key);
-        let target = root.path().join("projects").join(&old_key[..32]);
-        std::fs::create_dir_all(&old).expect("old project dir");
-        std::fs::create_dir_all(&target).expect("binding project dir");
-        std::fs::write(old.join("config.toml"), "slots = 3\n").expect("write old config");
-        std::fs::write(target.join("config.toml"), "slots = 7\n").expect("write new config");
-
-        let report = super::HostProjectDirs.apply(root.path()).expect("apply");
-        assert!(report.changed.is_empty(), "{report:?}");
-        assert_eq!(report.warnings.len(), 1, "{report:?}");
-        let warning = &report.warnings[0];
-        assert!(
-            warning.message.contains(&old.display().to_string())
-                && warning.message.contains(&target.display().to_string()),
-            "{:?}",
-            warning.message
-        );
-        let repair = warning.repair.as_deref().expect("repair");
-        assert!(repair.contains(&old.display().to_string()), "{repair}");
-        assert!(repair.contains(&target.display().to_string()), "{repair}");
-        assert!(repair.contains("remove"), "{repair}");
-        assert_eq!(
-            std::fs::read_to_string(old.join("config.toml")).expect("old kept"),
-            "slots = 3\n"
-        );
-        assert_eq!(
-            std::fs::read_to_string(target.join("config.toml")).expect("target kept"),
-            "slots = 7\n"
-        );
-    }
-
-    /// Spec: docs/specs/state.md#format-changes-migrate-once-at-install
-    #[test]
-    fn host_project_dirs_merges_around_the_binding_record() {
-        let root = tempfile::tempdir().expect("tempdir");
-        let old_key = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
-        let old = root.path().join("projects").join(old_key);
-        let target = root.path().join("projects").join(&old_key[..32]);
-        std::fs::create_dir_all(&old).expect("old project dir");
-        std::fs::create_dir_all(&target).expect("binding project dir");
-        std::fs::write(old.join("config.toml"), "[admission.build]\nslots = 3\n")
-            .expect("write old config");
-        std::fs::write(target.join("ports.json"), r#"{"schema_version":3}"#)
-            .expect("write binding record");
-
-        let report = super::HostProjectDirs.apply(root.path()).expect("apply");
-        assert_eq!(
-            report.changed,
-            [target.join("config.toml").display().to_string()]
-        );
-        assert!(report.warnings.is_empty(), "{report:?}");
-        assert!(!old.exists(), "the merged old directory was removed");
-        assert_eq!(
-            std::fs::read_to_string(target.join("config.toml")).expect("moved config"),
-            "[admission.build]\nslots = 3\n"
-        );
-        assert_eq!(
-            std::fs::read_to_string(target.join("ports.json")).expect("binding record kept"),
-            r#"{"schema_version":3}"#
-        );
-
-        let again = super::HostProjectDirs
-            .apply(root.path())
-            .expect("apply twice");
-        assert!(again.changed.is_empty(), "second run must change nothing");
-        assert!(again.warnings.is_empty(), "{again:?}");
-    }
-
-    /// Spec: docs/specs/state.md#format-changes-migrate-once-at-install
-    #[test]
-    fn publish_no_clobber_moves_when_the_target_is_absent() {
-        let root = tempfile::tempdir().expect("tempdir");
-        let source = root.path().join("source.json");
-        let target = root.path().join("target.json");
-        std::fs::write(&source, "payload").expect("write source");
-        assert!(super::publish_no_clobber(&source, &target).expect("publish"));
-        assert!(!source.exists(), "source was moved");
-        assert_eq!(std::fs::read_to_string(&target).expect("moved"), "payload");
-    }
-
-    /// Spec: docs/specs/state.md#format-changes-migrate-once-at-install
-    #[test]
-    fn publish_no_clobber_never_replaces_an_existing_entry() {
-        let root = tempfile::tempdir().expect("tempdir");
-        let source = root.path().join("source.json");
-        let target = root.path().join("target.json");
-        std::fs::write(&source, "from old key").expect("write source");
-        std::fs::write(&target, "from concurrent writer").expect("write target");
-
-        // A check-then-rename would silently replace `target` with `source`.
-        assert!(!super::publish_no_clobber(&source, &target).expect("publish"));
-        assert_eq!(
-            std::fs::read_to_string(&source).expect("source kept"),
-            "from old key"
-        );
-        assert_eq!(
-            std::fs::read_to_string(&target).expect("target kept"),
-            "from concurrent writer"
-        );
-    }
-
-    struct Succeeds(&'static str);
-
-    impl Migration for Succeeds {
-        fn id(&self) -> &'static str {
-            self.0
-        }
-
-        fn apply(&self, _state_root: &Path) -> Result<MigrationReport, MigrationError> {
-            Ok(MigrationReport::new(self.0))
-        }
-    }
-
-    struct FailsThenSucceeds {
-        id: &'static str,
-        failures: AtomicUsize,
-    }
-
-    impl Migration for FailsThenSucceeds {
-        fn id(&self) -> &'static str {
-            self.id
-        }
-
-        fn apply(&self, _state_root: &Path) -> Result<MigrationReport, MigrationError> {
-            if self.failures.load(Ordering::SeqCst) > 0 {
-                self.failures.fetch_sub(1, Ordering::SeqCst);
-                return Err(MigrationError::new("fixture failure"));
-            }
-            Ok(MigrationReport::new(self.id))
-        }
-    }
-
-    struct WarnsThenSucceeds {
-        id: &'static str,
-        warnings: AtomicUsize,
-    }
-
-    impl Migration for WarnsThenSucceeds {
-        fn id(&self) -> &'static str {
-            self.id
-        }
-
-        fn apply(&self, _state_root: &Path) -> Result<MigrationReport, MigrationError> {
-            let mut report = MigrationReport::new(self.id);
-            if self.warnings.load(Ordering::SeqCst) > 0 {
-                self.warnings.fetch_sub(1, Ordering::SeqCst);
-                report.warnings.push(
-                    Warning::new(
-                        MIGRATION_STEP_FAILED,
-                        "fixture left something behind",
-                        provenant_records::warning::detected_source(MIGRATION_STEP_FAILED),
-                    )
-                    .subject("fixture")
-                    .repair("retry"),
-                );
-            }
-            Ok(report)
-        }
-    }
-
-    fn write_receipt(root: &Path, migrations: Vec<String>) -> InstallReceipt {
-        let install = root.join("install");
-        std::fs::create_dir_all(&install).expect("install directory");
-        let receipt = InstallReceipt {
-            extra: Default::default(),
-            schema_version: provenant_records::INSTALL_RECEIPT_SCHEMA_VERSION,
-            state_format_version: provenant_records::STATE_FORMAT_VERSION,
-            live_record_format: Some(provenant_records::LIVE_RECORD_FORMAT),
-            source_digest: SourceDigest::from_bytes([1; 32]),
-            manifest_digest: FileDigest::from_bytes([2; 32]),
-            asset_digest: SourceDigest::from_bytes([3; 32]),
-            target: "fixture".into(),
-            toolchain: "fixture".into(),
-            bin_dir: AbsolutePath::new(&root.join("bin")).expect("bin dir"),
-            harnesses: Vec::new(),
-            harness_targets: Vec::new(),
-            entries: Vec::new(),
-            migrations,
-        };
-        std::fs::write(
-            install.join("receipt.json"),
-            provenant_records::encode(&receipt).expect("encode receipt"),
-        )
-        .expect("write receipt");
-        receipt
-    }
-
-    /// Spec: docs/specs/state.md#format-changes-migrate-once-at-install
-    #[test]
-    fn only_successful_ids_are_recorded_and_a_failed_step_reruns() {
-        let root = tempfile::tempdir().expect("tempdir");
-        let path = root.path();
-        write_receipt(path, Vec::new());
-        let success = Succeeds("first");
-        let flaky = FailsThenSucceeds {
-            id: "second",
-            failures: AtomicUsize::new(1),
-        };
-        let steps: [&dyn Migration; 2] = [&success, &flaky];
-
-        let (applied, warnings) = capture(|| run_steps(path, &steps));
-        assert_eq!(applied, ["first"]);
-        assert!(
-            warnings
-                .iter()
-                .any(|warning| warning.code.as_ref() == MIGRATION_STEP_FAILED.0),
-            "{warnings:?}"
-        );
-        let receipt = read_receipt(path).expect("read").expect("receipt");
-        assert_eq!(receipt.migrations, ["first"]);
-
-        let (applied, warnings) = capture(|| run_steps(path, &steps));
-        assert_eq!(applied, ["first", "second"]);
-        assert!(warnings.is_empty(), "{warnings:?}");
-        let receipt = read_receipt(path).expect("read").expect("receipt");
-        assert_eq!(receipt.migrations, ["first", "second"]);
-    }
-
-    #[test]
-    // Spec: docs/specs/state.md#format-changes-migrate-once-at-install
-    fn retiring_warning_markers_deletes_only_marker_files() {
-        let root = tempfile::tempdir().expect("tempdir");
-        let path = root.path();
-        for name in [
-            "config-warning-abc",
-            "root-warning-def",
-            "config.toml",
-            "warnings.sqlite3",
-        ] {
-            std::fs::write(path.join(name), b"fixture\n").expect("write state file");
-        }
-        let step = super::RetireWarningMarkers;
-        let report = step.apply(path).expect("apply migration");
-        assert_eq!(report.changed.len(), 2);
-        assert!(!path.join("config-warning-abc").exists());
-        assert!(!path.join("root-warning-def").exists());
-        assert!(path.join("config.toml").exists());
-        assert!(path.join("warnings.sqlite3").exists());
-    }
-
-    #[test]
-    fn a_recorded_step_does_not_apply_again() {
-        let root = tempfile::tempdir().expect("tempdir");
-        let path = root.path();
-        write_receipt(path, vec!["done".to_owned()]);
-        let step = Succeeds("done");
-        let steps: [&dyn Migration; 1] = [&step];
-        let (applied, warnings) = capture(|| run_steps(path, &steps));
-        assert_eq!(applied, ["done"]);
-        assert!(warnings.is_empty(), "{warnings:?}");
-        // A first install has no receipt to record into; the returned ids are
-        // what `record` writes once install publishes the receipt.
-        let absent = tempfile::tempdir().expect("tempdir");
-        let (applied, warnings) = capture(|| run_steps(absent.path(), &steps));
-        assert_eq!(applied, ["done"]);
-        assert!(warnings.is_empty(), "{warnings:?}");
-    }
-
-    /// Spec: docs/specs/state.md#format-changes-migrate-once-at-install
-    #[test]
-    fn a_step_with_unmigrated_entries_is_retried() {
-        let root = tempfile::tempdir().expect("tempdir");
-        let path = root.path();
-        write_receipt(path, Vec::new());
-        let step = WarnsThenSucceeds {
-            id: "pending",
-            warnings: AtomicUsize::new(1),
-        };
-        let steps: [&dyn Migration; 1] = [&step];
-
-        let (applied, warnings) = capture(|| run_steps(path, &steps));
-        assert!(applied.is_empty(), "{applied:?}");
-        assert_eq!(warnings.len(), 1, "{warnings:?}");
-        let receipt = read_receipt(path).expect("read").expect("receipt");
-        assert!(receipt.migrations.is_empty(), "{receipt:?}");
-
-        let (applied, warnings) = capture(|| run_steps(path, &steps));
-        assert_eq!(applied, ["pending"]);
-        assert!(warnings.is_empty(), "{warnings:?}");
-        let receipt = read_receipt(path).expect("read").expect("receipt");
-        assert_eq!(receipt.migrations, ["pending"]);
-    }
-
-    /// Spec: docs/specs/state.md#format-changes-migrate-once-at-install
-    #[test]
-    fn one_unparseable_receipt_warns_without_aborting_the_other_files() {
-        let root = tempfile::tempdir().expect("tempdir");
-        let owner = root.path().join("port-receipts/admission");
-        std::fs::create_dir_all(&owner).expect("owner dir");
-        let broken = owner.join("port-command-broken.json");
-        let good = owner.join("port-command-good.json");
-        std::fs::write(&broken, "{not json").expect("write broken receipt");
-        std::fs::write(
-            &good,
-            r#"{"schema_version":2,"source":"builtin","owner":"admission"}"#,
-        )
-        .expect("write good receipt");
-
-        let report = PortSourceSpellings.apply(root.path()).expect("apply");
-        assert_eq!(report.changed, [good.display().to_string()]);
-        assert_eq!(report.warnings.len(), 1, "{report:?}");
-        let warning = &report.warnings[0];
-        assert!(
-            warning.message.contains(&broken.display().to_string()),
-            "{:?}",
-            warning.message
-        );
-        let value: Value =
-            serde_json::from_slice(&std::fs::read(&good).expect("read")).expect("parse");
-        assert_eq!(value["source"], json!("default"));
-        assert_eq!(value["schema_version"], json!(3));
-    }
-
-    /// Spec: docs/specs/state.md#format-changes-migrate-once-at-install
-    #[test]
-    fn port_table_leaf_sources_migrate_the_retired_spelling() {
-        let root = tempfile::tempdir().expect("tempdir");
-        let host = root.path().join("ports.json");
-        std::fs::write(
-            &host,
-            r#"{"schema_version":2,"build":{"source":"builtin","leaf_sources":{"build.strategy":"builtin","build.offload":"host"}}}"#,
-        )
-        .expect("write host table");
-
-        let report = PortConfigSourceSpellings.apply(root.path()).expect("apply");
-        assert_eq!(report.changed, [host.display().to_string()]);
-        assert!(report.warnings.is_empty(), "{report:?}");
-        let value: Value =
-            serde_json::from_slice(&std::fs::read(&host).expect("read")).expect("parse");
-        assert_eq!(value["schema_version"], json!(3));
-        assert_eq!(value["build"]["source"], json!("default"));
-        assert_eq!(
-            value["build"]["leaf_sources"]["build.strategy"],
-            json!("default")
-        );
-        assert_eq!(
-            value["build"]["leaf_sources"]["build.offload"],
-            json!("host")
-        );
-    }
-}
+include!("migrations_tests.rs");

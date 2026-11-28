@@ -61,55 +61,43 @@ pub struct Finding {
     pub reason: Option<String>,
 }
 
-/// The three severity classes named by the review doctrine. External reviewers
-/// use other words; the vocabulary below is the single translation to these.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SeverityClass {
-    Blocking,
-    ShouldFix,
-    Note,
-}
-
-/// One vocabulary map: each severity word an external reviewer may use, its
-/// doctrine class and its relative rank for bounded export. No module keeps a
-/// separate severity list.
-pub const SEVERITY_VOCABULARY: &[(&str, SeverityClass, u8)] = &[
-    ("critical", SeverityClass::Blocking, 0),
-    ("blocker", SeverityClass::Blocking, 0),
-    ("blocking", SeverityClass::Blocking, 0),
-    ("p0", SeverityClass::Blocking, 0),
-    ("high", SeverityClass::Blocking, 1),
-    ("error", SeverityClass::Blocking, 1),
-    ("p1", SeverityClass::Blocking, 1),
-    ("medium", SeverityClass::ShouldFix, 2),
-    ("moderate", SeverityClass::ShouldFix, 2),
-    ("should-fix", SeverityClass::ShouldFix, 2),
-    ("p2", SeverityClass::ShouldFix, 2),
-    ("low", SeverityClass::Note, 3),
-    ("warning", SeverityClass::Note, 3),
-    ("p3", SeverityClass::Note, 3),
-    ("info", SeverityClass::Note, 4),
-    ("informational", SeverityClass::Note, 4),
-    ("note", SeverityClass::Note, 4),
-    ("p4", SeverityClass::Note, 4),
+/// The review severity vocabulary shared by acceptance, repair and export.
+pub const SEVERITY_VOCABULARY: &[(&str, Severity)] = &[
+    ("critical", Severity::Blocking),
+    ("blocker", Severity::Blocking),
+    ("blocking", Severity::Blocking),
+    ("major", Severity::High),
+    ("high", Severity::High),
+    ("medium", Severity::Medium),
+    ("moderate", Severity::Medium),
+    ("minor", Severity::Low),
+    ("low", Severity::Low),
+    ("nit", Severity::Nit),
+    ("info", Severity::Nit),
+    ("style", Severity::Nit),
 ];
 
-fn severity_word(word: &str) -> Option<(&'static str, SeverityClass, u8)> {
+/// Decode the acceptance vocabulary; unrecognised words are high and warned.
+pub fn decode_severity(word: &str) -> (Severity, bool) {
     let word = word.trim().to_ascii_lowercase();
-    SEVERITY_VOCABULARY
+    match SEVERITY_VOCABULARY
         .iter()
-        .copied()
-        .find(|(known, _, _)| *known == word.as_str())
+        .find(|(known, _)| *known == word.as_str())
+    {
+        Some((_, severity)) => (*severity, false),
+        None => (Severity::High, true),
+    }
 }
 
-/// Translate a reviewer's severity word once. An unknown word is not blocking.
-pub fn severity_class(word: &str) -> Option<SeverityClass> {
-    severity_word(word).map(|(_, class, _)| class)
-}
-
-/// Relative order for bounded export; unknown words sort last.
+/// Relative order for bounded export; unknown words have high priority.
 pub fn severity_rank(word: &str) -> u8 {
-    severity_word(word).map_or(5, |(_, _, rank)| rank)
+    match decode_severity(word).0 {
+        Severity::Blocking => 0,
+        Severity::High => 1,
+        Severity::Medium => 2,
+        Severity::Low => 3,
+        Severity::Nit => 4,
+    }
 }
 
 /// Evidence checked by verification or synthesis before a repair writer starts.
@@ -157,6 +145,17 @@ impl Finding {
             .filter(|value| !value.trim().is_empty())
     }
 
+    /// A declared blocking class remains binding even without a trigger.
+    pub fn has_blocking_class(&self) -> bool {
+        self.boundary_or_data_loss()
+            || self.triage.as_ref().is_some_and(|triage| {
+                matches!(
+                    triage.blocking_class.as_str(),
+                    "acceptance" | "default_path_defect"
+                )
+            })
+    }
+
     pub fn boundary_or_data_loss(&self) -> bool {
         self.triage.as_ref().is_some_and(|triage| {
             matches!(triage.blocking_class.as_str(), "boundary" | "data_loss")
@@ -173,11 +172,7 @@ impl Finding {
     }
 
     pub fn effective_severity(&self) -> &str {
-        if self.boundary_or_data_loss() || self.default_path() {
-            &self.severity
-        } else {
-            "note"
-        }
+        &self.severity
     }
 
     pub fn falsified_with_evidence(&self) -> bool {

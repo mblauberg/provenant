@@ -197,6 +197,530 @@ pub(super) fn preparation_exhausted_message(message: Option<String>) -> String {
     message.unwrap_or_else(|| "Preparation retries exhausted".into())
 }
 
+fn review_retryable_leaf(node: &PlannedNode) -> bool {
+    node.access == AccessMode::ReadOnly
+        && node.composite.is_none()
+        && (node.review_lens.is_some()
+            || template::review_behaviour(node) == Some(template::ReviewBehaviour::Lens)
+            || node
+                .role
+                .as_deref()
+                .is_some_and(|role| role == "lens" || role.starts_with("lens.")))
+}
+
+fn review_retry_cause(progress: &NodeProgress) -> Option<ReviewRetryCause> {
+    let attempt = progress.attempts.last()?;
+    if attempt.state != AttemptState::Terminal
+        || !matches!(progress.state, NodeState::Failed | NodeState::Blocked)
+    {
+        return None;
+    }
+    let code = progress.advance_code.as_deref();
+    if review::malformed_delivery_evidence_error(code) || code == Some("review_invariant_missing") {
+        return Some(ReviewRetryCause::Evidence);
+    }
+    if matches!(code, Some("blocked_environment" | "model_unavailable"))
+        || matches!(
+            attempt.stop,
+            Some(
+                provenant_records::StopCause::BlockedEnvironment
+                    | provenant_records::StopCause::ModelUnavailable
+            )
+        )
+        || attempt.outcome == Some(GraphAttemptOutcome::ModelUnavailable)
+    {
+        return Some(ReviewRetryCause::LensUnavailable);
+    }
+    None
+}
+
+pub(super) fn pinned_review_head(
+    node: &PlannedNode,
+    progress: &NodeProgress,
+    checkpoint: &GraphCheckpoint,
+    positions: &std::collections::BTreeMap<String, usize>,
+) -> Option<String> {
+    let manifest = progress
+        .attempts
+        .last()
+        .and_then(|attempt| attempt.input_manifest.as_ref())
+        .and_then(|manifest| manifest.source_commit.clone());
+    let source = match node.source.as_ref() {
+        Some(SourceBinding::Commit { commit }) => Some(commit.clone()),
+        Some(SourceBinding::Integration) => checkpoint.integration_pin.clone(),
+        Some(SourceBinding::Node { node } | SourceBinding::Head { node }) => positions
+            .get(node)
+            .and_then(|index| checkpoint.nodes.get(*index))
+            .and_then(|producer| {
+                producer
+                    .outputs
+                    .as_ref()
+                    .and_then(|outputs| outputs.commit.clone())
+                    .or_else(|| producer.source_commit.clone())
+            }),
+        None => None,
+    };
+    progress
+        .source_commit
+        .clone()
+        .or(manifest)
+        .or(source)
+        .or_else(|| {
+            checkpoint
+                .subject
+                .as_ref()
+                .map(|subject| subject.head.to_string())
+        })
+        .filter(|head| head.parse::<provenant_core::GitOid>().is_ok())
+}
+
+/// Resolve a later review round's exact full/delta scope from the sealed
+/// policy and the current review-chain ledger.
+pub(super) fn review_round_scope(
+    node_index: usize,
+    plan: &PlannedGraph,
+    checkpoint: &GraphCheckpoint,
+    _positions: &std::collections::BTreeMap<String, usize>,
+) -> Option<review::RoundScope> {
+    let node = plan.nodes.get(node_index)?;
+    let round = node.round.as_ref()?;
+    if round.round == 0 {
+        return None;
+    }
+    checkpoint
+        .nodes
+        .get(node_index)?
+        .review_round_scope
+        .as_ref()
+        .map(|scope| match scope {
+            ReviewRoundScope::Delta { base, head } => review::RoundScope::Delta {
+                base: base.clone(),
+                head: head.clone(),
+            },
+            ReviewRoundScope::Full { head } => review::RoundScope::Full { head: head.clone() },
+        })
+}
+
+pub(super) fn effective_review_policy(
+    node: &PlannedNode,
+    checkpoint: &GraphCheckpoint,
+) -> ReviewPolicy {
+    node.effective_review_policy
+        .clone()
+        .unwrap_or_else(|| checkpoint.review_policy())
+}
+
+fn effective_route_review_policy(
+    node: &PlannedNode,
+    route: &GraphRoute,
+    checkpoint: &GraphCheckpoint,
+) -> ReviewPolicy {
+    let node_policy = effective_review_policy(node, checkpoint);
+    candidate::route_review_policy(&node_policy, route).unwrap_or(node_policy)
+}
+
+fn effective_adjudicator_route(
+    parent: &str,
+    plan: &PlannedGraph,
+    checkpoint: &GraphCheckpoint,
+    positions: &std::collections::BTreeMap<String, usize>,
+) -> String {
+    let fallback = positions
+        .get(parent)
+        .and_then(|index| plan.nodes.get(*index))
+        .map(|node| {
+            effective_review_policy(node, checkpoint)
+                .adjudicator_route
+                .value
+        })
+        .unwrap_or_else(|| checkpoint.review_policy().adjudicator_route.value);
+    let Some(parent_row) = checkpoint
+        .nodes
+        .iter()
+        .find(|progress| progress.id == parent)
+    else {
+        return fallback;
+    };
+    let mut pending = parent_row
+        .children
+        .iter()
+        .rev()
+        .cloned()
+        .collect::<Vec<_>>();
+    while let Some(id) = pending.pop() {
+        let Some(progress) = checkpoint.nodes.iter().find(|progress| progress.id == id) else {
+            continue;
+        };
+        if let Some(node_index) = positions.get(&id).copied()
+            && let Some(node) = plan.nodes.get(node_index)
+            && review_retryable_leaf(node)
+            && let Some(route) = progress.attempts.last().map(|attempt| &attempt.route)
+        {
+            let policy = node
+                .routes
+                .iter()
+                .find(|candidate| *candidate == route)
+                .map(|route| effective_route_review_policy(node, route, checkpoint))
+                .unwrap_or_else(|| effective_review_policy(node, checkpoint));
+            return policy.adjudicator_route.value;
+        }
+        pending.extend(progress.children.iter().rev().cloned());
+    }
+    fallback
+}
+
+/// Compute the structural delta candidate. The attempt owner still has to
+/// prove ancestry before this is sealed for launch.
+fn candidate_review_round_scope(
+    node_index: usize,
+    plan: &PlannedGraph,
+    checkpoint: &GraphCheckpoint,
+    positions: &std::collections::BTreeMap<String, usize>,
+) -> Option<review::RoundScope> {
+    let node = plan.nodes.get(node_index)?;
+    let round = node.round.as_ref()?;
+    if round.round == 0 {
+        return None;
+    }
+    let head = pinned_review_head(node, &checkpoint.nodes[node_index], checkpoint, positions)?;
+    let chain = review::chain_owner_id(node_index, plan);
+    let ledger = checkpoint
+        .nodes
+        .iter()
+        .find(|progress| progress.id == chain)
+        .and_then(|progress| progress.finding_ledger.as_ref())
+        .cloned()
+        .or_else(|| review::initial_chain_ledger(&round.loop_id, plan, checkpoint))
+        .unwrap_or_default();
+    let previous_base = ledger
+        .last_reviewed_head
+        .as_deref()
+        .and_then(|last| ledger.heads.get(last))
+        .and_then(|entry| entry.dispositions.get("base"))
+        .map(String::as_str);
+    let graph_base = checkpoint
+        .bases
+        .and_then(|bases| bases.review)
+        .map(|base| base.to_string());
+    let current_base = checkpoint.nodes[node_index]
+        .review_base
+        .as_deref()
+        .or(node.review_base.as_deref())
+        .or(graph_base.as_deref())
+        .unwrap_or("");
+    let mode =
+        if effective_review_policy(node, checkpoint).later_rounds.value == ReviewRounds::Delta {
+            review::RoundMode::Delta
+        } else {
+            review::RoundMode::Full
+        };
+    Some(review::round_scope(
+        &ledger,
+        &head,
+        current_base,
+        previous_base,
+        mode,
+    ))
+}
+
+/// Resolve and persist a later-round scope before any prompt or input manifest
+/// is staged. A failed Git ancestry read widens the review to the full head.
+pub(super) fn seal_review_round_scope<R: AttemptOwner>(
+    owner: &mut R,
+    node_index: usize,
+    plan: &PlannedGraph,
+    checkpoint: &mut GraphCheckpoint,
+    positions: &std::collections::BTreeMap<String, usize>,
+) -> bool {
+    let Some(candidate) = candidate_review_round_scope(node_index, plan, checkpoint, positions)
+    else {
+        return false;
+    };
+    let head = match &candidate {
+        review::RoundScope::Delta { head, .. } | review::RoundScope::Full { head } => head.clone(),
+    };
+    if let Some(scope) = checkpoint.nodes[node_index].review_round_scope.as_ref() {
+        let already_sealed = match (scope, &candidate) {
+            (ReviewRoundScope::Full { head: sealed }, _) => sealed == &head,
+            (
+                ReviewRoundScope::Delta {
+                    base: sealed_base,
+                    head: sealed_head,
+                },
+                review::RoundScope::Delta { base, head },
+            ) => sealed_head == head && sealed_base == base,
+            _ => false,
+        };
+        if already_sealed {
+            return false;
+        }
+    }
+    let resolved = match candidate {
+        review::RoundScope::Delta { base, head }
+            if owner.review_delta_attributable(&base, &head) =>
+        {
+            ReviewRoundScope::Delta { base, head }
+        }
+        review::RoundScope::Delta { head, .. } | review::RoundScope::Full { head } => {
+            ReviewRoundScope::Full { head }
+        }
+    };
+    if checkpoint.nodes[node_index].review_round_scope.as_ref() == Some(&resolved) {
+        return false;
+    }
+    checkpoint.nodes[node_index].review_round_scope = Some(resolved);
+    true
+}
+
+/// The launch and manifest base for one attempt. Later delta rounds use the
+/// last reviewed head as their base without rewriting the node's authored base.
+pub(super) fn review_base_for_attempt(
+    node_index: usize,
+    plan: &PlannedGraph,
+    checkpoint: &GraphCheckpoint,
+    positions: &std::collections::BTreeMap<String, usize>,
+) -> Option<String> {
+    let progress = checkpoint.nodes.get(node_index)?;
+    let authored = progress.review_base.clone();
+    match review_round_scope(node_index, plan, checkpoint, positions) {
+        Some(review::RoundScope::Delta { base, .. }) => Some(base),
+        _ => authored,
+    }
+}
+
+/// What a review retry needs beside the graph it rewrites: the document, the
+/// structural limits and the worktree layout.
+#[derive(Clone, Copy)]
+struct RetryContext<'a> {
+    document: &'a GraphDocument,
+    limits: &'a crate::config::GraphLimits,
+    worktree_layout: &'a provenant_config::WorktreeLayoutPort,
+}
+
+fn apply_pending_review_retry<R: AttemptOwner, J: GraphJournal>(
+    context: &RetryContext<'_>,
+    owner: &mut R,
+    journal: &mut J,
+    expanded: &mut GraphDocument,
+    plan: &mut PlannedGraph,
+    positions: &mut std::collections::BTreeMap<String, usize>,
+    checkpoint: &mut GraphCheckpoint,
+) -> Result<bool, GraphError<R::Error, J::Error>> {
+    let RetryContext {
+        document,
+        limits,
+        worktree_layout,
+    } = *context;
+    let pending = checkpoint
+        .nodes
+        .iter()
+        .enumerate()
+        .find_map(|(index, progress)| {
+            progress
+                .review_retry
+                .as_ref()
+                .and_then(|state| state.pending_retry.as_ref())
+                .map(|intent| (index, progress.id.clone(), intent.clone()))
+        });
+    let Some((index, id, intent)) = pending else {
+        return Ok(false);
+    };
+    let Some(node_index) = positions.get(&id).copied() else {
+        return Err(GraphError::BadCheckpoint {
+            node: id,
+            invariant: "review retry intent must identify a planned leaf",
+        });
+    };
+    let progress = &checkpoint.nodes[index];
+    let current_routes = &plan.nodes[node_index].routes;
+    let already_reset = progress.state == NodeState::Pending
+        && progress.attempts.is_empty()
+        && current_routes.len() == 1
+        && current_routes.first() == Some(&intent.route);
+    let mut candidate = checkpoint.clone();
+    if already_reset {
+        candidate.nodes[index]
+            .review_retry
+            .as_mut()
+            .ok_or_else(|| GraphError::BadCheckpoint {
+                node: id.clone(),
+                invariant: "pending review retry must retain its state",
+            })?
+            .pending_retry = None;
+    } else {
+        let attempt_is_terminal = progress
+            .attempts
+            .iter()
+            .chain(&progress.previous_attempts)
+            .any(|attempt| {
+                attempt.key == intent.attempt && attempt.state == AttemptState::Terminal
+            });
+        if !attempt_is_terminal {
+            return Err(GraphError::BadCheckpoint {
+                node: id,
+                invariant: "review retry intent must name a retained terminal attempt",
+            });
+        }
+        let library = template::TemplateLibrary::bundled();
+        let result = patch::retry_review_leaf(
+            &mut patch::LiveGraph {
+                document,
+                checkpoint: &mut candidate,
+            },
+            &id,
+            &intent.route,
+            &intent.attempt,
+            &patch::PatchContext {
+                catalogue: None,
+                library: &library,
+                resolvers: &document.template_resolvers,
+                journal: None,
+                limits,
+                worktree_layout: worktree_layout.clone(),
+            },
+        )
+        .map_err(|error| GraphError::Refused(error.to_string()))?;
+        let _ = result;
+        let next_expanded = plans::expand(
+            document,
+            &candidate.extensions,
+            &candidate.expansions,
+            limits,
+        )
+        .map_err(|error| GraphError::Invalid(error.to_string()))?;
+        let (next_plan, next_positions) = validate_flat_plan(&next_expanded, limits)
+            .map_err(|error| GraphError::Invalid(error.to_string()))?;
+        validate_expanded_rows(&candidate, &next_plan)?;
+        owner
+            .validate_expansion(&next_expanded, &candidate)
+            .map_err(GraphError::Run)?;
+        let progress_index = candidate
+            .nodes
+            .iter()
+            .position(|progress| progress.id == id)
+            .ok_or_else(|| GraphError::BadCheckpoint {
+                node: id.clone(),
+                invariant: "review retry reset must retain its progress row",
+            })?;
+        candidate.nodes[progress_index]
+            .review_retry
+            .as_mut()
+            .ok_or_else(|| GraphError::BadCheckpoint {
+                node: id.clone(),
+                invariant: "review retry reset must retain its retry state",
+            })?
+            .pending_retry = None;
+        journal.save(&candidate).map_err(GraphError::Journal)?;
+        *checkpoint = candidate;
+        *expanded = next_expanded;
+        *plan = next_plan;
+        *positions = next_positions;
+        return Ok(true);
+    }
+    journal.save(&candidate).map_err(GraphError::Journal)?;
+    *checkpoint = candidate;
+    Ok(true)
+}
+
+fn schedule_review_retry<R: AttemptOwner, J: GraphJournal>(
+    context: &RetryContext<'_>,
+    owner: &mut R,
+    journal: &mut J,
+    expanded: &mut GraphDocument,
+    plan: &mut PlannedGraph,
+    positions: &mut std::collections::BTreeMap<String, usize>,
+    checkpoint: &mut GraphCheckpoint,
+) -> Result<bool, GraphError<R::Error, J::Error>> {
+    if apply_pending_review_retry(
+        context, owner, journal, expanded, plan, positions, checkpoint,
+    )? {
+        return Ok(true);
+    }
+    for (index, node) in plan.nodes.iter().enumerate() {
+        if !review_retryable_leaf(node) {
+            continue;
+        }
+        let policy = effective_review_policy(node, checkpoint);
+        let route_lens_retry = |route: &GraphRoute| {
+            effective_route_review_policy(node, route, checkpoint)
+                .lens_retry
+                .value
+        };
+        let progress = &checkpoint.nodes[index];
+        let Some(cause) = review_retry_cause(progress) else {
+            continue;
+        };
+        let Some(attempt) = progress.attempts.last().cloned() else {
+            continue;
+        };
+        let Some(head) = pinned_review_head(node, progress, checkpoint, positions) else {
+            continue;
+        };
+        let chain = review::chain_owner_id(index, plan);
+        let current_route = attempt.route.clone();
+        let eligible_routes = if node.routes.is_empty() {
+            vec![current_route.clone()]
+        } else {
+            node.routes.clone()
+        };
+        let routes = progress
+            .review_retry
+            .as_ref()
+            .filter(|state| state.matches(&chain, &head) && !state.eligible_routes.is_empty())
+            .map(|state| state.eligible_routes.clone())
+            .unwrap_or(eligible_routes);
+        let max_lens_retry = routes
+            .iter()
+            .map(&route_lens_retry)
+            .max()
+            .unwrap_or(policy.lens_retry.value);
+        if !routes.contains(&current_route) {
+            continue;
+        }
+        let mut state = progress
+            .review_retry
+            .as_ref()
+            .filter(|state| {
+                state.valid_for(&chain, &head, policy.evidence_retries.value, max_lens_retry)
+            })
+            .map(|state| (**state).clone())
+            .unwrap_or_else(|| ReviewRetryState::new(&chain, &head, &routes));
+        let retry_route = match cause {
+            ReviewRetryCause::Evidence
+                if state.evidence_retries_for(&current_route) < policy.evidence_retries.value =>
+            {
+                if state.record_evidence_retry(&current_route).is_none() {
+                    continue;
+                }
+                current_route
+            }
+            ReviewRetryCause::LensUnavailable
+                if state.lens_retries < route_lens_retry(&current_route) =>
+            {
+                let Some(next_route) = state.next_route(&current_route).cloned() else {
+                    continue;
+                };
+                if state.record_lens_retry().is_none() {
+                    continue;
+                }
+                next_route
+            }
+            _ => continue,
+        };
+        state.pending_retry = Some(Box::new(ReviewRetryIntent {
+            route: retry_route,
+            cause,
+            attempt: attempt.key,
+        }));
+        checkpoint.nodes[index].review_retry = Some(Box::new(state));
+        journal.save(checkpoint).map_err(GraphError::Journal)?;
+        return apply_pending_review_retry(
+            context, owner, journal, expanded, plan, positions, checkpoint,
+        );
+    }
+    Ok(false)
+}
+
 pub(super) fn queue_conflict_recheck(
     node_index: usize,
     condition: &GateCondition,
@@ -315,45 +839,90 @@ fn advance_gate<R: AttemptOwner, J: GraphJournal>(
     // A split verdict on one head goes to one adjudication node. The patch adds
     // no round, so the gate waits for the adjudicator instead of failing into a
     // fresh repair cycle. Only a gate downstream of the split panel admits it.
-    let split = repair::split_adjudication(node, checkpoint);
+    let split = repair::split_adjudication(node, plan, checkpoint);
     if let Err(error) = &split {
         replan_error = Some((*error).to_owned());
     }
     if let Ok(Some(repair::SplitAdjudication {
+        item,
         parent,
+        panels,
         head,
         revision,
+        existing_node_id,
     })) = split
     {
+        if existing_node_id.as_ref().is_some_and(|id| {
+            checkpoint
+                .nodes
+                .iter()
+                .find(|progress| progress.id == *id)
+                .is_some_and(|progress| {
+                    matches!(progress.state, NodeState::Pending | NodeState::Running)
+                })
+        }) {
+            // Let the existing adjudicator's scheduled attempt settle first;
+            // its old verdict cannot be consumed by this gate while split
+            // evidence remains uncovered.
+            return Ok(GateStep::Next);
+        }
         let library = template::TemplateLibrary::bundled();
         let resolvers = Default::default();
-        let change = repair::split_verdict_patch(&parent, head.as_deref(), revision);
+        let adjudicator_route = effective_adjudicator_route(&parent, plan, checkpoint, positions);
         let result = (|| -> Result<_, String> {
             let mut prospective = checkpoint.clone();
-            patch::admit_patch(
-                &mut patch::LiveGraph {
-                    document,
-                    checkpoint: &mut prospective,
-                },
-                Some(&parent),
-                &change,
-                &patch::PatchContext {
-                    catalogue: None,
-                    library: &library,
-                    resolvers: &resolvers,
-                    journal: None,
+            if let Some(node_id) = existing_node_id.as_deref() {
+                patch::continue_adjudicator(
+                    &mut patch::LiveGraph {
+                        document,
+                        checkpoint: &mut prospective,
+                    },
+                    &patch::AdjudicatorContinuation {
+                        item: &item,
+                        node_id,
+                        panels: &panels,
+                        head: head.as_deref(),
+                        expected_revision: revision,
+                    },
                     limits,
-                    worktree_layout: worktree_layout.clone(),
-                },
-            )
-            .map_err(|error| error.message)?;
-            let preview = plans::expand(
+                    effective_budget,
+                )
+                .map_err(|error| error.message)?;
+            } else {
+                let change = repair::split_verdict_patch(
+                    &item,
+                    &panels,
+                    head.as_deref(),
+                    revision,
+                    &adjudicator_route,
+                );
+                patch::admit_patch(
+                    &mut patch::LiveGraph {
+                        document,
+                        checkpoint: &mut prospective,
+                    },
+                    Some(&parent),
+                    &change,
+                    &patch::PatchContext {
+                        catalogue: None,
+                        library: &library,
+                        resolvers: &resolvers,
+                        journal: None,
+                        limits,
+                        worktree_layout: worktree_layout.clone(),
+                    },
+                )
+                .map_err(|error| error.message)?;
+            }
+            let mut preview = plans::expand(
                 document,
                 &prospective.extensions,
                 &prospective.expansions,
                 limits,
             )
             .map_err(|error| error.to_string())?;
+            candidate::resolve_review_policies(&mut preview, &prospective.review_policy())
+                .map_err(|error| error.to_string())?;
             let (new_plan, new_positions) = validate_flat_plan(&preview, &plans::generous())
                 .map_err(|error| error.to_string())?;
             owner
@@ -487,13 +1056,15 @@ fn advance_gate<R: AttemptOwner, J: GraphJournal>(
                         &context,
                     )
                     .map_err(|error| error.message)?;
-                    let preview = plans::expand(
+                    let mut preview = plans::expand(
                         document,
                         &prospective.extensions,
                         &prospective.expansions,
                         limits,
                     )
                     .map_err(|error| error.to_string())?;
+                    candidate::resolve_review_policies(&mut preview, &prospective.review_policy())
+                        .map_err(|error| error.to_string())?;
                     let (new_plan, new_positions) =
                         validate_flat_plan(&preview, &plans::generous())
                             .map_err(|error| error.to_string())?;
@@ -519,7 +1090,7 @@ fn advance_gate<R: AttemptOwner, J: GraphJournal>(
                 } else if repair::panel_pending(&*checkpoint, panel) {
                     return Ok(GateStep::Next);
                 } else {
-                    replan_error = repair::panel_failure(&*checkpoint, panel);
+                    replan_error = repair::panel_failure(&*plan, &*checkpoint, panel);
                 }
             }
         } else {
@@ -1016,6 +1587,22 @@ pub(super) fn advance_schedule<R: AttemptOwner, J: GraphJournal>(
         if apply_pending_cancellation(document, &mut checkpoint, journal, &mut resume)? {
             continue 'schedule;
         }
+        if apply_pending_review_retry(
+            &RetryContext {
+                document,
+                limits,
+                worktree_layout: &worktree_layout,
+            },
+            owner,
+            journal,
+            &mut expanded,
+            &mut plan,
+            &mut positions,
+            &mut checkpoint,
+        )? {
+            resume = false;
+            continue 'schedule;
+        }
         // Save the running graph's pause before any recovery patch is planned
         // against today's tighter limits.
         let structural_pause =
@@ -1031,21 +1618,19 @@ pub(super) fn advance_schedule<R: AttemptOwner, J: GraphJournal>(
             journal.save(&checkpoint).map_err(GraphError::Journal)?;
         }
         if structural_pause.is_none() {
-            if let Some(next) =
-                review::correct_verdict(document, &plan, &checkpoint, limits, &worktree_layout)
-                    .map_err(|error| GraphError::Refused(error.to_string()))?
-            {
-                let next_expanded =
-                    plans::expand(document, &next.extensions, &next.expansions, limits)
-                        .map_err(|error| GraphError::Invalid(error.to_string()))?;
-                let (next_plan, next_positions) = validate_flat_plan(&next_expanded, limits)
-                    .map_err(|error| GraphError::Invalid(error.to_string()))?;
-                owner
-                    .validate_expansion(&next_expanded, &next)
-                    .map_err(GraphError::Run)?;
-                journal.save(&next).map_err(GraphError::Journal)?;
-                checkpoint = next;
-                (expanded, plan, positions) = (next_expanded, next_plan, next_positions);
+            if schedule_review_retry(
+                &RetryContext {
+                    document,
+                    limits,
+                    worktree_layout: &worktree_layout,
+                },
+                owner,
+                journal,
+                &mut expanded,
+                &mut plan,
+                &mut positions,
+                &mut checkpoint,
+            )? {
                 resume = false;
                 continue 'schedule;
             }
@@ -1196,7 +1781,13 @@ pub(super) fn advance_schedule<R: AttemptOwner, J: GraphJournal>(
                     continue;
                 }
             }
-            let node = &plan.nodes[node_index];
+            let node = plan.nodes[node_index].clone();
+            if node.repair_lens.is_some()
+                && !checkpoint.nodes[node_index].state.settled()
+                && seal_review_round_scope(owner, node_index, &plan, &mut checkpoint, &positions)
+            {
+                journal.save(&checkpoint).map_err(GraphError::Journal)?;
+            }
             match transitions::node_action(node_index, &plan, &mut checkpoint, &positions) {
                 transitions::NodeAction::Wait { changed } => {
                     if changed {
@@ -1258,7 +1849,10 @@ pub(super) fn advance_schedule<R: AttemptOwner, J: GraphJournal>(
                                     // A structural pause owns the graph; an
                                     // active expansion pause with a different
                                     // cause must yield before it is saved.
-                                    checkpoint.pause_structural(&limit.to_string());
+                                    checkpoint.set_graph_pause_owner(
+                                        PauseCause::StructuralLimit,
+                                        &limit.to_string(),
+                                    );
                                     journal.save(&checkpoint).map_err(GraphError::Journal)?;
                                 }
                                 loops::DecisionExtensionError::Invalid(reason) => {
@@ -1283,7 +1877,7 @@ pub(super) fn advance_schedule<R: AttemptOwner, J: GraphJournal>(
                 transitions::NodeAction::Decide(spec) => {
                     asks::decide(
                         node_index,
-                        node,
+                        &node,
                         spec,
                         &plan,
                         &mut checkpoint,
@@ -1303,7 +1897,7 @@ pub(super) fn advance_schedule<R: AttemptOwner, J: GraphJournal>(
                     if structural_pause.is_none() && checkpoint.pause.is_none() && !waiting {
                         land::advance(
                             node_index,
-                            node,
+                            &node,
                             spec,
                             &plan,
                             &positions,
@@ -1398,7 +1992,7 @@ pub(super) fn advance_schedule<R: AttemptOwner, J: GraphJournal>(
                     let base = owner
                         .resolve_review_base(
                             reference,
-                            source_worktree(node, &plan, &checkpoint, &positions)
+                            source_worktree(&node, &plan, &checkpoint, &positions)
                                 .or(node.worktree.as_deref()),
                         )
                         .map_err(GraphError::Run)?;
@@ -1419,7 +2013,7 @@ pub(super) fn advance_schedule<R: AttemptOwner, J: GraphJournal>(
                     continue 'schedule;
                 }
                 let (route_index, settlement_retries) = match decide_next_attempt(
-                    node,
+                    &node,
                     &checkpoint.nodes[node_index],
                     limits,
                     document
@@ -1585,7 +2179,12 @@ pub(super) fn advance_schedule<R: AttemptOwner, J: GraphJournal>(
                 )? {
                     LoopStep::Proceed => {}
                     LoopStep::Break => break,
-                    LoopStep::Reschedule => continue 'schedule,
+                    LoopStep::Reschedule => {
+                        if retain_launch_warnings(owner, &mut checkpoint, node_index) {
+                            journal.save(&checkpoint).map_err(GraphError::Journal)?;
+                        }
+                        continue 'schedule;
+                    }
                 }
                 let needs_record = checkpoint.nodes[node_index]
                     .attempts
@@ -1634,7 +2233,7 @@ pub(super) fn advance_schedule<R: AttemptOwner, J: GraphJournal>(
                     &positions,
                     &mut checkpoint,
                 )?;
-                let continued = land::continued_branch(node, &checkpoint, &positions);
+                let continued = land::continued_branch(&node, &checkpoint, &positions);
                 if apply_pending_cancellation(document, &mut checkpoint, journal, &mut resume)? {
                     continue 'schedule;
                 }
@@ -1679,6 +2278,23 @@ pub(super) fn advance_schedule<R: AttemptOwner, J: GraphJournal>(
                         quota_redraw,
                     } => (settled_result, should_continue, quota_redraw),
                 };
+                if schedule_review_retry(
+                    &RetryContext {
+                        document,
+                        limits,
+                        worktree_layout: &worktree_layout,
+                    },
+                    owner,
+                    journal,
+                    &mut expanded,
+                    &mut plan,
+                    &mut positions,
+                    &mut checkpoint,
+                )? {
+                    resume = false;
+                    continue 'schedule;
+                }
+                composites::reconcile_checkpoint(&plan, &mut checkpoint);
                 let progress = &checkpoint.nodes[node_index];
                 let malformed_delivery_review = plan.queue.is_some()
                     && node.delivery_review.is_some()
@@ -1735,7 +2351,7 @@ pub(super) fn advance_schedule<R: AttemptOwner, J: GraphJournal>(
                 if quota_redraw {
                     transitions::redraw_quota_alias(
                         document,
-                        node,
+                        &node,
                         &mut checkpoint,
                         node_index,
                         limits,
@@ -1751,7 +2367,7 @@ pub(super) fn advance_schedule<R: AttemptOwner, J: GraphJournal>(
                 }
                 let appended = if settled_result.is_some() || node.plan.is_some() {
                     plans::settle(
-                        node,
+                        &node,
                         document,
                         &expanded,
                         &mut checkpoint,
@@ -1809,6 +2425,11 @@ pub(super) fn advance_schedule<R: AttemptOwner, J: GraphJournal>(
                 if !should_continue {
                     break;
                 }
+            }
+            // Every break from this node's launch loop lands here, so warnings
+            // its step raised (a deferred or waiting launch included) stay on it.
+            if retain_launch_warnings(owner, &mut checkpoint, node_index) {
+                journal.save(&checkpoint).map_err(GraphError::Journal)?;
             }
             if (!checkpoint.cancelled
                 || resume

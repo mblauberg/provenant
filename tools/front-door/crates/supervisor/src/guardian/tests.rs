@@ -486,7 +486,7 @@ fn guardian_missing_attempt_finishes_unresolved_group_cleanup() {
     let capture = CapturePlan {
         root_flush_ms: 50,
         descendant_grace_ms: 100,
-        wall_ms: 5_000,
+        wall_ms: Some(5_000),
         ..CapturePlan::default()
     };
     crate::custody::liveness::prepare_guardian_lifetime(
@@ -980,7 +980,7 @@ fn spawn_missing_attempt_guardian(
         capture: CapturePlan {
             root_flush_ms: 50,
             descendant_grace_ms: 100,
-            wall_ms: 5_000,
+            wall_ms: Some(5_000),
             ..CapturePlan::default()
         },
     };
@@ -2058,11 +2058,14 @@ fn unavailable_port_allocation_warns_and_does_not_claim_a_block()
             "GUARDIAN_LANE_PORT_ALLOCATION_NONE".into(),
             provenant_records::policy::Strength::Off,
         )]),
-        provenant_records::policy::Source::Dispatch,
+        provenant_records::Layer::Route,
     );
     assert_eq!(
-        off_policy.rule("GUARDIAN_LANE_PORT_ALLOCATION_NONE").source,
-        provenant_records::policy::Source::Dispatch
+        off_policy
+            .rule("GUARDIAN_LANE_PORT_ALLOCATION_NONE")
+            .source
+            .layer,
+        provenant_records::Layer::Route
     );
     let (_, warning) =
         lane_port_allocation(&off_policy, Some(&unavailable)).map_err(std::io::Error::other)?;
@@ -2104,7 +2107,7 @@ fn unavailable_port_allocation_warns_and_does_not_claim_a_block()
         error.fact(),
         provenant_records::diagnostic::ResourceFact::LanePorts {
             blocks: 1,
-            origin: provenant_records::diagnostic::PortSettingSource::Configuration
+            origin: provenant_records::Layer::Host
         }
     );
     // The automatic port range is a convenience, never an implicit writer cap.
@@ -2231,7 +2234,7 @@ fn strict_port_policy() -> provenant_records::policy::Policy {
             "PORT_BLOCKS".into(),
             provenant_records::policy::Strength::Refuse,
         )]),
-        provenant_records::policy::Source::Dispatch,
+        provenant_records::Layer::Route,
     );
     policy
 }

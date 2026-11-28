@@ -524,7 +524,13 @@ pub enum FacadeError {
         expected: u64,
     },
     #[error("run launch outcome is unknown for operation {operation_id}")]
-    LaunchUnknown { operation_id: OperationId },
+    LaunchUnknown {
+        operation_id: OperationId,
+        /// The local launcher's bounded cause, such as the failed guardian
+        /// handshake step. In-process only: a peer's text never fills it.
+        #[serde(skip)]
+        detail: Option<Box<str>>,
+    },
     #[error("run continuation is unsupported")]
     ContinuationUnsupported,
     #[error("provider state expired; use the retained result or transcripts as context")]
@@ -574,6 +580,15 @@ pub enum FacadeError {
     },
     #[error("writer lock or writer is busy{}", .holder.map_or_else(String::new, |attempt| format!(", held by attempt {attempt}")))]
     WriterBusy {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        holder: Option<AttemptId>,
+    },
+    /// A destruction-guard refusal: an operation would destroy another live
+    /// lane's work. Only destruction produces this; a shared live lease warns
+    /// and proceeds instead.
+    #[error("error [DESTROYS_LIVE_WORK] {message}")]
+    CustodyRefused {
+        message: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         holder: Option<AttemptId>,
     },
@@ -1111,7 +1126,12 @@ impl FacadeError {
             // their operation, path and source into this one field, so the
             // writer-binding diagnostic names them without trusting wire text.
             Self::Io { cause: Some(cause), .. } => projected = projected.detail(&**cause),
-            Self::LaunchUnknown { operation_id } => projected = projected.next(format!("inspect the receipt for operation {operation_id} before retrying with the same operation ID")),
+            Self::LaunchUnknown { operation_id, detail } => {
+                if let Some(detail) = detail {
+                    projected = projected.detail(&**detail);
+                }
+                projected = projected.next(format!("inspect the receipt for operation {operation_id} before retrying with the same operation ID"));
+            }
             Self::WriterBusy { holder } => {
                 if let Some(holder) = holder {
                     projected = projected.detail(format!("writer is held by attempt {holder}"));
@@ -1124,6 +1144,16 @@ impl FacadeError {
                 } else {
                     projected = projected.next("wait for the current writer or lock holder to finish");
                 }
+            }
+            Self::CustodyRefused { message, holder } => {
+                projected = projected
+                    .detail(format!(
+                        "{message}{}",
+                        holder.map_or_else(String::new, |holder| format!(
+                            "; held by attempt {holder}"
+                        ))
+                    ))
+                    .next("wait for the holder or launch with --destination new");
             }
             Self::WriterLockBusy { holder } => {
                 projected = projected
@@ -1238,6 +1268,7 @@ impl FacadeError {
             Self::ConfinementRefused { .. } => "confinement_refused",
             Self::RunKind { .. } => "run_refused",
             Self::WriterBusy { .. } => "writer_busy",
+            Self::CustodyRefused { .. } => "destroys_live_work",
             Self::WriterLockBusy { .. } => "writer_lock_busy",
             Self::WriterUnknown => "writer_unknown",
             Self::WriterLeaseHeld { .. } => "writer_lease_held",
@@ -1445,6 +1476,7 @@ impl From<&crate::hosts::PeerError> for FacadeError {
             }
             PeerError::Unavailable | PeerError::Failed(_) => Self::HomeUnavailable,
             PeerError::Unknown { operation_id } => Self::LaunchUnknown {
+                detail: None,
                 operation_id: operation_id.clone(),
             },
             PeerError::Deadline => Self::Timeout,
@@ -1696,3 +1728,23 @@ pub enum OutputResult {
 #[cfg(test)]
 #[path = "facade_new_worktree_tests.rs"]
 mod new_worktree_tests;
+
+#[cfg(test)]
+mod sharing_tests {
+    use super::*;
+
+    #[test]
+    fn destruction_refusal_is_a_boundary_free_configured_error() {
+        let error = FacadeError::CustodyRefused {
+            message: "reset would destroy work held by a live lane".to_owned(),
+            holder: None,
+        };
+        assert_eq!(error.code(), "destroys_live_work");
+        let projected = error.diagnostic();
+        assert_eq!(
+            projected.detail.as_deref(),
+            Some("reset would destroy work held by a live lane")
+        );
+        assert!(projected.next.is_some());
+    }
+}

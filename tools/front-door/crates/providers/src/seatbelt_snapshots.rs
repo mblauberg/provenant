@@ -5,10 +5,10 @@ use super::*;
 use provenant_confinement::cargo::CargoHome;
 use provenant_confinement::permissions::snapshot::render;
 use provenant_confinement::permissions::{
-    ConfinementSource, NetworkAccess, NetworkPolicy, PathGrant, PathScope, PlanPermissions,
-    ProviderProfile,
+    NetworkAccess, NetworkPolicy, PathGrant, PathScope, PlanPermissions, ProviderProfile,
 };
 use provenant_confinement::plan::ReadOnlyGrants;
+use provenant_records::{Layer, Source};
 use std::collections::BTreeSet;
 use std::path::Path;
 
@@ -66,6 +66,7 @@ fn prepared(
         permissions.network = network;
     }
     let confined = provenant_confinement::ConfinedPlan::new(provenant_confinement::PlanRequest {
+        policy: provenant_records::policy::Policy::default(),
         scope: base.scope(),
         permissions,
         codex: provenant_confinement::CodexPolicy::Clean,
@@ -520,11 +521,10 @@ fn host_network_restriction_is_sourced_and_applied() -> Result<(), Box<dyn std::
 
     let resolved = profile.spec.confinement.resolve_for(&plan);
     assert_eq!(resolved.network(), NetworkPolicy::Provider);
-    assert!(
-        resolved
-            .sources()
-            .contains(&ConfinementSource::Host(state.join("config.toml")))
-    );
+    assert!(resolved.sources().contains(&Source {
+        layer: Layer::Host,
+        origin: Some(state.join("config.toml").display().to_string()),
+    }));
     let rendered = render(&plan, &profile, Path::new(HOME))?;
     assert!(rendered.contains("(deny network*)"));
     assert!(!rendered.contains("(allow network-outbound (remote ip \"*:*\"))"));

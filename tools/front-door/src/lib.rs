@@ -10,6 +10,7 @@ mod chair;
 mod check_providers;
 mod checks;
 mod ci;
+mod ci_patch;
 mod cloud;
 pub mod commands;
 #[cfg(any(test, feature = "fixture"))]
@@ -78,6 +79,7 @@ use serde::Serialize;
 use std::{
     ffi::OsString,
     io::{self, Write},
+    time::Duration,
 };
 
 pub(crate) use output::{emit, emit_summarised, emit_unpublished, emit_with_writers};
@@ -298,7 +300,7 @@ fn fail_with_diagnostic(
             .as_deref()
             .unwrap_or("correct the reported condition and rerun the command"),
     );
-    error.diagnostic = Some(diagnostic.into());
+    error.set_diagnostic(Some(diagnostic.into()));
     result.error = Some(error);
     emit(&result, globals, "", false)
 }
@@ -1216,7 +1218,7 @@ fn config_command(command: &str, action: ConfigAction, globals: &provenant_cli::
                         .as_deref()
                         .unwrap_or("run `provenant accounts sync`"),
                 );
-                error.diagnostic = Some((&projection).into());
+                error.set_diagnostic(Some((&projection).into()));
                 result.error = Some(error);
                 return emit(&result, globals, "", false);
             }
@@ -1476,16 +1478,105 @@ fn run(inv: provenant_cli::Invocation, process: &dyn Process) -> u8 {
             globals,
         );
     };
+    let mut common = command.resolve_common(Duration::from_secs(verb_default_timeout(&inv.leaf)));
+    if inv.leaf == "run"
+        && common
+            .as_ref()
+            .is_some_and(|common| invalid_run_target(&common.target))
+    {
+        return fail(
+            "run",
+            Outcome::Invalid,
+            "INVALID_HOST_SELECTION",
+            "run requires exactly one host",
+            "select one host with `--host NAME` or omit `--host`",
+            globals,
+        );
+    }
+    if let Some(resolved_common) = common.as_mut()
+        && let Ok(resolved) = roots::resolve(
+            globals,
+            roots::Workspace::Directory,
+            roots::Product::Optional,
+        )
+    {
+        resolved_common.deadline = Duration::from_secs(fabric::host_read::bounded_timeout_request(
+            &resolved.roots,
+            resolved_common.deadline.as_secs(),
+        ));
+    }
     let invocation = provenant_cli::Call {
         command,
         globals,
         leaf: inv.leaf.as_str(),
         process,
+        common: common.clone(),
     };
+    if let Some(status) =
+        fabric::host_read::route_if_selected(invocation.command, |command, selection| {
+            fabric::host_read::route(command, selection, globals, process.workers())
+        })
+    {
+        return status;
+    }
+    // One resolution of the shared `--timeout` and `--host` flags. Verbs that
+    // flatten CommonArgs must read both here instead of accepting and ignoring
+    // them. The peer-served reads and gc route selected hosts; unsupported
+    // verbs retain the explicit warning and local behavior.
+    if let Some(common) = common
+        && matches!(&common.target, provenant_cli::HostSelection::All)
+        && !matches!(
+            &invocation.command,
+            Command::Status(_)
+                | Command::Output(_)
+                | Command::Result { .. }
+                | Command::Events { .. }
+                | Command::Gc(_)
+        )
+    {
+        provenant_records::warning::warn(
+            provenant_records::warning::Warning::new(
+                provenant_records::warning::HOST_ALL_UNSUPPORTED,
+                format!(
+                    "--host all is not supported by {}; serving the local host",
+                    inv.leaf
+                ),
+                provenant_records::warning::detected_source(
+                    provenant_records::warning::HOST_ALL_UNSUPPORTED,
+                ),
+            )
+            .once_per_change(),
+        );
+    }
     match (verb.run)(&invocation) {
         Ok(outcome) => provenant_cli::exit_status(&outcome),
         Err(error) => fail_with_command_error(&inv.leaf, Outcome::Error, error, globals),
     }
+}
+
+#[cfg(test)]
+mod multi_host_run_tests {
+    use provenant_cli::HostSelection;
+
+    #[test]
+    fn multi_host_run_is_invalid_before_the_unsupported_host_warning() {
+        let multi_host = [
+            HostSelection::All,
+            HostSelection::Many(vec!["a".into(), "b".into()]),
+        ];
+        assert!(multi_host.iter().all(super::invalid_run_target));
+        assert!(!super::invalid_run_target(&HostSelection::Named(
+            "a".into()
+        )));
+        assert!(!super::invalid_run_target(&HostSelection::Local));
+    }
+}
+
+fn invalid_run_target(target: &provenant_cli::HostSelection) -> bool {
+    matches!(
+        target,
+        provenant_cli::HostSelection::All | provenant_cli::HostSelection::Many(_)
+    )
 }
 
 /// Disk observations are best-effort and may stall on an unhealthy volume.
@@ -1519,6 +1610,19 @@ mod session_warning_tests {
     }
 }
 
+/// Declared per-verb budget defaults from docs/specs/agent-native.md#34-consistent-verbs-and-flags.
+/// `wait` resolves its own default from `domains.wait.timeout_seconds` in its handler.
+fn verb_default_timeout(leaf: &str) -> u64 {
+    match leaf {
+        "status" | "output" | "result" | "events" | "wait" => 30,
+        "gc" => 300,
+        "ci" | "ci failures" | "ci patch" => 120,
+        "run" => 1_800,
+        "upgrade" => 1_200,
+        _ => 30,
+    }
+}
+
 /// Run one parsed command line and count it, returning the exit status.
 // CLI reporting measures real elapsed time for operational diagnostics.
 #[allow(clippy::disallowed_methods)]
@@ -1547,7 +1651,7 @@ pub fn dispatch(
     let verb = verb.to_owned();
     // One sink for the whole command: warnings raised while resolving roots or
     // loading config reach it, and the guard restores the previous sink on exit.
-    let _command_sink = output::install_command_sink(globals.json);
+    let _command_sink = output::install_command_sink_with(globals.json, globals.full);
     // The CLI crate's command surfaces drain this sink through one shared seam
     // so warnings raised while a command runs reach its envelope, not stderr.
     // Spec: docs/specs/cli.md#warnings-are-typed-values
@@ -1839,3 +1943,7 @@ mod unpublished_result_tests {
         assert!(!out.is_empty());
     }
 }
+
+#[cfg(test)]
+#[path = "../tests/epic_e_contract.rs"]
+mod epic_e_contract;

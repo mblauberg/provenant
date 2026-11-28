@@ -1,7 +1,10 @@
 use super::*;
 use provenant_core::{Clock, ProjectId};
-use provenant_os::{clock::SystemClock, fs::SystemPathResolver};
-use std::{convert::Infallible, os::unix::fs::PermissionsExt};
+use provenant_os::{
+    clock::SystemClock,
+    fs::{Directory, SystemPathResolver},
+};
+use std::{convert::Infallible, ffi::OsStr, os::unix::fs::PermissionsExt};
 struct Owner;
 
 fn collect_terminal(
@@ -78,6 +81,118 @@ fn stored_fixture() -> StoredCheckpoint {
         .join("graph-g-test.json");
     let bytes = std::fs::read(path).unwrap();
     decode_checkpoint_in(&journal.directory, &bytes, "g-test").unwrap()
+}
+
+#[test]
+fn graph_retirement_archives_prompt_blobs_before_finalisation_and_clearing()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let temp = crate::test_support::tempdir()?;
+    std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700))?;
+    let base = std::fs::canonicalize(temp.path())?;
+    let inputs = provenant_test_support::root_inputs(&base)?;
+    let root = StateRoot::resolve(&inputs, &SystemPathResolver)?;
+    let project = ProjectId::from_bytes([8; 16]);
+    let graph_id = "retire-prompts";
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let budget = WaitBudget::cli(clock.mono_now(), 5)?;
+    let prompt = format!("retirement prompt {}", "x".repeat(5000));
+    let document: GraphDocument = serde_json::from_value(serde_json::json!({
+        "schema_version": 2,
+        "graph_id": graph_id,
+        "nodes": [{
+            "id": "reader",
+            "prompt": prompt,
+            "access": "read_only",
+            "route": {"adapter": "fixture", "model": "fixture/model"}
+        }]
+    }))?;
+    let execution = GraphExecution {
+        peer_origin_context: None,
+        peer_submission_digest: None,
+        requester_path: None,
+        extra: Default::default(),
+        bases: None,
+        directory: inputs.checkout,
+        document: document.clone(),
+    };
+    let mut journal = FileJournal::open(&root, project, graph_id, budget, &cancel, &clock)?;
+    journal.bind(execution)?;
+    let checkpoint = advance(&document, &mut Owner, &mut journal)?.checkpoint;
+    journal.save(&checkpoint)?;
+    drop(journal);
+
+    let graph_directory = root
+        .as_path()
+        .join("fabric/graphs")
+        .join(project.to_string());
+    let checkpoint_path = graph_directory.join(format!("graph-{graph_id}.json"));
+    let original_checkpoint = std::fs::read(&checkpoint_path)?;
+    let original_prompts = std::fs::read_dir(&graph_directory)?
+        .map(|entry| entry.unwrap())
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(&format!("graph-{graph_id}.prompt-"))
+        })
+        .map(|entry| Ok((entry.file_name(), std::fs::read(entry.path())?)))
+        .collect::<std::io::Result<Vec<_>>>()?;
+    assert!(
+        !original_prompts.is_empty(),
+        "the large prompt is externalised"
+    );
+
+    let failed = FileJournal::retire(&root, project, graph_id, budget, &cancel, &clock, |_| {
+        Err(std::io::Error::other("queue retirement failed").into())
+    });
+    assert!(failed.is_err());
+    assert_eq!(std::fs::read(&checkpoint_path)?, original_checkpoint);
+    for (name, bytes) in &original_prompts {
+        assert_eq!(std::fs::read(graph_directory.join(name))?, *bytes);
+    }
+
+    let archive =
+        FileJournal::retire(
+            &root,
+            project,
+            graph_id,
+            budget,
+            &cancel,
+            &clock,
+            |_| Ok(()),
+        )?
+        .expect("retirement archives the live graph");
+    assert!(!checkpoint_path.exists());
+    let archive_directory = Directory::open_anchor(&archive)?;
+    let archived_checkpoint = archive_directory.read_bounded(
+        OsStr::new(&format!("graph-{graph_id}.json")),
+        64 * 1024 * 1024,
+    )?;
+    let decoded = decode_checkpoint_in(&archive_directory, &archived_checkpoint, graph_id)?;
+    assert_eq!(decoded.execution.document.nodes[0].prompt, prompt);
+    for (name, bytes) in original_prompts {
+        assert_eq!(std::fs::read(archive.join(&name))?, bytes);
+        assert!(!graph_directory.join(name).exists());
+    }
+
+    FileJournal::collect_terminal(
+        &root,
+        project,
+        i128::MAX,
+        &provenant_core::SweepControl {
+            cancel: cancel.clone(),
+            ..Default::default()
+        },
+        &clock,
+    )?;
+    let archive_directory = Directory::open_anchor(&archive)?;
+    let archived_checkpoint = archive_directory.read_bounded(
+        OsStr::new(&format!("graph-{graph_id}.json")),
+        64 * 1024 * 1024,
+    )?;
+    decode_checkpoint_in(&archive_directory, &archived_checkpoint, graph_id)?;
+    Ok(())
 }
 
 fn fixture_plan_digest(document: &GraphDocument) -> String {
@@ -392,8 +507,8 @@ fn round_2_checkpoint_with_identity_key_in_parameters_resumes_and_lands() {
     let budget = WaitBudget::cli(clock.mono_now(), 5).unwrap();
     let graph_id = "g-test";
     let credential = "AKIAIOSFODNN7EXAMPLE";
-    // In round-2 normal form, identity-like keys inside parameters retained their
-    // value unredacted. Round 3 normalises all descendants of parameters as content.
+    // The credential-shaped value stays byte-for-byte in the sealed submission
+    // through the store migration and replay.
     let document: GraphDocument = serde_json::from_value(serde_json::json!({
         "schema_version": 2,
         "graph_id": graph_id,
@@ -435,6 +550,8 @@ fn round_2_checkpoint_with_identity_key_in_parameters_resumes_and_lands() {
         .join(format!("fabric/graphs/{project}/graph-{graph_id}.json"));
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     std::fs::write(&path, CanonicalV1::bytes(&fixture).unwrap().as_bytes()).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    migrate_store(root.as_path()).unwrap();
 
     let mut journal = FileJournal::open(&root, project, graph_id, budget, &cancel, &clock).unwrap();
     // Stored checkpoint in round-2 normal form must resume without BadCheckpoint/BadDigest.
@@ -608,6 +725,21 @@ fn terminal_checkpoint_with_superseded_header_is_retired() {
         .unwrap()
     );
     assert!(!path.exists());
+    // Spec: docs/specs/agent-native.md#31-progress-without-tick — a retired
+    // graph is archived under the graph directory, never deleted.
+    let retired = root
+        .as_path()
+        .join("fabric/graphs")
+        .join(project.to_string())
+        .join("retired");
+    let archived = std::fs::read_dir(&retired)
+        .unwrap()
+        .filter_map(Result::ok)
+        .any(|entry| entry.path().join("graph-g-test.json").is_file());
+    assert!(
+        archived,
+        "retired checkpoint must be preserved under retired/"
+    );
 }
 
 #[test]
@@ -2172,6 +2304,8 @@ fn implicit_writer_binding_reattaches_without_resolving_the_moved_head() {
             self.bindings += 1;
             Ok(Some(WriterWorktreeBinding {
                 extra: Default::default(),
+                carry_examined: false,
+                carried_paths: Vec::new(),
                 shared_worktree: None,
                 source_directory_identity: None,
                 worktree: "/fixture/lane".into(),
@@ -2984,6 +3118,8 @@ fn v2_checkpoint_migrates_and_is_published_under_the_journal_lock() {
     value["digest"] = digest.to_string().into();
     std::fs::write(&path, CanonicalV1::bytes(&value).unwrap().as_bytes()).unwrap();
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    assert!(decode_checkpoint(&std::fs::read(&path).unwrap(), "g-test").is_err());
+    migrate_store(root.as_path()).unwrap();
     let journal = FileJournal::open(&root, project, "g-test", budget, &cancel, &clock).unwrap();
     let stored = load_checkpoint(&journal.directory, "g-test")
         .unwrap()
@@ -2997,10 +3133,112 @@ fn v2_checkpoint_migrates_and_is_published_under_the_journal_lock() {
         Some("waiting")
     );
     let saved: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-    assert_eq!(saved["schema_version"], 3);
+    assert_eq!(saved["schema_version"], CHECKPOINT_SCHEMA_VERSION);
     assert!(
         saved["checkpoint"]["nodes"][0]
             .get("advance_error_code")
             .is_none()
     );
+}
+
+/// Spec: docs/specs/agent-native.md#310-store-migrations
+#[test]
+fn v3_checkpoint_cut_over_types_warnings_and_renames_sealed_settings() {
+    let temp = crate::test_support::tempdir().unwrap();
+    std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let base = std::fs::canonicalize(temp.path()).unwrap();
+    let inputs = provenant_test_support::root_inputs(&base).unwrap();
+    let root = StateRoot::resolve(&inputs, &SystemPathResolver).unwrap();
+    let project = ProjectId::from_bytes([1; 16]);
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let budget = WaitBudget::cli(clock.mono_now(), 5).unwrap();
+    drop(FileJournal::open(&root, project, "g-test", budget, &cancel, &clock).unwrap());
+    let path = root
+        .as_path()
+        .join("fabric/graphs")
+        .join(project.to_string())
+        .join("graph-g-test.json");
+
+    let mut value = serde_json::to_value(stored_fixture()).unwrap();
+    assert_eq!(value["schema_version"], CHECKPOINT_SCHEMA_VERSION);
+    value["schema_version"] = 3.into();
+    value["checkpoint"]["nodes"][0]["warnings"] = serde_json::json!(["legacy note"]);
+    value["execution"]["accept_inconclusive_without_blocking"] = true.into();
+    value["execution"]["lanes.isolation"] = "shared".into();
+    value["execution"]["source"] = "builtin".into();
+    value["digest"] = CanonicalV1::record_digest(
+        "fabric-graph-checkpoint",
+        2,
+        &(&value["checkpoint"], &value["execution"]),
+    )
+    .unwrap()
+    .to_string()
+    .into();
+    let valid = CanonicalV1::bytes(&value).unwrap().as_bytes().to_vec();
+    assert!(decode_checkpoint(&valid, "g-test").is_err());
+    value["digest"] = "sha256:corrupt".into();
+    let corrupt = CanonicalV1::bytes(&value).unwrap().as_bytes().to_vec();
+    std::fs::write(&path, &corrupt).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    assert!(migrate_store(root.as_path()).is_err());
+    assert_eq!(std::fs::read(&path).unwrap(), corrupt);
+    assert!(
+        !root
+            .as_path()
+            .join("fabric/graphs")
+            .join(format!("migrating-{CHECKPOINT_SCHEMA_VERSION}"))
+            .exists()
+    );
+    std::fs::write(&path, valid).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+    let changed = migrate_store(root.as_path()).unwrap();
+    assert_eq!(changed.len(), 1, "{changed:?}");
+    assert!(
+        !root
+            .as_path()
+            .join("fabric/graphs")
+            .join(format!("migrating-{CHECKPOINT_SCHEMA_VERSION}"))
+            .exists(),
+        "marker removed after a complete cut-over"
+    );
+    let saved: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert_eq!(saved["schema_version"], CHECKPOINT_SCHEMA_VERSION);
+    let warning = &saved["checkpoint"]["nodes"][0]["warnings"][0];
+    assert_eq!(warning["code"], "LEGACY_WARNING");
+    assert_eq!(warning["message"], "legacy note");
+    assert_eq!(warning["source"]["layer"], "default");
+    let execution = &saved["execution"];
+    assert!(
+        execution
+            .get("accept_inconclusive_without_blocking")
+            .is_none()
+    );
+    assert_eq!(execution["accept_below"], "blocking");
+    assert!(execution.get("lanes.isolation").is_none());
+    assert_eq!(
+        execution["lanes.read_source"],
+        provenant_config::READ_SOURCE_LIVE
+    );
+    assert_eq!(execution["source"], "default");
+
+    let mut off_value = serde_json::to_value(stored_fixture()).unwrap();
+    off_value["schema_version"] = 3.into();
+    off_value["execution"]["accept_inconclusive_without_blocking"] = false.into();
+    let off = migrate(3, CHECKPOINT_SCHEMA_VERSION, off_value).unwrap();
+    assert_eq!(off["execution"]["accept_below"], "off");
+
+    let again = migrate_store(root.as_path()).unwrap();
+    assert!(again.is_empty(), "resumed pass is idempotent: {again:?}");
+}
+
+/// The strict reader is what makes a mixed-version deployment transient: an
+/// old binary sees a newer store and refuses instead of guessing a shape.
+#[test]
+fn a_newer_store_version_is_refused_by_the_reader() {
+    let mut value = serde_json::to_value(stored_fixture()).unwrap();
+    value["schema_version"] = (CHECKPOINT_SCHEMA_VERSION + 1).into();
+    let bytes = CanonicalV1::bytes(&value).unwrap().as_bytes().to_vec();
+    assert!(decode_checkpoint(&bytes, "g-test").is_err());
 }

@@ -5,7 +5,14 @@ fn home_refusal_has_install_repair() {
     let result = super::home_error_result("install", "HOME must be absolute");
     let error = result.error.unwrap();
     assert_eq!(error.code, "HOME");
-    assert!(error.repair.unwrap().contains("provenant install"));
+    assert!(
+        error
+            .next
+            .first()
+            .unwrap()
+            .display_text()
+            .contains("provenant install")
+    );
 }
 
 /// An installed state root whose receipt records the given live-record format.
@@ -349,9 +356,11 @@ fn verify_execs_the_installed_binary() -> Result<(), Box<dyn std::error::Error>>
         &environment,
         &targets,
         &cli::Upgrade {
+            common: Default::default(),
             yes: false,
             from_source: None,
             hosts: "all".into(),
+            keep: false,
             verify: true,
             verify_only: false,
             dry_run: false,
@@ -359,6 +368,7 @@ fn verify_execs_the_installed_binary() -> Result<(), Box<dyn std::error::Error>>
             route: None,
             set: Vec::new(),
         },
+        3_700,
     )?;
 
     let calls = std::fs::read_to_string(calls)?;
@@ -430,9 +440,11 @@ fn verify_smoke_runs_outside_a_checkout_without_requiring_one()
         &environment,
         &targets,
         &cli::Upgrade {
+            common: Default::default(),
             yes: false,
             from_source: None,
             hosts: "all".into(),
+            keep: false,
             verify: true,
             verify_only: false,
             dry_run: false,
@@ -440,6 +452,7 @@ fn verify_smoke_runs_outside_a_checkout_without_requiring_one()
             route: None,
             set: Vec::new(),
         },
+        3_700,
     )?;
 
     let calls = std::fs::read_to_string(calls)?;
@@ -537,9 +550,11 @@ fn smoke_runner(cwd: &std::path::Path) -> Result<ChildRunner, Box<dyn std::error
 #[allow(dead_code)]
 fn smoke_upgrade(host: Option<String>, set: Vec<String>) -> cli::Upgrade {
     cli::Upgrade {
+        common: Default::default(),
         yes: false,
         from_source: None,
         hosts: "all".into(),
+        keep: false,
         verify: true,
         verify_only: false,
         dry_run: false,
@@ -751,13 +766,14 @@ fn smoke_fails_without_the_nonce() -> Result<(), Box<dyn std::error::Error>> {
     provenant_os::fixture::private_state_dir(&state)?;
     let (program, _) = smoke_program(temp.path(), "no nonce here")?;
     let runner = smoke_runner(&home)?;
-    let outcome = crate::smoke::run_lifecycle(
+    let outcome = crate::smoke::run_lifecycle_with_timeout(
         &provenant_os::clock::SystemClock::new(),
         &runner,
         &program,
         &state,
         &home,
         &smoke_upgrade(None, Vec::new()),
+        std::time::Duration::from_secs(60),
     )?;
     let crate::smoke::SmokeVerdict::Failed { row, reason } = &outcome.verdict else {
         panic!("the nonce is absent, so the smoke must fail");
@@ -956,6 +972,7 @@ fn smoke_dry_run_previews_nodes_without_launching() -> Result<(), Box<dyn std::e
         &state,
         &home,
         &smoke_upgrade(None, Vec::new()),
+        60,
     )?;
     let output = String::from_utf8(output)?;
     for node in [
@@ -1005,6 +1022,7 @@ fn smoke_dry_run_keeps_a_user_diff_base_and_adds_fixture_base()
         &state,
         &home,
         &smoke_upgrade(None, vec![format!("diff_base={user_base}")]),
+        60,
     )?;
     let run = std::fs::read_to_string(calls)?
         .lines()
@@ -1032,9 +1050,11 @@ fn smoke_preview_and_verify_share_writer_branch_and_base() -> Result<(), Box<dyn
     let state = tmp.path().join("state");
     let graph = "smoke-verify-test";
     let args = cli::Upgrade {
+        common: Default::default(),
         yes: false,
         from_source: None,
         hosts: "all".into(),
+        keep: false,
         verify: true,
         verify_only: false,
         dry_run: true,
@@ -1533,12 +1553,9 @@ fn upgrade_failure_repair_points_at_json_per_host_detail() {
     let hosts = vec![fixture_smoke_host(false, "graph child failed\n")];
     let error = super::failed_upgrade_result(hosts).error.unwrap();
     assert_eq!(error.code, "UPGRADE_FAILED");
-    let repair = error.repair.unwrap();
-    assert!(
-        repair.contains("provenant upgrade --verify --json"),
-        "{repair}"
-    );
-    assert!(!repair.contains("--full"), "{repair}");
+    let next = error.next.first().unwrap().display_text();
+    assert!(next.contains("provenant upgrade --verify --json"), "{next}");
+    assert!(!next.contains("--full"), "{next}");
 }
 
 #[test]
@@ -1642,6 +1659,138 @@ fn upgrade_full_human_keeps_capability_notices_and_smoke_envelopes() {
     );
     assert!(text.contains("\"schema_version\""), "{text}");
     assert!(!text.contains("use --full for detail"), "{text}");
+}
+
+#[test]
+fn keep_marker_retains_the_smoke_graph_and_names_retire_next()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let project = temp.path().join("smoke");
+    std::fs::create_dir(&project)?;
+    let ((), warnings) = provenant_records::warning::capture(|| {
+        super::retain_smoke(&project, "smoke-verify-1", true).unwrap();
+    });
+    assert_eq!(
+        std::fs::read_to_string(project.join("keep"))?.trim(),
+        "smoke-verify-1"
+    );
+    let warning = warnings
+        .iter()
+        .find(|warning| warning.code.as_ref() == "SMOKE_GRAPH_RETAINED")
+        .ok_or("SMOKE_GRAPH_RETAINED was not emitted")?;
+    assert!(
+        warning
+            .next
+            .iter()
+            .any(|step| step.argv.join(" ") == "provenant retire graph:smoke-verify-1"),
+        "{warning:?}"
+    );
+    Ok(())
+}
+
+#[test]
+fn release_pin_keeps_a_release_that_pruning_would_remove() -> Result<(), Box<dyn std::error::Error>>
+{
+    use provenant_records::{AbsolutePath, FileDigest, InstallReceipt, SourceDigest};
+
+    let temp = tempfile::tempdir()?;
+    let state = temp.path().join("state");
+    let install = state.join("install");
+    let releases = state.join("releases");
+    use std::os::unix::fs::DirBuilderExt;
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&install)?;
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&releases)?;
+    let mut pinned = [0u8; 32];
+    pinned[31] = 1;
+    let receipt = InstallReceipt {
+        extra: Default::default(),
+        schema_version: provenant_records::INSTALL_RECEIPT_SCHEMA_VERSION,
+        state_format_version: provenant_records::STATE_FORMAT_VERSION,
+        live_record_format: None,
+        source_digest: SourceDigest::from_bytes(pinned),
+        manifest_digest: FileDigest::from_bytes([2; 32]),
+        asset_digest: SourceDigest::from_bytes([3; 32]),
+        target: "fixture".into(),
+        toolchain: "fixture".into(),
+        bin_dir: AbsolutePath::new(&temp.path().join("bin"))?,
+        harnesses: Vec::new(),
+        harness_targets: Vec::new(),
+        entries: Vec::new(),
+        migrations: Vec::new(),
+    };
+    std::fs::write(
+        install.join("receipt.json"),
+        provenant_records::encode(&receipt)?,
+    )?;
+    let pin = super::verify_release_pin(&state).map_err(std::io::Error::other)?;
+    for n in 1..=5u8 {
+        let release = releases.join(format!("sha256:{n:064x}"));
+        std::fs::create_dir(&release)?;
+        std::fs::write(release.join("release.json"), b"fixture")?;
+        // Control recency so the pinned first release would otherwise be pruned.
+        std::fs::File::open(&release)?.set_modified(
+            std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(u64::from(n)),
+        )?;
+    }
+    let active = format!("sha256:{:064x}", 4u8);
+    let pinned_name = format!("sha256:{:064x}", 1u8);
+    super::prune_release_directories(&releases, &active, &[])?;
+    assert!(
+        releases.join(&pinned_name).exists(),
+        "a pinned release must survive"
+    );
+    assert!(!releases.join(format!("sha256:{:064x}", 2u8)).exists());
+    drop(pin);
+    Ok(())
+}
+
+#[test]
+fn upgrade_host_selection_keeps_all_or_only_named_peers() {
+    let args = cli::Upgrade {
+        common: Default::default(),
+        yes: false,
+        from_source: None,
+        hosts: "all".into(),
+        keep: false,
+        verify: false,
+        verify_only: false,
+        dry_run: false,
+        host: None,
+        route: None,
+        set: Vec::new(),
+    };
+    assert_eq!(super::selected_upgrade_hosts(&args), None);
+    let all = cli::Upgrade {
+        common: cli::CommonArgs {
+            host: vec![cli::HostArg::All],
+            ..Default::default()
+        },
+        ..args.clone()
+    };
+    assert_eq!(super::selected_upgrade_hosts(&all), None);
+    let named = cli::Upgrade {
+        common: cli::CommonArgs {
+            host: vec![
+                cli::HostArg::Named("worker".into()),
+                cli::HostArg::Named("peer-a".into()),
+            ],
+            ..Default::default()
+        },
+        ..args
+    };
+    assert_eq!(
+        super::selected_upgrade_hosts(&named),
+        Some(std::collections::BTreeSet::from([
+            "peer-a".to_owned(),
+            "worker".to_owned(),
+        ]))
+    );
 }
 
 #[test]

@@ -27,17 +27,22 @@ mod git_context;
 mod holder;
 mod identity;
 mod launch;
+pub use launch::{OwnCommit, OwnCommitInput, OwnCommitRequest, commit_own_paths};
+pub mod worktree_carry;
+pub use worktree_carry::{CarryError, CarrySnapshot};
+pub mod lease_migrate;
 mod ledger;
 mod objects;
 mod overview;
 mod plan;
 mod pr_contribution;
+pub mod reclaim;
 pub use pr_contribution::{Contribution, Contributions, PullRequest, WEIGHT_ONE};
 pub mod reactions;
 pub use reactions::Reaction;
 mod reader;
 mod verification;
-pub use verification::{VerificationResolution, conflict_cause};
+pub use verification::VerificationResolution;
 mod retention;
 mod service;
 #[cfg(test)]
@@ -673,8 +678,6 @@ pub enum RunError {
     InvalidSealedRemote(String),
     #[error(transparent)]
     Handoff(#[from] provenant_records::handoff::HandoffError),
-    #[error("invalid run record: {0}")]
-    WriterLineage(&'static str),
     #[error("invalid run record: writer HEAD is not the lane branch")]
     WriterHeadNotLaneBranch,
     #[error(
@@ -835,6 +838,14 @@ impl From<provenant_config::ForgeContextError> for RunError {
         }
     }
 }
+impl From<provenant_core::TimeError> for RunError {
+    fn from(error: provenant_core::TimeError) -> Self {
+        Self::Input {
+            kind: ErrorKind::Time,
+            message: error.to_string(),
+        }
+    }
+}
 impl From<provenant_confinement::worktrees::WorktreeError> for RunError {
     fn from(error: provenant_confinement::worktrees::WorktreeError) -> Self {
         use provenant_confinement::repo::RepoError;
@@ -909,11 +920,10 @@ impl RunError {
 
     /// A generic code can wrap multiple guards; classify the typed cause rather
     /// than assigning an unrelated hard boundary to every confinement error.
-    pub fn boundary_class(&self) -> provenant_records::diagnostic::BoundaryClass {
-        use provenant_records::diagnostic::BoundaryClass as B;
+    pub fn boundary_class(&self) -> provenant_records::policy::Boundary {
+        use provenant_records::policy::Boundary as B;
         match self {
-            Self::WriterHeadNotLaneBranch | Self::WriterSourceMismatch { .. } => B::LaneGit,
-            Self::WriterLineage(_) => B::Authority,
+            Self::WriterHeadNotLaneBranch | Self::WriterSourceMismatch { .. } => B::OtherWork,
             Self::DeliveryPrepare {
                 refusal: Some(DeliveryPrepareRefusal::CredentialHelper(safety)),
                 ..
@@ -937,6 +947,27 @@ impl RunError {
         }
         use provenant_confinement::{permissions::PermissionError, worktrees::WorktreeError};
         use provenant_records::diagnostic::{Diagnostic, DiagnosticFact, shell_path};
+        if let Self::Writer(WorktreeError::CustodyCommand(error)) = self {
+            let setting = error.setting.as_ref().map_or_else(String::new, |setting| {
+                format!(
+                    "; {} = {} from {} ({})",
+                    setting.key,
+                    setting.value,
+                    setting.layer.as_str(),
+                    setting.origin
+                )
+            });
+            let next = error
+                .next
+                .iter()
+                .map(provenant_records::command_result::NextStep::display_text)
+                .collect::<Vec<_>>()
+                .join("; ");
+            return Diagnostic::new(&error.code)
+                .category("configured")
+                .detail(format!("{}{setting}", error.message))
+                .next(next);
+        }
         let kind = ErrorKind::from(self);
         let mut diagnostic = Diagnostic::new(kind.code()).category(kind.category());
         match self {
@@ -1375,7 +1406,8 @@ mod error_size_tests {
 #[cfg(test)]
 mod diagnostic_projection_tests {
     use super::*;
-    use provenant_records::diagnostic::{BoundaryClass, Destination};
+    use provenant_records::diagnostic::Destination;
+    use provenant_records::policy::Boundary;
     use std::path::PathBuf;
 
     #[test]
@@ -1491,6 +1523,21 @@ mod diagnostic_projection_tests {
                 .detail
                 .unwrap()
                 .contains("/fixture/process-exit.json")
+        );
+    }
+
+    #[test]
+    fn clock_failure_is_a_typed_time_error_that_keeps_its_cause() {
+        let error = RunError::from(provenant_core::TimeError::HostClock);
+        assert_eq!(ErrorKind::from(&error), ErrorKind::Time);
+        let diagnostic = error.diagnostic(Destination::Local);
+        assert_eq!(diagnostic.code, ErrorKind::Time.code());
+        assert!(
+            diagnostic
+                .detail
+                .unwrap()
+                .contains("clock or boot identity cannot be read"),
+            "the host clock cause stays visible in the error contract"
         );
     }
 
@@ -1710,7 +1757,7 @@ mod diagnostic_projection_tests {
             );
             assert_eq!(
                 ErrorKind::from(&error).boundary_class(),
-                BoundaryClass::Credentials
+                Boundary::Credentials
             );
             for destination in [Destination::Local, Destination::Remote] {
                 let diagnostic = error.diagnostic(destination);

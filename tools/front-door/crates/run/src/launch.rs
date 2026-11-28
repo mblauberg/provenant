@@ -6,7 +6,10 @@ use crate::{
     db::decode,
     *,
 };
-use provenant_core::{ActorId, AttemptId, OperationId};
+use provenant_core::{ActorId, AttemptId, DurationMicros, OperationId, Pause};
+use provenant_os::exec::Executor;
+use provenant_records::CommandError;
+use provenant_records::command_result::ErrorClass;
 use provenant_records::custody::Scope;
 use provenant_supervisor::custody::{
     self, CapturePlan, ExitObservation, OwnedLaunch, ProviderCommand, PublicationReservation,
@@ -15,7 +18,453 @@ use rusqlite::params;
 use std::{
     ffi::OsString,
     path::{Path, PathBuf},
+    time::Duration,
 };
+
+/// A `--commit own` commit: only the claimed paths, staged in a private index,
+/// with a compare-and-swap update of the lane branch.
+///
+/// Spec: docs/specs/agent-native.md#4-a-lane-as-a-native-sub-agent (#3453)
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OwnCommit {
+    pub head: provenant_core::GitOid,
+    pub ref_name: String,
+    pub paths: Vec<String>,
+}
+
+/// Exact source for a private-index commit. Path mode snapshots selected
+/// worktree files; patch mode applies the supplied diff to the expected tree.
+#[derive(Clone, Copy, Debug)]
+pub enum OwnCommitInput<'a> {
+    Paths(&'a [PathBuf]),
+    Patch {
+        bytes: &'a [u8],
+        paths: &'a [String],
+    },
+}
+
+/// Inputs and runtime dependencies for an own-path commit.
+pub struct OwnCommitRequest<'a> {
+    pub worktree: &'a Path,
+    pub git_dir: &'a Path,
+    pub ref_name: &'a str,
+    pub expected: provenant_core::GitOid,
+    pub input: OwnCommitInput<'a>,
+    pub message: &'a str,
+    pub retries: u32,
+    pub env: &'a [(OsString, OsString)],
+    pub executor: &'a dyn Executor,
+    pub cancel: &'a provenant_core::CancelToken,
+    pub pause: &'a dyn Pause,
+    pub timeout: Duration,
+}
+
+#[derive(Debug, thiserror::Error)]
+enum CommitOwnError {
+    #[error("git executable unavailable")]
+    GitUnavailable,
+    #[error("git {operation} failed: {detail}")]
+    Git {
+        operation: &'static str,
+        detail: String,
+    },
+    #[error("git {operation} timed out")]
+    TimedOut { operation: &'static str },
+    #[error("invalid git object id: {0}")]
+    InvalidOid(String),
+    #[error("command failed: {0}")]
+    Exec(#[from] provenant_os::exec::ExecError),
+}
+
+/// Remove a private index on every exit path, including an early error.
+struct PrivateIndex(PathBuf);
+impl Drop for PrivateIndex {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+#[derive(Clone, Copy)]
+struct GitOwnContext<'a> {
+    cwd: &'a Path,
+    env: &'a [(OsString, OsString)],
+    executor: &'a dyn Executor,
+    cancel: &'a provenant_core::CancelToken,
+    timeout: Duration,
+}
+
+impl GitOwnContext<'_> {
+    fn run(
+        &self,
+        args: &[&str],
+        operation: &'static str,
+    ) -> std::result::Result<crate::worktree_carry::GitOutput, CommitOwnError> {
+        self.with_stdin(args, None, operation)
+    }
+
+    fn with_stdin(
+        &self,
+        args: &[&str],
+        stdin: Option<&[u8]>,
+        operation: &'static str,
+    ) -> std::result::Result<crate::worktree_carry::GitOutput, CommitOwnError> {
+        let out = crate::worktree_carry::git_with_stdin(
+            self.cwd,
+            args,
+            stdin,
+            self.env,
+            self.executor,
+            self.cancel,
+            self.timeout,
+        )
+        .map_err(|error| match error {
+            crate::worktree_carry::CarryError::GitUnavailable => CommitOwnError::GitUnavailable,
+            crate::worktree_carry::CarryError::Exec(source) => CommitOwnError::Exec(source),
+            other => CommitOwnError::Git {
+                operation,
+                detail: other.to_string(),
+            },
+        })?;
+        if out.timed_out {
+            return Err(CommitOwnError::TimedOut { operation });
+        }
+        Ok(out)
+    }
+}
+
+fn index_contention(stderr: &str) -> bool {
+    let lower = stderr.to_ascii_lowercase();
+    lower.contains("index.lock") || lower.contains("unable to create")
+}
+
+fn cas_mismatch(stderr: &str) -> bool {
+    let lower = stderr.to_ascii_lowercase();
+    lower.contains("cannot lock ref") || lower.contains("is at") || lower.contains("expected")
+}
+
+fn retry_error(retries: u32, detail: &str) -> CommandError {
+    CommandError::new(
+        "INDEX_LOCK_RETRY_EXHAUSTED",
+        format!("commit could not complete after {retries} index-lock/compare-and-swap retries"),
+        Some(detail),
+        "provenant wait the holder, then retry the launch",
+    )
+    .with_class(ErrorClass::Transient { retry_at: None })
+}
+
+/// Commit selected worktree paths or an exact patch through a private index,
+/// leaving the shared index untouched. The branch moves only through a
+/// compare-and-swap `update-ref`; a lost race reapplies the same input to the
+/// new head, while index-lock contention retries with a cancellable backoff.
+pub fn commit_own_paths(
+    request: OwnCommitRequest<'_>,
+) -> std::result::Result<OwnCommit, CommandError> {
+    let OwnCommitRequest {
+        worktree,
+        git_dir,
+        ref_name,
+        expected,
+        input,
+        message,
+        retries,
+        env,
+        executor,
+        cancel,
+        pause,
+        timeout,
+    } = request;
+    let git = GitOwnContext {
+        cwd: worktree,
+        env,
+        executor,
+        cancel,
+        timeout,
+    };
+    let to_error = |error: CommitOwnError| -> CommandError {
+        match error {
+            CommitOwnError::GitUnavailable => CommandError::new(
+                "GIT_UNAVAILABLE",
+                "git executable unavailable",
+                None,
+                "install git, then retry the launch",
+            ),
+            CommitOwnError::TimedOut { operation } => CommandError::new(
+                "COMMIT_TIMEOUT",
+                format!("git {operation} timed out"),
+                None,
+                "retry with a longer --timeout",
+            )
+            .with_class(ErrorClass::Transient { retry_at: None }),
+            other => CommandError::new(
+                "COMMIT_OWN_FAILED",
+                "could not commit the lane's own paths",
+                Some(other.to_string().as_str()),
+                "inspect the worktree, then retry the launch",
+            ),
+        }
+    };
+    let (path_strings, pathspecs, patch) = match input {
+        OwnCommitInput::Paths(paths) => {
+            let path_strings = paths
+                .iter()
+                .map(|path| {
+                    use std::path::Component;
+
+                    let relative = if path.is_absolute() {
+                        path.strip_prefix(worktree).map_err(|_| {
+                            "commit path is outside the selected worktree".to_owned()
+                        })?
+                    } else {
+                        path.as_path()
+                    };
+                    if relative.as_os_str().is_empty()
+                        || (relative != Path::new(".")
+                            && path.to_str().is_some_and(|path| {
+                                path.split('/').any(|part| part == ".." || part == ".")
+                            }))
+                        || (relative != Path::new(".")
+                            && relative.components().any(|component| {
+                                matches!(
+                                    component,
+                                    Component::CurDir
+                                        | Component::ParentDir
+                                        | Component::RootDir
+                                        | Component::Prefix(_)
+                                )
+                            }))
+                    {
+                        return Err("commit path is not worktree-relative".to_owned());
+                    }
+                    relative
+                        .to_str()
+                        .map(str::to_owned)
+                        .ok_or_else(|| "commit path is not valid UTF-8".to_owned())
+                })
+                .collect::<std::result::Result<Vec<_>, _>>();
+            let path_strings = path_strings.map_err(|detail| {
+                CommandError::new(
+                    "COMMIT_OWN_PATH_INVALID",
+                    "could not commit the lane's own paths",
+                    Some(detail.as_str()),
+                    "inspect the requested paths, then retry the launch",
+                )
+            })?;
+            let pathspecs = path_strings
+                .iter()
+                .map(|path| format!(":(literal){path}"))
+                .collect::<Vec<_>>();
+            (path_strings, pathspecs, None)
+        }
+        OwnCommitInput::Patch { bytes, paths } => {
+            let path_strings = paths
+                .iter()
+                .map(|path| {
+                    let relative = Path::new(path);
+                    if relative.as_os_str().is_empty()
+                        || relative.is_absolute()
+                        || path
+                            .split('/')
+                            .any(|part| part.is_empty() || part == "." || part == "..")
+                        || relative.components().any(|component| {
+                            matches!(
+                                component,
+                                std::path::Component::CurDir
+                                    | std::path::Component::ParentDir
+                                    | std::path::Component::RootDir
+                                    | std::path::Component::Prefix(_)
+                            )
+                        })
+                    {
+                        return Err("patch path is not worktree-relative".to_owned());
+                    }
+                    Ok(path.clone())
+                })
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(|detail| {
+                    CommandError::new(
+                        "COMMIT_OWN_PATH_INVALID",
+                        "could not commit the lane's own paths",
+                        Some(detail.as_str()),
+                        "inspect the requested paths, then retry the launch",
+                    )
+                })?;
+            (path_strings, Vec::new(), Some(bytes))
+        }
+    };
+    if path_strings.is_empty() {
+        return Ok(OwnCommit {
+            head: expected,
+            ref_name: ref_name.to_owned(),
+            paths: Vec::new(),
+        });
+    }
+    let mut expected = expected;
+    let mut attempt = 0_u32;
+    loop {
+        if cancel.is_cancelled() {
+            return Err(CommandError::new(
+                "LAUNCH_CANCELLED",
+                "commit cancelled before completion",
+                None,
+                "relaunch the lane",
+            )
+            .with_class(ErrorClass::Transient { retry_at: None }));
+        }
+        let tag = format!(
+            "{}-{:?}-{attempt}",
+            std::process::id(),
+            std::thread::current().id()
+        );
+        let private = PrivateIndex(crate::worktree_carry::private_index_path(git_dir, &tag));
+        let mut index_env = env.to_vec();
+        index_env.push((
+            OsString::from("GIT_INDEX_FILE"),
+            private.0.as_os_str().to_owned(),
+        ));
+        let index_git = GitOwnContext {
+            env: &index_env,
+            ..git
+        };
+        let expected_text = expected.to_string();
+
+        let read = index_git
+            .run(&["read-tree", expected_text.as_str()], "read-tree")
+            .map_err(to_error)?;
+        if !read.ok {
+            if index_contention(&read.stderr) {
+                attempt += 1;
+                if attempt > retries {
+                    return Err(retry_error(retries, &read.stderr));
+                }
+                pause.wait(
+                    DurationMicros::from_micros(5_000_u64 * u64::from(attempt)),
+                    cancel,
+                );
+                continue;
+            }
+            return Err(to_error(CommitOwnError::Git {
+                operation: "read-tree",
+                detail: read.stderr,
+            }));
+        }
+
+        let stage = match patch {
+            Some(bytes) => {
+                index_git.with_stdin(&["apply", "--cached"], Some(bytes), "apply cached patch")
+            }
+            None => {
+                let path_refs: Vec<&str> = pathspecs.iter().map(String::as_str).collect();
+                let mut add_args = vec!["add", "--"];
+                add_args.extend(path_refs.iter().copied());
+                index_git.run(&add_args, "add")
+            }
+        }
+        .map_err(to_error)?;
+        if !stage.ok {
+            if index_contention(&stage.stderr) {
+                attempt += 1;
+                if attempt > retries {
+                    return Err(retry_error(retries, &stage.stderr));
+                }
+                pause.wait(
+                    DurationMicros::from_micros(5_000_u64 * u64::from(attempt)),
+                    cancel,
+                );
+                continue;
+            }
+            return Err(to_error(CommitOwnError::Git {
+                operation: if patch.is_some() {
+                    "apply cached patch"
+                } else {
+                    "add"
+                },
+                detail: stage.stderr,
+            }));
+        }
+
+        let tree = index_git
+            .run(&["write-tree"], "write-tree")
+            .map_err(to_error)?;
+        if !tree.ok {
+            return Err(to_error(CommitOwnError::Git {
+                operation: "write-tree",
+                detail: tree.stderr,
+            }));
+        }
+        let tree_oid = tree.stdout.trim().to_owned();
+
+        let commit_args = vec![
+            "commit-tree",
+            &tree_oid,
+            "-p",
+            expected_text.as_str(),
+            "-m",
+            message,
+        ];
+        let made = git.run(&commit_args, "commit-tree").map_err(to_error)?;
+        if !made.ok {
+            return Err(to_error(CommitOwnError::Git {
+                operation: "commit-tree",
+                detail: made.stderr,
+            }));
+        }
+        let new = provenant_core::GitOid::parse(made.stdout.trim())
+            .map_err(|_| to_error(CommitOwnError::InvalidOid(made.stdout.trim().to_owned())))?;
+        let new_text = new.to_string();
+
+        let update = git
+            .run(
+                &[
+                    "update-ref",
+                    ref_name,
+                    new_text.as_str(),
+                    expected_text.as_str(),
+                ],
+                "update-ref",
+            )
+            .map_err(to_error)?;
+        if update.ok {
+            return Ok(OwnCommit {
+                head: new,
+                ref_name: ref_name.to_owned(),
+                paths: path_strings,
+            });
+        }
+        if cas_mismatch(&update.stderr) || index_contention(&update.stderr) {
+            attempt += 1;
+            if attempt > retries {
+                return Err(retry_error(retries, &update.stderr));
+            }
+            pause.wait(
+                DurationMicros::from_micros(5_000_u64 * u64::from(attempt)),
+                cancel,
+            );
+            let head = git
+                .run(&["rev-parse", ref_name], "rev-parse")
+                .map_err(to_error)?;
+            if !head.ok {
+                return Err(to_error(CommitOwnError::Git {
+                    operation: "rev-parse",
+                    detail: head.stderr,
+                }));
+            }
+            expected = provenant_core::GitOid::parse(head.stdout.trim())
+                .map_err(|_| to_error(CommitOwnError::InvalidOid(head.stdout.trim().to_owned())))?;
+            continue;
+        }
+        return Err(to_error(CommitOwnError::Git {
+            operation: "update-ref",
+            detail: update.stderr,
+        }));
+    }
+}
+
+#[cfg(test)]
+#[path = "launch/commit_own_tests.rs"]
+mod commit_own_tests;
+#[cfg(test)]
+#[path = "launch/never_spawned_tests.rs"]
+mod never_spawned_tests;
 
 fn sandbox_mode_receipt(
     mode: &provenant_confinement::run_config::SandboxMode,
@@ -60,7 +509,7 @@ pub fn capture_plan(task: &TaskRequest, limits: &provenant_records::LaneLimits) 
         limit
             .as_ref()
             .filter(|limit| limit.enforced())
-            .map_or(0, |limit| limit.value)
+            .map(|limit| limit.value)
     };
     CapturePlan {
         stdout: if matches!(&task.route, crate::RequestedRoute::Adapter { provider, .. }
@@ -73,13 +522,14 @@ pub fn capture_plan(task: &TaskRequest, limits: &provenant_records::LaneLimits) 
         } else {
             CapturePlan::default().stdout
         },
-        wall_ms: enforced(&limits.deadline_seconds).saturating_mul(1000),
-        token_budget: enforced(&limits.token_budget),
+        // An advisory or absent deadline carries no wall bound.
+        wall_ms: enforced(&limits.deadline_seconds).map(|seconds| seconds.saturating_mul(1000)),
+        token_budget: enforced(&limits.token_budget).unwrap_or(0),
         budget_action: limits.budget_policy.clone().unwrap_or_default().action,
         // Writers only: a fresh attempt continues a writer's retained
         // worktree from its handoff. 0 or unset is off; a provider that
         // reports no per-call context figure is never stopped for it.
-        context_handoff: enforced(&limits.context_handoff),
+        context_handoff: enforced(&limits.context_handoff).unwrap_or(0),
         ..CapturePlan::default()
     }
 }
@@ -293,7 +743,7 @@ fn applied_write_grants(
     }
     if let provenant_records::policy::Effect::Warn(warning) = &effect {
         // Spec: docs/specs/cli.md#warnings-are-typed-values
-        provenant_records::warning::warn(warning.clone());
+        provenant_records::warning::warn((**warning).clone());
     }
     let git_grants_digest = match &permissions.mode {
         provenant_confinement::permissions::AccessMode::ReadOnly => None,
@@ -325,7 +775,7 @@ pub struct Decoded {
 #[error("{message}")]
 pub struct PrepareRefusal {
     /// Boundary established by the original typed preparation failure, if any.
-    pub boundary_class: provenant_records::diagnostic::BoundaryClass,
+    pub boundary_class: provenant_records::policy::Boundary,
     /// Stable table row for the predicate that refused preparation.
     pub policy_code: Option<String>,
     /// A configurable resource threshold that refused this launch, if known.
@@ -365,7 +815,7 @@ impl PrepareRefusal {
 
     pub fn boxed(cause: CauseKind, message: impl Into<String>) -> Box<Self> {
         Box::new(Self {
-            boundary_class: provenant_records::diagnostic::BoundaryClass::None,
+            boundary_class: provenant_records::policy::Boundary::None,
             policy_code: None,
             resource: None,
             cause,
@@ -389,7 +839,7 @@ impl PrepareRefusal {
             }
         } else if let Some(fact) = self.resource.clone() {
             RefusalKind::PreparationResource(fact)
-        } else if self.boundary_class != provenant_records::diagnostic::BoundaryClass::None {
+        } else if self.boundary_class != provenant_records::policy::Boundary::None {
             RefusalKind::PreparationBoundary(self.boundary_class)
         } else {
             RefusalKind::Preparation
@@ -405,40 +855,8 @@ impl PrepareRefusal {
     }
 }
 #[cfg(test)]
-#[test]
-fn pacing_refusal_retains_the_selected_reserve_fact() {
-    use provenant_records::diagnostic::{PacingReserveSetting, PacingSettingSource, ResourceFact};
-    let fact = ResourceFact::PacingReserve {
-        percent: 15,
-        setting: PacingReserveSetting::AdapterFiveHour,
-        origin: PacingSettingSource::ShippedDefault,
-        hold: Box::new(provenant_records::diagnostic::PacingHold {
-            account: "codex/opaque-account".into(),
-            window: "five_hour".into(),
-            setting_path: "domains.routing.pacing_reserve.codex.five_hour_percent".into(),
-        }),
-    };
-    let mut skipped = SkippedRoute {
-        skipped_accounts: Vec::new(),
-        extra: Default::default(),
-        route: "fixture/model".into(),
-        kind: SkipKind::Unavailable,
-        cause: Some(provenant_records::RouteExclusionReason::PacingReserve),
-        detail: "opaque source".into(),
-        ..Default::default()
-    };
-    skipped.set_guard_facts(None, Some(fact.clone())).unwrap();
-    let mut refusal = PrepareRefusal::boxed(CauseKind::RouteResolutionRefused, "opaque source");
-    refusal.skipped_routes.push(skipped);
-    let kind = refusal.kind();
-    assert!(matches!(&kind, RefusalKind::PacingReserveResource(value) if value == &fact));
-    let diagnostic = kind.diagnostic().unwrap();
-    assert_eq!(diagnostic.code, "REFUSED");
-    let detail = diagnostic.detail.unwrap();
-    assert!(detail.contains("domains.routing.pacing_reserve"));
-    assert!(detail.contains("shipped default"));
-    assert!(!detail.contains("opaque source"));
-}
+#[path = "launch/pacing_refusal_tests.rs"]
+mod pacing_refusal_tests;
 
 /// Run-owned per-attempt paths. Allocated once, shared by explicit fallback candidates.
 pub struct LaunchPaths {
@@ -495,49 +913,8 @@ fn output_prompt(directory: &std::path::Path, prompt: &str) -> String {
 }
 
 #[cfg(test)]
-#[test]
-fn output_prompt_directs_scratch_outside_worktree() {
-    let prompt = output_prompt(std::path::Path::new("/attempt"), "task");
-    assert!(prompt.contains("$TMPDIR"));
-    assert!(prompt.contains("not in the worktree"));
-}
-
-/// The launch prompt teaches the declaration command and keeps harness and
-/// lane ownership distinct: settlement seals the snapshot from declarations,
-/// never from a progress file or the answer text.
-#[cfg(test)]
-#[test]
-fn output_prompt_teaches_the_declaration_command_and_host_ownership() {
-    let prompt = output_prompt(std::path::Path::new("/attempt"), "task");
-    assert!(prompt.contains("$TMPDIR"));
-    assert!(prompt.contains("not in the worktree"));
-    assert!(
-        prompt.contains("Declare your result with `provenant declare --stdin`"),
-        "{prompt}"
-    );
-    assert!(
-        prompt.contains("Field errors come back at once"),
-        "{prompt}"
-    );
-    assert!(
-        prompt.contains("prose and fenced blocks are not read"),
-        "{prompt}"
-    );
-    assert!(
-        prompt.contains("harness writes the attempt's own records"),
-        "{prompt}"
-    );
-    assert!(
-        prompt.contains("sealed handoff.json in the attempt directory"),
-        "{prompt}"
-    );
-    assert!(prompt.contains("the lane never writes them"), "{prompt}");
-    assert!(
-        !prompt.contains("your progress handoff JSON under provider-state"),
-        "{prompt}"
-    );
-    assert!(!prompt.contains("Progress handoff JSON:"), "{prompt}");
-}
+#[path = "launch/output_prompt_tests.rs"]
+mod output_prompt_tests;
 
 /// Resolve policy once for this launch from host, project and dispatch settings.
 pub fn launch_policy(
@@ -567,29 +944,29 @@ fn check_launch_policy(
         code
     } else {
         match refusal.boundary_class {
-            provenant_records::diagnostic::BoundaryClass::Credentials => {
+            provenant_records::policy::Boundary::Credentials => {
                 "PREPARATION_PREPARE_WITH_CREDENTIALS"
             }
-            provenant_records::diagnostic::BoundaryClass::LaneGit => {
+            provenant_records::policy::Boundary::OtherWork => {
                 "VALIDATION_VERIFY_WORKTREE_AUTHORITY_GIT_ISOLATION"
             }
-            provenant_records::diagnostic::BoundaryClass::Integrity => {
+            provenant_records::policy::Boundary::Operation => {
                 "PREPARATION_PREPARE_CANDIDATES_DATA_INTEGRITY"
             }
-            provenant_records::diagnostic::BoundaryClass::Authority => {
+            provenant_records::policy::Boundary::Authority => {
                 "LAUNCH_RUNSTORE_START_INNER_AUTHORITY"
             }
-            provenant_records::diagnostic::BoundaryClass::None
+            provenant_records::policy::Boundary::None
                 if matches!(refusal.cause, CauseKind::DiskObservationUnavailable) =>
             {
                 "SUBMIT_CHECK_WRITER_DISK_WITH_COLLECTION_NONE"
             }
             // A generic refusal with no boundary is not evidence of disk pressure.
             // Keep its typed outcome instead of letting a disk knob authorise it.
-            provenant_records::diagnostic::BoundaryClass::None => return Err(refusal),
+            provenant_records::policy::Boundary::None => return Err(refusal),
         }
     };
-    if refusal.boundary_class != provenant_records::diagnostic::BoundaryClass::None {
+    if refusal.boundary_class != provenant_records::policy::Boundary::None {
         return Err(policy.boundary_error(code, Facts::violation(&refusal.message), refusal));
     }
     match policy.check(code, Facts::violation(&refusal.message)) {
@@ -597,7 +974,7 @@ fn check_launch_policy(
         Effect::Warn(message) => {
             use provenant_records::warning::warn;
             // Spec: docs/specs/cli.md#warnings-are-typed-values
-            warn(message);
+            warn(*message);
             Ok(())
         }
         Effect::Refuse(_) | Effect::Stop(_) => Err(refusal),
@@ -608,17 +985,17 @@ fn check_preparation_refusal(
     policy: &provenant_records::policy::Policy,
     refusal: Box<PrepareRefusal>,
 ) -> Box<PrepareRefusal> {
-    use provenant_records::diagnostic::BoundaryClass;
+    use provenant_records::policy::Boundary;
     let class = refusal.boundary_class;
-    if class == BoundaryClass::None {
+    if class == Boundary::None {
         return refusal;
     }
     let fallback = match class {
-        BoundaryClass::Credentials => Some("PREPARATION_PREPARE_WITH_CREDENTIALS"),
-        BoundaryClass::LaneGit => Some("VALIDATION_VERIFY_WORKTREE_AUTHORITY_GIT_ISOLATION"),
-        BoundaryClass::Integrity => Some("PREPARATION_PREPARE_CANDIDATES_DATA_INTEGRITY"),
-        BoundaryClass::Authority => Some("PREPARATION_PREPARE_CANDIDATES_AUTHORITY"),
-        BoundaryClass::None => None,
+        Boundary::Credentials => Some("PREPARATION_PREPARE_WITH_CREDENTIALS"),
+        Boundary::OtherWork => Some("VALIDATION_VERIFY_WORKTREE_AUTHORITY_GIT_ISOLATION"),
+        Boundary::Operation => Some("PREPARATION_PREPARE_CANDIDATES_DATA_INTEGRITY"),
+        Boundary::Authority => Some("PREPARATION_PREPARE_CANDIDATES_AUTHORITY"),
+        Boundary::None => None,
     };
     let owned = refusal.policy_code.clone();
     let Some(code) = owned.as_deref().or(fallback) else {
@@ -835,7 +1212,7 @@ impl WriteGrantLimit {
             ) {
                 use provenant_records::warning::warn;
                 // Spec: docs/specs/cli.md#warnings-are-typed-values
-                warn(message);
+                warn(*message);
             }
             Self::default()
         }
@@ -954,7 +1331,7 @@ pub(crate) enum HandOff {
     /// A typed boundary refused the prepared handoff.
     Boundary {
         message: String,
-        class: provenant_records::diagnostic::BoundaryClass,
+        class: provenant_records::policy::Boundary,
         cause: Option<CauseKind>,
     },
     Resource {
@@ -1047,10 +1424,10 @@ pub(crate) fn mark_admission_release_pending(record: &mut AttemptRecord) -> Resu
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum RefusalKind {
     Policy,
-    PolicyBoundary(provenant_records::diagnostic::BoundaryClass),
+    PolicyBoundary(provenant_records::policy::Boundary),
     PolicyResource(provenant_records::diagnostic::ResourceFact),
     Preparation,
-    PreparationBoundary(provenant_records::diagnostic::BoundaryClass),
+    PreparationBoundary(provenant_records::policy::Boundary),
     PreparationResource(provenant_records::diagnostic::ResourceFact),
     PacingReserve,
     PacingReserveResource(provenant_records::diagnostic::ResourceFact),
@@ -1061,7 +1438,7 @@ pub enum RefusalKind {
     InvalidWriteGrantPath,
     WriteGrantsLimit(provenant_records::diagnostic::ResourceFact),
     Handoff,
-    HandoffBoundary(provenant_records::diagnostic::BoundaryClass),
+    HandoffBoundary(provenant_records::policy::Boundary),
     HandoffResource(provenant_records::diagnostic::ResourceFact),
     RetainedImport {
         fence: provenant_supervisor::custody::PendingImport,
@@ -1116,14 +1493,14 @@ impl RefusalKind {
 
     /// The boundary established by this kind alone. Generic preparation and
     /// handoff errors need their original cause to establish a boundary.
-    pub fn boundary_class(&self) -> provenant_records::diagnostic::BoundaryClass {
-        use provenant_records::diagnostic::BoundaryClass as B;
+    pub fn boundary_class(&self) -> provenant_records::policy::Boundary {
+        use provenant_records::policy::Boundary as B;
         match self {
             Self::HandoffBoundary(class)
             | Self::PreparationBoundary(class)
             | Self::PolicyBoundary(class) => *class,
             Self::WorktreeBusy | Self::InvalidWriteGrantPath => B::Authority,
-            Self::RetainedImport { .. } => B::LaneGit,
+            Self::RetainedImport { .. } => B::OtherWork,
             Self::StoredPromptUnreadable | Self::CloudPlacementRemoved => B::Authority,
             Self::Policy
             | Self::Preparation
@@ -2288,9 +2665,7 @@ impl RunStore {
                 Err(refusal) => {
                     let kind = if let Some(fact) = refusal.resource.clone() {
                         RefusalKind::PolicyResource(fact)
-                    } else if refusal.boundary_class
-                        != provenant_records::diagnostic::BoundaryClass::None
-                    {
+                    } else if refusal.boundary_class != provenant_records::policy::Boundary::None {
                         RefusalKind::PolicyBoundary(refusal.boundary_class)
                     } else {
                         RefusalKind::Policy
@@ -2674,6 +3049,14 @@ impl RunStore {
                         };
                         let (preparation_failure, preparation_note) =
                             handoff_preparation(&error, &reason);
+                        // Custody is already withdrawn: finish the refusal's
+                        // bounded settlement even if the caller was cancelled
+                        // meanwhile, so no starting row outlives its reservation.
+                        let uncancelled = provenant_core::CancelToken::new();
+                        let settle = Request {
+                            clock: call.clock,
+                            cancel: &uncancelled,
+                        };
                         match self.withdraw_with_preparation_failure(
                             id,
                             crate::store::Withdrawal {
@@ -2687,7 +3070,7 @@ impl RunStore {
                                 cause,
                                 terminal_note: preparation_note.or_else(|| kind.terminal_note()),
                             },
-                            call,
+                            &settle,
                         ) {
                             // Cancel already settled it from the other side.
                             Ok(_) | Err(RunError::Conflict) if cancelled => {}
@@ -2701,7 +3084,7 @@ impl RunStore {
                         }
                     }
                     Err(HandOff::Uncertain(error)) => {
-                        self.launch_unknown(attempt, call)?;
+                        self.launch_unknown(attempt, &error, call)?;
                         Started::Unknown { attempt: id, error }
                     }
                     Err(HandOff::Protected(error)) => {
@@ -2727,13 +3110,14 @@ impl RunStore {
         )?;
         Ok((decode(&raw)?, settled))
     }
-    fn launch_unknown(&self, attempt: AttemptId, call: &Request<'_>) -> Result<()> {
+    fn launch_unknown(&self, attempt: AttemptId, reason: &str, call: &Request<'_>) -> Result<()> {
         self.write(call, |tx| {
             let (mut op, settled) = self.run_operation(tx, attempt)?;
             if settled {
                 return Ok(());
             }
             op.state = OperationState::LaunchUnknown;
+            op.blocked_reason = Some(provenant_records::diagnostic::safe_text(reason));
             tx.execute(
                 "UPDATE attempts SET operation_record=?1 WHERE id=?2 AND project=?3",
                 params![
@@ -2918,1151 +3302,18 @@ fn lane_port_plan_or_warn(
 }
 
 #[cfg(test)]
-mod lane_environment_tests {
-    use super::*;
+#[path = "launch/lane_environment_tests.rs"]
+mod lane_environment_tests;
 
-    #[test]
-    fn unavailable_lane_port_settings_skip_allocation() -> std::io::Result<()> {
-        let temp = tempfile::tempdir()?;
-        let not_directory = temp.path().join("not-directory");
-        std::fs::write(&not_directory, b"fixture")?;
-        let policy = provenant_records::policy::Policy::default();
-        assert!(
-            !policy
-                .rule("LAUNCH_LANE_PORT_PLAN_OR_WARN_NONE")
-                .rule
-                .refusable
-        );
-        assert_eq!(
-            policy
-                .rule("LAUNCH_LANE_PORT_PLAN_OR_WARN_NONE")
-                .rule
-                .strength,
-            provenant_records::policy::Strength::Warn
-        );
-        assert!(lane_port_plan_or_warn(&not_directory, &policy).is_none());
-        let mut off = policy.clone();
-        off.overlay(
-            &std::collections::BTreeMap::from([(
-                "LAUNCH_LANE_PORT_PLAN_OR_WARN_NONE".into(),
-                provenant_records::policy::Strength::Off,
-            )]),
-            provenant_records::policy::Source::Project,
-        );
-        assert_eq!(
-            off.rule("LAUNCH_LANE_PORT_PLAN_OR_WARN_NONE").source,
-            provenant_records::policy::Source::Project
-        );
-        assert!(lane_port_plan_or_warn(&not_directory, &off).is_none());
-        let defaults = lane_port_plan_or_warn(temp.path(), &policy).expect("default plan");
-        assert_eq!(
-            defaults.blocks_origin,
-            Some(provenant_os::lane_ports::BlocksOrigin::CompiledDefault)
-        );
-        std::fs::write(
-            temp.path().join("config.toml"),
-            "schema_version=1\n[domains.fabric.lanes]\nlane_port_blocks=2\n",
-        )?;
-        let configured = lane_port_plan_or_warn(temp.path(), &policy).expect("configured plan");
-        assert_eq!(configured.blocks, 2);
-        assert_eq!(
-            configured.blocks_origin,
-            Some(provenant_os::lane_ports::BlocksOrigin::HostConfig)
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn lane_environment_exposes_applied_route_and_clears_absent_values() {
-        use provenant_core::consumer_env::{ACCOUNT, EFFORT, MODEL, ROUTE};
-        let mut environment = vec![];
-        let mut route = RouteRecord {
-            provider: Some("claude".into()),
-            model: Some("opus[1m]".into()),
-            effort: Some("high".into()),
-            account_label: Some("work [east]".into()),
-            ..Default::default()
-        };
-        let parent = AttemptId::from_bytes([6; 16]);
-        set_lane_environment(&mut environment, 1, parent, &route);
-        for (name, value) in [
-            (ROUTE, "claude/opus[1m]@high"),
-            (MODEL, "opus[1m]"),
-            (EFFORT, "high"),
-            (ACCOUNT, "work [east]"),
-        ] {
-            assert!(
-                environment
-                    .iter()
-                    .any(|(key, actual)| key == name && actual == value)
-            );
-        }
-        route.effort = None;
-        route.account_label = None;
-        set_lane_environment(&mut environment, 1, parent, &route);
-        assert!(
-            environment
-                .iter()
-                .any(|(key, value)| key == ROUTE && value == "claude/opus[1m]")
-        );
-        assert!(
-            !environment
-                .iter()
-                .any(|(key, _)| key == EFFORT || key == ACCOUNT)
-        );
-    }
-
-    #[test]
-    fn lane_environment_overrides_adapter_values() {
-        let parent = AttemptId::from_bytes([6; 16]);
-        let mut environment = vec![
-            (
-                OsString::from(provenant_core::consumer_env::LANE_DEPTH),
-                OsString::from("99"),
-            ),
-            (OsString::from("OTHER"), OsString::from("kept")),
-        ];
-        set_lane_environment(&mut environment, 2, parent, &RouteRecord::default());
-        assert_eq!(
-            environment,
-            vec![
-                (OsString::from("OTHER"), OsString::from("kept")),
-                (
-                    OsString::from(provenant_core::consumer_env::LANE_DEPTH),
-                    OsString::from("2")
-                ),
-                (
-                    OsString::from(provenant_core::consumer_env::PARENT_ATTEMPT_ID),
-                    OsString::from(parent.to_string())
-                ),
-            ]
-        );
-    }
-}
-
-#[cfg(test)]
-mod policy_reporting_tests {
-    use super::*;
-    use crate::tests::{call, clock, context, input, route};
-    use provenant_confinement::permissions::{
-        AccessMode, MandatoryRoots, NetworkAccess, PathGrant, PathScope, PlanPermissions,
-        ProviderProfile, ProviderProfileSpec,
-    };
-    use provenant_confinement::{CodexPolicy, ConfinedPlan, ExtensionPolicy, PlanRequest};
-    use provenant_core::{CancelToken, Clock as _, WorkScope};
-    use std::path::Path;
-
-    // Medium: real accepted requests and continuation through RunStore::start;
-    // the provider edge inspects admission without spawning a process.
-    #[test]
-    fn continuation_keeps_the_sealed_parent_floor_and_policy()
-    -> std::result::Result<(), Box<dyn std::error::Error>> {
-        struct Inspect<'a> {
-            strength: &'a str,
-            prior: Option<AttemptId>,
-        }
-        impl Providers for Inspect<'_> {
-            fn prepare(
-                &self,
-                task: &TaskRequest,
-                _: &str,
-                _: &LaunchPaths,
-                prior: Option<&AttemptRecord>,
-            ) -> std::result::Result<PreparedLaunch, Box<PrepareRefusal>> {
-                assert_eq!(prior.map(|record| record.attempt_id), self.prior);
-                assert!(task.profile.parent_sandboxed);
-                let strength = task
-                    .profile
-                    .knobs
-                    .get("lanes.sandbox_floor")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap();
-                assert_eq!(strength, self.strength);
-                let sandbox = task
-                    .profile
-                    .knobs
-                    .get("lanes.sandbox")
-                    .and_then(serde_json::Value::as_str);
-                assert_eq!(
-                    provenant_records::run::admission_floor(true, sandbox, strength),
-                    if self.strength == "strict" {
-                        (true, false)
-                    } else {
-                        (false, true)
-                    }
-                );
-                Err(PrepareRefusal::boxed(
-                    CauseKind::RouteResolutionRefused,
-                    "fixture inspected admission",
-                ))
-            }
-            fn decode(
-                &self,
-                _: &RouteRecord,
-                _: &[u8],
-                _: &ExitObservation,
-                _: &Path,
-            ) -> std::result::Result<Decoded, String> {
-                unreachable!()
-            }
-        }
-        for strength in ["warn", "strict"] {
-            let temp = tempfile::tempdir()?;
-            let (clock, cancel) = (clock(), CancelToken::new());
-            let call = call(&clock, &cancel);
-            let store = RunStore::open(&context(temp.path())?, &call)?;
-            let parent = input();
-            store.create(&parent, &call)?;
-            let mut applied = route();
-            applied.sandbox = Some(provenant_records::run::SandboxModeReceipt {
-                requested: true,
-                effective: true,
-                source: provenant_records::Layer::Host,
-                constraint: None,
-                warning: None,
-                extra: Default::default(),
-            });
-            let starting = store.mark_starting(
-                &store.record(parent.attempt_id, &call)?,
-                &applied,
-                &[],
-                &Default::default(),
-                None,
-                &call,
-            )?;
-            store.withdraw(
-                parent.attempt_id,
-                starting.state,
-                Outcome::Rejected,
-                "fixture parent",
-                clock.wall_now()?,
-                &call,
-            )?;
-            assert!(store.attempt_floors_children(parent.attempt_id, &call));
-            let mut child = input();
-            child.attempt_id = AttemptId::from_bytes([7; 16]);
-            child.operation_id = provenant_core::OperationId::parse("admission-child")?;
-            child.request.parent_attempt = Some(parent.attempt_id);
-            child
-                .request
-                .task
-                .profile
-                .knobs
-                .insert("lanes.sandbox".into(), "off".into());
-            child
-                .request
-                .task
-                .profile
-                .knobs
-                .insert("lanes.sandbox_floor".into(), strength.into());
-            crate::tests::rekey(&mut child);
-            store.create(&child, &call)?;
-            store.start(
-                child.attempt_id,
-                &Inspect {
-                    strength,
-                    prior: None,
-                },
-                &|_, _| unreachable!(),
-                &call,
-            )?;
-            let mut continuation = input();
-            continuation.request = child.request.clone();
-            continuation.prompt = child.prompt.clone();
-            continuation.attempt_id = AttemptId::from_bytes([8; 16]);
-            continuation.operation_id =
-                provenant_core::OperationId::parse("admission-continuation")?;
-            continuation.request.parent = Some(child.attempt_id);
-            store.create(&continuation, &call)?;
-            store.start(
-                continuation.attempt_id,
-                &Inspect {
-                    strength,
-                    prior: Some(child.attempt_id),
-                },
-                &|_, _| unreachable!(),
-                &call,
-            )?;
-        }
-        Ok(())
-    }
-
-    // Spec: docs/specs/run-launch.md#policy-and-confinement
-    #[test]
-    fn claimed_launch_reports_once_when_a_prepared_attempt_is_replayed()
-    -> std::result::Result<(), Box<dyn std::error::Error>> {
-        let temp = tempfile::tempdir()?;
-        let (clock, cancel) = (clock(), CancelToken::new());
-        let call = call(&clock, &cancel);
-        let store = RunStore::open(&context(temp.path())?, &call)?;
-        let run = input();
-        store.create(&run, &call)?;
-        let expected =
-            store.claim_starting_for_preparation(&store.record(run.attempt_id, &call)?, &call)?;
-        let grant = |path: &str| PathGrant {
-            path: path.into(),
-            scope: PathScope::Subtree,
-        };
-        let mandatory = MandatoryRoots::new(
-            Path::new("/fixture/home"),
-            Path::new("/fixture/state"),
-            Path::new("/fixture/source"),
-        )?;
-        let policy = provenant_confinement::run_config::RunConfig::default()
-            .policy_for_launch(Path::new("/fixture/state"), mandatory);
-        let plan = ConfinedPlan::new(PlanRequest {
-            scope: WorkScope::Project(store.context.project_id),
-            codex: CodexPolicy::Clean,
-            extensions: ExtensionPolicy::Deny,
-            agy_state: None,
-            permissions: PlanPermissions {
-                credential_roots: policy.mandatory().credential_roots().clone(),
-                policy: Some(policy),
-                read_only: None,
-                mode: AccessMode::ReadOnly,
-                scratch: grant("/fixture/scratch"),
-                private_state: None,
-                read_roots: vec![],
-                protected_roots: vec![],
-                secret_roots: vec![],
-                selected_authentication: None,
-                include_continuation: false,
-                write_roots: vec![],
-                network: NetworkAccess::Open,
-                nested_confinement: false,
-            },
-        })?;
-        let inherited_sandbox = provenant_confinement::run_config::RunConfig::default()
-            .sandbox_for(provenant_confinement::run_config::SandboxInputs {
-                route: "command/test",
-                knob: None,
-                parent_sandboxed: false,
-                restrictions: &[],
-                os_sandboxed: true,
-                platform_supported: cfg!(target_os = "macos"),
-            });
-        assert!(!inherited_sandbox.requires_backend());
-        let mut prepared = PreparedLaunch {
-            limits: Default::default(),
-            continuation_expectation: None,
-            argv: vec!["fixture".into()],
-            environment: vec![],
-            stdin: vec![],
-            secret_input: None,
-            cwd: "/fixture/source".into(),
-            route: route(),
-            skipped_routes: vec![],
-            observed_head: None,
-            repository: None,
-            confinement: Some(crate::LaunchConfinement {
-                plan,
-                profile: ProviderProfile {
-                    spec: ProviderProfileSpec::default(),
-                    observations: Default::default(),
-                },
-                writer: None,
-                home: "/fixture/home".into(),
-                cargo_home: provenant_confinement::cargo::CargoHome::resolve(
-                    std::path::Path::new("/fixture/home"),
-                    |_| None,
-                )
-                .unwrap(),
-                state_root: "/fixture/state".into(),
-                sandbox: inherited_sandbox,
-                backend: None,
-            }),
-        };
-        prepared.bind_sandbox_backend(&cancel, &Default::default())?;
-        let mode = prepared
-            .route
-            .sandbox
-            .as_ref()
-            .ok_or("missing inherited sandbox receipt")?;
-        assert!(mode.effective);
-        assert!(mode.warning.is_none());
-        assert!(
-            prepared
-                .confinement
-                .as_ref()
-                .ok_or("missing confinement")?
-                .backend
-                .is_none(),
-            "trusted inherited route must not probe a nested backend"
-        );
-        assert!(prepared.environment.iter().any(|(name, value)| {
-            name == provenant_core::consumer_env::SANDBOX && value == "on"
-        }));
-        let grants =
-            applied_write_grants(&prepared, WriteGrantLimit::default(), &Default::default())?;
-        let mut output = Vec::new();
-        let claimed = store.claim_launch(
-            &expected,
-            &prepared,
-            &grants,
-            0,
-            &Default::default(),
-            &call,
-            &mut output,
-        )?;
-        assert!(matches!(claimed.state, AttemptState::Starting { .. }));
-        assert_eq!(
-            claimed
-                .applied_route
-                .as_ref()
-                .and_then(|route| route.sandbox.as_ref()),
-            prepared.route.sandbox.as_ref(),
-            "the claim must persist the inherited effective mode",
-        );
-        // Another launcher can have prepared from the same queued record.
-        // The compare-and-swap must refuse its stale claim before reporting.
-        assert!(matches!(
-            store.claim_launch(
-                &expected,
-                &prepared,
-                &grants,
-                0,
-                &Default::default(),
-                &call,
-                &mut output
-            ),
-            Err(RunError::Conflict)
-        ));
-        assert_eq!(
-            String::from_utf8(output)?
-                .lines()
-                .filter(|line| line.starts_with("lane policy:"))
-                .count(),
-            1
-        );
-        Ok(())
-    }
-
-    // Spec: docs/specs/run-launch.md#lane-scratch-stays-outside-the-attempt-record
-    #[test]
-    fn launched_lane_scratch_and_tmpdir_stay_outside_the_attempt_record()
-    -> std::result::Result<(), Box<dyn std::error::Error>> {
-        struct Capture(std::cell::RefCell<Option<LaunchPaths>>);
-        impl Providers for Capture {
-            fn prepare(
-                &self,
-                _: &TaskRequest,
-                _: &str,
-                paths: &LaunchPaths,
-                _: Option<&AttemptRecord>,
-            ) -> std::result::Result<PreparedLaunch, Box<PrepareRefusal>> {
-                *self.0.borrow_mut() = Some(LaunchPaths {
-                    attempt_id: paths.attempt_id,
-                    operation_id: paths.operation_id.clone(),
-                    task_index: paths.task_index,
-                    lane_depth: paths.lane_depth,
-                    deadline_unix_ms: paths.deadline_unix_ms,
-                    scratch: paths.scratch.clone(),
-                    provider_state: paths.provider_state.clone(),
-                    temporary: paths.temporary.clone(),
-                    temporary_alias: paths.temporary_alias.clone(),
-                });
-                Ok(PreparedLaunch {
-                    limits: Default::default(),
-                    continuation_expectation: None,
-                    argv: vec!["fixture".into()],
-                    environment: vec![],
-                    stdin: vec![],
-                    secret_input: None,
-                    cwd: "/".into(),
-                    route: route(),
-                    skipped_routes: vec![],
-                    observed_head: None,
-                    repository: None,
-                    confinement: None,
-                })
-            }
-            fn decode(
-                &self,
-                _: &RouteRecord,
-                _: &[u8],
-                _: &ExitObservation,
-                _: &Path,
-            ) -> std::result::Result<Decoded, String> {
-                unreachable!("no provider runs in this test")
-            }
-        }
-        let temp = tempfile::tempdir()?;
-        let short = std::fs::canonicalize(temp.path())?.join("short");
-        std::fs::create_dir(&short)?;
-        crate::short_temporary::use_parent_in_tests(&short);
-        let context = context(temp.path())?;
-        let (clock, cancel) = (clock(), CancelToken::new());
-        let call = call(&clock, &cancel);
-        let store = RunStore::open(&context, &call)?;
-        // Launch preparation creates the attempt directory exclusively, as
-        // dispatch does before it records the attempt.
-        let run = input();
-        let provider = Capture(std::cell::RefCell::new(None));
-        let _ready = store.prepare_fresh_start(&run, &provider, &call)?;
-        let borrowed = provider.0.borrow();
-        let paths = borrowed.as_ref().ok_or("paths captured")?;
-        let attempt = context
-            .state_root
-            .as_path()
-            .join("attempts")
-            .join(run.attempt_id.to_string());
-        assert!(!paths.temporary.starts_with(&attempt));
-        assert_eq!(paths.scratch, paths.temporary.join("scratch"));
-        assert!(paths.scratch.is_dir());
-        assert_eq!(
-            paths.temporary,
-            crate::plan::scratch_root(context.state_root.as_path(), run.attempt_id).join("tmp")
-        );
-        let alias = paths.temporary_alias.as_ref().ok_or("temporary alias")?;
-        assert!(!alias.starts_with(&attempt));
-        assert_eq!(
-            std::fs::canonicalize(alias)?,
-            std::fs::canonicalize(&paths.temporary)?
-        );
-        Ok(())
-    }
-}
 pub(crate) mod hand_off;
+#[cfg(test)]
+#[path = "launch/policy_reporting_tests.rs"]
+mod policy_reporting_tests;
 
 #[cfg(test)]
-mod resource_status_tests {
-    use super::*;
-    use crate::tests::{call, clock, context, input};
-    use provenant_core::CancelToken;
-    use provenant_records::diagnostic::{
-        LaneLimit, Layer, PressureLevel, PressureThreshold, ResourceFact,
-    };
-    use provenant_records::wire::LaneRow;
-
-    struct Dependencies;
-    impl Providers for Dependencies {
-        fn prepare(
-            &self,
-            _: &TaskRequest,
-            _: &str,
-            _: &LaunchPaths,
-            _: Option<&AttemptRecord>,
-        ) -> std::result::Result<PreparedLaunch, Box<PrepareRefusal>> {
-            let mut refusal = PrepareRefusal::boxed(
-                CauseKind::RouteResolutionRefused,
-                "DEPENDENCY_OUTPUT_SECRET",
-            );
-            refusal.resource = Some(ResourceFact::DependencyPreparation { configured: true });
-            Err(refusal)
-        }
-        fn decode(
-            &self,
-            _: &RouteRecord,
-            _: &[u8],
-            _: &ExitObservation,
-            _: &std::path::Path,
-        ) -> std::result::Result<Decoded, String> {
-            unreachable!()
-        }
-    }
-
-    #[test]
-    fn launch_resource_refusals_survive_withdrawal_in_retained_status()
-    -> std::result::Result<(), Box<dyn std::error::Error>> {
-        for handoff in [None, Some(false), Some(true)] {
-            let temp = tempfile::tempdir()?;
-            let (clock, cancel) = (clock(), CancelToken::new());
-            let call = call(&clock, &cancel);
-            let context = context(temp.path())?;
-            let store = RunStore::open(&context, &call)?;
-            let run = input();
-            let id = run.attempt_id;
-            store.create(&run, &call)?;
-            let started = store.start_inner(
-                run.attempt_id,
-                if handoff.is_some() {
-                    &crate::dispatch_tests::Ready
-                } else {
-                    &Dependencies
-                },
-                &|_, _| Ok(Vec::new()),
-                &|_, _, _| {
-                    Err(custody::CustodyError::Admission(if handoff == Some(true) {
-                        AdmissionError::LaneCap {
-                            active: 2,
-                            limit: 2,
-                            kind: LaneLimit::HostTotal,
-                            origin: Layer::Host,
-                        }
-                    } else {
-                        AdmissionError::MemoryPressure {
-                            level: PressureLevel::Critical,
-                            threshold: PressureThreshold::Warning,
-                            origin: Layer::Host,
-                        }
-                    }))
-                },
-                None,
-                &call,
-            )?;
-            let [Started::Refused { kind, .. }] = started.as_slice() else {
-                return Err("launch did not refuse".into());
-            };
-            let expected = kind.diagnostic().ok_or("missing resource diagnostic")?;
-            assert_eq!(store.record(id, &call)?.provider_launched, Some(false));
-            drop(store);
-            let reopened = RunStore::open(&context, &call)?;
-            let record = reopened.record(id, &call)?;
-            let (state, reason) = LaneRow::state_and_reason(&record.state);
-            assert_eq!(state, "rejected");
-            let reason = reason.ok_or("missing retained status")?;
-            assert!(
-                reason.contains(expected.detail.as_deref().unwrap()),
-                "{reason}"
-            );
-            assert!(
-                reason.contains(expected.next.as_deref().unwrap()),
-                "{reason}"
-            );
-            assert!(!reason.contains("DEPENDENCY_OUTPUT_SECRET"));
-        }
-        Ok(())
-    }
-}
+#[path = "launch/resource_status_tests.rs"]
+mod resource_status_tests;
 
 #[cfg(test)]
-mod admission_port_lifecycle_tests {
-    use super::*;
-    use crate::tests::{call, clock, context, input};
-    use provenant_core::{CancelToken, Clock as _};
-    use provenant_os::exec::{
-        CapturedStream, ExecError, ExecOptions, ExecOutcome, Executor, Termination,
-    };
-    use std::{collections::VecDeque, sync::Mutex};
-
-    type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
-
-    struct GateExecutor {
-        exits: Mutex<VecDeque<i64>>,
-        calls: Mutex<Vec<(String, String, String)>>,
-    }
-
-    impl GateExecutor {
-        fn new(exits: impl IntoIterator<Item = i64>) -> Self {
-            Self {
-                exits: Mutex::new(exits.into_iter().collect()),
-                calls: Mutex::new(Vec::new()),
-            }
-        }
-    }
-
-    impl Executor for GateExecutor {
-        fn execute(&self, options: ExecOptions<'_>) -> std::result::Result<ExecOutcome, ExecError> {
-            let program = options
-                .argv
-                .first()
-                .map(|value| value.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            let environment = options.env.unwrap_or(&[]);
-            let value = |name: &std::ffi::OsStr| {
-                environment
-                    .iter()
-                    .find(|(key, _)| key.as_os_str() == name)
-                    .map(|(_, value)| value.to_string_lossy().into_owned())
-                    .unwrap_or_default()
-            };
-            let phase = value(std::ffi::OsStr::new(
-                provenant_core::consumer_env::PORT_PHASE,
-            ));
-            let epoch = value(std::ffi::OsStr::new(
-                provenant_core::consumer_env::ADMISSION_EPOCH,
-            ));
-            self.calls
-                .lock()
-                .expect("gate calls mutex")
-                .push((program, phase, epoch));
-            let code = self
-                .exits
-                .lock()
-                .expect("gate exits mutex")
-                .pop_front()
-                .unwrap_or(0);
-            Ok(ExecOutcome {
-                termination: Termination::Exit(code),
-                stdout: Default::default(),
-                stderr: Default::default(),
-                timed_out: false,
-                drain_truncated: false,
-                overflow_stopped: false,
-                cancelled: false,
-                elapsed_micros: 1,
-            })
-        }
-    }
-
-    fn declaration(program: &str, source: &str) -> String {
-        serde_json::json!({
-            "schema_version": 2,
-            "admission": {
-                "source": source,
-                "backend": {
-                    "kind": "command",
-                    "command": {
-                        "argv": [program],
-                        "exit_codes": {
-                            "success": [0],
-                            "unknown": [75],
-                            "other": "refused"
-                        }
-                    }
-                }
-            }
-        })
-        .to_string()
-    }
-
-    #[test]
-    fn admission_binding_retries_busy_release_and_survives_config_rotation() -> TestResult {
-        let temp = tempfile::tempdir()?;
-        let context = context(temp.path())?;
-        let clock = clock();
-        let cancel = CancelToken::new();
-        let call = call(&clock, &cancel);
-        let store = RunStore::open(&context, &call)?;
-        let project = temp.path().join("project");
-        let project_ports = project.join(".provenant/ports.json");
-        std::fs::create_dir_all(
-            project_ports
-                .parent()
-                .ok_or_else(|| std::io::Error::other("ports parent missing"))?,
-        )?;
-        std::fs::create_dir_all(context.state_root.as_path())?;
-        std::fs::write(&project_ports, declaration("repo-gate-old", "project"))?;
-        std::fs::write(
-            context.state_root.as_path().join("ports.json"),
-            r#"{"schema_version":3}"#,
-        )?;
-
-        let mut prepared = input();
-        let attempt = prepared.attempt_id;
-        prepared.request.task.writer = Some(provenant_records::run::WriterRequest {
-            extra: Default::default(),
-            custody_project: Some(crate::tests::writer_project()),
-            project: project.clone(),
-            worktree: project.join("lane"),
-        });
-        crate::tests::rekey(&mut prepared);
-        store.create(&prepared, &call)?;
-        let request = store.request(attempt, &call)?;
-        let record = store.record(attempt, &call)?;
-        let (record, binding) = store
-            .admission_binding(&request, &record, &call)
-            .map_err(|error| std::io::Error::other(error.to_owned()))?;
-        let binding = binding
-            .ok_or_else(|| std::io::Error::other("project admission command was not bound"))?;
-        assert_eq!(binding.source, provenant_records::Layer::Project);
-        assert_eq!(binding.phase, RepositoryAdmissionPhase::AcquirePending);
-        assert!(record.repository_admission_binding.is_some());
-
-        // Busy acquisition is followed by a failed release. Both remain durable
-        // in the same attempt binding and the attempt stays queued for retry.
-        let executor = GateExecutor::new([1, 1, 0, 0, 0]);
-        let (record, skipped) = store.admission_skip_with_phase(
-            &request,
-            &record,
-            &call,
-            &mut |request, id, binding, phase, cancel| {
-                store.run_admission_phase_with_executor(
-                    request, id, binding, phase, cancel, &executor,
-                )
-            },
-        );
-        assert!(skipped.is_some());
-        assert!(matches!(record.state, AttemptState::Queued { .. }));
-        let stored: RepositoryAdmissionBinding = record
-            .repository_admission_binding
-            .clone()
-            .ok_or("missing repository admission binding")?;
-        assert_eq!(stored.phase, RepositoryAdmissionPhase::ReleasePending);
-
-        // The release retry and the next acquisition still use the bound project
-        // command after the effective source rotates to the host declaration.
-        std::fs::write(&project_ports, r#"{"schema_version":3}"#)?;
-        std::fs::write(
-            context.state_root.as_path().join("ports.json"),
-            declaration("repo-gate-new", "host"),
-        )?;
-        let effective =
-            provenant_config::PortTable::read_for(Some(&project), context.state_root.as_path())?;
-        assert_eq!(effective.admission.source, provenant_records::Layer::Host);
-        let rotated_program = match effective.admission.backend {
-            provenant_config::PortBackend::Command { command } => command.argv[0].clone(),
-            _ => return Err(std::io::Error::other("host admission command was not active").into()),
-        };
-        assert_eq!(rotated_program, "repo-gate-new");
-
-        let (record, skipped) = store.admission_skip_with_phase(
-            &request,
-            &record,
-            &call,
-            &mut |request, id, binding, phase, cancel| {
-                store.run_admission_phase_with_executor(
-                    request, id, binding, phase, cancel, &executor,
-                )
-            },
-        );
-        assert!(skipped.is_some());
-        assert!(matches!(record.state, AttemptState::Queued { .. }));
-        let (record, skipped) = store.admission_skip_with_phase(
-            &request,
-            &record,
-            &call,
-            &mut |request, id, binding, phase, cancel| {
-                store.run_admission_phase_with_executor(
-                    request, id, binding, phase, cancel, &executor,
-                )
-            },
-        );
-        assert!(skipped.is_none());
-        let mut terminal_intent = record.clone();
-        mark_admission_release_pending(&mut terminal_intent)?;
-        let terminal_binding: RepositoryAdmissionBinding = terminal_intent
-            .repository_admission_binding
-            .clone()
-            .ok_or("missing repository admission binding")?;
-        assert_eq!(
-            terminal_binding.phase,
-            RepositoryAdmissionPhase::ReleasePending
-        );
-        let record = store.record_admission_phase(
-            &record,
-            RepositoryAdmissionPhase::ReleasePending,
-            &call,
-        )?;
-        assert!(store.release_admission_with_phase(
-            &record,
-            &call,
-            &mut |request, id, binding, phase, cancel| {
-                store.run_admission_phase_with_executor(
-                    request, id, binding, phase, cancel, &executor,
-                )
-            },
-        ));
-        let final_record = store.record(attempt, &call)?;
-        let binding: RepositoryAdmissionBinding = final_record
-            .repository_admission_binding
-            .clone()
-            .ok_or("missing repository admission binding")?;
-        assert_eq!(binding.phase, RepositoryAdmissionPhase::Released);
-        assert_eq!(binding.lease_epoch, 2);
-        assert!(matches!(final_record.state, AttemptState::Queued { .. }));
-        let calls = executor.calls.lock().expect("gate calls mutex");
-        assert!(
-            calls
-                .iter()
-                .all(|(program, _, _)| program == "repo-gate-old")
-        );
-        for (phase, epoch) in [
-            ("acquire", "1"),
-            ("release", "1"),
-            ("acquire", "2"),
-            ("release", "2"),
-        ] {
-            assert!(
-                calls
-                    .iter()
-                    .any(|(_, observed, key)| observed == phase && key == epoch)
-            );
-        }
-        drop(calls);
-
-        // A release fence published while acquisition is in flight must win
-        // over the late successful acquire result.
-        let mut observed = Vec::new();
-        let (record, skipped) = store.admission_skip_with_phase(
-            &request,
-            &final_record,
-            &call,
-            &mut |_, id, binding, phase, _| {
-                observed.push((phase, binding.lease_epoch));
-                if phase == RepositoryAdmissionPhase::AcquirePending {
-                    let current = store.record(id, &call).expect("acquiring record");
-                    store
-                        .record_admission_phase(
-                            &current,
-                            RepositoryAdmissionPhase::ReleasePending,
-                            &call,
-                        )
-                        .expect("concurrent release fence");
-                }
-                true
-            },
-        );
-        assert!(skipped.is_some());
-        let fenced: RepositoryAdmissionBinding = record
-            .repository_admission_binding
-            .clone()
-            .ok_or("missing repository admission binding")?;
-        assert_eq!(fenced.phase, RepositoryAdmissionPhase::Released);
-        assert!(observed.contains(&(RepositoryAdmissionPhase::ReleasePending, fenced.lease_epoch)));
-        Ok(())
-    }
-    #[test]
-    fn starting_owner_waits_for_release_proof_and_unwinds_cancellation() -> TestResult {
-        let temp = tempfile::tempdir()?;
-        let context = context(temp.path())?;
-        let clock = clock();
-        let cancel = CancelToken::new();
-        let call = call(&clock, &cancel);
-        let store = RunStore::open(&context, &call)?;
-        let project = temp.path().join("project");
-        let project_ports = project.join(".provenant/ports.json");
-        std::fs::create_dir_all(project_ports.parent().ok_or("ports parent missing")?)?;
-        std::fs::create_dir_all(context.state_root.as_path())?;
-        std::fs::write(&project_ports, declaration("repo-gate-bound", "project"))?;
-        std::fs::write(
-            context.state_root.as_path().join("ports.json"),
-            r#"{"schema_version":3}"#,
-        )?;
-
-        let mut input = input();
-        let attempt = input.attempt_id;
-        input.request.task.writer = Some(provenant_records::run::WriterRequest {
-            extra: Default::default(),
-            custody_project: Some(crate::tests::writer_project()),
-            project: project.clone(),
-            worktree: project.join("lane"),
-        });
-        crate::tests::rekey(&mut input);
-        store.create(&input, &call)?;
-        let request = store.request(attempt, &call)?;
-        let queued = store.record(attempt, &call)?;
-        let (queued, frozen) = store
-            .admission_binding(&request, &queued, &call)
-            .map_err(|error| std::io::Error::other(error.to_owned()))?;
-        let frozen = frozen.ok_or("project admission command was not bound")?;
-        let attempt_dir = store.attempt_dir(attempt, true)?;
-        let launcher = attempt_dir.try_lock(
-            std::ffi::OsStr::new("launcher.lock"),
-            provenant_os::fs::LockMode::Exclusive,
-        )?;
-        let starting = store.claim_starting_for_preparation(&queued, &call)?;
-        assert!(matches!(starting.state, AttemptState::Starting { .. }));
-        assert!(starting.resolved_route.is_none());
-
-        // A configuration rotation after the owner claim cannot replace the
-        // declaration already bound to this attempt.
-        std::fs::write(&project_ports, r#"{"schema_version":3}"#)?;
-        std::fs::write(
-            context.state_root.as_path().join("ports.json"),
-            declaration("repo-gate-rotated", "host"),
-        )?;
-        let mut calls = Vec::new();
-        let (pending, skipped) = store.admission_skip_with_phase_bound(
-            &request,
-            &starting,
-            Some(frozen),
-            &call,
-            &mut |_, _, binding, phase, _| {
-                calls.push((binding.command.argv[0].clone(), phase));
-                false
-            },
-        );
-        assert!(skipped.is_some());
-        assert!(matches!(pending.state, AttemptState::Starting { .. }));
-        assert!(
-            calls
-                .iter()
-                .all(|(program, _)| program == "repo-gate-bound")
-        );
-        assert!(matches!(
-            store.requeue_starting_after_admission_skip(&pending, &call),
-            Err(RunError::Conflict)
-        ));
-        assert!(matches!(
-            store.record(attempt, &call)?.state,
-            AttemptState::Starting { .. }
-        ));
-
-        let binding: RepositoryAdmissionBinding = pending
-            .repository_admission_binding
-            .clone()
-            .ok_or("missing repository admission binding")?;
-        let (released, skipped) = store.admission_skip_with_phase_bound(
-            &request,
-            &pending,
-            Some(binding),
-            &call,
-            &mut |_, _, _, phase, _| phase == RepositoryAdmissionPhase::ReleasePending,
-        );
-        assert!(skipped.is_some());
-        let queued = store
-            .requeue_starting_after_admission_skip(&released, &call)?
-            .ok_or("cancellation unexpectedly won the requeue fence")?;
-        assert!(matches!(queued.state, AttemptState::Queued { .. }));
-        drop(launcher);
-
-        let launcher = attempt_dir.try_lock(
-            std::ffi::OsStr::new("launcher.lock"),
-            provenant_os::fs::LockMode::Exclusive,
-        )?;
-        let starting = store.claim_starting_for_preparation(&queued, &call)?;
-        custody::request_stop(
-            attempt_dir.try_clone()?,
-            RunStore::scope(&starting),
-            starting.verified_owner.unwrap_or(context.actor_id),
-            provenant_supervisor::machine::StopReason::ExplicitCancellation,
-        )?;
-        assert!(
-            store
-                .requeue_starting_after_admission_skip(&starting, &call)?
-                .is_none()
-        );
-        assert!(matches!(
-            store.record(attempt, &call)?.state,
-            AttemptState::Starting { .. }
-        ));
-        drop(launcher);
-        assert!(store.cancel_preparation_if_requested(
-            attempt,
-            &starting,
-            &attempt_dir,
-            clock.wall_now()?,
-            &call,
-        )?);
-        assert!(matches!(
-            store.record(attempt, &call)?.state,
-            AttemptState::Terminal {
-                outcome: Outcome::Cancelled,
-                ..
-            }
-        ));
-        Ok(())
-    }
-
-    #[test]
-    fn caller_cancellation_still_settles_the_preparation_owner() -> TestResult {
-        let temp = tempfile::tempdir()?;
-        let context = context(temp.path())?;
-        let clock = clock();
-        let never = CancelToken::new();
-        let inspection = call(&clock, &never);
-        let store = RunStore::open(&context, &inspection)?;
-        let input = input();
-        let attempt = input.attempt_id;
-        store.create(&input, &inspection)?;
-        let queued = store.record(attempt, &inspection)?;
-        let directory = store.attempt_dir(attempt, true)?;
-        let _launcher = directory.try_lock(
-            std::ffi::OsStr::new("launcher.lock"),
-            provenant_os::fs::LockMode::Exclusive,
-        )?;
-        let starting = store.claim_starting_for_preparation(&queued, &inspection)?;
-        let cancelled = CancelToken::new();
-        cancelled.cancel();
-        let cancelled_call = call(&clock, &cancelled);
-        assert!(store.cancel_preparation_if_requested(
-            attempt,
-            &starting,
-            &directory,
-            clock.wall_now()?,
-            &cancelled_call,
-        )?);
-        assert!(matches!(
-            store.record(attempt, &inspection)?.state,
-            AttemptState::Terminal {
-                outcome: Outcome::Cancelled,
-                ..
-            }
-        ));
-        Ok(())
-    }
-
-    #[test]
-    fn terminal_admission_release_uses_receipt_without_mutating_attempt() -> TestResult {
-        let temp = tempfile::tempdir()?;
-        let context = context(temp.path())?;
-        let clock = clock();
-        let cancel = CancelToken::new();
-        let call = call(&clock, &cancel);
-        let store = RunStore::open(&context, &call)?;
-        let input = input();
-        let attempt = input.attempt_id;
-        store.create(&input, &call)?;
-        let queued = store.record(attempt, &call)?;
-        let command = provenant_records::PortCommand {
-            argv: vec![
-                temp.path()
-                    .join("not-executed-admission-command")
-                    .display()
-                    .to_string(),
-            ],
-            exit_codes: provenant_records::CommandExitCodes {
-                success: vec![0],
-                unknown: vec![75],
-                other: provenant_records::ExitDisposition::Refused,
-            },
-        };
-        let binding = RepositoryAdmissionBinding::new(provenant_records::Layer::Project, &command);
-        store.record_admission_binding(&queued, binding, &call)?;
-        let terminal = store
-            .withdraw(
-                attempt,
-                AttemptState::Queued {
-                    extra: Default::default(),
-                },
-                Outcome::Cancelled,
-                "cancel before preparation",
-                clock.wall_now()?,
-                &call,
-            )?
-            .ok_or("attempt did not settle")?;
-        let terminal_binding = terminal
-            .repository_admission_binding
-            .clone()
-            .ok_or("missing repository admission binding")?;
-        assert_eq!(
-            terminal_binding.phase,
-            RepositoryAdmissionPhase::ReleasePending
-        );
-
-        // A matching sidecar receipt proves an idempotent release while the
-        // immutable terminal AttemptRecord remains byte-for-byte unchanged.
-        let key = format!("{attempt}:{}", terminal_binding.lease_epoch);
-        let execution = provenant_config::PortCommandExecution {
-            command_digest: terminal_binding.command_digest,
-            disposition: provenant_config::PortCommandDisposition::Succeeded,
-            outcome: Some(ExecOutcome {
-                termination: Termination::Exit(0),
-                stdout: CapturedStream::default(),
-                stderr: CapturedStream::default(),
-                timed_out: false,
-                drain_truncated: false,
-                overflow_stopped: false,
-                cancelled: false,
-                elapsed_micros: 1,
-            }),
-        };
-        provenant_config::record_port_command(
-            context.state_root.as_path(),
-            "admission",
-            terminal_binding.source,
-            "release",
-            &key,
-            &execution,
-            provenant_config::PortReceiptLifetime::AttemptTerminalAndRelease {
-                attempt_id: attempt,
-                project_id: context.project_id,
-                actor_id: context.actor_id,
-                lease_epoch: terminal_binding.lease_epoch,
-            },
-        )?;
-        assert!(store.admission_release_receipt_confirmed(attempt, &terminal_binding));
-        assert!(
-            store.release_admission_with_phase(&terminal, &call, &mut |_, _, _, _, _| panic!(
-                "confirmed receipt must avoid re-running release"
-            ),)
-        );
-        assert!(matches!(
-            store.record_admission_phase(&terminal, RepositoryAdmissionPhase::Released, &call),
-            Err(RunError::Conflict)
-        ));
-        assert_eq!(store.record(attempt, &call)?, terminal);
-        Ok(())
-    }
-}
+#[path = "launch/admission_port_lifecycle_tests.rs"]
+mod admission_port_lifecycle_tests;

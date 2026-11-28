@@ -125,11 +125,15 @@ budget; if the wait ends pending, it reports the last failed reading. A peer
 read failure also projects the attempt as unknown in status; that projection
 does not erase the failure from wait history.
 
-Graph advancement is a separate pass in `tick` and completes before forge
-polling starts, so a slow forge page cannot put graph settlement behind a long
-poll. The wait's terminal-remote recovery covers the remaining case where the
-scheduled tick itself is delayed by that poll: a waiting client settles the
-graph on its own next reread.
+Graph and forge tasks in `tick` run concurrently, each under its own deadline,
+so a slow forge page delays only `forge_events` and a slow graph delays only
+`graphs`. Tasks run under a host-configured concurrency cap and hold a
+single-flight lease until the worker actually ends: a worker that outlives its
+budget reports `over_budget`, and a second tick that finds the lease held
+reports `busy` rather than running the task twice. A fairness cursor orders
+due subjects with busy or over-budget visits first on the next pass. `tick
+--task` limits a pass to named tasks; `notice_batch_flush` and `quota_refresh`
+are no longer reported.
 
 - Why: terminal remote work must settle as soon as its home endpoint can be
   reached again, without requiring a second wait or a manual advance.
@@ -160,7 +164,9 @@ both ends with an omitted-bytes marker and a warning naming the cap, its source
 and the repair. A result the owner can page is published once and the envelope
 carries a pointer to it, never a truncated object; commands that warn and
 proceed keep the result's status. A surface that keeps the refusal contract
-instead emits a typed `RESULT_TOO_LARGE` Error envelope and exits 3. A surface
+instead adds a typed `RESULT_TOO_LARGE` warning naming the private report and
+keeps the real outcome; only a report that cannot be written becomes a typed IO
+Error envelope and exits 3. A surface
 that cannot publish a result carries a bounded marker in `data` (`truncated`,
 `omitted_bytes`, `source`, `repair`) with a warning, beside the result's typed
 error. Paged reads bind the cursor to the input, terminal text escapes control
@@ -635,10 +641,10 @@ spent, a batched GraphQL row with valid base and head subject fields and a usabl
 PR URL serves the launch even if its check rollup is truncated; rollup completeness
 does not determine subject completeness. A fresh cached row missing or invalidating
 those fields is refreshed through GraphQL before refusing. When the required subject
-fields are unavailable, the refusal is typed `FORGE_QUOTA` and its `next:` says `retry after
-<reset>`. It is never rendered as invalid input, because the caller supplied no
-bad field, and a peer refusing this way is retried rather than settled as a
-verdict. (#3986)
+fields are unavailable, the refusal is typed `FORGE_QUOTA_EXHAUSTED` with a
+transient retry time, and its `next:` names that reset. It is never rendered as
+invalid input, because the caller supplied no bad field, and a peer refusing
+this way is retried rather than settled as a verdict. (#3986)
 
 ### Integration batch membership
 

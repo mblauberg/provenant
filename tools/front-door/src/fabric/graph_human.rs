@@ -452,9 +452,13 @@ mod test_presentation {
                         manifest.integration_source.as_deref().unwrap_or("unavailable"),
                         attempt.input_cap.map_or_else(|| "unavailable".into(), |cap| cap.to_string()),
                         attempt.input_cap_source.map_or("unavailable", |source| match source {
-                            provenant_fabric_runtime::graph::InputCapSource::EffectiveGraphLimits => "effective_graph_limits",
-                            provenant_fabric_runtime::graph::InputCapSource::Default => "default",
-                            provenant_fabric_runtime::graph::InputCapSource::Configured => "configured",
+                            provenant_records::Layer::Detected => "effective_graph_limits",
+                            provenant_records::Layer::Default => "default",
+                            provenant_records::Layer::Host
+                            | provenant_records::Layer::HostProject
+                            | provenant_records::Layer::Project
+                            | provenant_records::Layer::Launch => "configured",
+                            _ => source.as_str(),
                         }),
                         manifest.omitted,
                     ));

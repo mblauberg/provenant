@@ -575,7 +575,7 @@ fn base_fourteen_migration_preserves_local_delivery_receipts() -> TestResult {
             )
             .is_err()
     );
-    assert_eq!(provenant_sqlite::stored_version(&store.db)?, 16);
+    assert_eq!(provenant_sqlite::stored_version(&store.db)?, 17);
     drop(store);
     let reopened = RunStore::open(&context, &call)?;
     assert_eq!(base_twelve_record(&reopened, remote_id)?, remote);
@@ -648,6 +648,44 @@ fn legacy_route(
 }
 
 #[test]
+fn base_sixteen_cutover_preserves_decodable_resource_facts() -> TestResult {
+    let (_temp, context, store, input, _attempt) = seeded()?;
+    let (clock, cancel) = (clock(), CancelToken::new());
+    let call = call(&clock, &cancel);
+    withdraw(&store, &input, &call)?;
+    let mut legacy = base_twelve_record(&store, input.attempt_id)?;
+    legacy["skipped_routes"] = serde_json::json!([
+        {"route":"a","kind":"unavailable","detail":"fixture",
+         "guard_resource":{"kind":"pacing_reserve","percent":25,"setting":"account",
+                           "origin":"configuration","account":"acct",
+                           "window":"window","setting_path":"path"}},
+        {"route":"b","kind":"unavailable","detail":"fixture",
+         "guard_resource":{"kind":"lane_ports","blocks":4,"origin":"shipped_default"}}
+    ]);
+    seal_base_thirteen_row(&store, input.attempt_id, &legacy)?;
+    store.db.execute_batch("PRAGMA user_version=16")?;
+    drop(store);
+    crate::lease_migrate::migrate_database(context.state_root.as_path())?;
+    let store = RunStore::open(&context, &call)?;
+    let record = store.record(input.attempt_id, &call)?;
+    assert!(matches!(
+        record.skipped_routes[0].guard_resource.as_ref(),
+        Some(provenant_records::diagnostic::ResourceFact::PacingReserve {
+            origin: Layer::Host,
+            ..
+        })
+    ));
+    assert!(matches!(
+        record.skipped_routes[1].guard_resource.as_ref(),
+        Some(provenant_records::diagnostic::ResourceFact::LanePorts {
+            origin: Layer::Default,
+            ..
+        })
+    ));
+    Ok(())
+}
+
+#[test]
 fn base_thirteen_migration_rewrites_v282_usage_and_receipts() -> TestResult {
     let (_temp, context, store, input, _attempt) = seeded()?;
     let (clock, cancel) = (clock(), CancelToken::new());
@@ -680,10 +718,8 @@ fn base_thirteen_migration_rewrites_v282_usage_and_receipts() -> TestResult {
          "guard_resource":{"kind":"disk","free":1,"floor":2,"origin":"configuration"}},
         {"route":"b","kind":"unavailable","detail":"fixture",
          "guard_resource":{"kind":"grant_limit","limit":7,"origin":"shipped_default"}},
-        // These two guards use their own setting-source enums, which still
-        // spell these origins `configuration` / `shipped_default`. The
-        // Layer-typed rewrite must leave them alone or this terminal row
-        // would stop decoding after migration.
+        // These two guards used their own setting-source enums; the
+        // migration rewrites their old spellings to the Layer vocabulary.
         {"route":"c","kind":"unavailable","detail":"fixture",
          "guard_resource":{"kind":"pacing_reserve","percent":25,"setting":"account",
                            "origin":"configuration","account":"acct",
@@ -768,20 +804,19 @@ fn base_thirteen_migration_rewrites_v282_usage_and_receipts() -> TestResult {
             ..
         }
     ));
-    // These origins belong to PacingSettingSource and PortSettingSource,
-    // whose current spellings are still configuration / shipped_default.
-    // Rewriting them would make this terminal row undecodable.
+    // These origins now use the shared provenance layer; their wire spellings
+    // keep the terminal row decodable.
     assert!(matches!(
         guards[2],
         provenant_records::diagnostic::ResourceFact::PacingReserve {
-            origin: provenant_records::diagnostic::PacingSettingSource::Configuration,
+            origin: provenant_records::Layer::Host,
             ..
         }
     ));
     assert!(matches!(
         guards[3],
         provenant_records::diagnostic::ResourceFact::LanePorts {
-            origin: provenant_records::diagnostic::PortSettingSource::ShippedDefault,
+            origin: provenant_records::Layer::Default,
             ..
         }
     ));
@@ -1210,6 +1245,7 @@ fn event_retention_stops_between_committed_batches_and_keeps_newest() -> TestRes
         &observer,
         &RetentionScan {
             start_at: Some(input.attempt_id),
+            detail: partial.continuation.as_deref(),
             ..Default::default()
         },
     )?;
@@ -1511,6 +1547,95 @@ fn gc_preserves_tmp_for_lost_attempt_without_exit_evidence() -> TestResult {
     )?;
     assert!(scratch.attempt_tmp.is_empty());
     assert!(temporary.exists());
+    Ok(())
+}
+
+// Spec: docs/specs/disk.md#bounded-sweeps
+#[test]
+fn scratch_budget_resume_finishes_the_open_sequence_page() -> TestResult {
+    let (_temp, context, store, first, first_attempt) = seeded()?;
+    let (initial_clock, initial_cancel) = (clock(), CancelToken::new());
+    let initial_call = call(&initial_clock, &initial_cancel);
+    withdraw(&store, &first, &initial_call)?;
+
+    let mut second = crate::tests::input();
+    second.attempt_id = AttemptId::from_bytes([7; 16]);
+    second.operation_id = provenant_core::OperationId::parse("run-test-b")?;
+    crate::tests::rekey(&mut second);
+    store.create(&second, &initial_call)?;
+    let second_attempt = context
+        .state_root
+        .as_path()
+        .join(format!("attempts/{}", second.attempt_id));
+    withdraw(&store, &second, &initial_call)?;
+
+    let first_tmp = scratch_root_of(&first_attempt).join("tmp");
+    let second_tmp = scratch_root_of(&second_attempt).join("tmp");
+    for tmp in [&first_tmp, &second_tmp] {
+        fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(tmp)?;
+    }
+    fs::write(first_tmp.join("small"), b"first sequence")?;
+    fs::write(second_tmp.join("large"), vec![7; 1_000_000])?;
+
+    // Scratch is ranked by size, so the later attempt is reclaimed first.
+    // Stop as soon as it is gone, at the earlier attempt's apply boundary.
+    let keep_going = || second_tmp.exists();
+    let root = Directory::open_anchor(context.state_root.as_path())?;
+    let now = WallTime::from_micros(200 + 31 * DAY_MICROS)?;
+    let partial = store.gc_temporary(
+        &root,
+        &ScratchPolicy::new(0),
+        now,
+        false,
+        &initial_call,
+        &RetentionScan {
+            keep_going: Some(&keep_going),
+            ..Default::default()
+        },
+    )?;
+    assert_eq!(
+        partial.interrupted_at.as_deref(),
+        Some(first_attempt.as_path())
+    );
+    assert!(
+        !second_tmp.exists(),
+        "the larger later row was applied first"
+    );
+    assert!(
+        first_tmp.exists(),
+        "the lower-sequence row remains for resume"
+    );
+    let detail = partial
+        .continuation
+        .as_deref()
+        .ok_or_else(|| std::io::Error::other("budget stop did not persist the open page"))?;
+    let (class, cursor) = crate::reclaim::decode_cursor(detail)
+        .map_err(|_| std::io::Error::other("reclaim cursor did not parse"))?
+        .ok_or_else(|| std::io::Error::other("missing reclaim cursor"))?;
+    assert_eq!(class, "attempt_scratch");
+    assert!(cursor.page_open());
+    assert!(cursor.is_visited(&second.attempt_id.to_string()));
+    assert!(!cursor.is_visited(&first.attempt_id.to_string()));
+
+    let (resume_clock, resume_cancel) = (clock(), CancelToken::new());
+    let resume_call = call(&resume_clock, &resume_cancel);
+    let resumed = store.gc_temporary(
+        &root,
+        &ScratchPolicy::new(0),
+        now,
+        false,
+        &resume_call,
+        &RetentionScan {
+            start_at: Some(first.attempt_id),
+            detail: Some(detail),
+            ..Default::default()
+        },
+    )?;
+    assert!(resumed.interrupted_at.is_none(), "{resumed:?}");
+    assert!(!first_tmp.exists(), "resume applied the earlier row");
     Ok(())
 }
 

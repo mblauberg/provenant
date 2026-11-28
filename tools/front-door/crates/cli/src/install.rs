@@ -1,6 +1,6 @@
 //! Installation grammar and thin orchestration over config's state machine.
 //! The process edge supplies captured roots, environment and capabilities.
-use crate::{Harness, Switch};
+use crate::{CommonArgs, Harness, Switch};
 use clap::builder::TypedValueParser;
 use provenant_config::{
     self as config, InstallContext, InstallError, InstallOutcome, InstallReporter, Release,
@@ -43,6 +43,8 @@ pub struct Uninstall {
 
 #[derive(Clone, Debug, clap::Args)]
 pub struct Upgrade {
+    #[command(flatten)]
+    pub common: CommonArgs,
     /// Accept the pinned toolchain install
     #[arg(long)]
     pub yes: bool,
@@ -50,8 +52,11 @@ pub struct Upgrade {
     #[arg(long, value_parser = clap::builder::PathBufValueParser::new().try_map(crate::grammar::absolute))]
     pub from_source: Option<PathBuf>,
     /// Upgrade this host and every registered Fabric peer
-    #[arg(long, value_parser = ["all"], default_value = "all")]
+    #[arg(skip)]
     pub hosts: String,
+    /// Keep the verification graph and worktree after the upgrade
+    #[arg(long)]
+    pub keep: bool,
     /// Run the bundled smoke graph after upgrading
     #[arg(long)]
     pub verify: bool,
@@ -62,7 +67,7 @@ pub struct Upgrade {
     #[arg(long, requires = "verify")]
     pub dry_run: bool,
     /// Place the smoke graph on this Fabric peer
-    #[arg(long, requires = "verify")]
+    #[arg(id = "verify_host", long = "verify-host", requires = "verify")]
     pub host: Option<String>,
     /// Override smoke graph routes
     #[arg(long, requires = "verify")]

@@ -1,6 +1,10 @@
 //! The format-2 custody contract. Advisory ownership is never a writer lease.
 use crate::ExtraFields;
-use provenant_core::{ActorId, AttemptId, HostId, ProjectId, WallTime};
+use crate::command_result::{CommandError, ErrorClass, SettingRef};
+use crate::policy::{LEASE_HOLDER_UNREACHABLE, WORKTREE_SHARED, WORKTREE_SHARING_REFUSED};
+use crate::provenance::{Layer, Source, Sourced};
+use crate::warning::{Warning, WarningCode, detected_source};
+use provenant_core::{ActorId, AttemptId, GitOid, HostId, ProjectId, WallTime};
 use serde::{Deserialize, Serialize};
 
 /// The durable attempt generation bound to supervisor custody and diagnostics.
@@ -54,7 +58,7 @@ macro_rules! subject_kinds {
 }
 subject_kinds! {
     Graph => ("graph", false), Attempt => ("attempt", false), Branch => ("branch", false), Ref => ("ref", false), Worktree => ("worktree", false),
-    Pr => ("pr", false), Issue => ("issue", false), Path => ("path", true), CloudKey => ("cloud_key", false),
+    Pr => ("pr", false), Issue => ("issue", false), Project => ("project", false), Path => ("path", true), CloudKey => ("cloud_key", false),
 }
 impl std::fmt::Display for SubjectKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -164,6 +168,253 @@ impl Holder {
         })
     }
 }
+
+/// How a second writer is admitted when a worktree lease is live.
+/// `Inherit` means resolve the ordinary layered setting for a new lease.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Sharing {
+    #[default]
+    Inherit,
+    Allow,
+    Warn,
+    Refuse,
+}
+
+impl Sharing {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Inherit => "inherit",
+            Self::Allow => "allow",
+            Self::Warn => "warn",
+            Self::Refuse => "refuse",
+        }
+    }
+}
+
+impl std::str::FromStr for Sharing {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "inherit" => Ok(Self::Inherit),
+            "allow" => Ok(Self::Allow),
+            "warn" => Ok(Self::Warn),
+            "refuse" => Ok(Self::Refuse),
+            _ => Err(format!("unknown worktree sharing mode: {value}")),
+        }
+    }
+}
+
+pub const WORKTREE_SHARING_KEY: &str = "lanes.worktree.sharing";
+
+/// The compiled sharing default, with provenance for typed admission output.
+pub fn default_sharing() -> Sourced<Sharing> {
+    Sourced {
+        value: Sharing::Warn,
+        source: Source::default(),
+    }
+}
+
+/// Preserve the resolved sharing source in a command or warning record.
+pub fn sharing_setting_ref(sharing: &Sourced<Sharing>) -> SettingRef {
+    SettingRef {
+        key: WORKTREE_SHARING_KEY.to_owned(),
+        value: sharing.value.as_str().to_owned(),
+        layer: sharing.source.layer,
+        origin: sharing.source.origin.clone().unwrap_or_default(),
+    }
+}
+
+/// Durable worktree or branch custody. Whether this lease is live is derived
+/// from the holder's attempt state at read time and is never stored here.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorktreeLease {
+    pub holder: AttemptId,
+    pub since: WallTime,
+    #[serde(default)]
+    pub sharing: Sharing,
+}
+
+/// Current derived state of a lease. An unreachable holder remains live until
+/// the configured grace period expires; callers then classify it as lapsed.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum LeaseState {
+    Live {
+        attempt_state: String,
+    },
+    Lapsed {
+        attempt_state: String,
+    },
+    Unreachable {
+        retry_at: WallTime,
+        setting: SettingRef,
+    },
+    /// The holder's host stayed unobservable through the configured grace.
+    /// The lease may be adopted, but callers must report the lapse.
+    LapsedUnreachable {
+        retry_at: WallTime,
+        setting: SettingRef,
+    },
+}
+
+/// Durable fact that a new attempt continued a lapsed lease.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Handover {
+    pub from: AttemptId,
+    pub to: AttemptId,
+    pub at: WallTime,
+    pub head: Option<GitOid>,
+    /// Paths left uncommitted by the previous holder; they must be preserved.
+    pub uncommitted: Vec<String>,
+}
+
+/// A lease record paired with its current holder classification. Confinement
+/// derives presence at read time and persists only the first-unreachable time.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LeaseObservation {
+    pub lease: WorktreeLease,
+    pub state: LeaseState,
+}
+
+/// Outcome of the shared writer-admission policy.
+#[derive(Clone, Debug)]
+pub enum Admit {
+    Proceed { warning: Option<Box<Warning>> },
+    Refuse { error: CommandError },
+}
+
+/// Resolve the effect of an already-classified lease and sharing setting.
+/// Callers pass `Lapsed` for a terminal holder and `Live` while its attempt is
+/// nonterminal. An unreachable holder that outlasted its grace proceeds with a
+/// lapse warning. This function creates the typed warning or refusal once.
+pub fn admit_writer(
+    tree: &Subject,
+    lease: Option<&LeaseObservation>,
+    sharing: &Sourced<Sharing>,
+) -> Admit {
+    let effective = lease
+        .map(|observation| observation.lease.sharing)
+        .filter(|owner| *owner != Sharing::Inherit)
+        .map(|owner| Sourced {
+            value: owner,
+            source: Source::at(Layer::Parent, "lease.json#sharing"),
+        })
+        .unwrap_or_else(|| sharing.clone());
+    let effective = if effective.value == Sharing::Inherit {
+        Sourced {
+            value: Sharing::Warn,
+            ..effective
+        }
+    } else {
+        effective
+    };
+    let setting = sharing_setting_ref(&effective);
+    let Some(observation) = lease else {
+        return Admit::Proceed { warning: None };
+    };
+    let warning = |code: WarningCode, message: String| {
+        Box::new(
+            Warning::new(code, message, detected_source(code))
+                .subject(tree.to_string())
+                .setting(setting.clone()),
+        )
+    };
+    let warning_with_setting = |code: WarningCode, message: String, setting: SettingRef| {
+        Box::new(
+            Warning::new(code, message, detected_source(code))
+                .subject(tree.to_string())
+                .setting(setting),
+        )
+    };
+    let refusal = || {
+        let holder = observation.lease.holder;
+        let holder_text = holder.to_string();
+        CommandError::new(
+            WORKTREE_SHARING_REFUSED,
+            format!(
+                "{WORKTREE_SHARING_REFUSED}: {tree} is held by live attempt {holder}; wait for the holder or launch with --destination new"
+            ),
+            Some(&holder_text),
+            format!("provenant wait {holder}"),
+        )
+        .with_class(ErrorClass::Configured)
+        .with_setting(setting.clone())
+    };
+    match &observation.state {
+        LeaseState::Lapsed { .. } => Admit::Proceed { warning: None },
+        LeaseState::Live { attempt_state } => match effective.value {
+            Sharing::Inherit | Sharing::Warn => Admit::Proceed {
+                warning: Some(warning(
+                    WarningCode(WORKTREE_SHARED),
+                    format!(
+                        "WORKTREE_SHARED: {tree} is held by attempt {} ({attempt_state})",
+                        observation.lease.holder
+                    ),
+                )),
+            },
+            Sharing::Allow => Admit::Proceed { warning: None },
+            Sharing::Refuse => Admit::Refuse { error: refusal() },
+        },
+        LeaseState::Unreachable { retry_at, setting } => match effective.value {
+            Sharing::Inherit | Sharing::Warn => Admit::Proceed {
+                warning: Some(warning_with_setting(
+                    WarningCode(LEASE_HOLDER_UNREACHABLE),
+                    format!(
+                        "LEASE_HOLDER_UNREACHABLE: {tree} holder {} is unreachable until {retry_at}",
+                        observation.lease.holder
+                    ),
+                    setting.clone(),
+                )),
+            },
+            Sharing::Allow => Admit::Proceed { warning: None },
+            Sharing::Refuse => Admit::Refuse { error: refusal() },
+        },
+        LeaseState::LapsedUnreachable { retry_at, setting } => Admit::Proceed {
+            warning: Some(warning_with_setting(
+                WarningCode(LEASE_HOLDER_UNREACHABLE),
+                format!(
+                    "LEASE_HOLDER_UNREACHABLE: {tree} holder {} stayed unreachable through the grace ending at {retry_at}; its lease has lapsed",
+                    observation.lease.holder
+                ),
+                setting.clone(),
+            )),
+        },
+    }
+}
+
+/// Boundary guard signature for operations that could destroy another live
+/// lane's work. The caller supplies the already-resolved fact; no filesystem
+/// or Git mutation belongs in this records crate.
+pub fn guard_destructive(
+    op: &str,
+    subject: &Subject,
+    destroys_live_work: bool,
+    holder: Option<AttemptId>,
+) -> Result<(), crate::command_result::CommandError> {
+    if destroys_live_work {
+        let holder = holder
+            .map(|attempt| attempt.to_string())
+            .unwrap_or_default();
+        Err(crate::command_result::CommandError::new(
+            "DESTROYS_LIVE_WORK",
+            format!("{op} on {subject} would destroy work held by a live lane"),
+            Some(&holder),
+            if holder.is_empty() {
+                "identify and wait for the holder".to_owned()
+            } else {
+                format!("provenant wait {holder}")
+            },
+        )
+        .with_class(crate::command_result::ErrorClass::Boundary(
+            crate::policy::Boundary::OtherWork,
+        )))
+    } else {
+        Ok(())
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Origin {
@@ -1110,455 +1361,5 @@ pub struct CustodyStatus {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn endpoint_identity_keeps_ssh_principals_and_drops_secrets() {
-        // Distinct SSH users at one host and path are distinct destinations.
-        let alice = endpoint_identity("ssh://alice@example.invalid/team/repo.git");
-        let bob = endpoint_identity("ssh://bob@example.invalid/team/repo.git");
-        assert_ne!(alice, bob);
-        assert_eq!(alice, "ssh://alice@example.invalid/team/repo.git");
-        assert_eq!(bob, "ssh://bob@example.invalid/team/repo.git");
-        // A password or token on the SSH user is a secret, never retained.
-        assert_eq!(
-            endpoint_identity("ssh://alice:token@example.invalid/team/repo.git"),
-            alice
-        );
-        assert_eq!(
-            endpoint_identity("git+ssh://alice@example.invalid/team/repo.git"),
-            "git+ssh://alice@example.invalid/team/repo.git"
-        );
-        // scp-like URLs have no password form; keep the principal as written.
-        assert_ne!(
-            endpoint_identity("alice@example.invalid:team/repo.git"),
-            endpoint_identity("bob@example.invalid:team/repo.git")
-        );
-        // For other transports the username can itself be a token: strip all
-        // userinfo so two HTTP destinations at one host and path stay equal.
-        assert_eq!(
-            endpoint_identity("https://alice@example.invalid/team/repo.git"),
-            endpoint_identity("https://bob:token@example.invalid/team/repo.git")
-        );
-        assert_eq!(
-            endpoint_identity("https://alice@example.invalid/team/repo.git"),
-            "https://example.invalid/team/repo.git"
-        );
-        assert_eq!(
-            endpoint_identity("file://user:secret@localhost/tmp/repo.git"),
-            "file://localhost/tmp/repo.git"
-        );
-        assert!(!alice.contains("token"));
-    }
-
-    #[test]
-
-    fn ref_custody_subject_binds_endpoint_reference_and_generation_without_exposing_url() {
-        let project = ProjectId::from_bytes([9; 16]);
-        let local = RefOwnership {
-            repository: project,
-            endpoint: RefEndpoint::Local,
-            reference: "refs/heads/topic".into(),
-            generation: 1,
-            origin: RefOrigin::Created,
-        };
-        let remote = RefOwnership {
-            endpoint: RefEndpoint::Remote {
-                remote: "origin".into(),
-                push_url: "ssh://example.invalid/team/repo.git".into(),
-            },
-            ..local.clone()
-        };
-        let another_generation = RefOwnership {
-            generation: 2,
-            ..remote.clone()
-        };
-        let another_remote = RefOwnership {
-            endpoint: RefEndpoint::Remote {
-                remote: "backup".into(),
-                push_url: "ssh://backup.invalid/team/repo.git".into(),
-            },
-            ..remote.clone()
-        };
-        let local_subject = local.custody_subject().unwrap();
-        let remote_subject = remote.custody_subject().unwrap();
-        assert_eq!(local_subject.kind, SubjectKind::Ref);
-        assert_eq!(
-            local.logical_branch_subject(),
-            remote.logical_branch_subject()
-        );
-        assert_ne!(local_subject, remote_subject);
-        assert_ne!(
-            remote_subject,
-            another_generation.custody_subject().unwrap()
-        );
-        assert_ne!(remote_subject, another_remote.custody_subject().unwrap());
-        let RefEndpoint::Remote { push_url, .. } = &remote.endpoint else {
-            unreachable!()
-        };
-        assert!(!remote_subject.id.contains(push_url.as_str()));
-        assert!(
-            !serde_json::to_string(&remote.generation_identity().unwrap())
-                .unwrap()
-                .contains(push_url.as_str())
-        );
-        let detached = RefOwnership {
-            endpoint: RefEndpoint::Worktree {
-                path: "/fixture/detached".into(),
-            },
-            reference: "HEAD".into(),
-            ..local.clone()
-        };
-        let detached_identity = detached.identity().unwrap();
-        assert!(matches!(
-            detached_identity.endpoint,
-            RefEndpointIdentity::Worktree { .. }
-        ));
-        assert!(detached.logical_branch_subject().is_none());
-        assert!(
-            RefOwnership {
-                endpoint: RefEndpoint::Worktree {
-                    path: "/fixture/../escape".into(),
-                },
-                ..detached
-            }
-            .identity()
-            .is_err()
-        );
-    }
-
-    #[test]
-    fn retirement_records_follow_one_declared_decision_and_archive_identity() {
-        let project = ProjectId::from_bytes([12; 16]);
-        let tip = provenant_core::GitOid::parse(&"c3".repeat(20)).unwrap();
-        let reference = RefOwnership {
-            repository: project,
-            endpoint: RefEndpoint::Local,
-            reference: "refs/heads/idle".into(),
-            generation: 4,
-            origin: RefOrigin::Created,
-        };
-        let worktree = Subject::worktree("/fixture/idle", "fixture-1");
-        let idle = RetirementDecision::RetireWorktree {
-            authority: ActorId::from_bytes([4; 16]),
-            evidence: RemovalEvidence::IdleRetirement { tip },
-        };
-        let mut record = RetirementRecord::plan(
-            project,
-            vec![worktree.clone()],
-            reference.clone(),
-            tip,
-            idle,
-        )
-        .unwrap();
-        assert!(record.valid_evidence());
-        assert_eq!(record.outcomes.len(), 1);
-        assert_eq!(
-            record.subjects().cloned().collect::<Vec<_>>(),
-            std::slice::from_ref(&worktree)
-        );
-        assert_eq!(record.removals().len(), 1);
-        assert_eq!(record.removal().subject, worktree);
-        let completion = record.decision.evidence().clone();
-        record.outcomes[0].state = RetirementStepState::Completed {
-            evidence: completion.clone(),
-        };
-        assert!(matches!(
-            record.removal().outcome,
-            RemovalOutcome::Removed { .. }
-        ));
-        assert!(record.accepts_completion_evidence(&record.outcomes[0].step, &completion));
-
-        let subsumed = RetirementRecord::plan(
-            project,
-            vec![Subject::worktree("/fixture/subsumed", "fixture-1")],
-            reference.clone(),
-            tip,
-            RetirementDecision::RetireWorktree {
-                authority: ActorId::from_bytes([4; 16]),
-                evidence: RemovalEvidence::Landing {
-                    evidence: LandedEvidence {
-                        predicate: LandingPredicate::Subsumed,
-                        source: LandingSource::RetainedRef {
-                            reference: "refs/heads/retained".into(),
-                            commit: tip,
-                        },
-                    },
-                },
-            },
-        )
-        .unwrap();
-        assert!(subsumed.valid_evidence());
-        assert_eq!(subsumed.outcomes.len(), 1);
-        assert_eq!(subsumed.subjects().count(), 1);
-        let refreshed_subsumed = RetirementDecision::RetireWorktree {
-            authority: ActorId::from_bytes([5; 16]),
-            evidence: RemovalEvidence::Landing {
-                evidence: LandedEvidence {
-                    predicate: LandingPredicate::Subsumed,
-                    source: LandingSource::RetainedRef {
-                        reference: "refs/heads/updated-base".into(),
-                        commit: tip,
-                    },
-                },
-            },
-        };
-        assert!(subsumed.decision.permits_replay(&refreshed_subsumed));
-        assert!(refreshed_subsumed.valid_for(&subsumed.related_subjects, tip));
-
-        let archive = ArchiveProof {
-            id: "archive-123".into(),
-            tip,
-        };
-        let explicit = RetirementDecision::Discard {
-            authority: ActorId::from_bytes([4; 16]),
-            evidence: RemovalEvidence::ExplicitDiscard {
-                archive: Some(archive.clone()),
-            },
-        };
-        let explicit_record = RetirementRecord::plan(
-            project,
-            vec![Subject::worktree("/fixture/idle", "fixture-1")],
-            reference.clone(),
-            tip,
-            explicit.clone(),
-        )
-        .unwrap();
-        assert!(explicit_record.valid_evidence());
-        assert_eq!(explicit_record.outcomes.len(), 2);
-        let refreshed_archive = RetirementDecision::Discard {
-            authority: ActorId::from_bytes([5; 16]),
-            evidence: RemovalEvidence::ExplicitDiscard {
-                archive: Some(ArchiveProof {
-                    id: "archive-retry".into(),
-                    tip,
-                }),
-            },
-        };
-        assert!(explicit.permits_replay(&refreshed_archive));
-        assert!(refreshed_archive.valid_for(&explicit_record.related_subjects, tip));
-        let worktree_step = RetirementStep::Worktree {
-            subject: explicit_record.related_subjects[0].clone(),
-        };
-        assert!(
-            explicit_record
-                .accepts_completion_evidence(&worktree_step, refreshed_archive.evidence(),)
-        );
-        let wrong_tip_archive = RetirementDecision::Discard {
-            authority: ActorId::from_bytes([5; 16]),
-            evidence: RemovalEvidence::ExplicitDiscard {
-                archive: Some(ArchiveProof {
-                    id: "archive-wrong-tip".into(),
-                    tip: provenant_core::GitOid::parse(&"d4".repeat(20)).unwrap(),
-                }),
-            },
-        };
-        assert!(explicit.permits_replay(&wrong_tip_archive));
-        assert!(!wrong_tip_archive.valid_for(&explicit_record.related_subjects, tip));
-        assert!(
-            !explicit_record
-                .accepts_completion_evidence(&worktree_step, wrong_tip_archive.evidence(),)
-        );
-        assert!(!explicit.permits_replay(&refreshed_subsumed));
-        assert_ne!(
-            explicit_record.id,
-            RetirementRecord::identity(
-                project,
-                &explicit_record.related_subjects,
-                &reference.generation_identity().unwrap(),
-                tip,
-                &RetirementDecision::Discard {
-                    authority: ActorId::from_bytes([4; 16]),
-                    evidence: RemovalEvidence::ExplicitDiscard {
-                        archive: Some(ArchiveProof {
-                            id: "archive-other".into(),
-                            tip,
-                        }),
-                    },
-                },
-            )
-            .unwrap()
-        );
-        let invalid_archive = RetirementDecision::Discard {
-            authority: ActorId::from_bytes([4; 16]),
-            evidence: RemovalEvidence::ExplicitDiscard {
-                archive: Some(ArchiveProof {
-                    id: "../escape".into(),
-                    tip,
-                }),
-            },
-        };
-        assert!(
-            !RetirementRecord::plan(
-                project,
-                explicit_record.related_subjects,
-                reference,
-                tip,
-                invalid_archive,
-            )
-            .unwrap()
-            .valid_evidence()
-        );
-        let detached_path = "/fixture/detached";
-        let detached_worktree = Subject::worktree(detached_path, "fixture-1");
-        let detached_reference = RefOwnership {
-            repository: project,
-            endpoint: RefEndpoint::Worktree {
-                path: detached_path.into(),
-            },
-            reference: "HEAD".into(),
-            generation: 1,
-            origin: RefOrigin::Adopted,
-        };
-        let detached = RetirementRecord::plan(
-            project,
-            vec![detached_worktree.clone()],
-            detached_reference,
-            tip,
-            RetirementDecision::RetireWorktree {
-                authority: ActorId::from_bytes([4; 16]),
-                evidence: RemovalEvidence::ExplicitDiscard {
-                    archive: Some(ArchiveProof {
-                        id: "archive-detached".into(),
-                        tip,
-                    }),
-                },
-            },
-        )
-        .unwrap();
-        assert!(detached.valid_evidence());
-        assert_eq!(detached.outcomes.len(), 1);
-        assert_eq!(
-            detached.subjects().cloned().collect::<Vec<_>>(),
-            [detached_worktree]
-        );
-        assert!(!archive.id.is_empty());
-    }
-
-    #[test]
-    fn removal_records_round_trip_every_predicate_source_and_uncertainty() {
-        let oid = provenant_core::GitOid::parse(&"a".repeat(40)).unwrap();
-        let target = provenant_core::GitOid::parse(&"b".repeat(40)).unwrap();
-        let project = ProjectId::from_bytes([7; 16]);
-        let sources = [
-            LandingSource::RetainedRef {
-                reference: "refs/heads/feature".into(),
-                commit: oid,
-            },
-            LandingSource::TreeEquivalent {
-                reference: "refs/heads/retained".into(),
-                head: oid,
-                target,
-                tree: oid,
-            },
-            LandingSource::IntegrationTarget {
-                reference: "refs/remotes/origin/main".into(),
-                commit: target,
-            },
-            LandingSource::ForgeMerged {
-                pr: "42".into(),
-                head: oid,
-                merge_commit: Some(target),
-            },
-        ];
-        for predicate in [LandingPredicate::Subsumed, LandingPredicate::Landed] {
-            for source in &sources {
-                let record = RemovalRecord {
-                    project,
-                    subject: Subject::worktree("/fixture/feature", "fixture-1"),
-                    tip: oid,
-                    outcome: RemovalOutcome::Removed {
-                        evidence: RemovalEvidence::Landing {
-                            evidence: LandedEvidence {
-                                predicate,
-                                source: source.clone(),
-                            },
-                        },
-                        retirement_id: "retirement-test".into(),
-                    },
-                };
-                let encoded = serde_json::to_vec(&record).unwrap();
-                let decoded: RemovalRecord = serde_json::from_slice(&encoded).unwrap();
-                assert_eq!(decoded, record);
-                let mut without_owner = serde_json::to_value(&record).unwrap();
-                without_owner["outcome"]
-                    .as_object_mut()
-                    .unwrap()
-                    .remove("retirement_id");
-                assert!(serde_json::from_value::<RemovalRecord>(without_owner).is_err());
-            }
-        }
-        let explicit = RemovalRecord {
-            project,
-            subject: Subject::worktree("/fixture/feature", "fixture-1"),
-            tip: oid,
-            outcome: RemovalOutcome::Removed {
-                evidence: RemovalEvidence::ExplicitDiscard {
-                    archive: Some(ArchiveProof {
-                        id: "archive-1".into(),
-                        tip: oid,
-                    }),
-                },
-                retirement_id: "retirement-explicit".into(),
-            },
-        };
-        let encoded = serde_json::to_vec(&explicit).unwrap();
-        assert_eq!(
-            serde_json::from_slice::<RemovalRecord>(&encoded).unwrap(),
-            explicit
-        );
-        for &cause in RemovalUncertainty::ALL {
-            let record = RemovalRecord {
-                project,
-                subject: Subject::worktree("/fixture/feature", "fixture-1"),
-                tip: oid,
-                outcome: RemovalOutcome::Kept { cause },
-            };
-            let encoded = serde_json::to_vec(&record).unwrap();
-            let decoded: RemovalRecord = serde_json::from_slice(&encoded).unwrap();
-            assert_eq!(decoded, record);
-        }
-    }
-
-    #[test]
-    fn worktree_identity_preserves_incarnations_and_rejects_path_only_subjects() {
-        let first = Subject::worktree("/fixture/reused", "generation-1");
-        let second = Subject::worktree("/fixture/reused", "generation-2");
-        assert_ne!(first, second);
-        assert_eq!(first.worktree_path(), second.worktree_path());
-        assert_eq!(first.to_string().parse::<Subject>().unwrap(), first);
-        assert!(
-            Subject::new(SubjectKind::Worktree, "/fixture/reused")
-                .worktree_path()
-                .is_none()
-        );
-        for (path, generation) in [
-            ("relative", "generation-1"),
-            ("/fixture/../escape", "generation-1"),
-            ("/fixture/reused", ""),
-        ] {
-            assert!(
-                Subject::worktree(path, generation)
-                    .worktree_path()
-                    .is_none()
-            );
-        }
-    }
-
-    #[test]
-    fn every_declared_subject_kind_round_trips() {
-        for &kind in SubjectKind::ALL {
-            assert_eq!(kind.as_str().parse::<SubjectKind>().unwrap(), kind);
-            let subject = if kind == SubjectKind::Worktree {
-                Subject::worktree("/fixture/checkout", "generation-1")
-            } else {
-                Subject::new(kind, "item:with:colons")
-            };
-            assert_eq!(subject.to_string().parse::<Subject>().unwrap(), subject);
-            assert_eq!(
-                serde_json::from_value::<Subject>(serde_json::to_value(&subject).unwrap()).unwrap(),
-                subject
-            );
-        }
-    }
-}
+#[path = "custody_tests.rs"]
+mod tests;

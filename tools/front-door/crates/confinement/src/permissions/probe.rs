@@ -359,7 +359,7 @@ pub(super) fn check_capacity_policy(
     };
     match policy.check(code, facts) {
         Effect::Proceed => Ok(None),
-        Effect::Warn(warning) => Ok(Some(warning)),
+        Effect::Warn(warning) => Ok(Some(*warning)),
         Effect::Refuse(diagnostic) | Effect::Stop(diagnostic) => {
             if let Some(detail) = diagnostic.detail {
                 use provenant_records::warning::{POLICY_STRICT_REFUSAL, Warning};

@@ -1,8 +1,9 @@
 #!/bin/sh
 set -eu
 
-cmd=${1:?expected mine, verify or run}
+cmd=${1:?expected mine, verify, run, report or replay}
 shift
+script_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)
 repo=$(pwd -P)
 root=$(git -C "$repo" rev-parse --show-toplevel)
 tasks=$root/bench/tasks
@@ -13,9 +14,11 @@ field() {
 import sys,tomllib
 with open(sys.argv[2],"rb") as source:
     task=tomllib.load(source)
-expected={"repo","parent_sha","merge_sha","prompt","hidden_test_command","split"}
+expected={"repo","parent_sha","merge_sha","prompt","hidden_test_command","split","family"}
 if set(task) != expected or task["split"] not in {"search","acceptance","held-out"}:
     raise SystemExit("invalid benchmark task fields or split")
+if task["family"] not in {"writer","fix","review","read-only","unclassified"}:
+    raise SystemExit("invalid benchmark task family")
 value=task[sys.argv[1]]
 if not isinstance(value,str):
     raise SystemExit("benchmark task fields must be strings")
@@ -63,12 +66,26 @@ print(digest.hexdigest())
 PY
 }
 
+family_wanted() {
+    if [ -z "$families" ]; then return 0; fi
+    case " $families " in
+        *" $1 "*) return 0 ;;
+    esac
+    return 1
+}
+
 case "$cmd" in
 mine)
     limit=100
+    family=unclassified
     while [ "$#" -gt 0 ]; do
-        case "$1" in --limit) limit=$2; shift 2 ;; *) echo "unknown mine option: $1" >&2; exit 2 ;; esac
+        case "$1" in
+            --limit) limit=$2; shift 2 ;;
+            --family) family=$2; shift 2 ;;
+            *) echo "unknown mine option: $1" >&2; exit 2 ;;
+        esac
     done
+    case "$family" in writer|fix|review|read-only|unclassified) ;; *) echo "unknown task family: $family" >&2; exit 2 ;; esac
     count=0
     merge_log=$(mktemp "${TMPDIR:-/tmp}/provenant-bench-log.XXXXXX")
     trap 'rm -f "$merge_log"' EXIT HUP INT TERM
@@ -92,6 +109,7 @@ merge_sha = "$merge"
 prompt = "Implement the change from merge $short: $title"
 hidden_test_command = "$escaped_command"
 split = "search"
+family = "$family"
 EOF
         git -C "$root" diff --binary --unified=0 "$parent" "$merge" -- ':(glob)**/*test*.rs' ':(glob)**/*_tests.rs' ':(glob)**/tests/**/*.rs' > "$tasks/candidate-$short.patch"
         count=$((count + 1))
@@ -119,27 +137,38 @@ verify)
     echo "verified $task"
     ;;
 run)
-    route='' split=acceptance limit=100
+    route='' split=acceptance limit=100 repeats=1 families='' ledger=''
     while [ "$#" -gt 0 ]; do
         case "$1" in
             --route) route=$2; shift 2 ;;
             --split) split=$2; shift 2 ;;
             --limit) limit=$2; shift 2 ;;
+            --repeats) repeats=$2; shift 2 ;;
+            --ledger) ledger=$2; shift 2 ;;
+            --family) families="$families $2"; shift 2 ;;
             *) echo "unknown run option: $1" >&2; exit 2 ;;
         esac
     done
     [ -n "$route" ] || { echo "--route is required" >&2; exit 2; }
+    case "$repeats" in ''|*[!0-9]*) echo "--repeats must be a positive integer" >&2; exit 2 ;; esac
+    [ "$repeats" -gt 0 ] || { echo "--repeats must be a positive integer" >&2; exit 2; }
+    for family in $families; do
+        case "$family" in writer|fix|review|read-only) ;; *) echo "unknown task family: $family" >&2; exit 2 ;; esac
+    done
     model=${route%@*}; effort=${route##*@}; [ "$model" != "$route" ] || effort=
     bin=${PROVENANT_BIN:-provenant}
     state=$("$bin" root --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["data"]["state_directory"])')
-    ledger=$state/bench.jsonl
-    mkdir -p "$state"
+    [ -n "$ledger" ] || ledger=$state/bench.jsonl
+    mkdir -p "$state" "$(dirname "$ledger")"
     count=0
+    runs=0
     for task in "$tasks"/*.toml; do
         [ -f "$task" ] || continue
         [ "$count" -lt "$limit" ] || break
         task_split=$(field split "$task")
         [ "$task_split" = "$split" ] || continue
+        task_family=$(field family "$task")
+        family_wanted "$task_family" || continue
         parent=$(field parent_sha "$task")
         prompt=$(field prompt "$task")
         command=$(field hidden_test_command "$task")
@@ -148,59 +177,109 @@ run)
         expected=$(task_fingerprint "$task")
         actual=$(cat "$task.verified" 2>/dev/null || :)
         [ "$expected" = "$actual" ] || { echo "task is unverified or changed; run bench verify first: $task" >&2; exit 2; }
-        tmp=$(mktemp -d "${TMPDIR:-/tmp}/provenant-bench.XXXXXX")
-        init_task_repo "$tmp/repo" "$parent"
-        branch=bench-$(date +%s)-$count
-        worktree=$tmp/repo/.worktrees/$branch
-        cleanup() {
-            "$bin" worktree remove "$branch" --project "$tmp/repo" --json >/dev/null 2>&1 || git -C "$tmp/repo" worktree remove --force "$worktree" >/dev/null 2>&1 || :
+        repeat=1
+        while [ "$repeat" -le "$repeats" ]; do
+            tmp=$(mktemp -d "${TMPDIR:-/tmp}/provenant-bench.XXXXXX")
+            init_task_repo "$tmp/repo" "$parent"
+            branch=bench-$(date +%s)-$runs
+            worktree=$tmp/repo/.worktrees/$branch
+            cleanup() {
+                "$bin" worktree remove "$branch" --project "$tmp/repo" --json >/dev/null 2>&1 || git -C "$tmp/repo" worktree remove --force "$worktree" >/dev/null 2>&1 || :
+                rm -rf "$tmp"
+            }
+            trap cleanup EXIT HUP INT TERM
+            start=$(date +%s)
+            "$bin" worktree create "$branch" --base "$parent" --project "$tmp/repo" --json > "$tmp/worktree.json"
+            printf '%s\n' "$prompt" > "$tmp/prompt.md"
+            op=bench-$(date +%s)-$runs
+            set -- task --project "$tmp/repo" --brief-file "$tmp/prompt.md" --name "$op"
+            case "$model" in */*) set -- "$@" --model "$model" ;; *) set -- "$@" --route "$model" ;; esac
+            set -- "$@" --mode worktree-write --worktree "$worktree" --json
+            [ -z "$effort" ] || set -- "$@" --effort "$effort"
+            run_exit=0
+            "$bin" run "$@" > "$tmp/run.json" || run_exit=$?
+            if [ "$run_exit" -eq 0 ]; then
+                "$bin" wait "$op" --project "$tmp/repo" --timeout 10800 --json > "$tmp/wait.json" || run_exit=$?
+            fi
+            if [ "$run_exit" -eq 0 ]; then
+                "$bin" telemetry cost "$op" --project "$tmp/repo" --json > "$tmp/stats.json" || printf '{"data":null}\n' > "$tmp/stats.json"
+                "$bin" telemetry stats --project "$tmp/repo" --json > "$tmp/usage.json" || printf '{"data":null}\n' > "$tmp/usage.json"
+            else
+                printf '{"data":null}\n' > "$tmp/stats.json"
+                printf '{"data":null}\n' > "$tmp/usage.json"
+            fi
+            passed=false
+            reason=
+            if [ "$run_exit" -ne 0 ]; then
+                reason="run or wait failed (exit $run_exit)"
+            elif ! git -C "$worktree" apply --unidiff-zero "$patch"; then
+                reason='hidden patch failed to apply'
+            elif (cd "$worktree" && sh -c "$command") > "$tmp/test.log" 2>&1; then
+                passed=true
+            fi
+            seconds=$(( $(date +%s) - start ))
+            python3 "$script_dir/bench-report" row \
+                "$task" "$task_family" "$route" "$model" "$passed" "$seconds" \
+                "$tmp/stats.json" "$reason" "$tmp/usage.json" \
+                "$repeat" "$repeats" >> "$ledger"
+            git -C "$tmp/repo" worktree remove --force "$worktree" >/dev/null
             rm -rf "$tmp"
-        }
-        trap cleanup EXIT HUP INT TERM
-        start=$(date +%s)
-        "$bin" worktree create "$branch" --base "$parent" --project "$tmp/repo" --json > "$tmp/worktree.json"
-        printf '%s\n' "$prompt" > "$tmp/prompt.md"
-        op=bench-$(date +%s)-$count
-        set -- task --project "$tmp/repo" --brief-file "$tmp/prompt.md" --name "$op"
-        case "$model" in */*) set -- "$@" --model "$model" ;; *) set -- "$@" --route "$model" ;; esac
-        set -- "$@" --mode worktree-write --worktree "$worktree" --json
-        [ -z "$effort" ] || set -- "$@" --effort "$effort"
-        run_exit=0
-        "$bin" run "$@" > "$tmp/run.json" || run_exit=$?
-        if [ "$run_exit" -eq 0 ]; then
-            "$bin" wait "$op" --project "$tmp/repo" --timeout 10800 --json > "$tmp/wait.json" || run_exit=$?
-        fi
-        if [ "$run_exit" -eq 0 ]; then
-            "$bin" telemetry cost "$op" --project "$tmp/repo" --json > "$tmp/stats.json" || printf '{"data":null}\n' > "$tmp/stats.json"
-        else
-            printf '{"data":null}\n' > "$tmp/stats.json"
-        fi
-        passed=false
-        reason=
-        if [ "$run_exit" -ne 0 ]; then
-            reason="run or wait failed (exit $run_exit)"
-        elif ! git -C "$worktree" apply --unidiff-zero "$patch"; then
-            reason='hidden patch failed to apply'
-        elif (cd "$worktree" && sh -c "$command") > "$tmp/test.log" 2>&1; then
-            passed=true
-        fi
-        seconds=$(( $(date +%s) - start ))
-        python3 - "$task" "$route" "$model" "$passed" "$seconds" "$tmp/stats.json" "$reason" >> "$ledger" <<'PY'
-import json,sys
-report=json.load(open(sys.argv[6])).get("data")
-totals=None if report is None else report["totals"]
-# The cost ledger reports money coverage, not aggregate token categories.
-tokens=None
-cost=None if totals is None or not totals["complete"] else totals["usd"]
-turns=None if totals is None else totals["attempts"]
-print(json.dumps({"task":sys.argv[1],"route":sys.argv[2],"model":sys.argv[3],"pass":None if sys.argv[7] else sys.argv[4]=="true","reason":sys.argv[7] or None,"tokens":tokens,"cost":cost,"turns":turns,"seconds":int(sys.argv[5])},separators=(",",":")))
-PY
-        git -C "$tmp/repo" worktree remove --force "$worktree" >/dev/null
-        rm -rf "$tmp"
-        trap - EXIT HUP INT TERM
+            trap - EXIT HUP INT TERM
+            runs=$((runs + 1))
+            repeat=$((repeat + 1))
+        done
         count=$((count + 1))
     done
-    echo "recorded $count task(s) in $ledger"
+    echo "recorded $runs run(s) across $count task(s) in $ledger (repeats=$repeats split=$split families=${families:-all})"
+    ;;
+report)
+    ledger='' route='' repeats='' families=''
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --ledger) ledger=$2; shift 2 ;;
+            --route) route=$2; shift 2 ;;
+            --repeats) repeats=$2; shift 2 ;;
+            --family) families="$families $2"; shift 2 ;;
+            *) echo "unknown report option: $1" >&2; exit 2 ;;
+        esac
+    done
+    if [ -z "$ledger" ]; then
+        bin=${PROVENANT_BIN:-provenant}
+        state=$("$bin" root --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["data"]["state_directory"])')
+        ledger=$state/bench.jsonl
+    fi
+    set -- python3 "$script_dir/bench-report" report --ledger "$ledger"
+    [ -z "$route" ] || set -- "$@" --route "$route"
+    [ -z "$repeats" ] || set -- "$@" --repeats "$repeats"
+    for family in $families; do set -- "$@" --family "$family"; done
+    exec "$@"
+    ;;
+replay)
+    route='' split='' limit='' repeats='' ledger='' families=''
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --route) route=$2; shift 2 ;;
+            --split) split=$2; shift 2 ;;
+            --limit) limit=$2; shift 2 ;;
+            --repeats) repeats=$2; shift 2 ;;
+            --ledger) ledger=$2; shift 2 ;;
+            --family) families="$families $2"; shift 2 ;;
+            *) echo "unknown replay option: $1" >&2; exit 2 ;;
+        esac
+    done
+    [ -n "$route" ] || { echo "--route is required" >&2; exit 2; }
+    set -- run --route "$route"
+    [ -z "$split" ] || set -- "$@" --split "$split"
+    [ -z "$limit" ] || set -- "$@" --limit "$limit"
+    [ -z "$repeats" ] || set -- "$@" --repeats "$repeats"
+    [ -z "$ledger" ] || set -- "$@" --ledger "$ledger"
+    for family in $families; do set -- "$@" --family "$family"; done
+    "$script_dir/bench" "$@"
+    set -- report --route "$route"
+    [ -z "$repeats" ] || set -- "$@" --repeats "$repeats"
+    [ -z "$ledger" ] || set -- "$@" --ledger "$ledger"
+    for family in $families; do set -- "$@" --family "$family"; done
+    "$script_dir/bench" "$@"
     ;;
 *) echo "unknown bench command: $cmd" >&2; exit 2 ;;
 esac

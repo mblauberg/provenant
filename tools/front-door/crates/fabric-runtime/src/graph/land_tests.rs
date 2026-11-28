@@ -158,6 +158,12 @@ impl AttemptOwner for Owner {
                 base: WRITE_HEAD.into(),
                 head: WRITE_HEAD.into(),
             }
+        } else if self.repair_fixture {
+            // The review chain's ledger is keyed by the head the panel reviewed.
+            ReviewRange::Resolved {
+                base: REVIEW_BASE.into(),
+                head: self.head.clone().unwrap_or_else(|| WRITE_HEAD.into()),
+            }
         } else {
             ReviewRange::Unknown
         })
@@ -180,6 +186,8 @@ impl AttemptOwner for Owner {
     ) -> Result<Option<WriterWorktreeBinding>, Self::Error> {
         Ok(Some(WriterWorktreeBinding {
             extra: Default::default(),
+            carry_examined: false,
+            carried_paths: Vec::new(),
             source_directory_identity: None,
             shared_worktree: None,
             worktree: worktree.to_owned(),
@@ -399,7 +407,8 @@ impl AttemptOwner for Owner {
             self.head = Some(commit.into());
         }
         let attempt_ref = if self.repair_fixture {
-            let reference = format!("fixture/{}", self.launches.len());
+            // Review settlement parses the final segment as an attempt id.
+            let reference = format!("fixture/{:032x}", self.launches.len());
             let family = if self.repair_alternative
                 && input.distinct_from_attempts.iter().any(|reference| {
                     self.repair_families
@@ -448,15 +457,15 @@ fn findings_panels_feed_repair_and_land_the_reviewed_head() {
         let repair = template::Compiler::new(&library).compile(&json!({
             "id":"cycles","use":"repair","after":["initial"],
             "inputs":[{"node":"initial","outputs":["findings","verdict"]}],
-            "repeat":{"until":"accepted","max_rounds":3,"review_repair":true},
+            "repeat":{"until":"accepted","max_rounds":3,"review_repair":true,"previous_bindings":{"synthesis":"initial"}},
             "with":{"worktree":"/wt/feature","write_scope":["src"],"writer":"write","lenses":["correctness"]}
         })).unwrap();
         let mut members = vec![
             json!({"id":"lens","template":"review.correctness","review_lens":"correctness",
-            "access":"read_only","prompt":"review","route":{"alias":"senior"},"require_findings":true}),
+            "review_behaviour":"lens","access":"read_only","prompt":"review","route":{"alias":"senior"},"require_findings":true}),
         ];
         let exported = if model_synthesis {
-            members.push(json!({"id":"synthesis","kind":"synthesise","access":"read_only","prompt":"synthesise",
+            members.push(json!({"id":"synthesis","kind":"synthesise","review_behaviour":"synthesis","access":"read_only","prompt":"synthesise",
                 "route":{"alias":"senior"},"depends_on":["lens"],"require_findings":true,
                 "inputs":[{"node":"lens","outputs":["findings"]}]}));
             "synthesis"
@@ -469,7 +478,7 @@ fn findings_panels_feed_repair_and_land_the_reviewed_head() {
             "exports":[{"node":exported,"outputs":["findings","verdict"]}]}}),
         )
         .unwrap();
-        let mut document: GraphDocument = serde_json::from_value(json!({"schema_version":1,"graph_id":"repair-land",
+        let mut document: GraphDocument = serde_json::from_value(json!({"schema_version":2,"graph_id":"repair-land",
             "context":{"risk_tier":"substantial"},"nodes":[
             {"id":"write","access":"worktree_write","worktree":"/wt/feature","delivery":"pr","prompt":"write","route":{"alias":"senior"}},
             {"id":"ci","kind":"gate","access":"read_only","depends_on":["cycles"],"condition":{"type":"ci","target":{"node":"write"}}},
@@ -590,6 +599,7 @@ fn bundled_deliver_repairs_findings_before_landing() {
         run.checkpoint
             .nodes
             .iter()
+            .filter(|n| n.state != NodeState::Skipped)
             .map(|n| (&n.id, n.state, &n.advance_note))
             .collect::<Vec<_>>()
     );
@@ -865,7 +875,7 @@ fn queue_publication_without_writer_delivery_supports_head_review_and_landing() 
             .find(|(node, _)| node == "review")
             .unwrap()
             .1,
-        vec!["fixture/1".to_owned()]
+        vec![format!("fixture/{:032x}", 1)]
     );
 
     let land = node(&checkpoint, "land");

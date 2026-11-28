@@ -462,10 +462,20 @@ pub(super) fn gc_sweep_budget_stops_then_resumes() -> Result {
         "schema_version=1\n[gc]\nsweep_budget='0'\nfree_floor='18446744073709551615B'\n",
     )?;
     let stopped = command(&rig, &["gc", "--scheduled", "--apply", "--json"])?;
-    assert_ne!(code(&stopped), 0);
+    // A budget stop saves its cursor: it is partial progress, not an error.
+    assert_eq!(code(&stopped), 0);
     let stopped: Value = serde_json::from_slice(&stopped.stdout.bytes)?;
     assert_eq!(stopped["data"]["sweep_stopped"], true, "{stopped}");
+    assert_eq!(stopped["data"]["partial"], true, "{stopped}");
     assert!(stopped["data"]["sweep_cursor"].is_object());
+    assert!(
+        stopped["warnings"]
+            .as_array()
+            .is_some_and(|warnings| warnings
+                .iter()
+                .any(|warning| warning["code"] == "GC_BUDGET_STOP")),
+        "{stopped}"
+    );
     fs::write(
         rig.state.join("config.toml"),
         "schema_version=1\n[gc]\nsweep_budget='5m'\nfree_floor='18446744073709551615B'\n",

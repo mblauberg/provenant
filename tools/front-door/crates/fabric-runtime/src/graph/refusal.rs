@@ -178,7 +178,7 @@ pub fn input_warnings(
         match policy.check("SECRET_SHAPED_INPUT", fact) {
             Effect::Proceed => {}
             Effect::Warn(warning) => {
-                warnings.push(warning);
+                warnings.push(*warning);
             }
             // Keep the input scanner advisory even if a caller constructs a
             // stale or otherwise unsupported strict policy directly. Exact
@@ -510,7 +510,7 @@ mod tests {
     #[test]
     fn secret_shaped_inputs_warn_without_disclosing_values_under_every_policy() {
         let _mode = provenant_redact::scoped(provenant_redact::Mode::Secrets);
-        use provenant_records::policy::{Policy, Source, Strength};
+        use provenant_records::policy::{Policy, Strength};
         use std::collections::BTreeMap;
 
         let marker = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
@@ -524,7 +524,7 @@ mod tests {
         let mut strict = Policy::default();
         strict.overlay(
             &BTreeMap::from([("SECRET_SHAPED_INPUT".into(), Strength::Refuse)]),
-            Source::Project,
+            provenant_records::Layer::Project,
         );
         assert_eq!(
             strict.rule("SECRET_SHAPED_INPUT").rule.strength,
@@ -546,6 +546,10 @@ mod tests {
             .expect("compiled scanner policy");
         rule.rule.refusable = true;
         rule.rule.strength = Strength::Refuse;
+        legacy.set_default(
+            Strength::Refuse,
+            provenant_records::provenance::Layer::Project,
+        );
         let warnings = input_warnings(&input, &legacy);
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].message.contains("strength=Warn"));

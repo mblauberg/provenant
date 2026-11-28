@@ -1,4 +1,20 @@
 include!("interface_implement_invariants.rs");
+
+#[test]
+fn review_policy_launch_set_is_removed_from_template_parameters() {
+    let input = super::extract_review_policy_set(json!({
+        "set": {
+            "domains.review.later_rounds": "full",
+            "domains.review.evidence_retries": "4",
+            "brief": "review this"
+        }
+    }))
+    .unwrap();
+    assert_eq!(input["review_policy"]["later_rounds"], "full");
+    assert_eq!(input["review_policy"]["evidence_retries"], 4);
+    assert_eq!(input["set"], json!({"brief":"review this"}));
+}
+
 #[test]
 fn route_overrides_skip_host_owned_delivery_nodes() {
     use provenant_fabric_runtime::graph::GraphNode;
@@ -2141,18 +2157,24 @@ fn reviews_of_the_same_subject_attach_to_the_completed_attempt() -> Result {
         fn observe_or_start(
             &mut self,
             _: &graph::AttemptKey,
-            _: graph::NodeInput<'_>,
+            node: graph::NodeInput<'_>,
             _: &graph::GraphRoute,
             _: graph::AccessMode,
             _: Option<&str>,
             _: graph::Replay<'_>,
         ) -> std::result::Result<graph::AttemptObservation, Self::Error> {
             self.0 += 1;
+            // Valid evidence: a reviewer that returns none is retried on
+            // the same route and head (domains.review.evidence_retries).
+            let mut result =
+                provenant_records::result_capture::ResultCapture::new(node.required_verdict);
+            result
+                .push(b"```findings\n{\"schema_version\":1,\"findings\":[]}\n```\nVERDICT: PASS\n");
             Ok(graph::AttemptObservation::Terminal {
                 attempt_ref: Some("fixture/review".into()),
                 outcome: graph::GraphAttemptOutcome::Succeeded,
                 launched: true,
-                result: None,
+                result: Some(Box::new(result.finish())),
                 result_warning: None,
                 result_path: None,
                 branch: None,
@@ -2225,6 +2247,9 @@ fn reviews_of_the_same_subject_attach_to_the_completed_attempt() -> Result {
             serde_json::from_value(attached["checkpoint"].clone())?;
         let mut comparable = checkpoint.clone();
         comparable.extra.remove("subject");
+        // The submission reports its subject beside the checkpoint; the
+        // journal read projects the same subject into the typed field.
+        comparable.subject = first.checkpoint.subject.clone();
         assert_eq!(comparable, first.checkpoint);
         assert_eq!(
             checkpoint.extra["subject"]["head"],
@@ -2758,7 +2783,7 @@ fn writer_controls_preserve_new_branch_and_refuse_conflicting_access() -> Result
 }
 
 #[test]
-fn plain_read_only_task_pins_fetched_upstream_and_live_source_is_honoured() -> Result {
+fn plain_read_only_task_uses_live_default_and_explicit_live_is_honoured() -> Result {
     let rig = TestRig::new()?;
     let remote = rig.root.join("remote.git");
     let remote = remote.to_str().ok_or("remote path")?;
@@ -2808,15 +2833,20 @@ fn plain_read_only_task_pins_fetched_upstream_and_live_source_is_honoured() -> R
         factory.graph_document(input, budget, &cancel)
     };
 
-    let pinned = submit(None)?;
-    let node = &pinned["document"]["nodes"][0];
-    assert_eq!(node["source"]["commit"], json!(default), "{node}");
-    let warnings = pinned["warnings"].as_array().ok_or("warnings")?;
+    let live_default = submit(None)?;
+    let node = &live_default["document"]["nodes"][0];
     assert!(
-        warnings.iter().any(|warning| warning
-            .as_str()
-            .is_some_and(|text| text.contains("origin") && text.contains(&default))),
-        "the launch must name the source ref it used: {warnings:?}"
+        node["source"].is_null(),
+        "live default keeps the checkout: {node}"
+    );
+    assert_eq!(live_default["read_source"]["value"], "live");
+    assert!(live_default["read_source"]["commit"].is_null());
+    let warnings = live_default["warnings"].as_array().ok_or("warnings")?;
+    assert!(
+        !warnings
+            .iter()
+            .any(|warning| warning.as_str().is_some_and(|text| text.contains(&default))),
+        "a live default must not report an upstream pin: {warnings:?}"
     );
 
     // An explicit live source keeps the stale checkout as the subject.
@@ -3279,15 +3309,18 @@ fn default_branch_pins_the_forge_default_not_the_feature_upstream() -> Result {
             "the tracking upstream is not the default branch: {chosen}"
         );
     }
-    // With no source setting the admission subject pins this level checkout.
+    // The configured default is live. Admission still records the observed
+    // checkout head as the subject, while the task reads the live tree.
     let automatic = submit(None, None)?;
     assert_eq!(
-        automatic["document"]["nodes"][0]["source"]["commit"],
-        json!(feature),
-        "automatic admission pins the observed checkout subject: {automatic}"
+        automatic["document"]["nodes"][0]["source"],
+        Value::Null,
+        "the default live source leaves the task unpinned: {automatic}"
     );
     assert_eq!(automatic["subject"]["head"], json!(feature));
     assert_eq!(automatic["subject"]["origin"]["name"], "feature");
+    assert_eq!(automatic["read_source"]["value"], "live");
+    assert!(automatic["read_source"]["commit"].is_null());
     Ok(())
 }
 
@@ -4255,6 +4288,85 @@ fn peer_placed_writer_explain_is_proposed_on_the_peer() -> Result {
 }
 
 #[test]
+// Spec: docs/specs/agent-native.md#32-checks-warn-by-default — explain plans a
+// peer-placed writer on the peer. Its worktree comes from the peer's managed
+// layout for the declared branch, never from the caller's checkout.
+fn explain_plans_peer_writer_on_peer() -> Result {
+    let rig = TestRig::new()?;
+    let remote_host = provenant_core::HostId::from_bytes([3; 16]);
+    let roots = crate::roots::child(&rig.home, &rig.project, rig.state.clone())?;
+    let mut context = Context::open_inspection(roots, &rig.home, &rig.project)?;
+    context.in_lane = false;
+    context.config.peers.insert(
+        "workshop".into(),
+        provenant_fabric_runtime::config::Peer {
+            host: remote_host,
+            destination: "workshop".into(),
+            remote_executable: None,
+            connect_timeout_seconds: 10,
+        },
+    );
+    let factory = Factory {
+        context,
+        project_attribution: false,
+        clock: SystemClock,
+        backoff: ThreadPause,
+        executor: SystemExecutor::new(1)?,
+        home: rig.home.clone(),
+        cwd: rig.project.clone(),
+        assets: rig.project.clone(),
+        host_launch: None,
+        workers: &Workers,
+    };
+    let budget = WaitBudget::cli(factory.clock.mono_now(), 10)?;
+    let preview = factory.graph_document(
+        json!({"op":"run","template":"smoke","host":"workshop",
+            "branch":"smoke/peer", "base":"HEAD", "explain":true}),
+        budget,
+        &CancelToken::new(),
+    )?;
+    let rows = preview["source_admission"]
+        .as_array()
+        .ok_or("source admission rows")?;
+    assert!(
+        rows.iter().all(|row| row["status"] != "refused"),
+        "the peer plan must not refuse a writer against the caller root: {preview}"
+    );
+    let writer = rows
+        .iter()
+        .find(|row| {
+            row["node"]
+                .as_str()
+                .is_some_and(|node| node.ends_with("write"))
+        })
+        .ok_or("writer admission row")?;
+    assert_eq!(writer["status"], json!("pending_registration"), "{preview}");
+    assert_eq!(writer["host"], json!("workshop"), "{preview}");
+    assert_eq!(
+        writer["credential_admission"],
+        json!("pending_route"),
+        "{preview}"
+    );
+    // The path is the peer's plan for this branch: the managed worktree layout
+    // under the peer's label, with no caller checkout path anywhere in it.
+    let relative = factory
+        .context
+        .port_table
+        .managed_writer_path("smoke/peer")
+        .map_err(|error| format!("managed writer path: {error}"))?;
+    let planned = PathBuf::from("workshop").join(relative);
+    assert_eq!(writer["path"], json!(planned), "{preview}");
+    assert!(
+        !writer["path"]
+            .as_str()
+            .ok_or("planned path")?
+            .contains(&rig.project.to_string_lossy().to_string()),
+        "the caller checkout reached the peer plan: {preview}"
+    );
+    Ok(())
+}
+
+#[test]
 fn explanation_and_preparation_share_worktree_admission() -> Result {
     use provenant_cli::run::{SourceAdmissionMode, admit_source_root};
     let rig = crate::worktree_tests::repository()?;
@@ -4581,6 +4693,8 @@ fn writer_sourced_template_review_selects_shape_and_pins_every_stage() -> Result
         ) -> std::result::Result<Option<graph::WriterWorktreeBinding>, Self::Error> {
             Ok(Some(graph::WriterWorktreeBinding {
                 extra: Default::default(),
+                carry_examined: false,
+                carried_paths: Vec::new(),
                 shared_worktree: None,
                 source_directory_identity: None,
                 worktree: worktree.into(),
@@ -5322,5 +5436,118 @@ fn explain_uses_the_declared_adapter_for_an_uncanonicalised_model() -> Result {
     assert_eq!(rows[0]["adapter"], "codex");
     assert_eq!(rows[0]["model"], "unprefixed-model");
     assert_eq!(rows[0]["sources"]["adapter"], "node field");
+    Ok(())
+}
+
+#[test]
+// Spec: docs/specs/agent-native.md#34-consistent-verbs-and-flags
+fn launch_flags_reach_the_host_as_launch_layer_settings() -> Result {
+    let rig = crate::worktree_tests::repository()?;
+    let factory = factory(&rig)?;
+    let cancel = CancelToken::new();
+    let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
+    let launch = |extra: Value| -> Result<Value> {
+        let mut input = json!({
+            "op":"run", "template":"task", "brief":"Inspect the tree", "explain":true
+        });
+        input
+            .as_object_mut()
+            .ok_or("input object")?
+            .extend(extra.as_object().ok_or("flags object")?.clone());
+        Ok(factory.graph_document(input, budget, &cancel)?)
+    };
+    let layer = |receipt: &Value, key: &str| -> String {
+        receipt["launch_settings"][key]["source"]["layer"]
+            .as_str()
+            .unwrap_or("missing")
+            .to_owned()
+    };
+
+    let strict = launch(json!({"checks_mode":"strict"}))?;
+    assert_eq!(layer(&strict, "policy.default"), "launch", "{strict}");
+    assert_eq!(
+        strict["launch_settings"]["policy.default"]["value"],
+        "refuse"
+    );
+
+    let checks_off = launch(json!({"checks_mode":"off"}))?;
+    assert_eq!(
+        layer(&checks_off, "policy.default"),
+        "launch",
+        "{checks_off}"
+    );
+    assert_eq!(
+        checks_off["launch_settings"]["policy.default"]["value"],
+        "off"
+    );
+
+    let destination = launch(json!({"destination":"parent"}))?;
+    assert_eq!(
+        layer(&destination, "lanes.destination.write"),
+        "launch",
+        "{destination}"
+    );
+    assert_eq!(
+        destination["launch_settings"]["lanes.destination.write"]["value"],
+        "parent"
+    );
+
+    let sharing = launch(json!({"worktree_sharing":"refuse"}))?;
+    assert_eq!(
+        layer(&sharing, "lanes.worktree.sharing"),
+        "launch",
+        "{sharing}"
+    );
+    assert_eq!(
+        sharing["launch_settings"]["lanes.worktree.sharing"]["value"],
+        "refuse"
+    );
+
+    let own = super::launch_input(&json!({"commit":"own"}))?;
+    assert_eq!(own["attempt"]["commit"], "own_paths");
+    assert!(super::launch_input(&json!({"commit":"all"})).is_err());
+
+    let prepared = super::launch_input(&json!({"isolated":true}))?;
+    assert_eq!(prepared["attempt"]["sandbox"], "on");
+    assert_eq!(prepared["attempt"]["checks_mode"], "strict");
+    let override_input = super::launch_input(&json!({
+        "isolated":true, "checks_mode":"off", "attempt":{"sandbox":"off"}
+    }))?;
+    assert_eq!(override_input["attempt"]["sandbox"], "off");
+    assert_eq!(override_input["attempt"]["checks_mode"], "off");
+
+    let isolated = launch(json!({"isolated":true}))?;
+    for key in [
+        "lanes.access",
+        "lanes.sandbox",
+        "policy.default",
+        "lanes.read_source",
+        "lanes.destination.write",
+        "lanes.worktree.sharing",
+    ] {
+        assert_eq!(layer(&isolated, key), "launch", "{key}: {isolated}");
+    }
+    assert_eq!(
+        isolated["launch_settings"]["lanes.access"]["value"],
+        "isolated"
+    );
+    assert_eq!(isolated["launch_settings"]["lanes.sandbox"]["value"], "on");
+    assert_eq!(
+        isolated["launch_settings"]["policy.default"]["value"],
+        "refuse"
+    );
+    assert_eq!(
+        isolated["launch_settings"]["lanes.destination.write"]["value"],
+        "new"
+    );
+    assert_eq!(
+        isolated["launch_settings"]["lanes.worktree.sharing"]["value"],
+        "refuse"
+    );
+    // `read_source` is pinned to the admitted HEAD, not re-read after admission.
+    assert_eq!(
+        isolated["launch_settings"]["lanes.read_source"]["value"],
+        isolated["read_source"]["commit"],
+    );
     Ok(())
 }

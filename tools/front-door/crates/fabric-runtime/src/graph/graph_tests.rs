@@ -37,7 +37,7 @@ impl GraphJournal for MemoryJournal {
 struct FakeOwner {
     quota_redraw: bool,
     retry_limit: Option<u8>,
-    input_cap_source: Option<InputCapSource>,
+    input_cap_source: Option<provenant_records::Layer>,
     admission_policy: Option<provenant_records::policy::Policy>,
     retry_budgets: Vec<Option<u8>>,
     deliveries: usize,
@@ -61,6 +61,7 @@ struct FakeOwner {
     usage: AttemptUsage,
     usage_fails: bool,
     refuse_expansion_target: bool,
+    refuse_review_retry_once: bool,
     expansion_validations: usize,
     integration_heads: VecDeque<String>,
     graph_bases: (
@@ -71,6 +72,13 @@ struct FakeOwner {
     implicit_bindings: usize,
     provisions: Vec<(String, String, String)>,
     provisioned: Vec<(String, String)>,
+    carry_requests: Vec<(
+        String,
+        String,
+        Option<provenant_records::lane_contract::CarryMode>,
+    )>,
+    peer_carry_requests: Vec<Option<provenant_records::lane_contract::CarryMode>>,
+    child_provision: Option<ChildWorktreeProvision>,
     provision_fail_once: bool,
     source_commits: Vec<Option<String>>,
     resolved_review_base: Option<String>,
@@ -78,7 +86,14 @@ struct FakeOwner {
     review_base_worktrees: Vec<Option<String>>,
     observed_review_bases: Vec<Option<String>>,
     equal_range: bool,
+    /// Review attempts settle with a resolvable range and a host attempt ref, as
+    /// a real host reports them, so panel settlements reach the finding ledger.
+    resolve_reviews: bool,
+    last_commit: Option<String>,
     no_review_base: bool,
+    review_delta_is_ancestor: bool,
+    review_delta_checks: Vec<(String, String)>,
+    resolved_review_policy: Option<ReviewPolicy>,
     read_roots: Vec<Vec<String>>,
     attachments: Vec<Vec<String>>,
     capabilities: Vec<Option<Vec<String>>>,
@@ -136,8 +151,18 @@ fn reply(option: Option<&str>, text: Option<&str>) -> AskReply {
     }
 }
 
+impl FakeOwner {
+    /// A host that replans a repair panel resolves its reviews; any test may also ask.
+    fn resolves_reviews(&self) -> bool {
+        self.resolve_reviews || self.repair_panel.is_some()
+    }
+}
+
 impl AttemptOwner for FakeOwner {
     type Error = NoObservation;
+    fn review_policy(&self) -> ReviewPolicy {
+        self.resolved_review_policy.clone().unwrap_or_default()
+    }
     fn continuation_refused(&mut self, _reference: &str) -> Result<bool, Self::Error> {
         Ok(self.steer_refused)
     }
@@ -168,9 +193,9 @@ impl AttemptOwner for FakeOwner {
                 family_group: Some("group-0".into()),
             }).collect() })
     }
-    fn input_cap_source(&self) -> InputCapSource {
+    fn input_cap_source(&self) -> provenant_records::Layer {
         self.input_cap_source
-            .unwrap_or(InputCapSource::EffectiveGraphLimits)
+            .unwrap_or(provenant_records::Layer::Detected)
     }
 
     fn retry_allowance(
@@ -233,6 +258,8 @@ impl AttemptOwner for FakeOwner {
         self.implicit_bindings += 1;
         Ok(Some(WriterWorktreeBinding {
             extra: Default::default(),
+            carry_examined: false,
+            carried_paths: Vec::new(),
             shared_worktree: None,
             source_directory_identity: None,
             worktree: if std::path::Path::new(worktree).is_absolute() {
@@ -243,13 +270,25 @@ impl AttemptOwner for FakeOwner {
             head: self.implicit_head.clone().unwrap_or_else(|| "a".repeat(40)),
         }))
     }
+    fn peer_carry_unsupported(
+        &mut self,
+        mode: Option<provenant_records::lane_contract::CarryMode>,
+    ) -> Result<(), Self::Error> {
+        self.peer_carry_requests.push(mode);
+        Ok(())
+    }
     fn provision_writer_worktree(
         &mut self,
         path: &str,
         branch: &str,
         base: &str,
         _owner: Option<provenant_core::Digest>,
+        carry: Option<&WriterCarryRequest<'_>>,
     ) -> Result<Option<WriterWorktreeBinding>, Self::Error> {
+        if let Some(carry) = carry {
+            self.carry_requests
+                .push((carry.graph.to_owned(), carry.node.to_owned(), carry.mode));
+        }
         self.provisions
             .push((path.into(), branch.into(), base.into()));
         self.implicit_head = Some(base.into());
@@ -260,12 +299,21 @@ impl AttemptOwner for FakeOwner {
         path: &str,
         source: &str,
         _owner: Option<provenant_core::Digest>,
-    ) -> Result<bool, Self::Error> {
+        carry: Option<&WriterCarryRequest<'_>>,
+    ) -> Result<Option<ChildWorktreeProvision>, Self::Error> {
         self.provisioned.push((path.into(), source.into()));
+        if let Some(carry) = carry {
+            self.carry_requests
+                .push((carry.graph.to_owned(), carry.node.to_owned(), carry.mode));
+        }
         if std::mem::take(&mut self.provision_fail_once) {
             return Err(NoObservation);
         }
-        Ok(true)
+        Ok(Some(if carry.is_some() {
+            self.child_provision.clone().unwrap_or_default()
+        } else {
+            ChildWorktreeProvision::default()
+        }))
     }
 
     fn bound_graph_bases(
@@ -294,6 +342,8 @@ impl AttemptOwner for FakeOwner {
             effort: None,
             account: None,
             tier: None,
+            review_policy: None,
+            effective_review_policy: None,
         }))
     }
     fn attempt_models(&mut self, attempts: &[String]) -> Result<Vec<String>, Self::Error> {
@@ -400,9 +450,21 @@ impl AttemptOwner for FakeOwner {
     fn validate_expansion(
         &mut self,
         document: &GraphDocument,
-        _checkpoint: &GraphCheckpoint,
+        checkpoint: &GraphCheckpoint,
     ) -> Result<(), Self::Error> {
         self.expansion_validations += 1;
+        if self.refuse_review_retry_once
+            && checkpoint.nodes.iter().any(|progress| {
+                progress
+                    .review_retry
+                    .as_ref()
+                    .and_then(|state| state.pending_retry.as_ref())
+                    .is_some()
+            })
+        {
+            self.refuse_review_retry_once = false;
+            return Err(NoObservation);
+        }
         if self.refuse_expansion_target
             && document.nodes.iter().any(|node| {
                 matches!(
@@ -456,11 +518,22 @@ impl AttemptOwner for FakeOwner {
                 base: "1".repeat(40),
                 head: "1".repeat(40),
             }
+        } else if self.resolves_reviews() {
+            ReviewRange::Resolved {
+                base: "1".repeat(40),
+                head: self.last_commit.clone().unwrap_or_else(|| "2".repeat(40)),
+            }
         } else if self.no_review_base {
             ReviewRange::NoBase
         } else {
             ReviewRange::Unknown
         })
+    }
+
+    fn review_delta_attributable(&mut self, base: &str, head: &str) -> bool {
+        self.review_delta_checks
+            .push((base.to_owned(), head.to_owned()));
+        self.review_delta_is_ancestor
     }
 
     fn observe_or_start(
@@ -509,7 +582,21 @@ impl AttemptOwner for FakeOwner {
             self.families.insert(reference.clone(), family);
             return Ok(done_as(&reference));
         }
-        let observation = self.observations.pop_front().ok_or(NoObservation)?;
+        let mut observation = self.observations.pop_front().ok_or(NoObservation)?;
+        if self.resolves_reviews()
+            && let AttemptObservation::Terminal {
+                attempt_ref,
+                commit,
+                ..
+            } = &mut observation
+        {
+            if attempt_ref.is_none() {
+                *attempt_ref = Some(format!("fixture/{:032x}", self.calls.len()));
+            }
+            if commit.is_some() {
+                self.last_commit.clone_from(commit);
+            }
+        }
         if let AttemptObservation::Terminal {
             attempt_ref: Some(reference),
             outcome,
@@ -554,6 +641,8 @@ fn route(adapter: &str) -> GraphRoute {
         alias: None,
         effort: None,
         tier: None,
+        review_policy: None,
+        effective_review_policy: None,
     }
 }
 
@@ -655,6 +744,7 @@ fn graph(nodes: Vec<GraphNode>) -> GraphDocument {
         queue_ci_wait: None,
         queue: None,
         review: None,
+        review_policy: None,
         subject: None,
         exclude: Vec::new(),
         network: None,
@@ -817,13 +907,110 @@ fn applied_route_retains_metadata_and_warns_without_dropping_it() {
         progress
             .warnings
             .iter()
-            .any(|warning| warning.contains("effort") && warning.contains("256"))
+            .any(|warning| warning.message.contains("effort") && warning.message.contains("256")),
+        "an over-long identifier keeps its typed warning: {:?}",
+        progress.warnings
     );
     assert!(
         progress
             .warnings
             .iter()
-            .any(|warning| warning.contains("tier") && warning.contains("control"))
+            .any(|warning| warning.message.contains("tier") && warning.message.contains("control")),
+        "a control character keeps its typed warning: {:?}",
+        progress.warnings
+    );
+    assert!(
+        progress.warnings.iter().all(|warning| {
+            warning.code.as_ref() == provenant_records::warning::ROUTE_IDENTIFIER_TOO_LONG.as_str()
+                || warning.code.as_ref()
+                    == provenant_records::warning::ROUTE_IDENTIFIER_CONTROL_CHAR.as_str()
+        }),
+        "route warnings carry a dedicated code, not LEGACY_WARNING: {:?}",
+        progress.warnings
+    );
+    assert!(
+        progress
+            .warnings
+            .iter()
+            .all(|warning| !warning.message.contains("future_field")),
+        "extra fields are not identifiers: {:?}",
+        progress.warnings
+    );
+}
+
+#[test]
+fn pool_selection_note_never_warns() {
+    let mut owner = FakeOwner {
+        observations: [done_as("h/pool")].into(),
+        ..Default::default()
+    };
+    let mut progress = advance(
+        &graph(vec![node("lane", route("fixture"))]),
+        &mut owner,
+        &mut MemoryJournal::default(),
+    )
+    .unwrap()
+    .checkpoint
+    .nodes
+    .remove(0);
+    progress.warnings.clear();
+
+    let mut applied = route("fixture");
+    let mut receipt = provenant_records::RouteSelectionReceipt {
+        selection_rule: provenant_records::route_selection::SelectionRule::WeightedDraw,
+        considered_exclusions: vec![],
+        exploration: provenant_records::route_selection::Exploration {
+            extra: Default::default(),
+            selected: false,
+            percent: 0,
+            enabled: false,
+            source: "default".into(),
+        },
+        weight_source: provenant_records::route_selection::WeightSource::Config,
+        account_load: None,
+        extra: Default::default(),
+        pool: "principal".into(),
+        candidates: vec![],
+        roll: 0,
+        total_weight: 1,
+        pick: "codex/gpt-6-luna".into(),
+        reason: Some("p".repeat(300)),
+        redraws: vec![],
+    };
+    receipt
+        .extra
+        .insert("note".into(), serde_json::json!("q".repeat(300)));
+    applied.pool_selection = Some(receipt);
+
+    transitions::apply_route(&mut progress, Some(applied.clone()));
+    assert!(
+        progress.warnings.is_empty(),
+        "pool-selection notes are not identifiers: {:?}",
+        progress.warnings
+    );
+    assert_eq!(
+        progress
+            .attempts
+            .last()
+            .unwrap()
+            .input_manifest
+            .as_ref()
+            .unwrap()
+            .applied_route
+            .as_ref(),
+        Some(&applied),
+        "the receipt is still retained in the applied route"
+    );
+
+    applied.model = Some("o".repeat(257));
+    transitions::apply_route(&mut progress, Some(applied));
+    assert!(
+        progress.warnings.iter().any(|warning| {
+            warning.code.as_ref() == provenant_records::warning::ROUTE_IDENTIFIER_TOO_LONG.as_str()
+                && warning.message.contains("model")
+        }),
+        "identifier fields still warn: {:?}",
+        progress.warnings
     );
 }
 
@@ -951,6 +1138,34 @@ fn terminal(outcome: GraphAttemptOutcome) -> AttemptObservation {
         settlement_class: Some(provenant_records::run::SettlementClass::Completed),
         stop: None,
         cause: None,
+    }
+}
+
+fn fully_materialise_inputs(requests: &[InputRequest]) -> MaterialisedInputs {
+    MaterialisedInputs {
+        directory: Some(std::path::PathBuf::from("/fixture/inputs")),
+        entries: requests
+            .iter()
+            .map(|request| MaterialisedInput::File {
+                label: request.label.clone(),
+                path: std::path::PathBuf::from(format!("/fixture/inputs/{}.json", request.label)),
+                bytes: 1,
+                omitted: 0,
+            })
+            .collect(),
+        ..Default::default()
+    }
+}
+
+fn cap_materialised_inputs(requests: &[InputRequest]) -> MaterialisedInputs {
+    MaterialisedInputs {
+        entries: requests
+            .iter()
+            .map(|request| MaterialisedInput::Capped {
+                label: request.label.clone(),
+            })
+            .collect(),
+        ..Default::default()
     }
 }
 

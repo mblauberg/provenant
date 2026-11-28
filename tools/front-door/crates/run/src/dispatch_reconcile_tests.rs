@@ -138,7 +138,7 @@ fn preparation_pacing_refusal_uses_typed_skipped_route_cause() -> TestResult {
             _: Option<&AttemptRecord>,
         ) -> std::result::Result<PreparedLaunch, Box<crate::PrepareRefusal>> {
             Err(Box::new(crate::PrepareRefusal {
-                boundary_class: provenant_records::diagnostic::BoundaryClass::None,
+                boundary_class: provenant_records::policy::Boundary::None,
                 policy_code: None,
                 resource: None,
                 cause: provenant_records::run::CauseKind::LaunchHandoffRefused,
@@ -243,7 +243,7 @@ fn all_candidates_skipped_for_auth_settle_auth_required() -> TestResult {
             _: Option<&AttemptRecord>,
         ) -> std::result::Result<PreparedLaunch, Box<crate::PrepareRefusal>> {
             Err(Box::new(crate::PrepareRefusal {
-                boundary_class: provenant_records::diagnostic::BoundaryClass::None,
+                boundary_class: provenant_records::policy::Boundary::None,
                 policy_code: None,
                 resource: None,
                 cause: provenant_records::run::CauseKind::LaunchHandoffRefused,

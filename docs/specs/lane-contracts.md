@@ -12,13 +12,62 @@ These contracts are shared by admission, delivery and settlement. The records in
 `ChildLaunchRequest` names the parent attempt, its child's narrowed authority and a
 `Destination`: the parent's worktree, a managed worktree on a new or existing branch, or a
 parent-owned path. Path claims and own-path commits are optional, sourced and off by default;
-claims are advisory unless explicitly strict. Admission resolves paths and links and validates
-ownership and the inherited [hard boundaries](../adr/0035-three-hard-boundaries-and-flexible-everything-else.md).
+claims are advisory and an overlap with a live claim warns `PATH_CLAIM_OVERLAP` without
+refusing. Admission resolves paths and links and validates
+[custody](#worktree-and-branch-custody) and the inherited
+[hard boundaries](../adr/0035-three-hard-boundaries-and-flexible-everything-else.md).
 The lexical `NarrowedAuthority::is_within` comparison is one check, never a grant: routes must be
 a subset, budgets cannot exceed or drop a parent ceiling, paths must lie under an allowed root,
 and other inherited boundary restrictions cannot widen. An unknown authority field makes the
 comparison inconclusive, and so false.
 - Why: a child must not acquire authority its parent did not hold.
+
+## Worktree and branch custody
+
+Owner: `tools/front-door/crates/records/src/custody.rs`
+
+A worktree and its branch carry `WorktreeLease{holder, since, sharing}`, which replaces
+`WriterOwnership` as the ownership record. A lease is live while its holder's attempt is
+nonterminal and lapses when the holder is terminal (done, stopped, failed or cancelled). Its
+state is derived from the attempt on every read, so no sweeper is needed and a crash cannot
+leave a stale lease. A holder whose host is unreachable stays live until
+`domains.fabric.lanes.lease_unreachable_seconds` (900), then lapses with
+`LEASE_HOLDER_UNREACHABLE`.
+- Why: custody must survive a restart without a sweeper, and a stopped lane must not hold its branch forever.
+
+Continuing a lapsed lease needs no flag. `--worktree`, `--branch`, `retry`, `resume`, queue
+relaunch and `--adopt` take the lease and warn `WRITER_HANDOVER` with the prior lane, its
+terminal state and last head, recording a `Handover` fact in the run store. Uncommitted files
+left by the prior lane are kept in place, listed in the warning and the new brief footer, and
+never reset, stashed or discarded. A head that moved is re-pinned with `WRITER_HEAD_MOVED`, and
+an unreadable predecessor record is a typed operation error, not an ownership refusal.
+- Why: a lapsed lease is a handover, not a boundary; the prior lane's work is never destroyed.
+
+A second live writer is admitted by `custody::admit_writer` under `lanes.worktree.sharing`
+(H/P/L/O, default `warn`): `allow` proceeds and records the co-writer, `warn` proceeds with
+`WORKTREE_SHARED` naming the holder and setting, and `refuse` returns
+`WORKTREE_SHARING_REFUSED` with `next: provenant wait HOLDER` or `--destination new`. The
+owning lane's own-tree setting (`--worktree-sharing refuse` or `provenant lane share refuse`)
+is stored in its lease and wins over the other layers for that tree only. `WriterBusy` and
+`FacadeError::WriterBusy` remain only for `refuse`; nested provisioning follows the same
+admission rule, and path claims stay advisory.
+- Why: sharing is a sourced setting that warns and proceeds, not a new hard boundary.
+
+`custody::guard_destructive` runs before any reset, checkout, stash, clean, force-push or
+non-fast-forward ref update, branch deletion or worktree removal that would destroy another
+live lane's uncommitted files or ref. It refuses as `other_work` with `DESTROYS_LIVE_WORK`,
+naming the holder, its state and the files or ref. Adding commits, fast-forward pushes and edits
+to other paths are not destruction. A lapsed lease never triggers the guard, though gc moves its
+uncommitted files to `<state>/retained/<attempt>/` before removal. Concurrent commits are
+protected by git's index lock and ref compare-and-swap, with
+`domains.fabric.lanes.index_lock_retries` (5) retries before a `Transient` failure.
+- Why: only actual destruction of another live lane's work is one of the three hard boundaries.
+
+| Key | Scope | Default | Values |
+|---|---|---|---|
+| `lanes.worktree.sharing` | H/P/L/O | `warn` | `allow|warn|refuse` |
+| `domains.fabric.lanes.lease_unreachable_seconds` | H | 900 | seconds |
+| `domains.fabric.lanes.index_lock_retries` | H/P | 5 | count |
 
 ## Observation events
 

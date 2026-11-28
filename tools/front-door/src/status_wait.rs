@@ -728,13 +728,14 @@ fn read_pr(
     cancel: &CancelToken,
 ) -> Reading {
     let label = source.label();
-    let (number, repository, complete, policy, policy_source) = match &*source {
+    let (number, repository, complete, policy, policy_source, pinned_head) = match &*source {
         Source::Pr {
             number,
             repository,
             complete,
             policy,
             policy_source,
+            subject,
             ..
         } => (
             *number,
@@ -742,6 +743,7 @@ fn read_pr(
             *complete,
             *policy,
             policy_source.clone(),
+            subject.as_deref().map(|subject| subject.head),
         ),
         _ => return Reading::unavailable(&label, "not a pull request source"),
     };
@@ -757,6 +759,7 @@ fn read_pr(
         // Spec: docs/specs/cli.md#ci-observations — the PR path reads
         // through the one observer and its one sourced retry family.
         crate::pr::observer::retry(edge.roots).poll.value,
+        pinned_head,
     ) {
         Ok(line) => line,
         Err(error) => return Reading::unavailable(&label, &error.to_string()),
@@ -820,7 +823,35 @@ fn read(
     }
 
     match source {
-        Source::Pr { .. } => {
+        Source::Pr { number, .. } => {
+            // A PR reader wakes the queue item bound to that PR. This is a
+            // read-class advance: the host owns custody and grants no resume,
+            // retry or landing authority. Without a bound item the read stays
+            // a pure snapshot.
+            if !provenant_cli::fabric::in_lane()
+                && let Ok(context) = provenant_cli::fabric::Context::open_read_only(
+                    edge.roots.clone(),
+                    edge.home,
+                    edge.cwd,
+                )
+            {
+                use provenant_core::Clock as _;
+                let now = provenant_os::clock::SystemClock::new().mono_now();
+                let left = deadline.saturating_duration_since(Instant::now());
+                let micros = left.as_micros().min(u64::MAX as u128) as u64;
+                let wake_deadline = provenant_core::Deadline::at(
+                    now.checked_add(provenant_core::DurationMicros::from_micros(micros))
+                        .unwrap_or(now),
+                );
+                let _ = crate::fabric::unified::wake_pr_item(
+                    edge,
+                    context.identity.project,
+                    *number,
+                    wake_deadline,
+                    cancel,
+                    workers,
+                );
+            }
             // A one-off read has no state to carry forward; the polling worker
             // owns the persistent subject for the wait loop.
             let mut owned = source.clone();
@@ -835,7 +866,13 @@ fn read(
         Source::Graph(target) => {
             match provenant_sqlite::with_busy_timeout(Duration::ZERO, || {
                 crate::fabric::read_status_rows_with_recovery(
-                    target, edge, session, deadline, cancel, workers,
+                    target,
+                    edge,
+                    session,
+                    deadline,
+                    cancel,
+                    workers,
+                    crate::fabric::progress::WakeReason::Wait,
                 )
             }) {
                 Ok(rows) => classify_rows(&label, &rows),
@@ -1747,9 +1784,15 @@ pub(crate) fn run(
     // every budget shares the same maximum.
     let complete = matches!(command.until, Some(provenant_cli::PrWaitUntil::Complete));
     let budget = if complete {
-        settings.complete_timeout(command.timeout, &origin)
+        settings.complete_timeout(
+            command.common.timeout.map(|timeout| timeout.seconds()),
+            &origin,
+        )
     } else {
-        settings.timeout(command.timeout, &origin)
+        settings.timeout(
+            command.common.timeout.map(|timeout| timeout.seconds()),
+            &origin,
+        )
     };
     let deadline = Instant::now() + Duration::from_secs(budget);
     // Preflight reads tolerate a momentarily busy store instead of failing a
@@ -2247,7 +2290,10 @@ pub(crate) fn run(
                     fallback_reason.as_deref(),
                 );
             }
-            scope.spawn(move || {
+            // Graph reads can advance and launch nodes; use the shared graph stack.
+            std::thread::Builder::new()
+                .stack_size(provenant_fabric_runtime::graph::GRAPH_STACK_BYTES)
+                .spawn_scoped(scope, move || {
                 let mut journal = graph_subscription.and_then(|(roots, project, cursor)|
                     crate::event_delivery::Journal::resume_graphs(roots, project, cursor).ok());
                 let mut last_graph_reconcile = Instant::now();
@@ -2455,7 +2501,8 @@ pub(crate) fn run(
                         next_remote_poll = Instant::now() + interval;
                     }
                 }
-            });
+                })
+                .map_err(graph_wait_spawn_error)?;
         }
         for (index, source) in sources.iter().enumerate() {
             if !matches!(source, Source::Pr { .. })
@@ -2682,8 +2729,21 @@ pub(crate) fn run(
         );
         stop.stop();
         drop(receiver);
-        done
+        Ok::<bool, std::io::Error>(done)
     });
+    let done = match done {
+        Ok(done) => done,
+        Err(error) => {
+            return crate::fail(
+                "wait",
+                Outcome::Error,
+                "IO",
+                &error.to_string(),
+                "check system thread resources, then rerun `provenant wait`; the work continues",
+                globals,
+            );
+        }
+    };
     let mut final_session = None;
     let done = done
         || final_snapshot(
@@ -2814,6 +2874,13 @@ pub(crate) fn run(
         &human,
         true,
         Some(&summary),
+    )
+}
+
+fn graph_wait_spawn_error(error: std::io::Error) -> std::io::Error {
+    std::io::Error::new(
+        error.kind(),
+        format!("cannot spawn graph wait worker: {error}"),
     )
 }
 

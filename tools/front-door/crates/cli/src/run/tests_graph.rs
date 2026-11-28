@@ -165,7 +165,7 @@ fn cli_io_projection_omits_untrusted_sources_in_both_formats()
             assert!(!text.chars().any(|c| c.is_control() && c != '\n'));
             assert!(text.len() < 4096);
         }
-        assert!(reply.result.error.as_ref().unwrap().repair.is_some());
+        assert!(!reply.result.error.as_ref().unwrap().next.is_empty());
     }
     Ok(())
 }

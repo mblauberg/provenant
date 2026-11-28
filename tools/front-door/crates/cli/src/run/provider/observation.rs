@@ -784,7 +784,7 @@ pub(super) fn launch_prompt(
                 "host-added launch prompt text exceeds 1 MiB",
             ),
         ) {
-            warn(warning);
+            warn(*warning);
         }
     }
     check_launch_prompt(text, paths, Some(adapter), argv_limit, argv_origin, policy)?;

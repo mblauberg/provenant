@@ -2,7 +2,9 @@
 use crate::worktrees::GcCompletion;
 use provenant_cli::Globals;
 use provenant_confinement::worktrees::WorkerObserver;
-use provenant_core::{Clock, DurationMicros, WaitBudget, WallTime};
+#[cfg(test)]
+use provenant_core::MonoTime;
+use provenant_core::{Clock, Deadline, DurationMicros, WaitBudget, WallTime};
 use provenant_os::{
     clock::SystemClock,
     fs::{Directory, LockGuard, LockMode, PublishMode},
@@ -12,10 +14,14 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
+    sync::{Arc, Mutex},
     time::{Duration, UNIX_EPOCH},
 };
 
+mod registry;
 mod steward;
+pub(crate) use registry::Cursor;
+use registry::{TaskDef, TaskLeases};
 
 const DAY_SECONDS: u64 = 86_400;
 /// An unfinished scheduled collection retries after this delay, then after
@@ -48,19 +54,79 @@ struct Cadence {
 
 /// A task's last outcome, written by its detached worker or its scheduler.
 #[derive(Serialize, Deserialize)]
-struct TaskResult {
+pub(super) struct TaskResult {
     #[serde(flatten)]
     extra: provenant_records::ExtraFields,
     state: String,
     at: WallTime,
     error: Option<String>,
+    /// An operator note that is not a failure, such as a gc budget detail.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    diagnostic: Option<String>,
     /// Consecutive attempts that did not complete. It selects the retry delay
     /// after a failure and restarts at zero when a collection completes.
     #[serde(default, skip_serializing_if = "is_zero")]
     failures: u32,
 }
 
-fn publish<T: Serialize>(
+impl TaskResult {
+    fn disabled(at: WallTime) -> Self {
+        Self {
+            extra: Default::default(),
+            state: "disabled".into(),
+            at,
+            error: None,
+            diagnostic: None,
+            failures: 0,
+        }
+    }
+
+    fn busy(at: WallTime, holder: &str) -> Self {
+        Self {
+            extra: Default::default(),
+            state: "busy".into(),
+            at,
+            error: None,
+            diagnostic: Some(format!(
+                "TICK_TASK_LEASE_BUSY: single-flight lease unavailable: {holder}"
+            )),
+            failures: 0,
+        }
+    }
+
+    fn over_budget(at: WallTime, task: &str) -> Self {
+        Self {
+            extra: Default::default(),
+            state: "over_budget".into(),
+            at,
+            error: None,
+            diagnostic: Some(format!(
+                "TICK_TASK_OVERRUN: domains.tick.tasks.{task}.budget_seconds elapsed before the worker ended"
+            )),
+            failures: 0,
+        }
+    }
+
+    #[cfg(test)]
+    fn sample(at: WallTime) -> Self {
+        Self {
+            extra: Default::default(),
+            state: "observed".into(),
+            at,
+            error: None,
+            diagnostic: None,
+            failures: 0,
+        }
+    }
+}
+
+#[cfg(test)]
+fn test_wall() -> WallTime {
+    WallTime::from_micros(1_700_000_000_000_000)
+        .expect("a fixed in-range wall time for task registry tests")
+}
+
+pub(crate) fn publish<T: Serialize>(
     directory: &Directory,
     file: &str,
     purpose: &str,
@@ -98,6 +164,7 @@ fn write_task_result(
         state: state.into(),
         at,
         error: error.map(|error| truncate_bytes(error, MAX_RESULT_ERROR_BYTES)),
+        diagnostic: None,
         failures,
     };
     publish(directory, file, purpose, &result)
@@ -647,9 +714,33 @@ fn read_cadence(directory: &Directory) -> Result<Cadence, Box<dyn std::error::Er
     }
 }
 
+/// Keep the durable result shape while reusing the existing task bodies.
+fn result_from_task(task: Task, at: WallTime) -> TaskResult {
+    TaskResult {
+        extra: Default::default(),
+        state: task.state,
+        at,
+        error: task.error,
+        diagnostic: task.diagnostic,
+        failures: 0,
+    }
+}
+
+pub(crate) fn read_cursor(directory: &Directory, task: &str) -> Result<Cursor, String> {
+    let name = format!("cursor-{task}.json");
+    match directory.read_bounded(name.as_ref(), 64 * 1024) {
+        Ok(bytes) => serde_json::from_slice(&bytes).map_err(|error| error.to_string()),
+        Err(error) if error.is_not_found() => Ok(Cursor::default()),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
 /// Recovery is independent of graph journals: even an orphaned attempt must
 /// eventually settle. Share one host census across all registered projects.
-fn reap_projects(resolved: &crate::roots::Resolved) -> Result<&'static str, String> {
+fn reap_projects(
+    resolved: &crate::roots::Resolved,
+    deadline: Deadline,
+) -> Result<&'static str, String> {
     use provenant_supervisor::census::{MAX_CENSUS_ENTRIES, SystemProcessObserver};
     let census = SystemProcessObserver.census(MAX_CENSUS_ENTRIES).ok();
     let clock = SystemClock;
@@ -662,6 +753,9 @@ fn reap_projects(resolved: &crate::roots::Resolved) -> Result<&'static str, Stri
     for binding in
         provenant_config::registered_projects(&resolved.roots).map_err(|e| e.to_string())?
     {
+        if deadline.is_expired(clock.mono_now()) {
+            break;
+        }
         // A vanished checkout or common directory has nothing to settle. Report
         // it once with the unregister command rather than failing every tick.
         if crate::project_root::absent(&binding) {
@@ -729,22 +823,10 @@ fn reap_before_index<E>(
     index()
 }
 
-/// Graph advancement is a pass of its own and completes before forge polling
-/// starts. Keeping the passes in this order means a slow forge page cannot put
-/// graph settlement behind a long poll; the wait's terminal-remote recovery
-/// covers the case where the next scheduled tick itself is delayed.
-fn graph_pass_before_forge<T>(
-    graphs: impl FnOnce() -> T,
-    forge: impl FnOnce() -> Task,
-) -> (T, Task) {
-    let graphs = graphs();
-    let forge = forge();
-    (graphs, forge)
-}
-
 fn tick(
     globals: &Globals,
     workers: &'static dyn WorkerObserver,
+    only: &[String],
 ) -> Result<Tick, Box<dyn std::error::Error>> {
     // Scheduled host work must never inherit a lane's authority.
     if provenant_cli::fabric::in_lane() {
@@ -758,81 +840,211 @@ fn tick(
     let config = provenant_cli::config_reads::read_for(&resolved.roots, "tick")?;
     let clock = SystemClock;
     let now = clock.wall_now()?;
-    let settlement = Task::run("settlement", || reap_projects(&resolved));
-    // Graph tick includes queue-owned replay, pending-item claims and lease reconciliation.
-    let (graphs, forge_events) = graph_pass_before_forge(
-        || {
-            crate::fabric::tick_graphs(&resolved, now, workers).unwrap_or_else(|error| Graphs {
-                advanced: 0,
-                errors: vec![error.to_string()],
-                warnings: Vec::new(),
-            })
-        },
-        || {
-            Task::run("forge_events", || {
-                crate::event_delivery::tick(&resolved)
-                    .map(|()| "observed")
-                    .map_err(|error| error.to_string())
-            })
-        },
-    );
-    // Task errors are isolated: a failed graph or collection must not prevent
-    // later hooks from running. GC cadence is serialised across manual ticks
-    // and launchd invocations, separately from each graph's journal custody.
-    let gc = if !config.gc.schedule {
-        Task::idle("gc", "disabled")
-    } else {
-        Task::gc(|| -> Result<GcReport, String> {
-            let directory = provenant_config::private_directory(
-                &resolved.roots.state.as_path().join("tick"),
-                true,
-            )
-            .map_err(|error| error.to_string())?;
-            let _lock = match directory.try_lock("cadence.lock".as_ref(), LockMode::Exclusive) {
-                Ok(lock) => lock,
-                Err(provenant_os::fs::FsError::LockTimeout { .. }) => {
-                    return Ok(GcReport::state("busy; next tick retries"));
-                }
-                Err(error) => return Err(error.to_string()),
-            };
-            queue_gc(&directory, now, || {
-                let executable = std::env::current_exe().map_err(|error| error.to_string())?;
-                let argv = [
-                    executable.into_os_string(),
-                    "--state-dir".into(),
-                    resolved.roots.state.as_path().as_os_str().to_owned(),
-                    "internal".into(),
-                    "tick-gc".into(),
-                ];
-                provenant_os::exec::spawn_detached(&argv, &resolved.home)
-                    .map_err(|error| error.to_string())
-            })
-        })
+    let knob = |name: &str| config.knobs.get(name).map(|entry| &entry.value);
+    let enabled = |task: &str| {
+        knob(&format!("domains.tick.tasks.{task}.enabled"))
+            .and_then(|value| value.as_bool())
+            .unwrap_or(true)
     };
-    // The notice and quota tasks stay explicit until their owners wire them.
-    let tasks = vec![
-        gc,
-        steward::run(&config.domains.steward, &resolved, workers),
-        settlement,
-        forge_events,
-        Task::idle("notice_batch_flush", "unwired"),
-        Task::idle("quota_refresh", "unwired"),
-    ];
-    Ok(Tick { graphs, tasks })
+    let budget = |task: &str, seconds: u64| -> DurationMicros {
+        let value = knob(&format!("domains.tick.tasks.{task}.budget_seconds"))
+            .and_then(|value| value.as_u64())
+            .unwrap_or(seconds);
+        DurationMicros::from_seconds(value).unwrap_or(DurationMicros::from_micros(
+            seconds.saturating_mul(1_000_000),
+        ))
+    };
+    let concurrency = knob("domains.tick.concurrency")
+        .and_then(|value| value.as_u64())
+        .unwrap_or(4) as usize;
+    let selected = |name: &str| only.is_empty() || only.iter().any(|entry| entry == name);
+    let holder = format!("tick:{}", std::process::id());
+    let graphs = Arc::new(Mutex::new(Graphs::default()));
+    let mut tasks: Vec<TaskDef> = Vec::new();
+
+    if selected("settlement") {
+        let resolved = resolved.clone();
+        tasks.push(TaskDef::new(
+            "settlement",
+            enabled("settlement"),
+            budget("settlement", 30),
+            move |ctx| {
+                result_from_task(
+                    Task::run("settlement", || reap_projects(&resolved, ctx.deadline)),
+                    ctx.wall,
+                )
+            },
+        ));
+    }
+    if selected("graphs") {
+        let graphs_out = Arc::clone(&graphs);
+        let resolved = resolved.clone();
+        tasks.push(TaskDef::new(
+            "graphs",
+            enabled("graphs"),
+            budget("graphs", 60),
+            move |ctx| {
+                let report = crate::fabric::tick_graphs(&resolved, ctx.wall, workers, ctx.deadline)
+                    .unwrap_or_else(|error| Graphs {
+                        advanced: 0,
+                        errors: vec![error.to_string()],
+                        warnings: Vec::new(),
+                    });
+                let state = if report.errors.is_empty() {
+                    "advanced"
+                } else {
+                    "failed"
+                };
+                let error = (!report.errors.is_empty()).then(|| report.errors.join("; "));
+                let warnings = report.warnings.len();
+                match graphs_out.lock() {
+                    Ok(mut output) => *output = report,
+                    Err(_) => {
+                        return result_from_task(
+                            Task::failed("graphs", "graph output lock poisoned".into()),
+                            ctx.wall,
+                        );
+                    }
+                }
+                let mut result = result_from_task(Task::reported("graphs", state, None), ctx.wall);
+                result.error = error;
+                if warnings > 0 {
+                    result.diagnostic = Some(format!("{warnings} warning(s)"));
+                }
+                result
+            },
+        ));
+    }
+    if selected("forge_events") {
+        let resolved = resolved.clone();
+        tasks.push(TaskDef::new(
+            "forge_events",
+            enabled("forge_events"),
+            budget("forge_events", 30),
+            move |ctx| {
+                result_from_task(
+                    Task::run("forge_events", || {
+                        crate::event_delivery::tick(&resolved, ctx.deadline)
+                            .map(|()| "observed")
+                            .map_err(|error| error.to_string())
+                    }),
+                    ctx.wall,
+                )
+            },
+        ));
+    }
+    if selected("gc") {
+        let resolved = resolved.clone();
+        // GC cadence is serialised across manual ticks and launchd invocations,
+        // separately from each graph's journal custody.
+        tasks.push(TaskDef::new(
+            "gc",
+            enabled("gc") && config.gc.schedule,
+            budget("gc", 5),
+            move |ctx| {
+                result_from_task(
+                    Task::gc(|| -> Result<GcReport, String> {
+                        if ctx.deadline.is_expired(SystemClock.mono_now()) {
+                            return Ok(GcReport::state("over budget; next tick retries"));
+                        }
+                        let directory = provenant_config::private_directory(
+                            &resolved.roots.state.as_path().join("tick"),
+                            true,
+                        )
+                        .map_err(|error| error.to_string())?;
+                        let _lock = match directory
+                            .try_lock("cadence.lock".as_ref(), LockMode::Exclusive)
+                        {
+                            Ok(lock) => lock,
+                            Err(provenant_os::fs::FsError::LockTimeout { .. }) => {
+                                return Ok(GcReport::state("busy; next tick retries"));
+                            }
+                            Err(error) => return Err(error.to_string()),
+                        };
+                        queue_gc(&directory, ctx.wall, || {
+                            let executable =
+                                std::env::current_exe().map_err(|error| error.to_string())?;
+                            let argv = [
+                                executable.into_os_string(),
+                                "--state-dir".into(),
+                                resolved.roots.state.as_path().as_os_str().to_owned(),
+                                "internal".into(),
+                                "tick-gc".into(),
+                            ];
+                            provenant_os::exec::spawn_detached(&argv, &resolved.home)
+                                .map_err(|error| error.to_string())
+                        })
+                    }),
+                    ctx.wall,
+                )
+            },
+        ));
+    }
+    if selected("steward") {
+        let resolved = resolved.clone();
+        let steward_enabled = enabled("steward");
+        let steward_budget = budget("steward", 30);
+        let steward_config = config.domains.steward;
+        tasks.push(TaskDef::new(
+            "steward",
+            steward_enabled,
+            steward_budget,
+            move |ctx| {
+                result_from_task(
+                    steward::run(&steward_config, &resolved, workers, ctx.deadline),
+                    ctx.wall,
+                )
+            },
+        ));
+    }
+
+    let outcomes = registry::run_tasks(
+        tasks,
+        concurrency,
+        &TaskLeases::new(resolved.roots.state.as_path().to_owned()),
+        &clock,
+        now,
+        &holder,
+    )?;
+    let task_rows: Vec<Task> = outcomes
+        .into_iter()
+        .map(|outcome| Task {
+            task: outcome.name,
+            state: outcome.result.state,
+            error: outcome.result.error,
+            diagnostic: outcome.result.diagnostic,
+        })
+        .collect();
+    let graphs = std::mem::take(&mut *graphs.lock().map_err(|_| "graph output lock poisoned")?);
+    Ok(Tick {
+        graphs,
+        tasks: task_rows,
+    })
 }
 
-pub(crate) fn run(globals: &Globals, workers: &'static dyn WorkerObserver) -> u8 {
-    match tick(globals, workers) {
+fn task_summary(tasks: &[Task]) -> String {
+    tasks
+        .iter()
+        .map(|task| format!("{}={}", task.task, task.state))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+pub(crate) fn run_selected(
+    globals: &Globals,
+    workers: &'static dyn WorkerObserver,
+    only: &[String],
+) -> u8 {
+    match tick(globals, workers, only) {
         Ok(data) => {
             let failed = !data.graphs.errors.is_empty()
                 || data.tasks.iter().any(|task| task.error.is_some());
+            let states = task_summary(&data.tasks);
             let mut human = format!(
-                "tick: graphs={} errors={} gc={} steward={} settlement={}\n",
+                "tick: graphs_advanced={} errors={} {}\n",
                 data.graphs.advanced,
                 data.graphs.errors.len(),
-                data.tasks[0].state,
-                data.tasks[1].state,
-                data.tasks[2].state
+                states
             );
             for warning in &data.graphs.warnings {
                 human.push_str(&format!("warning: {warning}\n"));
@@ -856,7 +1068,7 @@ pub(crate) fn run(globals: &Globals, workers: &'static dyn WorkerObserver) -> u8
                 .chain(data.tasks.iter().filter_map(|task| {
                     task.diagnostic
                         .as_ref()
-                        .map(|diagnostic| format!("note: {}: {diagnostic}", task.task))
+                        .map(|diagnostic| format!("warning: {}: {diagnostic}", task.task))
                 }))
                 .collect();
             let summary = provenant_cli::Summary::new(human.trim(), rows);
@@ -909,26 +1121,6 @@ mod tests {
         assert!(reaped.get());
     }
 
-    // Spec: docs/specs/cli.md#graph-wait-recovery
-    #[test]
-    fn graph_advancement_is_a_pass_before_forge_polling() {
-        let order = std::cell::RefCell::new(Vec::new());
-        let (graphs, forge) = graph_pass_before_forge(
-            || {
-                order.borrow_mut().push("graphs");
-                3
-            },
-            || {
-                order.borrow_mut().push("forge_events");
-                Task::idle("forge_events", "observed")
-            },
-        );
-        assert_eq!(graphs, 3);
-        assert_eq!(forge.task, "forge_events");
-        assert_eq!(forge.state, "observed");
-        assert_eq!(order.into_inner(), vec!["graphs", "forge_events"]);
-    }
-
     // Spec: docs/specs/supervisor.md#tick-driven-settlement
     #[test]
     fn settlement_skips_a_binding_whose_common_directory_is_gone() {
@@ -963,7 +1155,10 @@ mod tests {
             claude_config: None,
             codex_home: None,
         };
-        assert_eq!(reap_projects(&resolved).unwrap(), "queued");
+        assert_eq!(
+            reap_projects(&resolved, Deadline::at(MonoTime::from_micros(u64::MAX))).unwrap(),
+            "queued"
+        );
     }
 
     // Spec: docs/specs/supervisor.md#tick-driven-settlement
@@ -1013,7 +1208,9 @@ mod tests {
             claude_config: None,
             codex_home: None,
         };
-        let (result, warnings) = provenant_records::warning::capture(|| reap_projects(&resolved));
+        let (result, warnings) = provenant_records::warning::capture(|| {
+            reap_projects(&resolved, Deadline::at(MonoTime::from_micros(u64::MAX)))
+        });
         assert_eq!(
             result.unwrap(),
             "queued",
@@ -1030,9 +1227,9 @@ mod tests {
         assert_eq!(warned[0].subject.as_deref(), Some(subject.as_str()));
         assert!(
             warned[0]
-                .repair
-                .as_deref()
-                .is_some_and(|repair| repair.contains("provenant gc --apply")),
+                .next
+                .iter()
+                .any(|step| step.display_text().contains("provenant gc --apply")),
             "the warning names the unregister command: {:?}",
             warned[0]
         );

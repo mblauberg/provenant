@@ -9,6 +9,7 @@ use crate::machine::{
     self, Budgets, DeliveryFailure, DeliveryOutcome, DeliveryReceipt, Effect, Event, Phase, State,
     Tick,
 };
+use crate::process_os::handoff::HandoffFailure;
 use provenant_core::{CancelToken, Clock, WallTime};
 use provenant_os::fs::{Directory, Publication, PublishMode};
 use provenant_records::custody::Scope;
@@ -389,21 +390,24 @@ pub(crate) fn handoff(
     owned: OwnedLaunch<'_>,
     capture: CapturePlan,
     publication: &PublicationReservation,
-) -> Result<()> {
+) -> std::result::Result<(), HandoffFailure> {
+    // Every refusal before the guardian spawns leaves nothing to fence.
+    use HandoffFailure::Undelivered;
     if owned.command.config_environment.len() > 128
         || owned.command.holder_context.len() > HOLDER_CONTEXT_LIMIT
         || !valid_resolved_route(&owned.command.resolved_route)
     {
-        return Err(CustodyError::InvalidRecord);
+        return Err(Undelivered(CustodyError::InvalidRecord));
     }
-    validate_profile_command(owned.command.profile_file.as_ref(), &owned.command.argv)?;
+    validate_profile_command(owned.command.profile_file.as_ref(), &owned.command.argv)
+        .map_err(|error| Undelivered(error.into()))?;
     if !owned
         .command
         .argv
         .first()
         .is_some_and(|executable| Path::new(executable).is_absolute())
     {
-        return Err(CustodyError::InvalidRecord);
+        return Err(Undelivered(CustodyError::InvalidRecord));
     }
     let message = LaunchMessage {
         redaction: provenant_redact::mode().as_str().to_owned(),
@@ -450,16 +454,25 @@ pub(crate) fn handoff(
         || message.stdin.len() > 1024 * 1024
         || !owned.command.cwd.is_absolute()
     {
-        return Err(CustodyError::InvalidRecord);
+        return Err(Undelivered(CustodyError::InvalidRecord));
     }
-    let payload = serde_json::to_vec(&message).map_err(|_| CustodyError::InvalidRecord)?;
+    let payload =
+        serde_json::to_vec(&message).map_err(|_| Undelivered(CustodyError::InvalidRecord))?;
     crate::process_os::handoff::spawn(
         &owned.lease.lock_directory,
         &publication.directory,
         &owned.lease.directory,
-        owned.lease.lease.as_ref().ok_or(CustodyError::Fenced)?,
+        owned
+            .lease
+            .lease
+            .as_ref()
+            .ok_or(Undelivered(CustodyError::Fenced))?,
         &publication.custody,
-        owned.lease.holder.as_ref().ok_or(CustodyError::Fenced)?,
+        owned
+            .lease
+            .holder
+            .as_ref()
+            .ok_or(Undelivered(CustodyError::Fenced))?,
         owned
             .command
             .profile_file
@@ -1065,10 +1078,10 @@ impl provenant_os::capture::DecodedEventSink for Events {
     }
 }
 #[derive(Debug, thiserror::Error)]
-#[error("no free lane port block; domains.fabric.lanes.lane_port_blocks={blocks} ({}); raise or disable this setting", match origin { provenant_records::diagnostic::PortSettingSource::Configuration => "host configuration", provenant_records::diagnostic::PortSettingSource::ShippedDefault => "compiled default", provenant_records::diagnostic::PortSettingSource::RecordedPlan => "recorded plan" })]
+#[error("no free lane port block; domains.fabric.lanes.lane_port_blocks={blocks} ({}); raise or disable this setting", match origin { provenant_records::Layer::Host => "host configuration", provenant_records::Layer::Default => "compiled default", provenant_records::Layer::Detected => "recorded plan", other => other.description() })]
 struct LanePortRefusal {
     blocks: u32,
-    origin: provenant_records::diagnostic::PortSettingSource,
+    origin: provenant_records::Layer,
 }
 impl LanePortRefusal {
     fn fact(&self) -> provenant_records::diagnostic::ResourceFact {
@@ -1099,18 +1112,17 @@ fn lane_port_allocation(
             let effect = policy.check("PORT_BLOCKS", Facts::violation("lane port pool exhausted"));
             match effect {
                 Effect::Proceed => return Ok((None, None)),
-                Effect::Warn(warning) => return Ok((None, Some(warning))),
+                Effect::Warn(warning) => return Ok((None, Some(*warning))),
                 Effect::Refuse(_) | Effect::Stop(_) => {}
             }
-            use provenant_records::diagnostic::PortSettingSource;
             let origin = match plan.blocks_origin {
                 Some(provenant_os::lane_ports::BlocksOrigin::CompiledDefault) => {
-                    PortSettingSource::ShippedDefault
+                    provenant_records::Layer::Default
                 }
                 Some(provenant_os::lane_ports::BlocksOrigin::HostConfig) => {
-                    PortSettingSource::Configuration
+                    provenant_records::Layer::Host
                 }
-                None => PortSettingSource::RecordedPlan,
+                None => provenant_records::Layer::Detected,
             };
             Err(LanePortRefusal {
                 blocks: plan.blocks,
@@ -1125,7 +1137,7 @@ fn lane_port_allocation(
                 ),
             );
             let warning = match effect {
-                provenant_records::policy::Effect::Warn(warning) => Some(warning),
+                provenant_records::policy::Effect::Warn(warning) => Some(*warning),
                 _ => None,
             };
             Ok((None, warning))
@@ -1255,8 +1267,12 @@ impl Driver<'_> {
         let clock: &dyn Clock = &system;
         let wall_now = || clock.wall_now().ok();
         let wall_started = wall_now();
-        let budgets =
-            Budgets::with_cleanup(plan.wall_ms, plan.root_flush_ms, plan.descendant_grace_ms);
+        // No enforced wall bound is a deadline neither clock reaches.
+        let budgets = Budgets::with_cleanup(
+            plan.wall_ms.unwrap_or(u64::MAX),
+            plan.root_flush_ms,
+            plan.descendant_grace_ms,
+        );
         let mut state = State::prepared(budgets);
         let mut budget_warned = false;
         let mut budget_stop_sent = false;

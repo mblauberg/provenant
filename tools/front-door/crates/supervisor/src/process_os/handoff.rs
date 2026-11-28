@@ -129,116 +129,159 @@ pub(crate) fn spawn(
     payload: &[u8],
     timeout: Duration,
     cancel: &CancelToken,
-) -> Result<()> {
-    if payload.len() > MESSAGE_LIMIT {
-        return Err(CustodyError::InvalidRecord);
-    }
-    provenant_os::sys::raw_exec::verify_child_wait_policy()?;
-    let reaper = provenant_os::sys::reaper::Reaper::new(1)?;
-    let permit = reaper.reserve().ok_or(CustodyError::HandoffUnknown)?;
-    let (mut parent, child_channel) = UnixStream::pair()?;
-    let mut descriptors = vec![
-        child_channel.as_fd(),
-        writer_directory.handoff_file().as_fd(),
-        attempt_directory.handoff_file().as_fd(),
-        evidence_directory.handoff_file().as_fd(),
-        writer.handoff_file().as_fd(),
-        custody.handoff_file().as_fd(),
-        holder.handoff_file().as_fd(),
-    ];
-    if let Some(profile) = profile {
-        descriptors.push(profile.as_fd());
-    }
-    let executable = std::env::current_exe()?;
-    let mut command = Command::new(executable);
-    command.arg("internal").arg("supervise");
-    for fd in &descriptors {
-        command.arg(fd.as_raw_fd().to_string());
-    }
-    let mut config_environment: Vec<_> = environment
-        .iter()
-        .filter(|(name, _)| config_environment.contains(name))
-        .cloned()
-        .collect();
-    // The guardian settles lanes, so it keeps this process's durability setting.
-    if provenant_os::fs::durability_relaxed() {
-        config_environment.push((provenant_os::fs::DURABILITY_ENV.into(), "relaxed".into()));
-    }
-    // Fixture guardians belong to the test process, not the short-lived CLI.
-    // Capture its native identity before detaching so PID reuse cannot extend
-    // the guardian's lifetime beyond its owner.
-    #[cfg(feature = "fixture")]
-    if let Some(owner_pid) = std::env::var(crate::FIXTURE_OWNER_PID_ENV)
-        .ok()
-        .and_then(|value| value.parse::<i64>().ok())
-        && let crate::census::ProcessObservation::Present(owner) =
-            crate::census::SystemProcessObserver.observe(owner_pid)
-        && let Ok(identity) = serde_json::to_string(&owner.identity)
-    {
-        config_environment.push((crate::FIXTURE_OWNER_ENV.into(), identity.into()));
-    }
-    command
-        .env_clear()
-        .envs(config_environment.iter().cloned())
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    #[cfg(feature = "fixture")]
-    if profile.is_some()
-        && environment
+) -> std::result::Result<(), HandoffFailure> {
+    // Until the whole launch message is written the guardian cannot launch a
+    // provider: dropping `parent` on return leaves it a short read and it exits.
+    let delivered = || -> Result<(UnixStream, Instant)> {
+        if payload.len() > MESSAGE_LIMIT {
+            return Err(CustodyError::InvalidRecord);
+        }
+        provenant_os::sys::raw_exec::verify_child_wait_policy()?;
+        let reaper = provenant_os::sys::reaper::Reaper::new(1)?;
+        let permit = reaper
+            .reserve()
+            .ok_or_else(|| CustodyError::HandoffUndelivered("no guardian reaper slot".into()))?;
+        let (mut parent, child_channel) = UnixStream::pair()?;
+        let mut descriptors = vec![
+            child_channel.as_fd(),
+            writer_directory.handoff_file().as_fd(),
+            attempt_directory.handoff_file().as_fd(),
+            evidence_directory.handoff_file().as_fd(),
+            writer.handoff_file().as_fd(),
+            custody.handoff_file().as_fd(),
+            holder.handoff_file().as_fd(),
+        ];
+        if let Some(profile) = profile {
+            descriptors.push(profile.as_fd());
+        }
+        let executable = std::env::current_exe()?;
+        let mut command = Command::new(executable);
+        command.arg("internal").arg("supervise");
+        for fd in &descriptors {
+            command.arg(fd.as_raw_fd().to_string());
+        }
+        let mut config_environment: Vec<_> = environment
             .iter()
-            .find(|(name, _)| name == "PROVENANT_STATE_DIR")
-            .is_some_and(|(_, path)| {
-                std::path::Path::new(path)
-                    .join("s2-drop-profile-descriptor")
-                    .is_file()
-            })
-    {
-        descriptors.pop();
-    }
-    provenant_os::sys::child::configure_command(
-        &mut command,
-        &descriptors,
-        Some(&config_environment),
-        true,
-    )?;
-    let child = command.spawn().map_err(|error| {
-        if profile.is_some() {
-            crate::process_os::profile::failure(error)
-        } else {
-            error
+            .filter(|(name, _)| config_environment.contains(name))
+            .cloned()
+            .collect();
+        // The guardian settles lanes, so it keeps this process's durability setting.
+        if provenant_os::fs::durability_relaxed() {
+            config_environment.push((provenant_os::fs::DURABILITY_ENV.into(), "relaxed".into()));
         }
-    })?;
-    // The bounded detached reaper owns this direct guardian child on every path.
-    // It never signals, so handoff failure cannot kill a healthy provider.
-    permit.transfer(child);
-    drop(child_channel);
-    let end = deadline(timeout)?;
-    send(
-        &mut parent,
-        payload,
-        end.saturating_duration_since(Instant::now()),
-        cancel,
-    )
-    .map_err(|_| handoff_unknown(profile.is_some()))?;
+        // Fixture guardians belong to the test process, not the short-lived CLI.
+        // Capture its native identity before detaching so PID reuse cannot extend
+        // the guardian's lifetime beyond its owner.
+        #[cfg(feature = "fixture")]
+        if let Some(owner_pid) = std::env::var(crate::FIXTURE_OWNER_PID_ENV)
+            .ok()
+            .and_then(|value| value.parse::<i64>().ok())
+            && let crate::census::ProcessObservation::Present(owner) =
+                crate::census::SystemProcessObserver.observe(owner_pid)
+            && let Ok(identity) = serde_json::to_string(&owner.identity)
+        {
+            config_environment.push((crate::FIXTURE_OWNER_ENV.into(), identity.into()));
+        }
+        command
+            .env_clear()
+            .envs(config_environment.iter().cloned())
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        #[cfg(feature = "fixture")]
+        if profile.is_some()
+            && environment
+                .iter()
+                .find(|(name, _)| name == "PROVENANT_STATE_DIR")
+                .is_some_and(|(_, path)| {
+                    std::path::Path::new(path)
+                        .join("s2-drop-profile-descriptor")
+                        .is_file()
+                })
+        {
+            descriptors.pop();
+        }
+        provenant_os::sys::child::configure_command(
+            &mut command,
+            &descriptors,
+            Some(&config_environment),
+            true,
+        )?;
+        let child = command.spawn().map_err(|error| {
+            if profile.is_some() {
+                crate::process_os::profile::failure(error)
+            } else {
+                error
+            }
+        })?;
+        // The bounded detached reaper owns this direct guardian child on every path.
+        // It never signals, so handoff failure cannot kill a healthy provider.
+        permit.transfer(child);
+        drop(child_channel);
+        let end = deadline(timeout)?;
+        send(
+            &mut parent,
+            payload,
+            end.saturating_duration_since(Instant::now()),
+            cancel,
+        )
+        .map_err(|error| {
+            undelivered(
+                profile.is_some(),
+                format!(
+                    "sending the {}-byte launch message within {timeout:?}: {error}",
+                    payload.len()
+                ),
+            )
+        })?;
+        Ok((parent, end))
+    };
+    let (mut parent, end) = delivered().map_err(HandoffFailure::Undelivered)?;
     let remaining = end.saturating_duration_since(Instant::now());
-    let response = receive_cancellable(&mut parent, remaining, cancel)
-        .map_err(|_| handoff_unknown(profile.is_some()))?;
-    if response == b"custody-accepted-v1" {
-        Ok(())
-    } else {
-        if response == b"sandbox-profile-transport-refused-v1" {
-            return Err(io::Error::other("sandbox profile transport refused by guardian").into());
-        }
-        Err(CustodyError::HandoffUnknown)
+    let response = receive_cancellable(&mut parent, remaining, cancel).map_err(|error| {
+        HandoffFailure::Unconfirmed(handoff_unknown(
+            profile.is_some(),
+            format!("awaiting the guardian's acceptance within {timeout:?}: {error}"),
+        ))
+    })?;
+    match response.as_slice() {
+        b"custody-accepted-v1" => Ok(()),
+        // The guardian refused before adopting custody or spawning anything.
+        b"sandbox-profile-transport-refused-v1" => Err(HandoffFailure::Undelivered(
+            CustodyError::ProfileHandoffUndelivered(
+                "the guardian refused the sandbox profile descriptor".into(),
+            ),
+        )),
+        _ => Err(HandoffFailure::Unconfirmed(CustodyError::HandoffUnknown(
+            format!("unexpected {}-byte guardian response", response.len()),
+        ))),
     }
 }
 
-fn handoff_unknown(profile: bool) -> CustodyError {
+/// How far a failed handoff reached the guardian. The outcome follows what
+/// the guardian acknowledged, not whether a write started.
+#[derive(Debug)]
+pub(crate) enum HandoffFailure {
+    /// No guardian holds the whole launch message, or the guardian refused it:
+    /// no provider launched and nothing needs fencing.
+    Undelivered(CustodyError),
+    /// The guardian holds the launch message and may have accepted custody.
+    Unconfirmed(CustodyError),
+}
+
+fn undelivered(profile: bool, detail: String) -> CustodyError {
     if profile {
-        CustodyError::ProfileHandoffUnknown
+        CustodyError::ProfileHandoffUndelivered(detail)
     } else {
-        CustodyError::HandoffUnknown
+        CustodyError::HandoffUndelivered(detail)
+    }
+}
+
+fn handoff_unknown(profile: bool, detail: String) -> CustodyError {
+    if profile {
+        CustodyError::ProfileHandoffUnknown(detail)
+    } else {
+        CustodyError::HandoffUnknown(detail)
     }
 }
 

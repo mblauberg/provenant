@@ -1249,8 +1249,8 @@ mod tests {
             warning_source.origin.as_deref(),
             Some(".provenant/ports.json#verify.static_checks")
         );
-        let repair = warning.repair.as_deref().expect("warning has a repair");
-        assert!(repair.contains("verify.static_checks"), "{repair}");
+        let next = warning.next.first().expect("next").display_text();
+        assert!(next.contains("verify.static_checks"), "{next}");
 
         assert_eq!(brief.static_checks.len(), 1, "{brief:?}");
         assert_eq!(brief.static_checks[0].argv, ["scripts/check-extra-fields"]);
@@ -1604,7 +1604,10 @@ mod tests {
             base: "1".repeat(40),
             head: "2".repeat(40),
             strength: provenant_records::policy::Strength::Warn,
-            source: provenant_records::policy::Source::Project,
+            source: provenant_records::provenance::Source {
+                layer: provenant_records::Layer::Project,
+                origin: Some("policy.WRITE_SCOPE".to_owned()),
+            },
             out_of_scope_paths: paths,
         };
         seal(

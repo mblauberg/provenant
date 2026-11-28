@@ -17,10 +17,12 @@ use provenant_os::{
     fs::{Directory, FileKind, FsError, ledger::Ledger},
 };
 use provenant_records::{
-    CommandResult, Outcome, StructuredPathWire,
+    CommandResult, Layer, Outcome, StructuredPathWire,
+    command_result::{NextStep, SettingRef},
     custody::{
         LandedEvidence, LandingPredicate, LandingSource, RemovalRecord, Subject, SubjectKind,
     },
+    warning::{Warning, WarningCode, detected_source, warn},
 };
 use serde::Serialize;
 use std::{
@@ -218,6 +220,14 @@ impl Error {
                 | WorktreeError::ProjectLayoutUnresolved
                 | WorktreeError::PrimaryMoved,
             ) => Outcome::Refused,
+            Self::Worktree(WorktreeError::CustodyCommand(error))
+                if matches!(
+                    &error.class,
+                    provenant_records::command_result::ErrorClass::Configured
+                ) =>
+            {
+                Outcome::Refused
+            }
             Self::Worktree(WorktreeError::Cancelled) => Outcome::Cancelled,
             _ => Outcome::Error,
         }
@@ -226,6 +236,9 @@ impl Error {
     /// The one mapping from a worktree refusal to its transport facts. Used by
     /// the production emit path and by the render tests, so the two cannot drift.
     pub(crate) fn command_error(&self, code: &str) -> provenant_records::CommandError {
+        if let Self::Worktree(WorktreeError::CustodyCommand(error)) = self {
+            return error.as_ref().clone();
+        }
         // The conflict reason is evidence beside the short refusal: the
         // message names the path and branch, the cause names what clashed.
         let cause = match self {
@@ -1119,40 +1132,63 @@ fn gc_uncollected(data: &GcData) -> Vec<crate::gc_support::UncollectedItem> {
 const GC_REPAIR: &str =
     "Run `provenant gc --apply --json` to inspect failed paths and retry incomplete collection.";
 
+/// A bound stopped the pass after its cursor was saved. This is progress, not
+/// a failure: the exit table reserves `Error` for an operation that failed.
+const GC_BUDGET_STOP: WarningCode = WarningCode("GC_BUDGET_STOP");
+
 fn gc_failure<'a>(data: &'a GcData, message: &str, detailed: bool) -> CommandResult<GcOutput<'a>> {
     let mut result = CommandResult::new("gc", Outcome::Error, gc_result_data(data, detailed));
-    // Exit 3 must name the budget that stopped the pass and the way to raise
-    // it: a preview and an applied sweep have distinct, separately configured
-    // bounds and a single "retention incomplete" line cannot guide the operator.
-    let budget = if data.preview_budget_stopped {
-        format!(
-            "stopped at gc.preview_budget={}s (source: {}); raise gc.preview_budget in config.toml or rerun with `provenant gc --apply`",
-            data.preview_budget_seconds, data.preview_budget_source
-        )
-    } else if data.sweep_stopped {
-        format!(
-            "stopped at gc.sweep_budget={}s (source: {}); raise gc.sweep_budget in config.toml and rerun `provenant gc --apply`",
-            data.sweep_budget_seconds, data.sweep_budget_source
-        )
-    } else {
-        String::new()
-    };
-    let repair = if budget.is_empty() {
-        GC_REPAIR.to_owned()
-    } else {
-        format!("{GC_REPAIR} {budget}")
-    };
-    let message = if budget.is_empty() {
-        message.to_owned()
-    } else {
-        format!("{message}: {budget}")
-    };
     result.error = Some(provenant_records::CommandError::new(
         "GC",
         format!("{message}\n{}{GC_REPAIR}", gc_data_summary(data)),
         None,
-        repair.as_str(),
+        GC_REPAIR,
     ));
+    result
+}
+
+/// The budget that stopped a pass, with its configured value and source. A
+/// preview and an applied sweep have distinct, separately configured bounds.
+fn gc_budget_stop_key(data: &GcData) -> (&'static str, u64, &str) {
+    if data.preview_budget_stopped {
+        (
+            "gc.preview_budget",
+            data.preview_budget_seconds,
+            &data.preview_budget_source,
+        )
+    } else {
+        (
+            "gc.sweep_budget",
+            data.sweep_budget_seconds,
+            &data.sweep_budget_source,
+        )
+    }
+}
+
+fn gc_budget_stop<'a>(data: &'a GcData, detailed: bool) -> CommandResult<GcOutput<'a>> {
+    let (key, seconds, source) = gc_budget_stop_key(data);
+    let mut result = CommandResult::new("gc", Outcome::Ok, gc_result_data(data, detailed));
+    let step = NextStep::from_args(
+        &["provenant", "gc", "--apply"],
+        "resume the saved cursor on the next sweep",
+    );
+    let mut warning = Warning::new(
+        GC_BUDGET_STOP,
+        format!("{key}={seconds}s stopped the sweep; the cursor was saved and the next pass resumes from it"),
+        detected_source(GC_BUDGET_STOP),
+    )
+    .setting(SettingRef {
+        key: key.to_owned(),
+        value: seconds.to_string(),
+        layer: Layer::Host,
+        origin: source.to_owned(),
+    });
+    warning.next.push(step.clone());
+    // The binary edge drains the sink into the envelope, so raise it there as
+    // well as carrying it on the result for library callers.
+    warn(warning.clone());
+    result.warnings.push(warning);
+    result.next.push(step);
     result
 }
 
@@ -1162,14 +1198,95 @@ fn gc_result(data: &GcData, detailed: bool) -> CommandResult<GcOutput<'_>> {
         || !data.discard_archives.errors.is_empty()
         || !data.port_receipts.errors.is_empty()
         || !data.retention_errors.is_empty()
-        || !data.provider_state.payload.errors.is_empty()
-        || data.preview_budget_stopped
-        || data.sweep_stopped;
+        || !data.provider_state.payload.errors.is_empty();
     if failed {
         gc_failure(data, "retention incomplete", detailed)
+    } else if data.preview_budget_stopped || data.sweep_stopped {
+        gc_budget_stop(data, detailed)
     } else {
         CommandResult::new("gc", Outcome::Ok, gc_result_data(data, detailed))
     }
+}
+
+struct GcCacheFailureData {
+    error: Box<provenant_confinement::cache::CacheGcError>,
+    unobserved_projects: Vec<PathBuf>,
+    skipped_transient: Vec<PathBuf>,
+    provider_state: Box<provenant_run::ProviderStateGc>,
+    worktree_cleanup: Vec<worktrees::WorktreeGcReport>,
+    alerts: Vec<String>,
+}
+
+fn gc_cache_failure_result(
+    command: &Gc,
+    failure: GcCacheFailureData,
+    detailed: bool,
+) -> Result<provenant_records::CommandResult<serde_json::Value>, String> {
+    let error = *failure.error;
+    let message = error.to_string();
+    let data = GcData {
+        report: *error.report,
+        idle_seconds: command.idle.unwrap_or(6 * 3600),
+        sweep_budget_seconds: 0,
+        sweep_budget_source: "unavailable".into(),
+        sweep_cursor: None,
+        sweep_warning: None,
+        sweep_stopped: false,
+        unobserved_projects: failure.unobserved_projects,
+        skipped_transient: failure.skipped_transient,
+        provider_state: *failure.provider_state,
+        chair_logs: Default::default(),
+        build_dirs: Default::default(),
+        graph_checkpoints_removed: 0,
+        stale_graphs: Vec::new(),
+        graph_bytes: None,
+        port_receipts: Default::default(),
+        retention_errors: Vec::new(),
+        failed_classes: Vec::new(),
+        retention_observations: Vec::new(),
+        discard_archives: Default::default(),
+        staging_busy: Vec::new(),
+        worktree_cleanup: failure.worktree_cleanup,
+        alerts: failure.alerts,
+        notice: None,
+        ..Default::default()
+    };
+    let result = gc_failure(&data, &message, detailed);
+    Ok(provenant_records::CommandResult {
+        schema_version: result.schema_version,
+        command: result.command,
+        status: result.status,
+        data: serde_json::to_value(result.data).map_err(|error| error.to_string())?,
+        error: result.error,
+        warnings: result.warnings,
+        next: result.next,
+    })
+}
+
+fn gc_result_value(
+    result: CommandResult<GcOutput<'_>>,
+) -> Result<CommandResult<serde_json::Value>, String> {
+    Ok(provenant_records::CommandResult {
+        schema_version: result.schema_version,
+        command: result.command,
+        status: result.status,
+        data: serde_json::to_value(result.data).map_err(|error| error.to_string())?,
+        error: result.error,
+        warnings: result.warnings,
+        next: result.next,
+    })
+}
+
+fn gc_peer_failure(
+    status: Outcome,
+    message: impl Into<String>,
+) -> CommandResult<serde_json::Value> {
+    let message = message.into();
+    let mut result = CommandResult::new("gc", status, serde_json::Value::Null);
+    result.error = Some(provenant_records::CommandError::new(
+        "GC", message, None, GC_REPAIR,
+    ));
+    result
 }
 
 /// How a scheduled collection that raised no error ended.
@@ -1189,6 +1306,7 @@ pub(crate) fn scheduled_gc(
     home: Option<&Path>,
 ) -> Result<GcCompletion, String> {
     let command = Gc {
+        common: Default::default(),
         scheduled: true,
         pressure: false,
         free_floor: None,
@@ -1197,7 +1315,7 @@ pub(crate) fn scheduled_gc(
         idle: Some(idle_seconds),
         finished_branch: None,
     };
-    let data = gc(&command, globals, workers, home).map_err(|error| error.local_message())?;
+    let data = gc(&command, globals, workers, home, None).map_err(|error| error.local_message())?;
     if !data.provider_state.errors.is_empty()
         || !data.chair_logs.errors.is_empty()
         || !data.discard_archives.errors.is_empty()
@@ -1235,6 +1353,10 @@ pub(crate) fn scheduled_gc(
 /// `provenant gc`: remove orphaned and idle legacy lane caches, sparing any
 /// whose worktree has a live or unobservable writer.
 pub fn run_gc(command: Gc, globals: &Globals, workers: &dyn WorkerObserver) -> u8 {
+    let selection = command.common.target();
+    if !matches!(selection, provenant_cli::HostSelection::Local) {
+        return run_gc_hosts(command, selection, globals, workers);
+    }
     // Keep per-PID EPERM census detail behind the global --full flag; the
     // default prints one aggregate warning with a count.
     worktrees::set_unreadable_census_detail(globals.full);
@@ -1251,7 +1373,7 @@ pub fn run_gc(command: Gc, globals: &Globals, workers: &dyn WorkerObserver) -> u
         }
         return crate::provider_retention::run_branch_scratch(globals, branch);
     }
-    match gc(&command, globals, workers, None) {
+    match gc(&command, globals, workers, None, None) {
         Ok(data) => {
             let human = gc_compact_summary(&data, globals.full);
             let result = gc_result(&data, globals.json);
@@ -1265,37 +1387,23 @@ pub fn run_gc(command: Gc, globals: &Globals, workers: &dyn WorkerObserver) -> u
             worktree_cleanup,
             alerts,
         )) => {
-            let error = *error;
-            let failure = error.to_string();
-            let data = GcData {
-                report: *error.report,
-                idle_seconds: command.idle.unwrap_or(6 * 3600),
-                sweep_budget_seconds: 0,
-                sweep_budget_source: "unavailable".into(),
-                sweep_cursor: None,
-                sweep_warning: None,
-                sweep_stopped: false,
-                unobserved_projects,
-                skipped_transient,
-                provider_state: *provider_state,
-                chair_logs: Default::default(),
-                build_dirs: Default::default(),
-                graph_checkpoints_removed: 0,
-                stale_graphs: Vec::new(),
-                graph_bytes: None,
-                port_receipts: Default::default(),
-                retention_errors: Vec::new(),
-                failed_classes: Vec::new(),
-                retention_observations: Vec::new(),
-                discard_archives: Default::default(),
-                staging_busy: Vec::new(),
-                worktree_cleanup,
-                alerts,
-                notice: None,
-                ..Default::default()
-            };
-            let result = gc_failure(&data, &failure, globals.json);
-            emit(&result, globals, "", command.dry_run)
+            match gc_cache_failure_result(
+                &command,
+                GcCacheFailureData {
+                    error,
+                    unobserved_projects,
+                    skipped_transient,
+                    provider_state,
+                    worktree_cleanup,
+                    alerts,
+                },
+                globals.json,
+            ) {
+                Ok(result) => emit(&result, globals, "", command.dry_run),
+                Err(error) => {
+                    crate::fail_with_repair("gc", Outcome::Error, "GC", &error, GC_REPAIR, globals)
+                }
+            }
         }
         Err(error) => crate::fail_with_repair(
             "gc",
@@ -1307,6 +1415,240 @@ pub fn run_gc(command: Gc, globals: &Globals, workers: &dyn WorkerObserver) -> u
         ),
     }
 }
+
+fn run_gc_hosts(
+    command: Gc,
+    selection: provenant_cli::HostSelection,
+    globals: &Globals,
+    workers: &dyn WorkerObserver,
+) -> u8 {
+    let workspace = if command.scheduled {
+        crate::roots::Workspace::Home
+    } else {
+        crate::roots::Workspace::Checkout
+    };
+    let resolved = match crate::roots::resolve(globals, workspace, crate::roots::Product::Required)
+    {
+        Ok(resolved) => resolved,
+        Err(crate::roots::RootError::Checkout) if !command.scheduled => {
+            match crate::roots::resolve(
+                globals,
+                crate::roots::Workspace::Project,
+                crate::roots::Product::Required,
+            ) {
+                Ok(resolved) => resolved,
+                Err(error) => {
+                    return crate::fail(
+                        "gc",
+                        Outcome::Error,
+                        "GC",
+                        &error.to_string(),
+                        GC_REPAIR,
+                        globals,
+                    );
+                }
+            }
+        }
+        Err(error) => {
+            return crate::fail(
+                "gc",
+                Outcome::Error,
+                "GC",
+                &error.to_string(),
+                GC_REPAIR,
+                globals,
+            );
+        }
+    };
+    let context = match provenant_cli::fabric::Context::open_read_only(
+        resolved.roots,
+        &resolved.home,
+        &resolved.project,
+    ) {
+        Ok(context) => context,
+        Err(error) => {
+            return crate::fail(
+                "gc",
+                Outcome::Error,
+                "GC",
+                &error.to_string(),
+                GC_REPAIR,
+                globals,
+            );
+        }
+    };
+    let hosts = match crate::fabric::peer::selected_hosts(
+        context.identity.host,
+        &context.config,
+        &selection,
+    ) {
+        Ok(hosts) => hosts,
+        Err(error) => {
+            return crate::fail(
+                "gc",
+                Outcome::Invalid,
+                "HOST",
+                &error,
+                "check the configured peer host name",
+                globals,
+            );
+        }
+    };
+    let clock = provenant_os::clock::SystemClock::new();
+    let seconds =
+        crate::fabric::host_read::bounded_timeout_seconds(&context.roots, &command.common, 300);
+    let budget = match provenant_core::WaitBudget::cli(clock.mono_now(), seconds) {
+        Ok(budget) => budget,
+        Err(error) => {
+            return crate::fail(
+                "gc",
+                Outcome::Invalid,
+                "TIMEOUT",
+                &error.to_string(),
+                "pass a shorter --timeout",
+                globals,
+            );
+        }
+    };
+    let executor = match provenant_os::exec::SystemExecutor::new(8) {
+        Ok(executor) => executor,
+        Err(error) => {
+            return crate::fail(
+                "gc",
+                Outcome::Error,
+                "PEER",
+                &error.to_string(),
+                GC_REPAIR,
+                globals,
+            );
+        }
+    };
+    let cancel = CancelToken::new();
+    let mut readings = Vec::with_capacity(hosts.len());
+    for host in hosts {
+        let result = if let Some(peer) = host.host {
+            context.peer_with(
+                &executor,
+                &clock,
+                peer,
+                provenant_fabric_runtime::hosts::PeerAction::Gc {
+                    extra: Default::default(),
+                    dry_run: command.dry_run,
+                    apply: command.apply,
+                    scheduled: command.scheduled,
+                    pressure: command.pressure,
+                    free_floor: command.free_floor,
+                    idle: command.idle,
+                    finished_branch: command.finished_branch.clone(),
+                    full: globals.full,
+                    detailed: globals.json,
+                    timeout_seconds: seconds,
+                },
+                budget,
+                &cancel,
+            )
+        } else {
+            let value = gc_for_peer(&command, globals, workers, Some(seconds));
+            match value {
+                Ok(result) => {
+                    readings.push((
+                        host.name,
+                        crate::fabric::peer::HostResult::Command {
+                            status: result.status,
+                            data: result.data,
+                            error: result.error.map(|error| error.into_payload().message),
+                            warnings: result.warnings,
+                            next: result.next,
+                        },
+                    ));
+                    continue;
+                }
+                Err(reason) => {
+                    readings.push((host.name, crate::fabric::peer::HostResult::Failed(reason)));
+                    continue;
+                }
+            }
+        };
+        let reading = match result {
+            Ok(provenant_fabric_runtime::hosts::PeerResult::Gc { data: result, .. }) => {
+                crate::fabric::peer::HostResult::Command {
+                    status: result.status,
+                    data: result.data,
+                    error: result.error.map(|error| error.into_payload().message),
+                    warnings: result.warnings,
+                    next: result.next,
+                }
+            }
+            Ok(provenant_fabric_runtime::hosts::PeerResult::Error { data, .. }) => {
+                crate::fabric::peer::host_result_from_facade(data.error)
+            }
+            Ok(_) => crate::fabric::peer::HostResult::Failed(
+                "peer returned an unexpected gc result".into(),
+            ),
+            Err(failure) => crate::fabric::peer::host_result_from_peer(Err(failure)),
+        };
+        readings.push((host.name, reading));
+    }
+    crate::fabric::peer::emit_host_aggregate("gc", readings, globals)
+}
+
+/// Run one bounded sweep for a peer `gc` request and return its aggregates.
+/// Unlike `run_gc` this writes no process envelope: the peer wraps the value
+/// in a `PeerResult::Gc` and the calling host renders the fan-out.
+pub(crate) fn gc_for_peer(
+    command: &Gc,
+    globals: &provenant_cli::Globals,
+    workers: &dyn WorkerObserver,
+    timeout_seconds: Option<u64>,
+) -> Result<provenant_records::CommandResult<serde_json::Value>, String> {
+    worktrees::set_unreadable_census_detail(globals.full);
+    if let Some(branch) = &command.finished_branch {
+        if command.dry_run || !command.apply {
+            return Ok(gc_peer_failure(
+                Outcome::Refused,
+                "targeted scratch collection requires --apply and excludes --dry-run",
+            ));
+        }
+        return Ok(
+            match crate::provider_retention::collect_branch_scratch(globals, branch) {
+                Ok(data) => CommandResult::new("gc", Outcome::Ok, data),
+                Err(error) => gc_peer_failure(Outcome::Error, error.to_string()),
+            },
+        );
+    }
+    let data = match gc(command, globals, workers, None, timeout_seconds) {
+        Ok(data) => data,
+        Err(Error::CacheGc(
+            error,
+            unobserved_projects,
+            skipped_transient,
+            provider_state,
+            worktree_cleanup,
+            alerts,
+        )) => {
+            return gc_cache_failure_result(
+                command,
+                GcCacheFailureData {
+                    error,
+                    unobserved_projects,
+                    skipped_transient,
+                    provider_state,
+                    worktree_cleanup,
+                    alerts,
+                },
+                globals.json,
+            );
+        }
+        Err(error) => {
+            return Ok(gc_peer_failure(error.outcome(), error.local_message()));
+        }
+    };
+    gc_result_value(gc_result(&data, globals.json))
+}
+
+/// The compact view stays under 32 KiB; `--full` carries the per-candidate
+/// rows. Aggregate lines are grouped by class and reason before they are cut.
+const GC_AGGREGATE_LIMIT: usize = 30 * 1024;
 
 /// One line per kept class and reason. The default compact view shows this
 /// aggregate first so it survives the renderer's line clip; JSON and `--full`
@@ -1321,16 +1663,28 @@ fn gc_uncollected_aggregate_lines(data: &GcData) -> Vec<String> {
         entry.0 += 1;
         entry.1 = entry.1.zip(item.bytes).map(|(sum, bytes)| sum + bytes);
     }
-    groups
-        .into_iter()
-        .map(|((class, reason), (count, bytes))| {
-            let bytes = bytes.map_or_else(
-                || "bytes unknown".to_owned(),
-                |bytes| format!("{bytes} bytes"),
-            );
-            format!("uncollected {class}: {count} item(s), {bytes}; kept: {reason}")
-        })
-        .collect()
+    let mut used = 0;
+    let mut lines = Vec::new();
+    let mut omitted = 0;
+    for ((class, reason), (count, bytes)) in groups {
+        let bytes = bytes.map_or_else(
+            || "bytes unknown".to_owned(),
+            |bytes| format!("{bytes} bytes"),
+        );
+        let line = format!("uncollected {class}: {count} item(s), {bytes}; kept: {reason}");
+        if used + line.len() + 1 > GC_AGGREGATE_LIMIT {
+            omitted += 1;
+            continue;
+        }
+        used += line.len() + 1;
+        lines.push(line);
+    }
+    if omitted > 0 {
+        lines.push(format!(
+            "uncollected aggregate: {omitted} class/reason group(s) omitted; rerun with --full"
+        ));
+    }
+    lines
 }
 
 fn gc_compact_summary(data: &GcData, full: bool) -> String {
@@ -1840,6 +2194,8 @@ enum GcOutput<'a> {
     Detailed {
         #[serde(flatten)]
         data: &'a GcData,
+        /// The sweep stopped at a budget and saved a cursor; exit stays zero.
+        partial: bool,
         #[serde(skip_serializing_if = "<[_]>::is_empty")]
         uncollected: Vec<crate::gc_support::UncollectedItem>,
         retention_bytes: Vec<provenant_config::RetentionBytes>,
@@ -1847,6 +2203,8 @@ enum GcOutput<'a> {
     },
     Summary {
         dry_run: bool,
+        /// The sweep stopped at a budget and saved a cursor; exit stays zero.
+        partial: bool,
         candidate_progress: &'a Option<GcCandidateProgress>,
         retention_bytes: Vec<provenant_config::RetentionBytes>,
         removal_records: Vec<RemovalRecord>,
@@ -1937,6 +2295,7 @@ fn gc_result_data(data: &GcData, detailed: bool) -> GcOutput<'_> {
     if detailed {
         return GcOutput::Detailed {
             data,
+            partial: data.preview_budget_stopped || data.sweep_stopped,
             uncollected: gc_uncollected(data),
             retention_bytes: gc_retention_bytes(data),
             removal_records: gc_removal_records(data),
@@ -1944,6 +2303,7 @@ fn gc_result_data(data: &GcData, detailed: bool) -> GcOutput<'_> {
     }
     GcOutput::Summary {
         dry_run: data.report.dry_run,
+        partial: data.preview_budget_stopped || data.sweep_stopped,
         candidate_progress: &data.candidate_progress,
         retention_bytes: gc_retention_bytes(data),
         removal_records: gc_removal_records(data),
@@ -2295,6 +2655,7 @@ pub(crate) fn retention_event(
                     }
                     SubjectKind::Path => path == Path::new(&subject.id),
                     SubjectKind::Branch => branch == Some(subject.id.as_str()),
+                    SubjectKind::Project => false,
                     _ => false,
                 })
             })?;
@@ -2643,6 +3004,7 @@ fn gc(
     globals: &Globals,
     workers: &dyn WorkerObserver,
     home_override: Option<&Path>,
+    timeout_cap: Option<u64>,
 ) -> Result<GcData, Error> {
     use provenant_confinement::cache::CacheGcPolicy;
 
@@ -2673,16 +3035,25 @@ fn gc(
     let mut unobserved_projects = Vec::new();
     let mut skipped_transient = Vec::new();
     let config = provenant_cli::config_reads::read_for(&roots, "gc")?;
-    let sweep_budget_seconds = config
+    let requested_timeout = timeout_cap
+        .or_else(|| command.common.timeout_seconds())
+        .unwrap_or(300);
+    let timeout_cap = crate::fabric::host_read::bounded_timeout_request(&roots, requested_timeout);
+    let configured_sweep_budget = config
         .gc
         .sweep_budget_seconds()
         .map_err(|_| Error::GcObservation("invalid gc.sweep_budget"))?;
+    let sweep_budget_seconds = configured_sweep_budget.min(timeout_cap);
     let sweep_budget = Duration::from_secs(sweep_budget_seconds);
-    let sweep_budget_source = config
-        .origins
-        .get("gc.sweep_budget")
-        .map(gc_origin_source)
-        .unwrap_or_else(|| "compiled default".into());
+    let sweep_budget_source = if sweep_budget_seconds < configured_sweep_budget {
+        "command --timeout (bounded)".to_owned()
+    } else {
+        config
+            .origins
+            .get("gc.sweep_budget")
+            .map(gc_origin_source)
+            .unwrap_or_else(|| "compiled default".into())
+    };
     // One resolution of the floor and its source for admission, pressure and
     // reporting. An explicit `--free-floor` override names itself as the source.
     let (free_floor, free_floor_source) = match command.free_floor {
@@ -2720,15 +3091,20 @@ fn gc(
         .get("gc.scratch_grace")
         .map(gc_origin_source)
         .unwrap_or_else(|| "compiled default".into());
-    let preview_budget_seconds = config
+    let configured_preview_budget = config
         .gc
         .preview_budget_seconds()
         .map_err(|_| Error::GcObservation("invalid gc.preview_budget"))?;
-    let preview_budget_source = config
-        .origins
-        .get("gc.preview_budget")
-        .map(gc_origin_source)
-        .unwrap_or_else(|| "compiled default".into());
+    let preview_budget_seconds = configured_preview_budget.min(timeout_cap);
+    let preview_budget_source = if preview_budget_seconds < configured_preview_budget {
+        "command --timeout (bounded)".to_owned()
+    } else {
+        config
+            .origins
+            .get("gc.preview_budget")
+            .map(gc_origin_source)
+            .unwrap_or_else(|| "compiled default".into())
+    };
     let scratch_warning_share = config.gc.scratch_warning_share_value();
     let scratch_warning_share_source = config
         .origins
@@ -2827,6 +3203,9 @@ fn gc(
         lease
             .watch_fence(deadline.cancel().clone())
             .map_err(|error| Error::RetentionCollection(error.to_string()))?;
+    }
+    if lease.is_some() && sweep_should_continue(&deadline, lease.as_ref()) {
+        crate::output::prune_reports(roots.state.as_path());
     }
     let trigger_identity = if command.pressure {
         "pressure"
@@ -3374,7 +3753,17 @@ fn gc(
     } else {
         provenant_config::RetentionTrigger::FullGc
     };
-    let classes = provenant_config::retention_schedule(trigger).collect::<Vec<_>>();
+    let mut classes = provenant_config::retention_schedule(trigger).collect::<Vec<_>>();
+    // Attempt scratch is the cheapest, highest-churn class: it moves first so
+    // a bounded pass always spends its budget on the work that frees the most
+    // space before it reaches the slower classes.
+    if let Some(index) = classes
+        .iter()
+        .position(|class| class.class == provenant_config::RetentionKind::AttemptScratch)
+    {
+        let first = classes.remove(index);
+        classes.insert(0, first);
+    }
     let resume_index = adapters.resume_cursor.as_ref().and_then(|cursor| {
         if cursor.class == "complete" {
             Some(classes.len())
@@ -5162,8 +5551,8 @@ mod gc_subpass_removal_tests {
             .expect("a typed forge refusal warning");
         assert!(warning.message.contains("alpha"), "{}", warning.message);
         assert!(warning.message.contains("beta"), "{}", warning.message);
-        let repair = warning.repair.as_deref().expect("an actionable repair");
-        assert!(repair.contains("git.remote"), "{repair}");
+        let next = warning.next.first().expect("next").display_text();
+        assert!(next.contains("git.remote"), "{next}");
     }
 
     #[test]

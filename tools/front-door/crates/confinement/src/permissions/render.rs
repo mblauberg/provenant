@@ -193,16 +193,16 @@ pub(super) fn compile_sbpl_impl(
 
 #[cfg(target_os = "macos")]
 fn compile_boundary_error(error: PermissionError) -> PermissionError {
-    use provenant_records::diagnostic::BoundaryClass;
+    use provenant_records::policy::Boundary;
     let code = match error.boundary_class() {
-        BoundaryClass::Credentials => Some("RENDER_COMPILE_SBPL_CREDENTIALS"),
-        BoundaryClass::LaneGit => Some("RENDER_COMPILE_SBPL_GIT_ISOLATION"),
-        BoundaryClass::Authority => Some(match &error {
+        Boundary::Credentials => Some("RENDER_COMPILE_SBPL_CREDENTIALS"),
+        Boundary::OtherWork => Some("RENDER_COMPILE_SBPL_GIT_ISOLATION"),
+        Boundary::Authority => Some(match &error {
             PermissionError::NestedConfinementUnsupported => "RENDER_COMPILE_SBPL_AUTHORITY",
             PermissionError::PermissionNotRecorded => "RENDER_COMPILE_SBPL_AUTHORITY_3",
             _ => "RENDER_COMPILE_SBPL_AUTHORITY_2",
         }),
-        BoundaryClass::Integrity | BoundaryClass::None => None,
+        Boundary::Operation | Boundary::None => None,
     };
     match code {
         Some(code) => {
@@ -339,6 +339,7 @@ fn compile_sbpl_inner(
             anchors,
             &credentials,
             lane_access,
+            policy,
         )?),
     };
     if let Some(read_only) = &plan.read_only {
@@ -520,7 +521,7 @@ fn compile_sbpl_inner(
     // SBPL grants pathnames, so rebind them to their held identities after
     // rendering, immediately before returning the launch profile.
     if let AccessMode::WorktreeWrite(authority) = &plan.mode {
-        verify_worktree_authority(authority, anchors, &credentials, lane_access)?;
+        verify_worktree_authority(authority, anchors, &credentials, lane_access, policy)?;
     }
     verify_private_scratch(&plan.scratch, &scratch_exclusions, anchors)?;
     if let Some(state) = &plan.private_state {
@@ -1077,7 +1078,7 @@ fn render_profile_with_policy(
 fn report_policy_warning(policy: &Policy, code: &str, detail: String) {
     match policy.check(code, Facts::violation(detail)) {
         Effect::Proceed => {}
-        Effect::Warn(warning) => report_policy_message(warning),
+        Effect::Warn(warning) => report_policy_message(*warning),
         Effect::Refuse(_) | Effect::Stop(_) => {
             panic!("optional-filter rules are warn-or-off decisions")
         }

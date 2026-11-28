@@ -270,569 +270,8 @@ fn host_operation_blocks(
 }
 
 #[cfg(test)]
-mod host_checkout_tests {
-    use super::*;
-
-    const MOVED: &[&str] = &["refs/heads/lane", "refs/heads/published/lane"];
-
-    #[test]
-    fn unrelated_host_operation_does_not_block_a_linked_lane() {
-        assert!(!host_operation_blocks(
-            false,
-            Some("refs/heads/side"),
-            "refs/heads/lane",
-            MOVED
-        ));
-        // An unknown ref (detached HEAD, unreadable head-name) is not a moved
-        // ref, so it cannot refuse settlement on its own.
-        assert!(!host_operation_blocks(
-            false,
-            None,
-            "refs/heads/lane",
-            MOVED
-        ));
-    }
-
-    #[test]
-    fn host_operation_on_a_moved_ref_blocks_a_linked_lane() {
-        assert!(host_operation_blocks(
-            false,
-            Some("refs/heads/lane"),
-            "refs/heads/lane",
-            MOVED
-        ));
-        assert!(host_operation_blocks(
-            false,
-            Some("refs/heads/published/lane"),
-            "refs/heads/lane",
-            MOVED
-        ));
-    }
-
-    #[test]
-    fn primary_checkout_keeps_the_lanes_own_operation_without_refusing() {
-        // The lane's worktree is the primary checkout, so this is its own Git:
-        // a stopped rebase or merge of its branch warns and proceeds with the
-        // committed tip rather than refusing and hiding lane_git_operation_warning.
-        assert!(!host_operation_blocks(
-            true,
-            Some("refs/heads/lane"),
-            "refs/heads/lane",
-            MOVED
-        ));
-        assert!(!host_operation_blocks(
-            true,
-            Some("refs/heads/side"),
-            "refs/heads/lane",
-            MOVED
-        ));
-        assert!(!host_operation_blocks(true, None, "refs/heads/lane", MOVED));
-    }
-
-    #[test]
-    fn primary_checkout_operation_on_the_delivery_destination_blocks() {
-        // The one ref settlement moves that is not the lane's own in-progress
-        // operation: publication would move it underneath that operation.
-        assert!(host_operation_blocks(
-            true,
-            Some("refs/heads/published/lane"),
-            "refs/heads/lane",
-            MOVED
-        ));
-    }
-}
-
-#[derive(Clone, Debug, Serialize)]
-pub struct SubmoduleEvidence {
-    pub common_git_dir: PathBuf,
-    pub private_git_dir: PathBuf,
-    pub path: PathBuf,
-    pub head: GitOid,
-    pub evidence: provenant_records::custody::LandedEvidence,
-}
-
-/// Only stores under this project's common Git directory are in cleanup scope.
-/// Their refs/objects survive removal of a linked checkout. Every initialized
-/// child must be clean and independently retained; detached unpushed heads keep.
-pub fn submodule_evidence(
-    context: &WorktreeContext<'_>,
-    repo: &VerifiedRepo,
-    cancel: &CancelToken,
-) -> Result<Vec<SubmoduleEvidence>, WorktreeError> {
-    let mut evidence = Vec::new();
-    inspect_submodules(
-        context,
-        repo,
-        repo.root_path(),
-        repo.private_git_dir(),
-        0,
-        &mut evidence,
-        cancel,
-    )?;
-    Ok(evidence)
-}
-
-pub(super) fn verify_removal_submodules(
-    context: &WorktreeContext<'_>,
-    repo: &VerifiedRepo,
-    cancel: &CancelToken,
-) -> Result<Vec<SubmoduleEvidence>, WorktreeError> {
-    let mut evidence = Vec::new();
-    inspect_submodules(
-        context,
-        repo,
-        repo.root_path(),
-        repo.private_git_dir(),
-        0,
-        &mut evidence,
-        cancel,
-    )?;
-    Ok(evidence)
-}
-
-#[allow(clippy::too_many_arguments)]
-fn inspect_submodules(
-    context: &WorktreeContext<'_>,
-    repo: &VerifiedRepo,
-    removed_root: &Path,
-    removed_admin: &Path,
-    depth: usize,
-    evidence: &mut Vec<SubmoduleEvidence>,
-    cancel: &CancelToken,
-) -> Result<(), WorktreeError> {
-    if depth >= 32 {
-        return Err(WorktreeError::UnknownWriter);
-    }
-    let index = run_git(
-        context,
-        repo,
-        GitRead::IndexEntries { paths: Vec::new() },
-        cancel,
-    )?;
-    if exit_code(&index)? != 0 {
-        return Err(WorktreeError::InvalidOutput);
-    }
-    for entry in
-        parse_index_entries(&index.stdout.bytes).map_err(|_| WorktreeError::InvalidOutput)?
-    {
-        let entry = entry.map_err(|_| WorktreeError::InvalidOutput)?;
-        if entry.mode != 0o160000 {
-            continue;
-        }
-        let relative = Path::new(OsStr::from_bytes(entry.path));
-        if relative.as_os_str().is_empty()
-            || relative
-                .components()
-                .any(|c| !matches!(c, std::path::Component::Normal(_)))
-        {
-            return Err(WorktreeError::InvalidOutput);
-        }
-        let path = repo.root_path().join(relative);
-        let unknown = |detail: &str| WorktreeError::UnknownOccupancy {
-            path: path.clone(),
-            detail: detail.into(),
-        };
-        let mut directory = repo.root_dir().try_clone()?;
-        let mut absent = false;
-        for component in relative.components() {
-            match directory.open_verified_directory(component.as_os_str()) {
-                Ok(child) => directory = child,
-                Err(error) if error.is_not_found() => {
-                    absent = true;
-                    break;
-                }
-                Err(_) => {
-                    return Err(unknown(
-                        "submodule path cannot be observed without following links",
-                    ));
-                }
-            }
-        }
-        if absent {
-            continue;
-        }
-        match directory.metadata_at(OsStr::new(".git"), false) {
-            Err(error) if error.is_not_found() => {
-                // Git ignores submodule contents in parent status. An uninitialised
-                // directory with manually placed files must therefore be kept.
-                if directory.entries()?.next().is_some() {
-                    return Err(unknown("uninitialised submodule contains untracked data"));
-                }
-                continue;
-            }
-            Err(error) => return Err(error.into()),
-            Ok(_) => {}
-        }
-        let child = context.utility.open_read_repo(
-            context.executor,
-            directory.current_path()?,
-            context.utility_budget,
-            cancel,
-        )?;
-        let child = &child.0;
-        if child.common_git_dir().starts_with(removed_root)
-            || child.private_git_dir().starts_with(removed_root)
-            || child.common_git_dir().starts_with(removed_admin)
-            || child.private_git_dir().starts_with(removed_admin)
-            || !child
-                .common_git_dir()
-                .starts_with(context.repo.common_git_dir())
-        {
-            return Err(unknown(
-                "submodule Git custody is outside the current project's retained store",
-            ));
-        }
-        check_writer_terminal(child)?;
-        inspect_submodules(
-            context,
-            child,
-            removed_root,
-            removed_admin,
-            depth + 1,
-            evidence,
-            cancel,
-        )?;
-        let status = run_git(context, child, GitRead::StatusIncludingIgnored, cancel)?;
-        if exit_code(&status)? != 0 {
-            return Err(unknown("submodule status is unavailable"));
-        }
-        let status =
-            parse_porcelain_v2_z(&status.stdout.bytes).map_err(|_| WorktreeError::InvalidOutput)?;
-        if !status.is_empty() {
-            return Err(unknown(
-                "submodule has dirty, untracked or ignored working data",
-            ));
-        }
-        let head = run_git(context, child, GitRead::RevParseHead, cancel)?;
-        if exit_code(&head)? != 0 {
-            return Err(unknown("submodule HEAD is unavailable"));
-        }
-        let head = parse_oid(trim_ascii(&head.stdout.bytes))?;
-        let mut references = BTreeMap::new();
-        for read in [GitRead::BranchTips, GitRead::RemoteBranchTips] {
-            let command = read.command_label();
-            let refs = run_git(context, child, read, cancel)?;
-            if exit_code(&refs)? != 0 {
-                return Err(unknown("submodule retained refs are unavailable"));
-            }
-            references.extend(parse_branch_tips(&refs.stdout.bytes).map_err(|detail| {
-                git_read_failure(&command, &refs, format!("output: {detail}"))
-            })?);
-        }
-        let references: Vec<_> = references
-            .into_iter()
-            .map(|(reference, commit)| EvidenceRef {
-                reference,
-                commit,
-                integration: false,
-            })
-            .collect();
-        match super::evidence::removal_evidence_in(context, child, head, &references, cancel)? {
-            LandingAssessment::Proven(proof) => evidence.push(SubmoduleEvidence {
-                common_git_dir: child.common_git_dir().to_owned(),
-                private_git_dir: child.private_git_dir().to_owned(),
-                path: path.clone(),
-                head,
-                evidence: proof,
-            }),
-            _ => {
-                return Err(unknown(
-                    "submodule HEAD is not independently subsumed by a retained ref",
-                ));
-            }
-        }
-    }
-    Ok(())
-}
-
-const DIRTY_PATHS_LISTED: usize = 12;
-const DIRTY_SUMMARY_BYTES: usize = 1024;
-
-pub(super) fn dirty_paths_summary(paths: &[StatusPath]) -> String {
-    let raw: Vec<&[u8]> = paths
-        .iter()
-        .flat_map(|path| std::iter::once(path.path.as_slice()).chain(path.original_path.as_deref()))
-        .collect();
-    dirty_paths_summary_bytes(&raw).text
-}
-
-struct DirtyPathsSummary {
-    text: String,
-    #[cfg(test)]
-    listed: usize,
-    #[cfg(test)]
-    omitted: usize,
-    #[cfg(test)]
-    total: usize,
-}
-
-fn dirty_paths_summary_bytes(paths: &[&[u8]]) -> DirtyPathsSummary {
-    if paths.is_empty() {
-        return DirtyPathsSummary {
-            text: String::new(),
-            #[cfg(test)]
-            listed: 0,
-            #[cfg(test)]
-            omitted: 0,
-            #[cfg(test)]
-            total: 0,
-        };
-    }
-    let mut seen = std::collections::HashSet::new();
-    let mut unique = Vec::new();
-    for path in paths {
-        let lossy = String::from_utf8_lossy(path).into_owned();
-        if seen.insert(lossy.clone()) {
-            unique.push(lossy);
-        }
-    }
-    // List whole names only, within the count and byte budgets, so the
-    // omission count is never cut off. The first name is always listed,
-    // shortened only if it alone exceeds the budget.
-    // Reserve room for the widest omission suffix so the whole text, suffix
-    // included, stays within the byte budget.
-    let reserve = if unique.len() > 1 {
-        format!(" and {} more", unique.len()).len()
-    } else {
-        0
-    };
-    let budget = DIRTY_SUMMARY_BYTES.saturating_sub(reserve);
-    let mut summary = String::new();
-    let mut listed = 0;
-    for name in unique.iter().take(DIRTY_PATHS_LISTED) {
-        let separator = if listed == 0 { "" } else { ", " };
-        if listed > 0 && summary.len() + separator.len() + name.len() > budget {
-            break;
-        }
-        summary.push_str(separator);
-        summary.push_str(name);
-        listed += 1;
-    }
-    summary.truncate(summary.floor_char_boundary(budget));
-    let more = unique.len() - listed;
-    if more > 0 {
-        summary.push_str(&format!(" and {more} more"));
-    }
-    DirtyPathsSummary {
-        text: summary,
-        #[cfg(test)]
-        listed,
-        #[cfg(test)]
-        omitted: more,
-        #[cfg(test)]
-        total: unique.len(),
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) enum WorktreeCleanliness {
-    Clean,
-    Ignored,
-    Dirty(String, bool),
-    GitOperationInProgress,
-    Unknown,
-}
-
-/// The one dirtiness observation a launch or retry makes: a fresh
-/// `git status --porcelain` reading, with ignored paths excluded. A recorded
-/// private attempt index is a snapshot of an earlier attempt, retained across
-/// stop, not an observation of this worktree; it must not refuse a new writer
-/// whose native status is clean. Removal and GC, which destroy that private
-/// Git, use [`worktree_cleanliness_with_attempt_indexes_at`] instead.
-pub(super) fn worktree_cleanliness_at(
-    context: &WorktreeContext<'_>,
-    repo: &VerifiedRepo,
-    cancel: &CancelToken,
-) -> Result<WorktreeCleanliness, WorktreeError> {
-    native_worktree_cleanliness_at(context, repo, cancel)
-}
-
-/// The removal verdict also accounts for every durable private attempt index:
-/// removing the worktree destroys those indexes, so staged work invisible to
-/// the native status must still retain the tree.
-pub(super) fn worktree_cleanliness_with_attempt_indexes_at(
-    context: &WorktreeContext<'_>,
-    repo: &VerifiedRepo,
-    cancel: &CancelToken,
-) -> Result<WorktreeCleanliness, WorktreeError> {
-    let cleanliness = worktree_cleanliness_at(context, repo, cancel)?;
-    require_attempt_indexes_clean(context, repo, cancel)?;
-    Ok(cleanliness)
-}
-
-fn native_worktree_cleanliness_at(
-    context: &WorktreeContext<'_>,
-    repo: &VerifiedRepo,
-    cancel: &CancelToken,
-) -> Result<WorktreeCleanliness, WorktreeError> {
-    match check_writer_terminal(repo) {
-        Ok(()) => {}
-        Err(WorktreeError::GitOperationInProgress) => {
-            return Ok(WorktreeCleanliness::GitOperationInProgress);
-        }
-        Err(error) => return Err(error),
-    }
-    submodule_evidence(context, repo, cancel)?;
-    let outcome = run_git(context, repo, GitRead::StatusIncludingIgnored, cancel)?;
-    if exit_code(&outcome)? != 0 {
-        return Ok(WorktreeCleanliness::Unknown);
-    }
-    let records =
-        parse_porcelain_v2_z(&outcome.stdout.bytes).map_err(|_| WorktreeError::InvalidOutput)?;
-    if records.is_empty() {
-        return Ok(WorktreeCleanliness::Clean);
-    }
-    let dirty_records: Vec<_> = records
-        .into_iter()
-        .filter(|record| record.kind != StatusKind::Ignored)
-        .collect();
-    if dirty_records.is_empty() {
-        Ok(WorktreeCleanliness::Ignored)
-    } else {
-        let protected = dirty_records.iter().any(|record| {
-            std::iter::once(record.path.as_slice())
-                .chain(record.original_path.as_deref())
-                .any(|path| writer_edit_is_protected(&String::from_utf8_lossy(path)))
-        });
-        Ok(WorktreeCleanliness::Dirty(
-            dirty_paths_summary(&dirty_records),
-            protected,
-        ))
-    }
-}
-
-/// Run only after the caller has exclusive worktree occupancy. A native index
-/// can be clean while a crashed or unreconciled attempt still has staged paths
-/// in its private index, so removal must account for every durable record.
-fn require_attempt_indexes_clean(
-    context: &WorktreeContext<'_>,
-    repo: &VerifiedRepo,
-    cancel: &CancelToken,
-) -> Result<(), WorktreeError> {
-    let path = repo.root_path().to_path_buf();
-    let slot_name = state_dir_name(repo.root_path());
-    let slot = match context.project_state.open_verified_directory(&slot_name) {
-        Ok(slot) => slot,
-        Err(error) if error.is_not_found() => return Ok(()),
-        Err(_) => {
-            return Err(private_attempt_index_unknown(
-                &path,
-                "private attempt index custody could not be opened",
-            ));
-        }
-    };
-    let records = provenant_supervisor::custody::recorded_attempt_indexes(&slot).map_err(|_| {
-        private_attempt_index_unknown(&path, "private attempt index custody could not be verified")
-    })?;
-    for record in records {
-        if let Err(error) = check_git_operation_terminal(&record.refs, None) {
-            return match error {
-                WorktreeError::GitOperationInProgress => Err(WorktreeError::Dirty(format!(
-                    "attempt {} has an unfinished Git operation",
-                    record.scope.attempt
-                ))),
-                error => Err(error),
-            };
-        }
-
-        let head =
-            provenant_os::git::private_branch_tip(&record.refs, &record.branch).map_err(|_| {
-                private_attempt_index_unknown(
-                    &path,
-                    "private attempt branch tip could not be verified",
-                )
-            })?;
-        record
-            .refs
-            .read_stable(OsStr::new("index"), 64 * 1024 * 1024)
-            .map_err(|_| {
-                private_attempt_index_unknown(&path, "private attempt index could not be read")
-            })?;
-        let index = record
-            .refs
-            .current_path()
-            .map_err(|_| {
-                private_attempt_index_unknown(&path, "private attempt index path changed")
-            })?
-            .join("index");
-        let outcome = run_git(context, repo, GitRead::AttemptIndex { index, head }, cancel)
-            .map_err(|_| {
-                private_attempt_index_unknown(&path, "private attempt index could not be compared")
-            })?;
-        match exit_code(&outcome).map_err(|_| {
-            private_attempt_index_unknown(&path, "private attempt index result was incomplete")
-        })? {
-            0 | 1 => {}
-            _ => {
-                return Err(private_attempt_index_unknown(
-                    &path,
-                    "private attempt branch objects are unavailable",
-                ));
-            }
-        }
-        let staged: Vec<_> = outcome
-            .stdout
-            .bytes
-            .split(|byte| *byte == 0)
-            .filter(|name| !name.is_empty())
-            .collect();
-        if !staged.is_empty() {
-            let summary = dirty_paths_summary_bytes(&staged).text;
-            return Err(WorktreeError::Dirty(format!(
-                "attempt {} staged paths: {summary}",
-                record.scope.attempt
-            )));
-        }
-    }
-    Ok(())
-}
-
-fn private_attempt_index_unknown(path: &Path, detail: &str) -> WorktreeError {
-    WorktreeError::UnknownOccupancy {
-        path: path.to_path_buf(),
-        detail: detail.to_owned(),
-    }
-}
-
-/// Recheck that a verified worktree is clean while the caller holds writer
-/// custody. This probes the worktree's Git configuration before running status.
-pub fn require_clean_worktree(
-    context: &WorktreeContext<'_>,
-    worktree: &mut VerifiedWorktree,
-    cancel: &CancelToken,
-) -> Result<(), WorktreeError> {
-    context
-        .utility
-        .probe_worktree(context.executor, worktree, context.utility_budget, cancel)?;
-    match worktree_cleanliness_at(context, worktree.repo(), cancel)? {
-        WorktreeCleanliness::Clean => Ok(()),
-        WorktreeCleanliness::Ignored => Err(WorktreeError::IgnoredPaths(String::new())),
-        WorktreeCleanliness::Dirty(paths, _) => Err(WorktreeError::Dirty(paths)),
-        WorktreeCleanliness::GitOperationInProgress => Err(WorktreeError::GitOperationInProgress),
-        WorktreeCleanliness::Unknown => Err(WorktreeError::UnknownOccupancy {
-            path: worktree.path().to_path_buf(),
-            detail: "worktree cleanliness could not be verified".into(),
-        }),
-    }
-}
-
-pub(super) fn worktree_dirty_at(
-    context: &WorktreeContext<'_>,
-    repo: &VerifiedRepo,
-    cancel: &CancelToken,
-) -> Result<WorktreeCondition, WorktreeError> {
-    Ok(
-        match native_worktree_cleanliness_at(context, repo, cancel)? {
-            WorktreeCleanliness::Clean => WorktreeCondition::Clean,
-            WorktreeCleanliness::Ignored => WorktreeCondition::Ignored,
-            WorktreeCleanliness::Dirty(..) => WorktreeCondition::Dirty,
-            WorktreeCleanliness::GitOperationInProgress => {
-                WorktreeCondition::GitOperationInProgress
-            }
-            WorktreeCleanliness::Unknown => WorktreeCondition::Unknown,
-        },
-    )
-}
+#[path = "custody_host_checkout_tests.rs"]
+mod host_checkout_tests;
 
 pub(super) struct LockedWorktree {
     pub(super) verified: VerifiedWorktree,
@@ -1091,7 +530,7 @@ fn lock_worktree_impl(
         });
         match effect {
             Effect::Proceed => {}
-            Effect::Warn(warning) => provenant_records::warning::warn(warning),
+            Effect::Warn(warning) => provenant_records::warning::warn(*warning),
             Effect::Refuse(_) | Effect::Stop(_) => {
                 return Err(live_refusal(context.workers, &canonical));
             }
@@ -1480,49 +919,895 @@ fn cache_writer_guard_under_gate(
     Ok(guard)
 }
 
-#[cfg(test)]
-mod dirty_tests {
-    use super::*;
+// ---- Live-sharing lease admission and destruction guard (slice 35) ----
+//
+// The records crate owns the pure policy (`admit_writer`, `guard_destructive`).
+// Confinement owns the seam that turns its on-disk custody facts into a lease
+// observation and applies that policy before a writer shares a tree or a
+// destructive operation touches another lane's live work.
 
-    #[test]
-    fn summary_includes_both_rename_paths() {
-        let paths = [StatusPath {
-            kind: StatusKind::RenameOrCopy,
-            path: b"new name".to_vec(),
-            original_path: Some(b"old name".to_vec()),
-        }];
-        let summary = dirty_paths_summary(&paths);
-        assert!(summary.contains("new name"));
-        assert!(summary.contains("old name"));
-    }
+use provenant_core::WallTime;
+use provenant_records::command_result::SettingRef;
+use provenant_records::custody::{
+    Admit, LeaseObservation, LeaseState, Sharing, Subject as CustodySubject, WorktreeLease,
+    admit_writer as records_admit_writer, default_sharing,
+    guard_destructive as records_guard_destructive,
+};
+use provenant_records::policy::DESTROYS_LIVE_WORK;
+use provenant_records::provenance::{Source, Sourced};
+use provenant_records::warning::{CONFIG_UNAVAILABLE, Warning, detected_source, warn};
+use serde::{Deserialize, Serialize};
 
-    #[test]
-    fn summary_lists_dirty_paths_and_counts_the_rest() {
-        let empty = dirty_paths_summary_bytes(&[]);
-        assert!(empty.text.is_empty());
-        assert_eq!((empty.listed, empty.omitted, empty.total), (0, 0, 0));
-        let one = dirty_paths_summary_bytes(&[b"a.rs", b"b/c.rs"]);
-        for path in ["a.rs", "b/c.rs"] {
-            assert_eq!(one.text.matches(path).count(), 1, "{}", one.text);
-        }
-        let dedup = dirty_paths_summary_bytes(&[b"a.rs", b"a.rs", b"b.rs"]);
-        for path in ["a.rs", "b.rs"] {
-            assert_eq!(dedup.text.matches(path).count(), 1, "{}", dedup.text);
-        }
-        assert_eq!(dedup.total, 2);
-        assert_eq!(dedup.listed + dedup.omitted, dedup.total);
-        let many: Vec<Vec<u8>> = (0..15).map(|n| format!("f{n:02}").into_bytes()).collect();
-        let many_refs: Vec<&[u8]> = many.iter().map(Vec::as_slice).collect();
-        let summary = dirty_paths_summary_bytes(&many_refs);
-        assert!(summary.text.len() <= DIRTY_SUMMARY_BYTES);
-        assert_eq!(summary.total, many.len());
-        assert_eq!(summary.listed + summary.omitted, summary.total);
-        let wide: Vec<Vec<u8>> = (0..12)
-            .map(|n| format!("{n:02}{}", "y".repeat(200)).into_bytes())
-            .collect();
-        let wide_refs: Vec<&[u8]> = wide.iter().map(Vec::as_slice).collect();
-        let summary = dirty_paths_summary_bytes(&wide_refs);
-        assert_eq!(summary.total, wide.len());
-        assert_eq!(summary.listed + summary.omitted, summary.total);
+/// The single setting that selects live-worktree sharing behaviour.
+pub const WORKTREE_SHARING_KEY: &str = provenant_records::custody::WORKTREE_SHARING_KEY;
+
+const LEASE_UNREACHABLE_SECONDS_KEY: &str = "domains.fabric.lanes.lease_unreachable_seconds";
+const LEASE_UNREACHABLE_SECONDS_DEFAULT: u64 = 900;
+const UNREACHABLE_MARKER_FILE: &str = "lease-unreachable.json";
+
+/// The one file name of a worktree slot's lease. Launch, handover, migration
+/// and the confinement reader all write and read this one entry.
+pub const LEASE_FILE: &str = "lease.json";
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct UnreachableMarker {
+    /// Attempt id plus reservation generation identifies one holder incarnation.
+    holder: provenant_core::AttemptId,
+    generation: u64,
+    state: UnreachableMarkerState,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+enum UnreachableMarkerState {
+    Observed,
+    Unreachable { since: WallTime },
+}
+
+fn unreachable_setting_ref(grace: &Sourced<u64>) -> SettingRef {
+    SettingRef {
+        key: LEASE_UNREACHABLE_SECONDS_KEY.to_owned(),
+        value: grace.value.to_string(),
+        layer: grace.source.layer,
+        origin: grace.source.origin.clone().unwrap_or_default(),
     }
 }
+
+fn default_unreachable_grace() -> Sourced<u64> {
+    Sourced {
+        value: LEASE_UNREACHABLE_SECONDS_DEFAULT,
+        source: Source::default(),
+    }
+}
+
+fn resolved_host_knobs(
+    host_state: &Path,
+    home: &Path,
+    checkout: &Path,
+) -> Result<provenant_config::ResolvedConfig, String> {
+    let mut inputs = provenant_core::RootInputs::new(home.to_path_buf(), checkout.to_path_buf());
+    inputs.state_dir = Some(host_state.to_path_buf());
+    inputs
+        .resolve(&provenant_os::fs::SystemPathResolver)
+        .map_err(|error| error.to_string())
+        .and_then(|roots| provenant_config::read_knobs(&roots).map_err(|error| error.to_string()))
+}
+
+/// The one path at which a worktree slot's lease lives. `slot` is the slot
+/// directory below `<state>/worktrees/<project>/`; every writer of the lease
+/// derives its target from this function so no second spelling survives.
+pub fn lease_path(slot: &std::path::Path) -> std::path::PathBuf {
+    slot.join(LEASE_FILE)
+}
+
+/// Read the resolved sharing knob, preserving the layer supplied by the
+/// configuration resolver. A failed read warns and uses the compiled default.
+pub fn configured_sharing(host_state: &Path, home: &Path, checkout: &Path) -> Sourced<Sharing> {
+    let fallback = default_sharing();
+    let config = match resolved_host_knobs(host_state, home, checkout) {
+        Ok(config) => config,
+        Err(error) => {
+            warn(
+                Warning::new(
+                    CONFIG_UNAVAILABLE,
+                    format!(
+                        "{WORKTREE_SHARING_KEY} could not be resolved ({error}); using the default"
+                    ),
+                    detected_source(CONFIG_UNAVAILABLE),
+                )
+                .setting(provenant_records::custody::sharing_setting_ref(&fallback)),
+            );
+            return fallback;
+        }
+    };
+    config
+        .knobs
+        .get(WORKTREE_SHARING_KEY)
+        .and_then(|knob| {
+            Some(Sourced {
+                value: knob.value.as_str()?.parse().ok()?,
+                source: knob.source.clone(),
+            })
+        })
+        .unwrap_or(fallback)
+}
+
+/// Resolve the host's unreachable-holder grace from an authorised state path,
+/// retaining the setting source for custody warnings and downstream readers.
+/// A config read failure keeps the conservative compiled grace.
+pub fn configured_unreachable_grace_at(host_state: &Path) -> Sourced<u64> {
+    let fallback = default_unreachable_grace();
+    let config = match provenant_config::read_knobs_at_state(host_state) {
+        Ok(config) => config,
+        Err(error) => {
+            warn(
+                Warning::new(
+                    CONFIG_UNAVAILABLE,
+                    format!("{LEASE_UNREACHABLE_SECONDS_KEY} could not be resolved ({error}); using the default"),
+                    detected_source(CONFIG_UNAVAILABLE),
+                )
+                .setting(unreachable_setting_ref(&fallback)),
+            );
+            return fallback;
+        }
+    };
+    config
+        .knobs
+        .get(LEASE_UNREACHABLE_SECONDS_KEY)
+        .and_then(|knob| {
+            Some(Sourced {
+                value: knob.value.as_u64()?,
+                source: knob.source.clone(),
+            })
+        })
+        .unwrap_or(fallback)
+}
+
+/// Resolve the host's unreachable-holder grace, retaining its setting source.
+fn configured_unreachable_grace(context: &WorktreeContext<'_>) -> Sourced<u64> {
+    match context.host_state() {
+        Ok(host_state) => configured_unreachable_grace_at(&host_state),
+        Err(error) => {
+            let fallback = default_unreachable_grace();
+            warn(
+                Warning::new(
+                    CONFIG_UNAVAILABLE,
+                    format!("{LEASE_UNREACHABLE_SECONDS_KEY} could not be resolved ({error}); using the default"),
+                    detected_source(CONFIG_UNAVAILABLE),
+                )
+                .setting(unreachable_setting_ref(&fallback)),
+            );
+            fallback
+        }
+    }
+}
+
+/// Build the lease observation consumed by the records admission seam. A
+/// holder whose process is present owns a live lease, one whose process is
+/// gone has a lapsed lease, and one that cannot be observed is unreachable
+/// until `retry_at`.
+#[cfg(test)]
+pub(crate) fn lease_observation(
+    holder: provenant_core::AttemptId,
+    since: WallTime,
+    live: Option<bool>,
+    retry_at: WallTime,
+    owner_sharing: Sharing,
+) -> LeaseObservation {
+    let state = match live {
+        Some(true) => LeaseState::Live {
+            attempt_state: "nonterminal".to_owned(),
+        },
+        Some(false) => LeaseState::Lapsed {
+            attempt_state: "terminal".to_owned(),
+        },
+        None => LeaseState::Unreachable {
+            retry_at,
+            setting: unreachable_setting_ref(&default_unreachable_grace()),
+        },
+    };
+    LeaseObservation {
+        lease: WorktreeLease {
+            holder,
+            since,
+            sharing: owner_sharing,
+        },
+        state,
+    }
+}
+
+/// The one admission decision. `configured` is the resolved layered setting;
+/// the observation's `lease.sharing` is the owning lane's own override, which
+/// the records seam lets win for that tree only.
+pub(crate) fn admit_shared_writer(
+    tree: &CustodySubject,
+    observation: Option<&LeaseObservation>,
+    configured: &Sourced<Sharing>,
+) -> Admit {
+    records_admit_writer(tree, observation, configured)
+}
+
+/// Emit the typed warning carried by `Admit::Proceed`. The records policy has
+/// already decided that this is not a refusal; presentation is confinement's
+/// responsibility so the warning reaches the command's bounded sink.
+pub(crate) fn emit_admission_warning(admit: &Admit) {
+    let Some(warning) = (match admit {
+        Admit::Proceed { warning } => warning.as_ref(),
+        Admit::Refuse { .. } => None,
+    }) else {
+        return;
+    };
+    warn((**warning).clone());
+}
+
+fn retry_at(since: WallTime, seconds: u64) -> WallTime {
+    let duration = provenant_core::DurationMicros::from_seconds(seconds)
+        .unwrap_or_else(|_| provenant_core::DurationMicros::from_micros(u64::MAX));
+    since.checked_add(duration).unwrap_or(WallTime::MAX)
+}
+
+fn unreachable_state(since: WallTime, now: WallTime, grace: &Sourced<u64>) -> LeaseState {
+    let retry_at = retry_at(since, grace.value);
+    let setting = unreachable_setting_ref(grace);
+    if retry_at <= now {
+        LeaseState::LapsedUnreachable { retry_at, setting }
+    } else {
+        LeaseState::Unreachable { retry_at, setting }
+    }
+}
+
+fn write_unreachable_marker(
+    slot: &Directory,
+    holder: provenant_core::AttemptId,
+    generation: u64,
+    state: UnreachableMarkerState,
+) -> Option<()> {
+    let bytes = serde_json::to_vec(&UnreachableMarker {
+        holder,
+        generation,
+        state,
+    })
+    .ok()?;
+    slot.atomic_write(
+        OsStr::new(UNREACHABLE_MARKER_FILE),
+        ".lease-unreachable-",
+        &bytes,
+        provenant_os::fs::PublishMode::Replace,
+    )
+    .ok()?
+    .require_durable()
+    .ok()
+}
+
+/// Persist every observed presence transition while holding the slot's
+/// observation gate. A missing or unreadable marker starts a fresh grace;
+/// failure to publish it keeps an unreachable holder live for this read.
+#[cfg(test)]
+fn observe_reservation_liveness(
+    slot: &Directory,
+    holder: provenant_core::AttemptId,
+    generation: u64,
+    live: Option<bool>,
+    now: WallTime,
+    grace: &Sourced<u64>,
+) -> Option<LeaseState> {
+    let _observation = provenant_supervisor::custody::writer_observation_guard(slot).ok()?;
+    observe_reservation_liveness_locked(slot, holder, generation, live, false, now, grace)
+}
+
+/// `launching` marks a reservation in its launch window: the attempt is
+/// nonterminal but has no guardian to observe yet, so it counts as live for
+/// the unreachable grace and lapses with it like any unobservable holder.
+fn observe_reservation_liveness_locked(
+    slot: &Directory,
+    holder: provenant_core::AttemptId,
+    generation: u64,
+    live: Option<bool>,
+    launching: bool,
+    now: WallTime,
+    grace: &Sourced<u64>,
+) -> Option<LeaseState> {
+    match live {
+        Some(true) => {
+            write_unreachable_marker(slot, holder, generation, UnreachableMarkerState::Observed)?;
+            Some(LeaseState::Live {
+                attempt_state: "nonterminal".to_owned(),
+            })
+        }
+        Some(false) => {
+            write_unreachable_marker(slot, holder, generation, UnreachableMarkerState::Observed)?;
+            Some(LeaseState::Lapsed {
+                attempt_state: "terminal".to_owned(),
+            })
+        }
+        None => {
+            let marker = slot
+                .read_stable(OsStr::new(UNREACHABLE_MARKER_FILE), 4096)
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<UnreachableMarker>(&bytes).ok());
+            let since = match marker {
+                Some(UnreachableMarker {
+                    holder: marked_holder,
+                    generation: marked_generation,
+                    state: UnreachableMarkerState::Unreachable { since },
+                }) if marked_holder == holder
+                    && marked_generation == generation
+                    && since <= now =>
+                {
+                    since
+                }
+                _ => now,
+            };
+            let already_persisted = marker_matches_since(slot, holder, generation, since);
+            if !already_persisted
+                && write_unreachable_marker(
+                    slot,
+                    holder,
+                    generation,
+                    UnreachableMarkerState::Unreachable { since },
+                )
+                .is_none()
+            {
+                return Some(LeaseState::Unreachable {
+                    retry_at: retry_at(now, grace.value),
+                    setting: unreachable_setting_ref(grace),
+                });
+            }
+            Some(match unreachable_state(since, now, grace) {
+                LeaseState::Unreachable { .. } if launching => LeaseState::Live {
+                    attempt_state: "nonterminal".to_owned(),
+                },
+                state => state,
+            })
+        }
+    }
+}
+
+fn marker_matches_since(
+    slot: &Directory,
+    holder: provenant_core::AttemptId,
+    generation: u64,
+    since: WallTime,
+) -> bool {
+    slot.read_stable(OsStr::new(UNREACHABLE_MARKER_FILE), 4096)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<UnreachableMarker>(&bytes).ok())
+        .is_some_and(|marker| {
+            marker.holder == holder
+                && marker.generation == generation
+                && matches!(marker.state, UnreachableMarkerState::Unreachable { since: saved } if saved == since)
+        })
+}
+
+fn protects_holder(live: Option<bool>, state: Option<&LeaseState>) -> bool {
+    match state {
+        Some(LeaseState::Live { .. } | LeaseState::Unreachable { .. }) => true,
+        Some(LeaseState::Lapsed { .. } | LeaseState::LapsedUnreachable { .. }) => false,
+        None => live != Some(false),
+    }
+}
+
+/// Pair the authoritative slot lease with the reservation's current holder
+/// state. The reservation supplies liveness; identity, timestamp and sharing
+/// come from the B3 lease written for this slot.
+type ReservationSnapshot = (
+    Directory,
+    provenant_os::fs::LockGuard,
+    provenant_supervisor::custody::WriterReservation,
+    WorktreeLease,
+);
+type GatedReservationSnapshot = (
+    Directory,
+    provenant_os::fs::LockGuard,
+    Option<(
+        provenant_supervisor::custody::WriterReservation,
+        WorktreeLease,
+    )>,
+    Vec<provenant_supervisor::custody::WriterReservation>,
+);
+
+fn reservation_snapshot(
+    project_state: &Directory,
+    path: &Path,
+    adopter: Option<provenant_records::custody::Scope>,
+) -> Result<Option<ReservationSnapshot>, String> {
+    let slot = match project_state.open_verified_directory(&state_dir_name(path)) {
+        Ok(slot) => slot,
+        Err(error) if error.is_not_found() => return Ok(None),
+        Err(error) => {
+            return Err(format!(
+                "worktree custody slot could not be opened: {error}"
+            ));
+        }
+    };
+    let observation = match slot.metadata_at(OsStr::new("writer-probe.lock"), false) {
+        Ok(_) => provenant_supervisor::custody::writer_observation_guard(&slot)
+            .map_err(|error| format!("worktree custody observation is busy: {error}"))?,
+        Err(error) if error.is_not_found() => {
+            // Registry mutation owns gate creation. A legacy unowned slot is
+            // still observable without changing it; reservation evidence in a
+            // gate-less slot remains unknown and therefore protected.
+            let listing = provenant_supervisor::custody::list_writer_reservations_in_slot(&slot)
+                .map_err(|error| format!("writer reservations could not be checked: {error}"))?;
+            if let Some(issue) = listing.issues.first() {
+                return Err(format!(
+                    "writer reservation evidence could not be verified at {}: {}",
+                    issue.reservation.display(),
+                    issue.reason
+                ));
+            }
+            if listing.reservations.is_empty() {
+                return Ok(None);
+            }
+            return Err("writer reservation evidence exists without an observation gate".into());
+        }
+        Err(error) => {
+            return Err(format!(
+                "writer observation gate could not be checked: {error}"
+            ));
+        }
+    };
+    reservation_snapshot_under_gate(slot, observation, adopter).map(
+        |(slot, observation, evidence, _)| {
+            evidence.map(|(reservation, lease)| (slot, observation, reservation, lease))
+        },
+    )
+}
+
+/// Classify the reservations of a slot that has no lease yet. The adopter's own
+/// reservation is its launch. Another reservation whose holder is not known to
+/// be gone is a live writer in its launch window and becomes the holder, so the
+/// sharing policy decides; the rest are its siblings. Reservations no live
+/// attempt explains stay unexplained custody evidence and are refused.
+fn unleased_holder(
+    reservations: Vec<provenant_supervisor::custody::WriterReservation>,
+    adopter: Option<provenant_records::custody::Scope>,
+) -> Result<
+    Option<(
+        provenant_supervisor::custody::WriterReservation,
+        Vec<provenant_supervisor::custody::WriterReservation>,
+    )>,
+    String,
+> {
+    let (own, mut others): (Vec<_>, Vec<_>) = reservations
+        .into_iter()
+        .partition(|reservation| Some(reservation.scope) == adopter);
+    if others.is_empty() {
+        return Ok(None);
+    }
+    let Some(position) = others
+        .iter()
+        .position(|reservation| reservation.live != Some(false))
+    else {
+        return Err("writer reservations exist without a worktree lease".into());
+    };
+    let holder = others.remove(position);
+    let mut siblings = own;
+    siblings.extend(others);
+    Ok(Some((holder, siblings)))
+}
+
+/// When the reservation was written: the start of a launch that has no lease
+/// snapshot yet.
+fn reservation_written_at(
+    slot: &Directory,
+    reservation: &provenant_supervisor::custody::WriterReservation,
+) -> Result<WallTime, String> {
+    let unreadable = |detail: String| {
+        format!(
+            "writer reservation time could not be read at {}: {detail}",
+            reservation.reservation.display()
+        )
+    };
+    let attempt = reservation
+        .reservation
+        .parent()
+        .and_then(Path::file_name)
+        .ok_or_else(|| unreadable("it names no attempt directory".into()))?;
+    let modified_ns = slot
+        .open_verified_directory(attempt)
+        .and_then(|child| child.metadata_at(OsStr::new("reservation.json"), false))
+        .map_err(|error| unreadable(error.to_string()))?
+        .modified_ns;
+    i64::try_from(modified_ns / 1_000)
+        .map_err(|error| unreadable(error.to_string()))
+        .and_then(|micros| {
+            WallTime::from_micros(micros).map_err(|error| unreadable(error.to_string()))
+        })
+}
+
+fn reservation_snapshot_under_gate(
+    slot: Directory,
+    observation: provenant_os::fs::LockGuard,
+    adopter: Option<provenant_records::custody::Scope>,
+) -> Result<GatedReservationSnapshot, String> {
+    let listing = provenant_supervisor::custody::list_writer_reservations_in_slot(&slot)
+        .map_err(|error| format!("writer reservations could not be checked: {error}"))?;
+    if let Some(issue) = listing.issues.first() {
+        return Err(format!(
+            "writer reservation evidence could not be verified at {}: {}",
+            issue.reservation.display(),
+            issue.reason
+        ));
+    }
+    let lease_bytes = match slot.read_stable(OsStr::new(LEASE_FILE), 4096) {
+        Ok(bytes) => bytes,
+        Err(error) if error.is_not_found() => {
+            // Before its first lease snapshot, a launch holds only its prepared
+            // reservation. The adopter's own is its own launch. Another
+            // reservation whose holder is not known to be gone is a live
+            // writer in its launch window: it is the holder, and the sharing
+            // policy decides what the adopter may do. Only reservations no
+            // live attempt explains remain unexplained custody evidence.
+            let Some((reservation, siblings)) = unleased_holder(listing.reservations, adopter)?
+            else {
+                return Ok((slot, observation, None, Vec::new()));
+            };
+            let lease = WorktreeLease {
+                holder: reservation.scope.attempt,
+                since: reservation_written_at(&slot, &reservation)?,
+                sharing: Sharing::Inherit,
+            };
+            return Ok((slot, observation, Some((reservation, lease)), siblings));
+        }
+        Err(error) => return Err(format!("worktree lease could not be read: {error}")),
+    };
+    let lease: WorktreeLease = serde_json::from_slice(&lease_bytes)
+        .map_err(|error| format!("worktree lease is malformed: {error}"))?;
+    let mut holder = None;
+    let mut siblings = Vec::new();
+    for reservation in listing.reservations {
+        if reservation.scope.attempt == lease.holder {
+            holder = Some(reservation);
+        } else {
+            siblings.push(reservation);
+        }
+    }
+    let Some(reservation) = holder else {
+        return if siblings.is_empty() {
+            Ok((slot, observation, None, siblings))
+        } else {
+            Err("worktree lease does not match a recorded writer reservation".into())
+        };
+    };
+    Ok((slot, observation, Some((reservation, lease)), siblings))
+}
+
+/// Admission gate retained across a lapsed-lease handover. The apply path
+/// creates the gate when needed, classifies the current reservation under it
+/// and keeps it held until the successor lease is published.
+#[must_use = "keep the handover gate alive through lease publication"]
+pub struct WriterLeaseHandoverGuard {
+    slot: Option<Directory>,
+    _observation: Option<provenant_os::fs::LockGuard>,
+    observation: Option<LeaseObservation>,
+    other_protected_holder: bool,
+}
+
+impl WriterLeaseHandoverGuard {
+    pub fn slot(&self) -> Option<&Directory> {
+        self.slot.as_ref()
+    }
+
+    pub fn observation(&self) -> Option<&LeaseObservation> {
+        self.observation.as_ref()
+    }
+
+    pub fn has_other_protected_holder(&self) -> bool {
+        self.other_protected_holder
+    }
+}
+
+/// Acquire the admission gate and classify the lease for a handover. Unlike
+/// read-only observations, this mutation path may create the gate. The caller
+/// must retain the returned value through publication of the successor lease.
+pub fn lock_writer_lease_handover(
+    project_state: &Directory,
+    path: &Path,
+    now: WallTime,
+    grace: &Sourced<u64>,
+    adopter: provenant_records::custody::Scope,
+) -> Result<WriterLeaseHandoverGuard, WorktreeError> {
+    let slot = match project_state.open_verified_directory(&state_dir_name(path)) {
+        Ok(slot) => slot,
+        Err(error) if error.is_not_found() => {
+            return Ok(WriterLeaseHandoverGuard {
+                slot: None,
+                _observation: None,
+                observation: None,
+                other_protected_holder: false,
+            });
+        }
+        Err(error) => {
+            return Err(WorktreeError::UnknownOccupancy {
+                path: path.to_path_buf(),
+                detail: format!("worktree custody slot could not be opened: {error}"),
+            });
+        }
+    };
+    let observation =
+        provenant_supervisor::custody::writer_admission_guard(&slot).map_err(|error| {
+            WorktreeError::UnknownOccupancy {
+                path: path.to_path_buf(),
+                detail: format!("worktree custody observation is busy: {error}"),
+            }
+        })?;
+    let (slot, observation, evidence, siblings) =
+        reservation_snapshot_under_gate(slot, observation, Some(adopter)).map_err(|detail| {
+            WorktreeError::UnknownOccupancy {
+                path: path.to_path_buf(),
+                detail,
+            }
+        })?;
+    let other_protected_holder = siblings
+        .iter()
+        .any(|reservation| reservation.scope != adopter && reservation.live != Some(false));
+    let lease_observation = evidence
+        .map(
+            |(reservation, lease)| -> std::result::Result<LeaseObservation, WorktreeError> {
+                let state = observe_reservation_liveness_locked(
+                    &slot,
+                    reservation.scope.attempt,
+                    reservation.scope.generation,
+                    reservation.live,
+                    reservation.launching,
+                    now,
+                    grace,
+                )
+                .ok_or_else(|| WorktreeError::UnknownOccupancy {
+                    path: path.to_path_buf(),
+                    detail: "worktree holder liveness could not be persisted".into(),
+                })?;
+                Ok(LeaseObservation { lease, state })
+            },
+        )
+        .transpose()?;
+    Ok(WriterLeaseHandoverGuard {
+        slot: Some(slot),
+        _observation: Some(observation),
+        observation: lease_observation,
+        other_protected_holder,
+    })
+}
+
+/// Observe the current slot lease with the current configured grace. This is
+/// shared with run lineage so adoption and confinement use one classifier.
+/// The observation gate protects the reservation listing and marker update.
+pub fn writer_lease_observation(
+    project_state: &Directory,
+    path: &Path,
+    now: WallTime,
+    grace: &Sourced<u64>,
+) -> Result<Option<LeaseObservation>, WorktreeError> {
+    observe_writer_lease(project_state, path, now, grace, None)
+}
+
+/// Observe the lease during launch admission. A sole reservation for the
+/// launching attempt may precede its first lease snapshot; other reservation
+/// evidence without a lease remains an unknown-occupancy error.
+pub fn writer_lease_observation_for_adopter(
+    project_state: &Directory,
+    path: &Path,
+    now: WallTime,
+    grace: &Sourced<u64>,
+    adopter: provenant_records::custody::Scope,
+) -> Result<Option<LeaseObservation>, WorktreeError> {
+    observe_writer_lease(project_state, path, now, grace, Some(adopter))
+}
+
+fn observe_writer_lease(
+    project_state: &Directory,
+    path: &Path,
+    now: WallTime,
+    grace: &Sourced<u64>,
+    adopter: Option<provenant_records::custody::Scope>,
+) -> Result<Option<LeaseObservation>, WorktreeError> {
+    let Some((slot, _observation, reservation, lease)) =
+        reservation_snapshot(project_state, path, adopter).map_err(|detail| {
+            WorktreeError::UnknownOccupancy {
+                path: path.to_path_buf(),
+                detail,
+            }
+        })?
+    else {
+        return Ok(None);
+    };
+    let state = observe_reservation_liveness_locked(
+        &slot,
+        reservation.scope.attempt,
+        reservation.scope.generation,
+        reservation.live,
+        reservation.launching,
+        now,
+        grace,
+    )
+    .ok_or_else(|| WorktreeError::UnknownOccupancy {
+        path: path.to_path_buf(),
+        detail: "worktree holder liveness could not be persisted".into(),
+    })?;
+    Ok(Some(LeaseObservation { lease, state }))
+}
+
+fn reservation_observation(
+    context: &WorktreeContext<'_>,
+    path: &Path,
+) -> Result<
+    Option<(
+        provenant_supervisor::custody::WriterReservation,
+        LeaseObservation,
+    )>,
+    String,
+> {
+    let Some((slot, _observation, reservation, lease)) =
+        reservation_snapshot(context.project_state, path, None)?
+    else {
+        return Ok(None);
+    };
+    let now = context
+        .clock
+        .wall_now()
+        .map_err(|error| format!("holder observation time is unavailable: {error}"))?;
+    let grace = if reservation.live.is_none() {
+        configured_unreachable_grace(context)
+    } else {
+        default_unreachable_grace()
+    };
+    let state = observe_reservation_liveness_locked(
+        &slot,
+        reservation.scope.attempt,
+        reservation.scope.generation,
+        reservation.live,
+        reservation.launching,
+        now,
+        &grace,
+    )
+    .ok_or_else(|| "worktree holder liveness could not be persisted".to_owned())?;
+    Ok(Some((reservation, LeaseObservation { lease, state })))
+}
+
+/// Translate a shared writer-occupancy refusal into the worktree contract.
+/// Contention names the durable slot holder when one is recorded; any other
+/// custody refusal stays typed with its own detail rather than collapsing
+/// into an unrelated filesystem failure.
+fn writer_occupancy_refusal(
+    error: provenant_supervisor::custody::CustodyError,
+    holder: Option<provenant_core::AttemptId>,
+    path: &Path,
+) -> WorktreeError {
+    use provenant_supervisor::custody::CustodyError;
+    match error {
+        CustodyError::Filesystem(FsError::LockTimeout { .. }) | CustodyError::Timeout => {
+            WorktreeError::WriterBusy { holder }
+        }
+        // A busy observation gate is contention evidence, not a configured
+        // refusal that names a writer holder.
+        CustodyError::Busy => WorktreeError::LockBusy,
+        CustodyError::Filesystem(FsError::Cancelled { .. }) | CustodyError::Cancelled => {
+            WorktreeError::Cancelled
+        }
+        CustodyError::Filesystem(error) => WorktreeError::Filesystem(error),
+        error => WorktreeError::UnknownOccupancy {
+            path: path.to_path_buf(),
+            detail: error.to_string(),
+        },
+    }
+}
+
+/// Acquire shared occupancy under the live-sharing policy. A held lease no
+/// longer maps unconditionally to `WriterBusy`: `allow`/`warn` proceed with a
+/// typed warning, while `refuse` returns the typed configured error. If slot
+/// lease evidence is absent, shared occupancy still applies and an unsettled
+/// reservation remains an unknown-custody refusal.
+pub fn admitted_writer_guard(
+    context: &WorktreeContext<'_>,
+    path: &Path,
+) -> Result<LockGuard, WorktreeError> {
+    let observation = match reservation_observation(context, path) {
+        Ok(Some((_, observation))) => observation,
+        Ok(None) => {
+            let directory = writer_directory(context.project_state, path)?;
+            let guard = provenant_supervisor::custody::lock_writer_occupancy(
+                &directory,
+                context.lock_budget,
+                &CancelToken::new(),
+                context.clock,
+            )
+            .map_err(|error| {
+                writer_occupancy_refusal(error, writer_holder(context.project_state, path), path)
+            })?;
+            retained_import(&directory).map_err(|detail| WorktreeError::UnknownOccupancy {
+                path: path.to_path_buf(),
+                detail,
+            })?;
+            outstanding_reservation(&directory, path).map_err(custody_refusal)?;
+            return Ok(guard);
+        }
+        Err(detail) => {
+            return Err(WorktreeError::UnknownOccupancy {
+                path: path.to_path_buf(),
+                detail,
+            });
+        }
+    };
+    let tree = CustodySubject {
+        kind: provenant_records::custody::SubjectKind::Worktree,
+        id: path.to_string_lossy().into_owned(),
+    };
+    let host_state = context.host_state()?;
+    let sharing = configured_sharing(&host_state, context.home, context.repo.root_path());
+    let admit = admit_shared_writer(&tree, Some(&observation), &sharing);
+    emit_admission_warning(&admit);
+    if let Admit::Refuse { error } = admit {
+        return Err(WorktreeError::CustodyCommand(Box::new(error)));
+    }
+    let directory = writer_directory(context.project_state, path)?;
+    let guard = provenant_supervisor::custody::lock_writer_occupancy(
+        &directory,
+        context.lock_budget,
+        &CancelToken::new(),
+        context.clock,
+    )
+    .map_err(|error| {
+        writer_occupancy_refusal(error, writer_holder(context.project_state, path), path)
+    })?;
+    // An unresolved import is an operation error regardless of sharing; a
+    // reservation fence, however, is exactly what live sharing intentionally
+    // coexists with, so it is not re-checked here.
+    retained_import(&directory).map_err(|detail| WorktreeError::UnknownOccupancy {
+        path: path.to_path_buf(),
+        detail,
+    })?;
+    Ok(guard)
+}
+
+/// The holder of a worktree slot while its reservation is live or unobservable
+/// within grace. A terminal or grace-lapsed holder yields `None`; incomplete
+/// evidence returns an unknown holder that still fires the destruction guard.
+pub(crate) fn live_writer_holder(
+    context: &WorktreeContext<'_>,
+    path: &Path,
+) -> Option<(Option<provenant_core::AttemptId>, bool)> {
+    let (reservation, observation) = match reservation_observation(context, path) {
+        Ok(Some(observation)) => observation,
+        Ok(None) => return None,
+        Err(_) => return Some((None, true)),
+    };
+    let holder = reservation.scope.attempt;
+    if matches!(&observation.state, LeaseState::LapsedUnreachable { .. }) {
+        let tree = CustodySubject {
+            kind: provenant_records::custody::SubjectKind::Worktree,
+            id: path.to_string_lossy().into_owned(),
+        };
+        // Lapsed-unreachable always carries its warning, regardless of the
+        // sharing policy; no second config read is needed here.
+        let sharing = default_sharing();
+        let admit = admit_shared_writer(&tree, Some(&observation), &sharing);
+        emit_admission_warning(&admit);
+    }
+    let live = protects_holder(reservation.live, Some(&observation.state));
+    live.then_some((Some(holder), true))
+}
+
+/// Apply the destruction guard before an operation that could overwrite a
+/// live lane's uncommitted work, rewrite a live branch, or delete either.
+/// A lapsed lease (`destroys_live_work = false`) always proceeds.
+pub(crate) fn guard_destructive_worktree(
+    op: &str,
+    subject: &CustodySubject,
+    destroys_live_work: bool,
+    holder: Option<provenant_core::AttemptId>,
+) -> Result<(), WorktreeError> {
+    match records_guard_destructive(op, subject, destroys_live_work, holder) {
+        Ok(()) => Ok(()),
+        Err(error) => Err(WorktreeError::CustodyRefused {
+            code: DESTROYS_LIVE_WORK,
+            message: error.message.clone(),
+            holder,
+            cause: error.cause.clone(),
+        }),
+    }
+}
+
+#[cfg(test)]
+#[path = "custody_sharing_tests.rs"]
+mod sharing_tests;

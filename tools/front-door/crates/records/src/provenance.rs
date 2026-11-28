@@ -43,6 +43,67 @@ impl Default for Layer {
 }
 
 impl Layer {
+    /// Every setting layer in canonical precedence order.
+    pub const ALL: [Self; 12] = [
+        Self::Default,
+        Self::Profile,
+        Self::Detected,
+        Self::Host,
+        Self::HostProject,
+        Self::Project,
+        Self::Account,
+        Self::Tier,
+        Self::Template,
+        Self::Route,
+        Self::Parent,
+        Self::Launch,
+    ];
+}
+
+/// Canonical precedence order shared by all setting families.
+pub const CANONICAL_ORDER: [Layer; 12] = Layer::ALL;
+
+/// Whether `layers` appears in canonical order without skipping backwards or
+/// repeating a layer. Use in const assertions for each setting family.
+pub const fn is_canonical_subsequence(layers: &[Layer]) -> bool {
+    let mut layer_index = 0;
+    let mut canonical_index = 0;
+    while layer_index < layers.len() {
+        let mut found = false;
+        while canonical_index < CANONICAL_ORDER.len() {
+            if CANONICAL_ORDER[canonical_index] as u8 == layers[layer_index] as u8 {
+                found = true;
+                canonical_index += 1;
+                break;
+            }
+            canonical_index += 1;
+        }
+        if !found {
+            return false;
+        }
+        layer_index += 1;
+    }
+    true
+}
+
+/// Fail during const evaluation when a family declares a non-canonical order.
+#[allow(clippy::panic)] // const evaluation: this fails the build, never a run.
+pub const fn assert_canonical_subsequence(layers: &[Layer]) {
+    if !is_canonical_subsequence(layers) {
+        panic!("setting precedence must be a canonical layer subsequence");
+    }
+}
+
+const _: () = {
+    assert_canonical_subsequence(crate::ports::PORT_PRECEDENCE.0);
+    assert_canonical_subsequence(crate::limit::LIMIT_PRECEDENCE.0);
+    assert_canonical_subsequence(crate::diagnostic::PRESSURE_PRECEDENCE.0);
+    assert_canonical_subsequence(crate::settlement::policy::SETTLEMENT_PRECEDENCE.0);
+    assert_canonical_subsequence(crate::run::LANE_ACCESS_PRECEDENCE.0);
+    assert_canonical_subsequence(crate::run::SANDBOX_PRECEDENCE.0);
+};
+
+impl Layer {
     /// The person-readable name of this layer. The two layers a shipped
     /// default and a host setting collapse to keep their established prose in
     /// diagnostics; every other layer uses its wire spelling.
@@ -315,7 +376,7 @@ mod tests {
         assert_eq!(warnings.len(), 1);
         assert_eq!(warnings[0].code.as_ref(), "SETTING_LAYER_IGNORED");
         assert_eq!(warnings[0].source.layer, Layer::Profile);
-        assert!(warnings[0].repair.is_some());
+        assert!(!warnings[0].next.is_empty());
     }
 
     #[test]

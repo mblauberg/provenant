@@ -14,11 +14,13 @@ use target_faults::{
     TargetFault, command_target_fault, is_target_not_found, outside_project_fault, target_fault,
 };
 
-mod graph_wait;
+pub(super) mod graph_wait;
 use graph_wait::missing_graph_context;
+#[cfg(test)]
+pub(crate) use graph_wait::read_status_rows;
 pub(crate) use graph_wait::{
-    check_targets, final_status_rows, read_lane_graph, read_status_rows,
-    read_status_rows_with_recovery, unsettled_graphs,
+    check_targets, final_status_rows, read_lane_graph, read_status_rows_with_recovery,
+    unsettled_graphs, wake_pr_item,
 };
 // The recovery decision is exercised by the graph wait test; production callers
 // reach it through `read_status_rows_with_recovery` in the same module.
@@ -433,11 +435,7 @@ pub(crate) fn status_rows(run: &GraphRun, target: &GraphTarget) -> Vec<Value> {
                     json!(wait_reason),
                 )
             } else {
-                (
-                    json!(node.state),
-                    node.advance_note.as_deref().or(node.skip_reason.as_deref()),
-                    Value::Null,
-                )
+                (json!(node.state), node.status_note(), Value::Null)
             };
             let mut node_row = row(
                 format!("{}/{}", target.graph, node.id),
@@ -1129,7 +1127,10 @@ pub(crate) fn status_summary(rows: &[Value]) -> provenant_cli::Summary {
 
 fn append_status_warnings(line: &mut String, row: &Value) {
     if let Some(warnings) = row["warnings"].as_array() {
-        for warning in warnings.iter().filter_map(Value::as_str) {
+        for warning in warnings
+            .iter()
+            .filter_map(|warning| warning["message"].as_str())
+        {
             line.push_str(&format!(
                 "  warning: {}\n",
                 provenant_cli::bounded_text(warning, 2048)
@@ -1742,6 +1743,19 @@ pub(crate) fn command_fail(
     error: &(dyn std::error::Error + 'static),
     globals: &provenant_cli::Globals,
 ) -> u8 {
+    if error
+        .downcast_ref::<FacadeError>()
+        .is_some_and(|error| matches!(error, FacadeError::Timeout))
+    {
+        return crate::fail(
+            name,
+            provenant_records::Outcome::Timeout,
+            "TIMEOUT",
+            "the invocation deadline expired while reading graph state",
+            "retry with a longer --timeout",
+            globals,
+        );
+    }
     match command_target_fault(error, None) {
         Some((outcome, code, message)) => crate::fail(
             name,
@@ -1800,13 +1814,66 @@ fn validate_retry_brief_target(
 /// Read one graph target through the host relay. Inside a lane the host
 /// resolves the target (cli.md "Targets"), so the read needs neither host
 /// configuration nor state, which a confined lane cannot open.
-fn lane_graph_read(input: Value) -> Result<Value, FacadeError> {
-    provenant_cli::fabric::graph_relay::from_lane(
-        &provenant_fabric_runtime::graph::relay::RelayOp::Read { input },
-        &CancelToken::new(),
-        std::time::Duration::from_secs(55),
+fn lane_graph_read(
+    input: Value,
+    deadline: Option<provenant_core::Deadline>,
+) -> Result<Value, FacadeError> {
+    let cancel = CancelToken::new();
+    // Even the fallback read gets one shared bound. A status read followed by
+    // a wake and a refreshed read must spend the same invocation budget.
+    let deadline = deadline
+        .unwrap_or_else(|| super::invocation_deadline::after(std::time::Duration::from_secs(55)));
+    read_lane_graph_with_deadline(
+        &input,
+        || super::invocation_deadline::left(deadline),
+        |remaining| {
+            provenant_cli::fabric::graph_relay::from_lane(
+                &provenant_fabric_runtime::graph::relay::RelayOp::Read {
+                    input: input.clone(),
+                },
+                &cancel,
+                remaining,
+            )
+            .map_err(super::interface::relay_error)
+        },
+        |value, remaining| {
+            super::progress::wake_lane_reading(
+                value,
+                super::progress::WakeReason::Status,
+                remaining,
+            )
+        },
     )
-    .map_err(super::interface::relay_error)
+}
+
+fn read_lane_graph_with_deadline(
+    input: &Value,
+    mut remaining: impl FnMut() -> std::time::Duration,
+    mut read: impl FnMut(std::time::Duration) -> Result<Value, FacadeError>,
+    mut wake: impl FnMut(&Value, std::time::Duration) -> super::progress::WakeOutcome,
+) -> Result<Value, FacadeError> {
+    let within = remaining();
+    if within.is_zero() {
+        return Err(FacadeError::Timeout);
+    }
+    let value = read(within)?;
+    if input["op"] == "status" && !input["id"].as_str().unwrap_or("").is_empty() {
+        let within = remaining();
+        if within.is_zero() {
+            return Err(FacadeError::Timeout);
+        }
+        if matches!(
+            wake(&value, within),
+            super::progress::WakeOutcome::Advanced { .. }
+        ) {
+            let within = remaining();
+            if within.is_zero() {
+                return Err(FacadeError::Timeout);
+            }
+            return read(within);
+        }
+    }
+    Ok(value)
 }
 
 /// What a graph command reports before it is emitted: data, human text, the
@@ -1818,6 +1885,20 @@ type GraphCommandReply = (
     Option<provenant_records::command_result::NextStep>,
 );
 
+/// Use the invocation's remaining time when supplied; otherwise preserve the
+/// configured graph wait for internal status, stop and retry readers.
+fn invocation_wait_budget(
+    clock: &dyn provenant_core::Clock,
+    deadline: Option<provenant_core::Deadline>,
+    fallback_seconds: u64,
+) -> Result<WaitBudget, Box<dyn std::error::Error>> {
+    let Some(deadline) = deadline else {
+        return Ok(WaitBudget::cli(clock.mono_now(), fallback_seconds)?);
+    };
+    let now = clock.mono_now();
+    Ok(WaitBudget::up_to(now, deadline.remaining(now)))
+}
+
 /// Read or control graph targets. Every target resolves before any is read
 /// or changed, so one unknown target changes nothing. Inside a lane the host
 /// resolves the target, and an empty list reads the lane's own graph.
@@ -1826,13 +1907,64 @@ pub(crate) fn unified_graph_command(
     command: GraphCommand<'_>,
     globals: &provenant_cli::Globals,
     workers: &'static dyn WorkerObserver,
+    deadline: Option<provenant_core::Deadline>,
 ) -> u8 {
     let name = match command {
         GraphCommand::Status => "status",
         GraphCommand::Stop { .. } => "stop",
         GraphCommand::Retry { .. } => "retry",
     };
-    let result = (|| -> Result<GraphCommandReply, Box<dyn std::error::Error>> {
+    let result = graph_command_read(targets, command, globals, workers, deadline);
+    match result {
+        Ok((data, human, next_steps, superseded_next)) => {
+            let summary = if name == "status" {
+                let rows: Vec<Value> =
+                    if let Some(targets) = data.get("targets").and_then(Value::as_array) {
+                        targets
+                            .iter()
+                            .filter_map(|t| t.get("rows").and_then(Value::as_array))
+                            .flatten()
+                            .cloned()
+                            .collect()
+                    } else {
+                        data.get("rows")
+                            .and_then(Value::as_array)
+                            .cloned()
+                            .unwrap_or_default()
+                    };
+                Some(status_summary(&rows))
+            } else {
+                None
+            };
+            // A superseded name points at the newer handle, not at the older
+            // graph's own next step.
+            let steps = superseded_next.map_or(next_steps, |step| vec![step]);
+            crate::emit_summarised(
+                &provenant_records::CommandResult::new(name, provenant_records::Outcome::Ok, data)
+                    .with_next(steps),
+                globals,
+                &human,
+                false,
+                summary.as_ref().filter(|_| !globals.full),
+            )
+        }
+        Err(error) => command_fail(name, error.as_ref(), globals),
+    }
+}
+
+fn graph_command_read(
+    targets: &[provenant_cli::Target],
+    command: GraphCommand<'_>,
+    globals: &provenant_cli::Globals,
+    workers: &'static dyn WorkerObserver,
+    deadline: Option<provenant_core::Deadline>,
+) -> Result<GraphCommandReply, Box<dyn std::error::Error>> {
+    let name = match command {
+        GraphCommand::Status => "status",
+        GraphCommand::Stop { .. } => "stop",
+        GraphCommand::Retry { .. } => "retry",
+    };
+    (|| -> Result<GraphCommandReply, Box<dyn std::error::Error>> {
         // A lane reads through the host, which holds the configuration.
         let lane_read = matches!(command, GraphCommand::Status) && provenant_cli::fabric::in_lane();
         let factory = if lane_read {
@@ -2016,7 +2148,7 @@ pub(crate) fn unified_graph_command(
                 });
             }
             let Some(factory) = &factory else {
-                let mut data = lane_graph_read(input)?;
+                let mut data = lane_graph_read(input, deadline)?;
                 let rows = data["rows"].as_array().ok_or(FacadeError::StateCorrupt)?;
                 human.push_str(&render_graph_status(rows));
                 next_steps.extend(graph_status_next(rows));
@@ -2028,10 +2160,23 @@ pub(crate) fn unified_graph_command(
                 .map(|binding| project_factory(factory, binding))
                 .transpose()?;
             let reader = project_reader.as_ref().unwrap_or(factory);
-            let budget = WaitBudget::cli(
-                reader.clock.mono_now(),
+            let budget = invocation_wait_budget(
+                &reader.clock,
+                deadline,
                 reader.context.config.graph.launch_wait_seconds,
             )?;
+            if matches!(command, GraphCommand::Status)
+                && !selector.is_empty()
+                && let Some(target) = reader.graph_target(&selector)?
+            {
+                let _ = graph_wait::wake_graph_for_reader(
+                    reader,
+                    &target.graph,
+                    super::progress::WakeReason::Status,
+                    budget,
+                    &cancel,
+                );
+            }
             let mut data = reader.graph_document(input, budget, &cancel)?;
             if let Some(binding) = owner {
                 let notice = cross_project_notice(&selector, binding);
@@ -2082,42 +2227,18 @@ pub(crate) fn unified_graph_command(
             Err(documents) => json!({"targets":documents}),
         };
         Ok((data, human, next_steps, superseded_next))
-    })();
-    match result {
-        Ok((data, human, next_steps, superseded_next)) => {
-            let summary = if matches!(command, GraphCommand::Status) {
-                let rows: Vec<Value> =
-                    if let Some(targets) = data.get("targets").and_then(Value::as_array) {
-                        targets
-                            .iter()
-                            .filter_map(|t| t.get("rows").and_then(Value::as_array))
-                            .flatten()
-                            .cloned()
-                            .collect()
-                    } else {
-                        data.get("rows")
-                            .and_then(Value::as_array)
-                            .cloned()
-                            .unwrap_or_default()
-                    };
-                Some(status_summary(&rows))
-            } else {
-                None
-            };
-            // A superseded name points at the newer handle, not at the older
-            // graph's own next step.
-            let steps = superseded_next.map_or(next_steps, |step| vec![step]);
-            crate::emit_summarised(
-                &provenant_records::CommandResult::new(name, provenant_records::Outcome::Ok, data)
-                    .with_next(steps),
-                globals,
-                &human,
-                false,
-                summary.as_ref().filter(|_| !globals.full),
-            )
-        }
-        Err(error) => command_fail(name, error.as_ref(), globals),
-    }
+    })()
+}
+
+/// Read status data without rendering or writing to the process output streams.
+/// The same target resolution, wake and evidence path serves local and peer reads.
+pub(crate) fn graph_status_data(
+    targets: &[provenant_cli::Target],
+    globals: &provenant_cli::Globals,
+    workers: &'static dyn WorkerObserver,
+) -> Result<Value, Box<dyn std::error::Error>> {
+    graph_command_read(targets, GraphCommand::Status, globals, workers, None)
+        .map(|(data, _, _, _)| data)
 }
 
 /// Outcomes of one `steer` command. Settled targets are handled by the sourced
@@ -2923,12 +3044,13 @@ pub(crate) fn select_listing(
 
 /// `provenant status` with no target: every active graph, then recent
 /// settled ones, with a count of what the page leaves out.
-pub(crate) fn graph_listing(
+fn collect_graph_listing(
     command: &provenant_cli::Status,
     globals: &provenant_cli::Globals,
     workers: &'static dyn WorkerObserver,
-) -> u8 {
-    let result = (|| -> Result<Listing, Box<dyn std::error::Error>> {
+    deadline: Option<provenant_core::Deadline>,
+) -> Result<Listing, Box<dyn std::error::Error>> {
+    (|| -> Result<Listing, Box<dyn std::error::Error>> {
         let factory = match read_factory(globals, workers) {
             Ok(factory) => factory,
             Err(error) if missing_graph_context(error.as_ref()) => {
@@ -3033,7 +3155,7 @@ pub(crate) fn graph_listing(
             &cancel,
             now,
         );
-        let budget = WaitBudget::cli(factory.clock.mono_now(), 55)?;
+        let budget = invocation_wait_budget(&factory.clock, deadline, 55)?;
         let (mut finished, gathered) = listing_with_evidence(
             graphs,
             &mut projections,
@@ -3059,7 +3181,16 @@ pub(crate) fn graph_listing(
             finished.admission_waiters = provenant_os::admission::all_waiters(root.as_path());
         }
         Ok(finished)
-    })();
+    })()
+}
+
+pub(crate) fn graph_listing(
+    command: &provenant_cli::Status,
+    globals: &provenant_cli::Globals,
+    workers: &'static dyn WorkerObserver,
+    deadline: provenant_core::Deadline,
+) -> u8 {
+    let result = collect_graph_listing(command, globals, workers, Some(deadline));
     match result {
         Ok(listing) => {
             let now = SystemClock::new()
@@ -3230,6 +3361,57 @@ pub(crate) fn graph_listing(
         }
         Err(error) => command_fail("status", error.as_ref(), globals),
     }
+}
+
+/// Read status using the same dispatch boundary as the `status` command.
+pub(crate) fn host_status_data(
+    command: &provenant_cli::Status,
+    globals: &provenant_cli::Globals,
+    workers: &'static dyn WorkerObserver,
+) -> Result<Value, Box<dyn std::error::Error>> {
+    if command.targets.is_empty() && !provenant_cli::fabric::in_lane() {
+        graph_listing_data(command, globals, workers)
+    } else {
+        graph_status_data(&command.targets, globals, workers)
+    }
+}
+
+/// Read the no-target status page as data for a host aggregation response.
+pub(crate) fn graph_listing_data(
+    command: &provenant_cli::Status,
+    globals: &provenant_cli::Globals,
+    workers: &'static dyn WorkerObserver,
+) -> Result<Value, Box<dyn std::error::Error>> {
+    let listing = collect_graph_listing(command, globals, workers, None)?;
+    let live = live_lanes(&listing);
+    let rows: Vec<_> = listing
+        .rows
+        .iter()
+        .map(|graph| {
+            json!({
+                "name":graph.name,"state":graph.state,"template":graph.template,
+                "nodes":graph.nodes,"created_micros":graph.created_micros,
+                "changed_micros":graph.changed_micros,"reason":graph.reason,
+                "digests":graph.digests,"open_asks":graph.open_asks,
+            })
+        })
+        .collect();
+    let mut data = json!({
+        "graphs": rows,
+        "omitted": listing.omitted,
+        "next_cursor": listing.next,
+        "live_lanes": live,
+    });
+    if !listing.admission_holders.is_empty() || !listing.admission_waiters.is_empty() {
+        data["admission"] = json!({
+            "holders": listing.admission_holders,
+            "waiters": listing.admission_waiters,
+        });
+    }
+    if !listing.stranded_work.is_empty() {
+        data["stranded_work"] = json!(listing.stranded_work);
+    }
+    Ok(data)
 }
 
 /// The `admission:` section of a status listing: the waiters, each with the
@@ -3574,7 +3756,7 @@ pub(crate) fn unified_graph_trace(
         };
         // A lane reads through the host, which holds the configuration.
         if provenant_cli::fabric::in_lane() {
-            let mut data = lane_graph_read(json!({"op":"trace", "id":id}))?;
+            let mut data = lane_graph_read(json!({"op":"trace", "id":id}), None)?;
             add_cache_share(&mut data);
             return Ok(data);
         }
@@ -3662,9 +3844,18 @@ fn add_cache_share(data: &mut Value) {
 pub(crate) fn unified_graph_result(
     target: &provenant_cli::Target,
     edge: &provenant_cli::run::Edge<'_>,
+    timeout: std::time::Duration,
 ) -> provenant_cli::run::Reply {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(55);
-    let rows = match read_status_rows(target, edge, &mut None, deadline, &CancelToken::new()) {
+    let deadline = std::time::Instant::now() + timeout;
+    let rows = match read_status_rows_with_recovery(
+        target,
+        edge,
+        &mut None,
+        deadline,
+        &CancelToken::new(),
+        &provenant_confinement::worktrees::SystemWorkerObserver,
+        super::progress::WakeReason::Result,
+    ) {
         Ok(rows) => rows,
         Err(error) => return output_error(error.as_ref()),
     };
@@ -3910,6 +4101,7 @@ pub(crate) fn unified_graph_output(
     edge: &provenant_cli::run::Edge<'_>,
     globals: &provenant_cli::Globals,
     workers: &'static dyn WorkerObserver,
+    deadline: provenant_core::Deadline,
 ) -> provenant_cli::run::Reply {
     if !provenant_cli::fabric::in_lane() {
         let read = || -> Result<provenant_cli::run::Reply, Box<dyn std::error::Error>> {
@@ -3920,10 +4112,20 @@ pub(crate) fn unified_graph_output(
                     error
                 }
             })?;
-            let budget = WaitBudget::cli(
-                factory.clock.mono_now(),
+            let budget = invocation_wait_budget(
+                &factory.clock,
+                Some(deadline),
                 factory.context.config.graph.launch_wait_seconds,
             )?;
+            if let Ok(Some(target)) = factory.graph_target(&command.target.to_string()) {
+                let _ = graph_wait::wake_graph_for_reader(
+                    &factory,
+                    &target.graph,
+                    super::progress::WakeReason::Output,
+                    budget,
+                    &CancelToken::new(),
+                );
+            }
             host_graph_output(
                 command,
                 edge,
@@ -3948,17 +4150,33 @@ pub(crate) fn unified_graph_output(
             let input = json!({"op":"output", "id":page.target.to_string(),
                 "render":true, "part":part, "offset":page.offset, "full":false,
                 "max_bytes":page.max_bytes});
+            let timeout = super::invocation_deadline::left(deadline);
+            if timeout.is_zero() {
+                return Err(provenant_cli::run::Fail::new(
+                    provenant_records::Outcome::Timeout,
+                    provenant_run::ErrorKind::Timeout,
+                    "output deadline expired",
+                ));
+            }
             let response = provenant_cli::fabric::graph_relay::from_lane(
                 &provenant_fabric_runtime::graph::relay::RelayOp::Read { input },
                 &CancelToken::new(),
-                std::time::Duration::from_secs(55),
+                timeout,
             )
             .map_err(|error| {
-                provenant_cli::run::Fail::new(
-                    provenant_records::Outcome::Error,
-                    provenant_run::ErrorKind::Fabric,
-                    error.to_string(),
-                )
+                if super::invocation_deadline::left(deadline).is_zero() {
+                    provenant_cli::run::Fail::new(
+                        provenant_records::Outcome::Timeout,
+                        provenant_run::ErrorKind::Timeout,
+                        "output deadline expired",
+                    )
+                } else {
+                    provenant_cli::run::Fail::new(
+                        provenant_records::Outcome::Error,
+                        provenant_run::ErrorKind::Fabric,
+                        error.to_string(),
+                    )
+                }
             })?;
             let result: provenant_records::CommandResult<Value> =
                 serde_json::from_value(response["result"].clone()).map_err(|error| {
@@ -3972,7 +4190,7 @@ pub(crate) fn unified_graph_output(
                 return Err(provenant_cli::run::Fail::new(
                     result.status,
                     provenant_run::ErrorKind::Fabric,
-                    error.message,
+                    error.into_payload().message,
                 ));
             }
             Ok((result.data, String::new()))
@@ -3986,11 +4204,21 @@ pub(crate) fn unified_graph_output(
         let input = json!({"op":"output", "id":command.target.to_string(),
             "render":true,"part":part,"offset":command.offset,"tail":command.tail,
             "tail_lines":command.tail_lines,"full":globals.full,"max_bytes":command.max_bytes});
-        let response = provenant_cli::fabric::graph_relay::from_lane(
+        let timeout = super::invocation_deadline::left(deadline);
+        if timeout.is_zero() {
+            return Err(FacadeError::Timeout.into());
+        }
+        let response = match provenant_cli::fabric::graph_relay::from_lane(
             &provenant_fabric_runtime::graph::relay::RelayOp::Read { input },
             &CancelToken::new(),
-            std::time::Duration::from_secs(55),
-        )?;
+            timeout,
+        ) {
+            Ok(response) => response,
+            Err(_) if super::invocation_deadline::left(deadline).is_zero() => {
+                return Err(FacadeError::Timeout.into());
+            }
+            Err(error) => return Err(error.into()),
+        };
         let mut reply = provenant_cli::run::Reply {
             result: serde_json::from_value(response["result"].clone())?,
             human: response["human"].as_str().unwrap_or_default().to_owned(),
@@ -4392,6 +4620,16 @@ fn output_fail(
 }
 
 fn output_error(error: &(dyn std::error::Error + 'static)) -> provenant_cli::run::Reply {
+    if error
+        .downcast_ref::<FacadeError>()
+        .is_some_and(|error| matches!(error, FacadeError::Timeout))
+    {
+        return output_fail(
+            provenant_records::Outcome::Timeout,
+            "TIMEOUT",
+            "the invocation deadline expired while reading output",
+        );
+    }
     match command_target_fault(error, None) {
         Some((outcome, code, message)) => output_fail(outcome, code, &message),
         None => output_fail(

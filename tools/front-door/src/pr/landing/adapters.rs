@@ -4,8 +4,8 @@ use super::{
     model::*,
     ports::{
         AlarmSink, Approval, Forge, GateRunner, MergeTree, Mergeability, PullRequestInfo,
-        PullRequestState, Repo, RequiredCiCheck, ReviewRecord, ReviewRecordSource, Reviews,
-        StackMember, StackMembership,
+        PullRequestState, Repo, ReviewRecord, ReviewRecordSource, Reviews, StackMember,
+        StackMembership,
     },
 };
 use crate::pr::{
@@ -829,39 +829,60 @@ impl Forge for GhForge {
             extra: Default::default(),
         }])
     }
-    fn required_ci_policy(
+    fn observe_head(
         &mut self,
-        base_branch: &str,
-    ) -> Result<Option<Vec<RequiredCiCheck>>, LandingError> {
+        pr: &EligiblePr,
+        required_names: &[String],
+        timeout: Duration,
+    ) -> Result<crate::pr::observer::HeadReading, LandingError> {
         let repository = self.repository_name()?;
-        let read_error = std::cell::RefCell::new(None);
-        let policy = crate::pr::status::required_policy_for(
-            &format!("repos/{repository}"),
-            base_branch,
-            &|args| match self.reader().read(args) {
-                Ok(output) => Some(output),
-                Err(error) => {
-                    *read_error.borrow_mut() = Some(failed(error));
-                    None
+        let request = provenant_config::ports::Request::within(timeout);
+        let expected = provenant_core::GitOid::parse(&pr.head)
+            .map_err(|error| LandingError::Failed(format!("invalid PR head: {error}")))?;
+        let reading = if required_names.is_empty() {
+            self.observation_interval =
+                crate::pr::observer::fast_interval(&self.state, &self.project);
+            crate::pr::observer::observe_head(
+                &self.state,
+                &self.project,
+                &repository,
+                pr.number,
+                expected,
+                &request,
+            )
+        } else {
+            let mut observer = Observer::open(&self.state, &self.project, &repository, &request)
+                .map_err(|error| match error {
+                    ObserveError::RateLimited { .. } => {
+                        LandingError::RateLimited(error.to_string())
+                    }
+                    _ => LandingError::CiUnavailable(error.to_string()),
+                })?;
+            self.observation_interval = Some(observer.fast_interval());
+            let graphql_head = || match crate::pr::status::batch::single_for_repository_with_request(
+                &self.state,
+                &self.project,
+                &repository,
+                pr.number,
+                &request,
+            ) {
+                crate::pr::status::batch::Batch::Entries(entries) => {
+                    entries.first().map(|entry| entry.head.clone())
                 }
-            },
-        );
-        let Some(policy) = policy else {
-            return match read_error.into_inner() {
-                Some(error) => Err(error),
-                None => Ok(None),
+                _ => None,
             };
+            let reading = observer.observe_head_with_required_names(
+                pr.number,
+                expected,
+                &request,
+                crate::pr::observer::HEAD_MAX_AGE,
+                Some(required_names),
+                &graphql_head,
+            );
+            self.observation_interval = Some(observer.next_poll_interval());
+            reading
         };
-        Ok(Some(
-            policy
-                .checks
-                .into_iter()
-                .map(|required| RequiredCiCheck {
-                    name: required.name,
-                    app_id: required.app,
-                })
-                .collect(),
-        ))
+        Ok(reading)
     }
     #[allow(clippy::disallowed_methods)]
     fn checks_with_timeout(

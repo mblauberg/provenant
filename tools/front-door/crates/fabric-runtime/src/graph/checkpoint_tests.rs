@@ -6,6 +6,25 @@ fn stored() -> Value {
     serde_json::from_str(include_str!("../fixtures/graph-checkpoint.json")).unwrap()
 }
 
+fn migrate_fixture(temp: &std::path::Path, graph_id: &str, checkpoint: &[u8]) -> Directory {
+    let project = temp.join("fabric/graphs/fixture");
+    std::fs::create_dir_all(&project).unwrap();
+    let fixture_dir =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/fixtures/checkpoint-2.0.5");
+    let value: Value = serde_json::from_slice(checkpoint).unwrap();
+    for digest in value["stored_text"].as_object().unwrap().values() {
+        let name = format!("graph-{graph_id}.prompt-{}", digest.as_str().unwrap());
+        std::fs::copy(fixture_dir.join(&name), project.join(&name)).unwrap();
+    }
+    let checkpoint_path = project.join(format!("graph-{graph_id}.json"));
+    std::fs::write(&checkpoint_path, checkpoint).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&project, std::fs::Permissions::from_mode(0o700)).unwrap();
+    std::fs::set_permissions(&checkpoint_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    super::journal::migrate_store(temp).unwrap();
+    Directory::open_anchor(&project).unwrap()
+}
+
 #[test]
 fn deepest_stored_checkpoint_round_trips_on_a_512kib_debug_thread() {
     const CHECKPOINT: &[u8] = include_bytes!("../fixtures/checkpoint-2.0.5/graph-smoke205-ro.json");
@@ -23,8 +42,11 @@ fn deepest_stored_checkpoint_round_trips_on_a_512kib_debug_thread() {
                 let bytes = std::fs::read(fixture_dir.join(&name)).unwrap();
                 std::fs::write(temp.path().join(name), bytes).unwrap();
             }
-            let directory = Directory::open_anchor(temp.path()).unwrap();
-            let mut stored = decode_checkpoint_in(&directory, CHECKPOINT, graph_id).unwrap();
+            let directory = migrate_fixture(temp.path(), graph_id, CHECKPOINT);
+            let bytes = read_checkpoint_bytes(&directory, graph_id)
+                .unwrap()
+                .unwrap();
+            let mut stored = decode_checkpoint_in(&directory, &bytes, graph_id).unwrap();
             // Exercise a sealed stop cause on the deepest attempt as well.
             stored.checkpoint.nodes[0].attempts[0].stop =
                 Some(provenant_records::StopCause::Blocked);
@@ -70,17 +92,19 @@ fn deployed_2_0_5_checkpoint_and_external_prompts_still_read() {
         "fixture checkpoint contains credential-shaped text"
     );
 
-    // The fixture is deliberately a deployed v2 envelope; the reader migrates
-    // it to the current v3 layout. Keep both pins: the on-disk record stays v2
-    // and the decoded value is v3.
+    // The deployed v2 envelope crosses the explicit store cut-over before
+    // the strict production reader opens it.
     assert_eq!(value["schema_version"].as_u64(), Some(2));
-    let directory = Directory::open_anchor(temp.path()).unwrap();
-    let stored = decode_checkpoint_in(&directory, CHECKPOINT, graph_id).unwrap();
+    let directory = migrate_fixture(temp.path(), graph_id, CHECKPOINT);
+    let bytes = read_checkpoint_bytes(&directory, graph_id)
+        .unwrap()
+        .unwrap();
+    let stored = decode_checkpoint_in(&directory, &bytes, graph_id).unwrap();
     assert_eq!(
         stored.schema_version,
         super::journal::CHECKPOINT_SCHEMA_VERSION
     );
-    assert_eq!(stored.schema_version, 3);
+    assert_eq!(stored.schema_version, CHECKPOINT_SCHEMA_VERSION);
     assert_eq!(stored.execution.document.graph_id, graph_id);
     let (plan, _) = validate_plan_with_limits(&stored.execution.document, &Default::default())
         .expect("deployed document remains valid");
@@ -123,7 +147,7 @@ fn review_schema_versions_and_stored_digests() {
 
 fn sealed(mut record: StoredCheckpoint) -> Vec<u8> {
     // The fixture is a v2 envelope, but `decode_checkpoint` is the current
-    // reader and only accepts the post-migration v3 envelope. Seal test
+    // reader and only accepts the post-migration v4 envelope. Seal test
     // records in the layout production writes; the v2 fixture is still pinned
     // by the deployed-checkpoint and serde round-trip tests above.
     record.schema_version = super::journal::CHECKPOINT_SCHEMA_VERSION;

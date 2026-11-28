@@ -370,10 +370,13 @@ pub fn rest_ordered(
 mod tests {
     use super::*;
     use crate::pr::landing::{
-        fakes::{FakeForge, FakeRepo},
-        ports::{Approval, RequiredCiCheck},
+        fakes::{FakeForge, FakeRepo, RequiredCiCheck},
+        ports::Approval,
         test_support::LandingFixture,
     };
+
+    const QUEUE_HEAD: &str = "1111111111111111111111111111111111111111";
+    const MOVED_QUEUE_HEAD: &str = "2222222222222222222222222222222222222222";
 
     fn candidate() -> Candidate {
         LandingFixture::ordered_candidate()
@@ -418,10 +421,24 @@ mod tests {
     fn queue_fixture() -> (FakeForge, FakeRepo, Candidate) {
         let mut forge = FakeForge::default();
         prepare(&mut forge);
-        let candidate = Candidate {
-            steps: vec![candidate().steps[0].clone()],
-            ..candidate()
-        };
+        let mut candidate = candidate();
+        candidate.steps.truncate(1);
+        let step = &mut candidate.steps[0];
+        let old_head = std::mem::replace(&mut step.pr.head, QUEUE_HEAD.to_owned());
+        let number = step.pr.number;
+        forge.heads.insert(number, QUEUE_HEAD.into());
+        forge
+            .pull_requests
+            .get_mut(&number)
+            .expect("prepared pull request")
+            .head = QUEUE_HEAD.into();
+        let approvals = forge
+            .approvals_at_head
+            .remove(&(number, old_head))
+            .expect("approval for prepared head");
+        forge
+            .approvals_at_head
+            .insert((number, QUEUE_HEAD.into()), approvals);
         let step = &candidate.steps[0];
         forge
             .pull_requests
@@ -525,16 +542,19 @@ mod tests {
         let result = queue_publish(&mut forge, &mut repo, &candidate)?;
         assert_eq!(result.landed, vec!["landed-1".to_owned()]);
         let tail = &forge.events[forge.events.len() - 2..];
-        assert_eq!(tail[0].as_str(), "pull_request:1:Clean:head-1");
-        assert_eq!(tail[1].as_str(), "merge:1:head-1");
-        assert!(forge.events.contains(&"checks:head-1".into()));
+        assert_eq!(
+            tail[0].as_str(),
+            format!("pull_request:1:Clean:{QUEUE_HEAD}")
+        );
+        assert_eq!(tail[1].as_str(), format!("merge:1:{QUEUE_HEAD}"));
+        assert!(forge.events.contains(&format!("checks:{QUEUE_HEAD}")));
         Ok(())
     }
 
     #[test]
     fn delivery_queue_does_not_accept_red_absent_or_wrong_app_ci() {
         let (mut red, mut red_repo, red_candidate) = queue_fixture();
-        red.check_runs.get_mut("head-1").unwrap()[0].checks[0].result = GateResult::Failed;
+        red.check_runs.get_mut(QUEUE_HEAD).unwrap()[0].checks[0].result = GateResult::Failed;
         assert!(matches!(
             queue_publish(&mut red, &mut red_repo, &red_candidate),
             Err(LandingError::UnmetGate(_))
@@ -542,7 +562,7 @@ mod tests {
         assert!(red.merges.is_empty());
 
         let (mut absent, mut absent_repo, absent_candidate) = queue_fixture();
-        absent.check_runs.remove("head-1");
+        absent.check_runs.remove(QUEUE_HEAD);
         assert!(matches!(
             queue_publish(&mut absent, &mut absent_repo, &absent_candidate),
             Err(LandingError::Pending(_))
@@ -550,7 +570,7 @@ mod tests {
         assert!(absent.merges.is_empty());
 
         let (mut wrong_app, mut wrong_app_repo, wrong_app_candidate) = queue_fixture();
-        wrong_app.check_runs.get_mut("head-1").unwrap()[0].checks[0].app_id = Some(17);
+        wrong_app.check_runs.get_mut(QUEUE_HEAD).unwrap()[0].checks[0].app_id = Some(17);
         assert!(matches!(
             queue_publish(&mut wrong_app, &mut wrong_app_repo, &wrong_app_candidate),
             Err(LandingError::Pending(_))
@@ -563,7 +583,7 @@ mod tests {
         let (mut moved, mut moved_repo, moved_candidate) = queue_fixture();
         moved
             .move_head_after_checks
-            .insert("head-1".into(), "new-head".into());
+            .insert(QUEUE_HEAD.into(), MOVED_QUEUE_HEAD.into());
         assert!(matches!(
             queue_publish(&mut moved, &mut moved_repo, &moved_candidate),
             Err(LandingError::PullRequestChanged(1))
@@ -573,7 +593,7 @@ mod tests {
         let (mut retargeted, mut retargeted_repo, retargeted_candidate) = queue_fixture();
         retargeted
             .move_base_after_checks
-            .insert("head-1".into(), "other".into());
+            .insert(QUEUE_HEAD.into(), "other".into());
         assert!(matches!(
             queue_publish(&mut retargeted, &mut retargeted_repo, &retargeted_candidate),
             Err(LandingError::PullRequestChanged(1))
@@ -583,7 +603,7 @@ mod tests {
         let (mut conflicting, mut conflicting_repo, conflicting_candidate) = queue_fixture();
         conflicting
             .mergeability_after_checks
-            .insert("head-1".into(), Mergeability::Conflicting);
+            .insert(QUEUE_HEAD.into(), Mergeability::Conflicting);
         assert!(matches!(
             queue_publish(
                 &mut conflicting,
@@ -597,7 +617,7 @@ mod tests {
         let (mut unknown, mut unknown_repo, unknown_candidate) = queue_fixture();
         unknown
             .mergeability_after_checks
-            .insert("head-1".into(), Mergeability::Unknown);
+            .insert(QUEUE_HEAD.into(), Mergeability::Unknown);
         assert!(matches!(
             queue_publish(&mut unknown, &mut unknown_repo, &unknown_candidate),
             Err(LandingError::Pending(_))

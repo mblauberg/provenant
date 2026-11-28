@@ -1,5 +1,6 @@
 use super::*;
 use provenant_fabric_runtime::runs::SubmissionReceipt;
+use provenant_records::warning::PEER_UNREACHABLE;
 use std::{
     collections::HashSet,
     path::{Path, PathBuf},
@@ -67,6 +68,19 @@ fn peer_read_only(action: &PeerAction) -> bool {
         | PeerAction::ConsoleInbox { .. }
         | PeerAction::Doctor { .. }
         | PeerAction::Receipt { .. } => true,
+        PeerAction::HostRead {
+            input:
+                provenant_fabric_runtime::hosts::HostReadInput::Events {
+                    consumer: Some(_), ..
+                },
+            ..
+        }
+        | PeerAction::HostRead {
+            input: provenant_fabric_runtime::hosts::HostReadInput::EventsAck { .. },
+            ..
+        }
+        | PeerAction::Gc { .. } => false,
+        PeerAction::HostRead { .. } => true,
         PeerAction::CancelSubmission { stop, .. } => !stop,
         PeerAction::Inbox {
             input:
@@ -151,6 +165,7 @@ fn validate_graph_steer(
     let origin = &graph_context.origin_work_key;
     let receipt = peer_retained_receipt(factory, launch_operation, actor)?.ok_or(
         FacadeError::LaunchUnknown {
+            detail: None,
             operation_id: (*launch_operation).clone(),
         },
     )?;
@@ -268,6 +283,7 @@ pub(super) fn validate_graph_output(
     };
     let receipt = peer_retained_receipt(factory, operation, *actor)?.ok_or_else(|| {
         FacadeError::LaunchUnknown {
+            detail: None,
             operation_id: operation.clone(),
         }
     })?;
@@ -520,10 +536,6 @@ fn project_peer_output_with(
     Ok(output)
 }
 
-#[cfg(test)]
-#[path = "peer_output_projection_tests.rs"]
-mod output_projection_tests;
-
 const MAX_GRAPH_STEER_SUPERSEDED: usize = 32;
 
 fn peer_inbox_execute(
@@ -620,6 +632,53 @@ pub fn peer(
             crate::roots::Product::Required,
         )?;
         let home = host.home;
+        // A fixture-create request names a project that does not exist yet.
+        // Its release probe authenticates the host and sender without opening
+        // or creating that project; the actual create still takes the normal
+        // project and mutation path below.
+        let probe = decode_request(&bytes)?;
+        if matches!(probe.action, PeerAction::Health { .. }) && probe.release_probe {
+            let local = provenant_config::lookup_host(&host.roots)?.ok_or(PeerError::Project)?;
+            let config = provenant_cli::config_reads::read_for(&host.roots, "fabric context")?;
+            probe.validate(local, &config.domains.fabric, &home)?;
+            let response = PeerResponse {
+                extra: Default::default(),
+                version: 1,
+                protocol: probe.protocol,
+                host: local,
+                project: probe.project.key,
+                result: PeerResult::Health {
+                    data: provenant_fabric_runtime::hosts::PeerHealth {
+                        extra: Default::default(),
+                        host: local,
+                        available: true,
+                        execution: false,
+                        release: env!("CARGO_PKG_VERSION").into(),
+                        run_capabilities: provenant_fabric_runtime::runs::RunCapabilities {
+                            submit: false,
+                            list: false,
+                            status: false,
+                            wait: false,
+                            cancel: false,
+                            resume: false,
+                            output: false,
+                            events: false,
+                        },
+                        readiness: provenant_fabric_runtime::hosts::PeerReadiness::reporting(),
+                    },
+                    extra: Default::default(),
+                },
+            };
+            let projector = provenant_confinement::publication::Projector::ambient()?;
+            let mut reply =
+                provenant_fabric_runtime::hosts::encode_peer_response(response, &projector)?;
+            reply.push(b'\n');
+            provenant_os::sys::hook_io::write_stdout(
+                &reply,
+                Instant::now() + std::time::Duration::from_secs(30),
+            )?;
+            return Ok(());
+        }
         if !in_process {
             let state = host.roots.state.clone();
             // Only an unreachable agent falls back; a sent request is never repeated.
@@ -1363,6 +1422,7 @@ pub fn peer(
                             peer_result(
                                 receipt.and_then(|receipt| {
                                     receipt.ok_or_else(|| FacadeError::LaunchUnknown {
+                                        detail: None,
                                         operation_id: operation_id.clone(),
                                     })
                                 }),
@@ -1376,6 +1436,77 @@ pub fn peer(
                 })(),
                 |result| result,
             ),
+            PeerAction::Gc {
+                dry_run,
+                apply,
+                scheduled,
+                pressure,
+                free_floor,
+                idle,
+                finished_branch,
+                full,
+                detailed,
+                timeout_seconds,
+                ..
+            } => peer_result(
+                {
+                    let command = provenant_cli::Gc {
+                        common: provenant_cli::CommonArgs::default(),
+                        scheduled: *scheduled,
+                        pressure: *pressure,
+                        free_floor: *free_floor,
+                        dry_run: *dry_run,
+                        apply: *apply,
+                        finished_branch: finished_branch.clone(),
+                        idle: *idle,
+                    };
+                    let globals = provenant_cli::Globals {
+                        json: *detailed,
+                        full: *full,
+                        state_dir: Some(peer_factory.context.roots.state.as_path().to_owned()),
+                        project: Some(cwd.clone()),
+                    };
+                    crate::worktrees::gc_for_peer(
+                        &command,
+                        &globals,
+                        workers,
+                        Some(*timeout_seconds),
+                    )
+                    .map_err(|reason| FacadeError::io(format!("serialize gc result: {reason}")))
+                },
+                |result| PeerResult::Gc {
+                    data: Box::new(result),
+                    extra: Default::default(),
+                },
+            ),
+            PeerAction::HostRead { input, .. } => {
+                let full = match input {
+                    provenant_fabric_runtime::hosts::HostReadInput::Status { full, .. }
+                    | provenant_fabric_runtime::hosts::HostReadInput::Output { full, .. }
+                    | provenant_fabric_runtime::hosts::HostReadInput::Result { full, .. } => *full,
+                    provenant_fabric_runtime::hosts::HostReadInput::Events { .. }
+                    | provenant_fabric_runtime::hosts::HostReadInput::EventsAck { .. } => false,
+                };
+                let globals = provenant_cli::Globals {
+                    json: true,
+                    full,
+                    state_dir: Some(peer_factory.context.roots.state.as_path().to_owned()),
+                    project: Some(cwd.clone()),
+                };
+                match super::host_read::execute(input, &globals, workers, budget.deadline()) {
+                    Ok(result) => PeerResult::HostRead {
+                        data: Box::new(result),
+                        extra: Default::default(),
+                    },
+                    Err(error) => PeerResult::Error {
+                        data: provenant_fabric_runtime::hosts::PeerResultError {
+                            extra: Default::default(),
+                            error: FacadeError::io(format!("read host data: {error}")),
+                        },
+                        extra: Default::default(),
+                    },
+                }
+            }
             PeerAction::Coordination {
                 input,
                 operation_id,
@@ -1765,6 +1896,7 @@ pub(super) fn peer_graph_receipt(
         .first()
         .and_then(|node| node.attempts.last())
         .ok_or_else(|| FacadeError::LaunchUnknown {
+            detail: None,
             operation_id: operation_id.clone(),
         })?;
     if root.key.graph_id != graph {
@@ -1783,6 +1915,7 @@ pub(super) fn peer_graph_receipt(
     };
     let session = owner.read_session(&cancel).map_err(|error| match error {
         FacadeError::NotFound => FacadeError::LaunchUnknown {
+            detail: None,
             operation_id: operation_id.clone(),
         },
         error => error,
@@ -1794,6 +1927,7 @@ pub(super) fn peer_graph_receipt(
         .operation(&launch_operation, &call)
         .map_err(run_error)?
         .ok_or_else(|| FacadeError::LaunchUnknown {
+            detail: None,
             operation_id: operation_id.clone(),
         })?;
     if operation.operation_id != launch_operation
@@ -1805,6 +1939,7 @@ pub(super) fn peer_graph_receipt(
         )
     {
         return Err(FacadeError::LaunchUnknown {
+            detail: None,
             operation_id: operation_id.clone(),
         });
     }
@@ -2310,121 +2445,7 @@ pub(super) fn peer_retained_receipt(
     .transpose()
 }
 
-#[cfg(test)]
-#[allow(unused_imports)] // The custom worktree driver compiles without a test harness.
-#[path = "peer_console_tree_tests.rs"]
-mod console_tree_tests;
+include!("peer_host_reads.rs");
 
 #[cfg(test)]
-mod peer_project_root_tests {
-
-    #[test]
-    fn peer_refusal_precedes_binding_writes_and_holds_bare_common_metadata()
-    -> Result<(), Box<dyn std::error::Error>> {
-        use super::*;
-        use provenant_core::RootInputs;
-
-        fn git(cwd: &Path, args: &[&str]) -> Result<(), Box<dyn std::error::Error>> {
-            let output = provenant_os::fixture::git_command()
-                .current_dir(cwd)
-                .args(args)
-                .output()?;
-            if output.status.success() {
-                Ok(())
-            } else {
-                Err(std::io::Error::other(format!(
-                    "git {:?} failed: {}",
-                    args,
-                    String::from_utf8_lossy(&output.stderr)
-                ))
-                .into())
-            }
-        }
-
-        // Spec: docs/specs/run-git.md#project-layout-ownership
-        let temp = tempfile::tempdir()?;
-        let base = temp.path().canonicalize()?;
-        let home = base.join("home");
-        let assets = base.join("assets");
-        let source = base.join("source");
-        std::fs::create_dir_all(&home)?;
-        std::fs::create_dir_all(&assets)?;
-        std::fs::create_dir_all(&source)?;
-        git(&source, &["init", "-q", "--initial-branch=main"])?;
-        git(&source, &["config", "user.name", "Fixture"])?;
-        git(
-            &source,
-            &["config", "user.email", "fixture@example.invalid"],
-        )?;
-        std::fs::write(source.join("README.md"), "bare root boundary fixture\n")?;
-        git(&source, &["add", "README.md"])?;
-        git(&source, &["commit", "-qm", "initial"])?;
-
-        for name in ["bare-store", ".git"] {
-            let parent = base.join(name.replace('.', "dot"));
-            std::fs::create_dir_all(&parent)?;
-            let common = parent.join(name);
-            git(
-                &base,
-                &[
-                    "clone",
-                    "--bare",
-                    "-q",
-                    source.to_str().ok_or("source path")?,
-                    common.to_str().ok_or("common path")?,
-                ],
-            )?;
-            let state = common.join("state");
-            std::fs::create_dir_all(&state)?;
-            std::fs::set_permissions(&state, std::os::unix::fs::PermissionsExt::from_mode(0o700))?;
-            let mut inputs = RootInputs::new(home.clone(), assets.clone());
-            inputs.state_dir = Some(state.clone());
-            inputs.workspaces.push(home.clone());
-            let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
-            let globals = provenant_cli::Globals {
-                state_dir: Some(state.clone()),
-                ..Default::default()
-            };
-
-            assert!(!state.join("projects").exists());
-            assert!(!state.join("host-id").exists());
-            let refusal = prepare_peer_project_roots(
-                &globals,
-                roots,
-                &common,
-                false,
-                crate::roots::Product::Optional,
-            );
-            assert!(refusal.is_err(), "state under {common:?} was admitted");
-            assert!(!state.join("projects").exists());
-            assert!(!state.join("host-id").exists());
-        }
-
-        let plain = base.join("plain-project");
-        std::fs::create_dir_all(&plain)?;
-        git(&plain, &["init", "-q", "--initial-branch=main"])?;
-        let common = plain.join(".git");
-        let state = plain.join("state");
-        std::fs::create_dir_all(&state)?;
-        std::fs::set_permissions(&state, std::os::unix::fs::PermissionsExt::from_mode(0o700))?;
-        let mut inputs = RootInputs::new(home, assets);
-        inputs.state_dir = Some(state.clone());
-        inputs.workspaces.push(base.clone());
-        let roots = inputs.resolve(&provenant_os::fs::SystemPathResolver)?;
-        let globals = provenant_cli::Globals {
-            state_dir: Some(state.clone()),
-            ..Default::default()
-        };
-        let (roots, binding) = prepare_peer_project_roots(
-            &globals,
-            roots,
-            &common,
-            false,
-            crate::roots::Product::Optional,
-        )?;
-        assert_eq!(binding.common_dir(), common);
-        assert!(roots.state.as_path().join("projects").is_dir());
-        assert!(roots.state.as_path().join("host-id").is_file());
-        Ok(())
-    }
-}
+include!("peer_tests.rs");

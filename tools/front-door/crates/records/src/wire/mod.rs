@@ -94,7 +94,7 @@ pub fn envelope_schema(command: &str, data: Value) -> Value {
             ("warnings", schema::array(warning_schema())),
             ("next", schema::array(next_step_schema())),
         ],
-        &[],
+        &[("warnings_omitted", schema::unsigned())],
     );
     let failures: Vec<&str> = statuses
         .iter()
@@ -113,11 +113,65 @@ pub fn envelope_schema(command: &str, data: Value) -> Value {
 /// caused the warning when one did. Spec: docs/specs/cli.md#warnings-are-typed-values
 pub fn warning_schema() -> Value {
     object(
-        &[("code", string()), ("message", string())],
+        &[
+            ("code", string()),
+            ("message", string()),
+            ("source", source_schema()),
+            ("next", schema::array(next_step_schema())),
+        ],
         &[
             ("subject", string()),
-            ("source", json!({})),
-            ("repair", string()),
+            ("subject_ref", subject_schema()),
+            ("setting", setting_schema()),
+        ],
+    )
+}
+
+fn source_schema() -> Value {
+    object(&[("layer", layer_schema())], &[("origin", string())])
+}
+
+fn setting_schema() -> Value {
+    object(
+        &[
+            ("key", string()),
+            ("value", string()),
+            ("layer", layer_schema()),
+            ("origin", string()),
+        ],
+        &[],
+    )
+}
+
+fn layer_schema() -> Value {
+    choices(&[
+        "default",
+        "profile",
+        "detected",
+        "host",
+        "host_project",
+        "project",
+        "account",
+        "tier",
+        "template",
+        "route",
+        "parent",
+        "launch",
+    ])
+}
+
+fn subject_schema() -> Value {
+    object(
+        &[],
+        &[
+            ("host", string()),
+            ("project", string()),
+            ("graph", string()),
+            ("node", string()),
+            ("attempt", schema::unsigned()),
+            ("item", string()),
+            ("pr", schema::unsigned()),
+            ("head", string()),
         ],
     )
 }
@@ -171,7 +225,7 @@ pub fn error_envelope_schema() -> Value {
             ("warnings", array(warning_schema())),
             ("next", array(next_step_schema())),
         ],
-        &[],
+        &[("warnings_omitted", schema::unsigned())],
     );
     if let Some(map) = schema.as_object_mut() {
         // Failed commands may still carry partial data (cancel receipts).

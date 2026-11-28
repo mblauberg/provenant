@@ -21,13 +21,14 @@ const UNKNOWN_USAGE_TEXT_BYTES: usize = 64;
 /// Space for each runtime-owned refusal code, including future causes.
 pub(super) const REFUSAL_CODE_BYTES: usize = 64;
 
-pub(super) fn reason(
+pub(super) fn reason_with_policy(
     document: &GraphDocument,
     expansions: &[Expansion],
     extensions: &[String],
     plan: &PlannedGraph,
+    review_policy: &ReviewPolicy,
 ) -> Option<String> {
-    admit(document, expansions, extensions, plan)
+    admit_with_policy(document, expansions, extensions, plan, review_policy)
         .err()
         .map(|error| error.to_string())
 }
@@ -38,26 +39,42 @@ pub(super) fn admit(
     extensions: &[String],
     plan: &PlannedGraph,
 ) -> Result<(), AdmissionError> {
-    admit_with_limit(
+    admit_with_policy(
         document,
         expansions,
         extensions,
         plan,
+        &ReviewPolicy::default(),
+    )
+}
+
+pub(super) fn admit_with_policy(
+    document: &GraphDocument,
+    expansions: &[Expansion],
+    extensions: &[String],
+    plan: &PlannedGraph,
+    review_policy: &ReviewPolicy,
+) -> Result<(), AdmissionError> {
+    admit_with_limit_and_policy(
+        document,
+        expansions,
+        extensions,
+        plan,
+        review_policy,
         MAX_CHECKPOINT_BYTES as usize,
     )
     .map_err(|bound| AdmissionError::Envelope(GraphEnvelopeLimit { bound }))
 }
 
-// Return the measured bound; the production caller owns the fixed envelope's
-// diagnostic. Tests can cross this same admission boundary with a small budget.
-pub(super) fn admit_with_limit(
+pub(super) fn admit_with_limit_and_policy(
     document: &GraphDocument,
     expansions: &[Expansion],
     extensions: &[String],
     plan: &PlannedGraph,
+    review_policy: &ReviewPolicy,
     byte_limit: usize,
 ) -> Result<(), usize> {
-    let bound = checkpoint_bound(document, expansions, extensions, plan);
+    let bound = checkpoint_bound_with_policy(document, expansions, extensions, plan, review_policy);
     if bound > byte_limit {
         Err(bound)
     } else {
@@ -108,18 +125,19 @@ fn ask_bound(ask: &AskRequest) -> usize {
         wake_at: Some(latest()),
         timeout: Some(asks::DecideTimeout {
             seconds: u64::MAX,
-            source: asks::DecideTimeoutSource::Configured,
+            source: Layer::Host,
         }),
         request: "f".repeat(asks::REQUEST_ID_BYTES),
     };
     canonical_len(&link) + 1
 }
 
-pub(super) fn checkpoint_bound(
+pub(super) fn checkpoint_bound_with_policy(
     document: &GraphDocument,
     expansions: &[Expansion],
     extensions: &[String],
     plan: &PlannedGraph,
+    review_policy: &ReviewPolicy,
 ) -> usize {
     let max_base = provenant_core::GitOid::parse(&"f".repeat(64))
         .unwrap_or_else(|_| unreachable!("the fixed graph base is a valid object ID"));
@@ -151,6 +169,7 @@ pub(super) fn checkpoint_bound(
         integration_pin: Some(String::new()),
         cancelled: true,
         on_stop_defaults: worst_case_on_stop_defaults(),
+        review_policy: Some(review_policy.clone()),
         delivery_ci_superseded: Vec::new(),
         cancel_reason: Some(String::new()),
         pause: provenant_records::pause::Pause::new(
@@ -259,6 +278,12 @@ pub(super) fn checkpoint_bound(
         .enumerate()
         .map(|(index, node)| (node.id.clone(), index))
         .collect();
+    let longest_id = plan
+        .nodes
+        .iter()
+        .map(|node| node.id.len())
+        .max()
+        .unwrap_or(0);
     plan.nodes
         .iter()
         .map(|node| {
@@ -269,9 +294,11 @@ pub(super) fn checkpoint_bound(
             node_bound(
                 plan,
                 node,
+                resolved_review_policy(&node.id, document, expansions).unwrap_or(review_policy),
                 loop_rounds.get(node.id.as_str()).copied().unwrap_or(0),
                 admitted,
                 repair::is_repair_gate(node, plan, &positions),
+                longest_id,
             )
             .saturating_add(1)
         })
@@ -297,12 +324,33 @@ fn land_skeleton(tier: provenant_records::workflow::RiskTier) -> LandRecord {
     }
 }
 
+fn resolved_review_policy<'a>(
+    node_id: &str,
+    document: &'a GraphDocument,
+    expansions: &'a [Expansion],
+) -> Option<&'a ReviewPolicy> {
+    document
+        .nodes
+        .iter()
+        .find(|node| node.id == node_id)
+        .and_then(|node| node.effective_review_policy.as_ref())
+        .or_else(|| {
+            expansions
+                .iter()
+                .flat_map(|expansion| expansion.nodes.iter())
+                .find(|node| node.id == node_id)
+                .and_then(|node| node.effective_review_policy.as_ref())
+        })
+}
+
 fn node_bound(
     plan: &PlannedGraph,
     node: &PlannedNode,
+    review_policy: &ReviewPolicy,
     loop_rounds: usize,
     admitted: bool,
     repair_gate: bool,
+    longest_id: usize,
 ) -> usize {
     let expands = plans::agent(node);
     let gate = node.condition.is_some();
@@ -399,6 +447,49 @@ fn node_bound(
         }
     });
     let boundary = gate || node.loop_body.is_some();
+    let max_lens_retries = node
+        .routes
+        .iter()
+        .map(|route| {
+            route
+                .effective_review_policy
+                .as_ref()
+                .unwrap_or(review_policy)
+                .lens_retry
+                .value
+        })
+        .max()
+        .unwrap_or(review_policy.lens_retry.value);
+    let review_retry = (template::review_node(node) && node.composite.is_none()).then(|| {
+        Box::new(ReviewRetryState {
+            review_chain: "x".repeat(longest_id),
+            head: "f".repeat(64),
+            eligible_routes: node.routes.clone(),
+            evidence_retries: if review_policy.evidence_retries.value == 0 {
+                Vec::new()
+            } else {
+                node.routes
+                    .iter()
+                    .cloned()
+                    .map(|route| ReviewEvidenceRetryCount {
+                        route,
+                        retries: review_policy.evidence_retries.value,
+                    })
+                    .collect()
+            },
+            lens_retries: max_lens_retries,
+            pending_retry: Some(Box::new(ReviewRetryIntent {
+                route: node
+                    .routes
+                    .iter()
+                    .max_by_key(canonical_len)
+                    .cloned()
+                    .unwrap_or_default(),
+                cause: ReviewRetryCause::LensUnavailable,
+                attempt: worst_attempt_key.clone(),
+            })),
+        })
+    });
     let mut skeleton = NodeProgress {
         delivery_adoption: None,
         delivery_review_disposition: None,
@@ -418,6 +509,9 @@ fn node_bound(
         delivery_publication,
         delivery_park,
         conflict: None,
+        finding_ledger: None,
+        review_adjudication_receipts: Vec::new(),
+        review_round_scope: None,
         extra: Default::default(),
         children: node.composite_members.clone(),
         source_binding: node.source.clone(),
@@ -443,7 +537,6 @@ fn node_bound(
         container_retry: false,
         concurrency_warning: None,
         repair_growth: None,
-        review_verdict_correction_refused: None,
         provisioned_source: None,
         provisioned_owner: None,
         warnings: Vec::new(),
@@ -453,6 +546,7 @@ fn node_bound(
         blocked: false,
         decisions: Vec::new(),
         review_settlement: None,
+        review_retry,
         expansion_pause: expands.then(String::new),
         expansion_cause: expands.then_some(NodeDecisionCause::PlanExpansionPaused {
             active: false,
@@ -611,10 +705,12 @@ fn node_bound(
         fallback_evidence_retry: None,
         last_launch_retry: None,
     };
-    // A refused automatic verdict correction retains its bounded admission error.
-    let correction = template::review_behaviour(node) == Some(template::ReviewBehaviour::Lens);
-    if correction {
-        skeleton.review_verdict_correction_refused = Some(String::new());
+    // Round one is the first repair re-review; reserve its two longest pins.
+    if template::review_node(node) && node.round.as_ref().is_some_and(|round| round.round >= 1) {
+        skeleton.review_round_scope = Some(ReviewRoundScope::Delta {
+            base: "1".repeat(64),
+            head: "2".repeat(64),
+        });
     }
     // Only a repair acceptance gate can retain a measured growth cache.
     // Ordinary agent nodes may still report risk assessments in their output.
@@ -646,14 +742,69 @@ fn node_bound(
     }
     let mut bytes = canonical_len(&skeleton)
         + 64 // source commit
-        + MAX_ADVANCE_NOTE_BYTES // advance error
-        + if correction { MAX_ADVANCE_NOTE_BYTES } else { 0 };
+        + MAX_ADVANCE_NOTE_BYTES; // advance error
+    // Reserve the full source-bearing effective snapshots even though they
+    // also occur in the graph document or expansion envelope.
+    bytes = bytes.saturating_add(canonical_len(review_policy));
+    for route in &node.routes {
+        bytes = bytes.saturating_add(canonical_len(
+            route
+                .effective_review_policy
+                .as_ref()
+                .unwrap_or(review_policy),
+        ));
+    }
     if template::review_node(node) {
         bytes += canonical_len(&serde_json::json!({"review_settlement": {
             "attempt_id": "1".repeat(32),
             "head": "1".repeat(64), "base": "2".repeat(64),
             "verdict": "approve_with_nits", "independent": false,
         }}));
+    }
+    if node.kind == Some(NodeKind::Adjudicate) {
+        // A sequential same-head split can reopen this stable node once per
+        // newly admitted panel. Every receipt can retain the prior union and
+        // the added IDs separately; reserve both arrays across the full bounded
+        // receipt history, whose length is capped by the admitted node count.
+        let mut receipt_attempt_key = worst_attempt_key.clone();
+        receipt_attempt_key.previous_attempt_ref = Some("x".repeat(OUTPUT_FIELD_BYTES));
+        let receipt_bytes = canonical_len(&ReviewAdjudicationReceipt {
+            head: Some("1".repeat(64)),
+            panels: Vec::new(),
+            added_panels: Vec::new(),
+            prior_outputs: NodeOutputs::default(),
+            attempt_key: receipt_attempt_key,
+            attempt_ref: Some("x".repeat(OUTPUT_FIELD_BYTES)),
+            verdict: "VERDICT: INCONCLUSIVE".into(),
+            output_digest: "1".repeat(64),
+        });
+        // Reserve one complete bounded output projection and its external
+        // artifact pointers for every retained receipt. Full typed finding
+        // blobs are externalised and separately refused above the 32 MiB read
+        // cap when the continuation is admitted.
+        let prior_output_bytes = 256
+            + 80
+            + 256
+            + REMAINING_BYTES
+            + 256
+            + 3 * OUTPUT_FIELD_BYTES
+            + 64
+            + DISPOSITION_FINDINGS_BYTES
+            + 2 * OUTPUT_FIELD_BYTES
+            + MAX_WARNINGS * (WARNING_BYTES + 3)
+            + 2048;
+        let receipt_slot_bytes = receipt_bytes.saturating_add(prior_output_bytes);
+        let receipt_count = plan.nodes.len();
+        let panel_id_bytes = plan.nodes.iter().fold(0usize, |bytes, candidate| {
+            bytes.saturating_add(candidate.id.len().saturating_add(3))
+        });
+        bytes = bytes
+            .saturating_add(receipt_slot_bytes.saturating_mul(receipt_count))
+            .saturating_add(
+                panel_id_bytes
+                    .saturating_mul(receipt_count)
+                    .saturating_mul(2),
+            );
     }
     if node
         .plan
@@ -682,6 +833,9 @@ fn node_bound(
     }
     if template::review_node(node) {
         bytes += plans::STORED_DECISION_BYTES + 16;
+    }
+    if let Some(index) = node_index {
+        bytes = bytes.saturating_add(finding_ledger_bound(plan, index));
     }
     if repair::may_report_items(node, plan) || repair::is_repair(node) {
         bytes += FINDINGS_BYTES + 32;
@@ -814,6 +968,12 @@ fn node_bound(
         .queue
         .as_ref()
         .map_or(1, |queue| queue.prep_retries.value.saturating_add(1));
+    let evidence_rows_per_route = if template::review_node(node) && node.composite.is_none() {
+        review_policy.evidence_retries.value.saturating_add(1)
+    } else {
+        1
+    };
+    let attempt_rows_per_route = attempt_rows_per_route.saturating_mul(evidence_rows_per_route);
     for route in &node.routes {
         let attempt_route = if plans::writer(node) {
             escalation_policy
@@ -852,7 +1012,7 @@ fn node_bound(
             outcome: Some(GraphAttemptOutcome::AdapterUnavailable),
             launch_actor: String::new(),
             input_cap: Some(usize::MAX),
-            input_cap_source: Some(InputCapSource::EffectiveGraphLimits),
+            input_cap_source: Some(Layer::Detected),
             input_manifest: None,
             settled: u64::MAX,
             usage: Some(AttemptUsage {
@@ -891,4 +1051,32 @@ fn node_bound(
         bytes = bytes.saturating_add(attempt_row_bound.saturating_mul(attempt_rows_per_route));
     }
     bytes
+}
+
+/// Reserve the maximum inline ledger plus its external pointer at the stable
+/// chain owner. The complete blob has a separate runtime size check against
+/// `MAX_CHECKPOINT_BYTES` before the checkpoint can publish it.
+fn finding_ledger_bound(plan: &PlannedGraph, owner_index: usize) -> usize {
+    let owner = &plan.nodes[owner_index];
+    let owns_chain = owner.loop_body.is_some()
+        || owner
+            .composite
+            .as_ref()
+            .is_some_and(|spec| spec.reduce_verdict);
+    if !owns_chain {
+        return 0;
+    }
+    let has_review_rows = plan.nodes.iter().enumerate().any(|(index, node)| {
+        review::chain_owner_id(index, plan).as_str() == owner.id.as_str()
+            && (template::review_node(node) || node.kind == Some(NodeKind::Adjudicate))
+    });
+    if !has_review_rows {
+        return 0;
+    }
+    // The 4096-byte store threshold applies to the string value. A ledger
+    // string contains escaped JSON and can double when embedded in the outer
+    // checkpoint JSON, so reserve twice that inline bound.
+    const LEDGER_INLINE_BYTES: usize = 2 * 4096;
+    const LEDGER_POINTER_BYTES: usize = 256;
+    LEDGER_INLINE_BYTES + LEDGER_POINTER_BYTES
 }

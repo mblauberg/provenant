@@ -9,6 +9,7 @@ use provenant_os::exec::SystemExecutor;
 use provenant_os::exec::{ExecOutcome, Executor, Termination};
 #[cfg(any(target_os = "macos", feature = "snapshot"))]
 use provenant_records::policy::Policy;
+use provenant_records::{Layer, Source};
 #[cfg(target_os = "macos")]
 use std::collections::BTreeMap;
 #[cfg(any(target_os = "macos", feature = "snapshot"))]
@@ -471,7 +472,7 @@ fn large_profiles_render_without_truncation() -> Result<(), Box<dyn std::error::
 #[cfg(any(target_os = "macos", feature = "snapshot"))]
 #[test]
 fn capacity_policy_controls_warning_off_and_typed_refusal() {
-    use provenant_records::policy::{Boundary, Source, Strength};
+    use provenant_records::policy::{Boundary, Strength};
     use std::collections::BTreeMap;
 
     let default = Policy::default();
@@ -501,7 +502,7 @@ fn capacity_policy_controls_warning_off_and_typed_refusal() {
     let mut off = Policy::default();
     off.overlay(
         &BTreeMap::from([("PROFILE_GRANT_COUNT".to_owned(), Strength::Off)]),
-        Source::Host,
+        Layer::Host,
     );
     assert!(
         check_capacity_policy(
@@ -523,7 +524,7 @@ fn capacity_policy_controls_warning_off_and_typed_refusal() {
     let mut strict = Policy::default();
     strict.overlay(
         &BTreeMap::from([("PROFILE_BYTES".to_owned(), Strength::Refuse)]),
-        Source::Dispatch,
+        Layer::Route,
     );
     assert!(matches!(
         check_capacity_policy(
@@ -541,35 +542,38 @@ fn capacity_policy_controls_warning_off_and_typed_refusal() {
 
 #[cfg(any(target_os = "macos", feature = "snapshot"))]
 #[test]
-fn read_only_extension_guard_uses_immutable_authority_policy() {
+fn read_only_extension_guard_uses_layered_confinement_policy() {
     use crate::plan::{CodexPolicy, ConfinedPlan, ExtensionPolicy, PlanRequest};
     use provenant_records::policy::{Boundary, Effect, Facts, Strength};
 
     let (permissions, _) = write_grants_fixture();
-    let error = ConfinedPlan::new(PlanRequest {
-        scope: provenant_core::WorkScope::Project(provenant_core::ProjectId::from_bytes([1; 16])),
-        permissions,
-        codex: CodexPolicy::Inherited,
-        extensions: ExtensionPolicy::Unconfined,
-        agy_state: None,
-    })
-    .err()
-    .expect("unconfined read-only extensions are refused");
-    assert!(matches!(
-        error,
-        crate::plan::PlanError::UnconfinedExtensions
-    ));
+    let (plan, warnings) = provenant_records::warning::capture(|| {
+        ConfinedPlan::new(PlanRequest {
+            policy: provenant_records::policy::Policy::default(),
+            scope: provenant_core::WorkScope::Project(provenant_core::ProjectId::from_bytes(
+                [1; 16],
+            )),
+            permissions,
+            codex: CodexPolicy::Inherited,
+            extensions: ExtensionPolicy::Unconfined,
+            agy_state: None,
+        })
+    });
+    assert!(plan.is_ok(), "{:?}", plan.as_ref().err());
+    assert_eq!(warnings.len(), 1);
+    assert_eq!(warnings[0].code.as_ref(), "PLAN_CONFINEDPLAN_NEW_AUTHORITY");
 
     let policy = provenant_records::policy::Policy::default();
     let rule = policy.rule("PLAN_CONFINEDPLAN_NEW_AUTHORITY");
-    assert_eq!(rule.rule.boundary, Boundary::Authority);
-    assert_eq!(rule.rule.strength, Strength::Refuse);
+    assert_eq!(rule.rule.boundary, Boundary::None);
+    assert_eq!(rule.rule.group.as_deref(), Some("confinement"));
+    assert_eq!(rule.rule.strength, Strength::Warn);
     assert!(matches!(
         policy.check(
             "PLAN_CONFINEDPLAN_NEW_AUTHORITY",
             Facts::violation("guard failed"),
         ),
-        Effect::Refuse(_)
+        Effect::Warn(_)
     ));
 }
 
@@ -657,6 +661,7 @@ fn worktree_access_read_only_profile_limits_checkout_writes()
     let lane_policy = crate::run_config::RunConfig::default().policy_for_launch(&state, mandatory);
     let plan = ConfinedPlan::new(
         PlanRequest {
+            policy: provenant_records::policy::Policy::default(),
             scope: WorkScope::Project(binding.project_id()),
             permissions: PlanPermissions {
                 credential_roots: provenant_core::CredentialRoots::for_home(&home),
@@ -837,6 +842,7 @@ fn worktree_access_read_only_profile_limits_checkout_writes()
     strict_permissions.read_roots.clear();
     let strict = ConfinedPlan::new(
         PlanRequest {
+            policy: provenant_records::policy::Policy::default(),
             scope: WorkScope::Project(binding.project_id()),
             permissions: strict_permissions,
             codex: CodexPolicy::Clean,
@@ -1660,7 +1666,7 @@ fn ambient_policy_renders_complete_mandatory_and_host_denials()
         resolved
             .sources()
             .iter()
-            .any(|source| matches!(source, ConfinementSource::Host(_)))
+            .any(|source| source.layer == Layer::Host)
     );
     assert!(rule_index(&rendered, RuleAction::Allow, "default", None).is_some());
     assert!(!rule_facts(&rendered).iter().any(|rule| {
@@ -1798,14 +1804,17 @@ fn renderer_applies_all_network_ceiling_pairs_and_offline_denial()
             assert_eq!(resolved.network(), NetworkPolicy::from(effective));
             assert_eq!(resolved.resolve_for(&plan), resolved);
             assert_eq!(
-                resolved.sources().contains(&ConfinementSource::Plan),
+                resolved.sources().contains(&Source {
+                    layer: Layer::Launch,
+                    origin: None
+                }),
                 request != NetworkAccess::Open
             );
             assert_eq!(
                 resolved
                     .sources()
                     .iter()
-                    .any(|source| matches!(source, ConfinementSource::Host(_))),
+                    .any(|source| source.layer == Layer::Host),
                 ceiling != NetworkAccess::Open
             );
             let rendered = render(&GrantSet::build(&plan, &profile, home, None)?)?;
@@ -1824,7 +1833,10 @@ fn renderer_applies_all_network_ceiling_pairs_and_offline_denial()
             profile.spec.confinement = profile.spec.confinement.clone().offline();
             let resolved = profile.spec.confinement.resolve_for(&plan);
             assert_eq!(resolved.network(), NetworkPolicy::Offline);
-            assert!(resolved.sources().contains(&ConfinementSource::Provider));
+            assert!(resolved.sources().contains(&Source {
+                layer: Layer::Route,
+                origin: None
+            }));
             assert!(!resolved.github_permitted());
             let offline = render(&GrantSet::build(&plan, &profile, home, None)?)?;
             let final_deny = offline.rfind("(deny network*)").expect("offline denial");

@@ -394,7 +394,7 @@ mod provisioning_tests {
                 "source":{"type":"node","node":"dependency"},"prompt":"later"
             }]}]
         }))?;
-        bind_admitted_provisioning_owners(&mut checkpoint)?;
+        bind_admitted_provisioning_owners(&mut checkpoint, &default_sharing())?;
         let owner = checkpoint.nodes[0]
             .provisioned_owner
             .ok_or("deferred writer owner")?;
@@ -410,22 +410,25 @@ mod provisioning_tests {
         );
         relay::clear_provisioning(&mut checkpoint, "parent--later");
         assert_eq!(checkpoint.nodes[0].provisioned_owner, Some(owner));
-        // A later admission cannot turn this target into another lane's
-        // creation simply because the original effect fence was cleared.
+        // A later admission is an advisory claim, not a refusal: it rebinds
+        // the target and warns under the custody sharing rule (#4120).
         let mut foreign = checkpoint.expansions[0].clone();
         foreign.nodes[0].id = "other--writer".into();
         checkpoint.expansions.push(foreign);
         let mut foreign_progress = checkpoint.nodes[0].clone();
         foreign_progress.id = "other--writer".into();
-        foreign_progress.provisioned_owner = None;
+        foreign_progress.provisioned_owner =
+            Some(provisioning_owner_digest("another-graph", "writer")?);
+        foreign_progress.worktree = Some(path.into());
         checkpoint.nodes.push(foreign_progress);
-        assert_eq!(
-            bind_admitted_provisioning_owners(&mut checkpoint)
-                .unwrap_err()
-                .code(),
-            "writer_parent_required"
-        );
-        assert_eq!(checkpoint.nodes[0].provisioned_owner, Some(owner));
+        bind_admitted_provisioning_owners(&mut checkpoint, &default_sharing())?;
+        let rebound = checkpoint
+            .nodes
+            .iter()
+            .find(|row| row.id == "other--writer")
+            .and_then(|row| row.provisioned_owner);
+        assert!(rebound.is_some());
+        assert_eq!(checkpoint.nodes[0].provisioned_owner, rebound);
         Ok(())
     }
 
@@ -868,7 +871,7 @@ mod provisioning_tests {
                 "when":[{"name":"flag","expected":"true","actual":"false"}]
             }]}]
         }))?;
-        bind_admitted_provisioning_owners(&mut checkpoint)?;
+        bind_admitted_provisioning_owners(&mut checkpoint, &default_sharing())?;
         assert!(checkpoint.nodes[0].provisioned_owner.is_none());
         relay::fence_provisioning(&mut checkpoint, "writer", path, &source);
         let mut journal = FileJournal::open(
@@ -2593,6 +2596,22 @@ mod panel_tests {
         assert!(!quick["review-panel"].iter().any(|lens| lens == "tests"));
         let quick_floor: Value = serde_json::from_str(&quick["review-coverage-floor"][0]).unwrap();
         assert_eq!(quick_floor["hard"], false);
+        let library = TemplateLibrary::bundled();
+        let compiled = provenant_fabric_runtime::graph::template::Compiler {
+            library: &library,
+            resolvers: &quick,
+        }
+        .compile(&json!({"id":"review","use":"review-panel"}))
+        .unwrap();
+        let shape = compiled.composite.as_ref().unwrap().nodes[0]
+            .composite
+            .as_ref()
+            .unwrap();
+        let lenses = shape.nodes.iter().find(|node| node.id == "lenses").unwrap();
+        assert_eq!(
+            lenses.composite.as_ref().unwrap().min_successful,
+            Some(quick["review-panel"].len().saturating_sub(1).max(1))
+        );
 
         let boundary_diff = || {
             ReviewDiffSelection::Captured(vec![provenant_run::ReviewDiffContext {
@@ -2646,12 +2665,8 @@ mod panel_tests {
         let required = floor["required_lenses"].as_array().unwrap();
         assert!(required.iter().any(|lens| lens == "adversarial"));
         assert!(!required.iter().any(|lens| lens == "tests"));
-        let hard_reviewers: usize = project.shapes[&project.select.by_risk["crucial"]]
-            .reviewers
-            .iter()
-            .map(|g| g.count)
-            .sum();
-        assert_eq!(floor["minimum"], hard_reviewers);
+        let hard_panel_minimum = protected["review-panel"].len().saturating_sub(1).max(1);
+        assert_eq!(floor["minimum"], hard_panel_minimum);
 
         let library = TemplateLibrary::bundled();
         let compiled = provenant_fabric_runtime::graph::template::Compiler {
@@ -2661,13 +2676,14 @@ mod panel_tests {
         .compile(&json!({"id":"protected-panel", "use":"review-panel", "min_ok":1}))
         .unwrap();
         let root = compiled.composite.as_ref().unwrap();
+        assert_eq!(root.min_successful, Some(1), "explicit min_ok is preserved");
         assert!(root.hard_review_coverage);
         assert!(root.required_review_lenses.contains(&"adversarial".into()));
         let shape = root.nodes[0].composite.as_ref().unwrap();
         let lenses = shape.nodes.iter().find(|node| node.id == "lenses").unwrap();
         let lens_floor = lenses.composite.as_ref().unwrap();
         assert!(lens_floor.hard_review_coverage);
-        assert_eq!(lens_floor.min_successful, Some(hard_reviewers));
+        assert_eq!(lens_floor.min_successful, Some(hard_panel_minimum));
         assert!(
             lens_floor
                 .required_review_lenses
@@ -2844,6 +2860,53 @@ mod panel_tests {
         assert!(refused.contains(named_family));
         assert!(refused.contains("count 1"));
         assert!(refused.contains("candidate account unavailable; excluded by policy"));
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod wake_tests {
+    use super::*;
+
+    // Spec: docs/specs/agent-native.md#31-progress-without-tick
+    #[test]
+    fn lane_wake_frame_is_read_class_and_carries_no_mutation_authority()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let subject = WakeSubjectRef::Graph {
+            project: provenant_core::ProjectId::from_bytes([1; 16]),
+            id: "graph-one".into(),
+        };
+        let frame = serde_json::to_value(GraphRelay::Wake { subject })?;
+        assert_eq!(frame["op"], "wake");
+        assert_eq!(frame["subject"]["graph"]["id"], "graph-one");
+
+        let root = tempfile::tempdir()?;
+        let home = root.path().join("home");
+        let project = home.join("project");
+        std::fs::create_dir_all(&project)?;
+        provenant_os::fixture::run_git(&project, &["init", "-q"])?;
+        provenant_os::fixture::run_git(&project, &["commit", "--allow-empty", "-qm", "base"])?;
+        let mut inputs = provenant_core::RootInputs::new(home.clone(), project.clone());
+        inputs.state_dir = Some(root.path().join("state"));
+        let context = Context::open(
+            inputs.resolve(&provenant_os::fs::SystemPathResolver)?,
+            &home,
+            &project,
+        )?;
+        let clock = provenant_os::clock::SystemClock::new();
+        let cancel = CancelToken::new();
+        let budget = WaitBudget::cli(clock.mono_now(), 5)?;
+
+        // A wake is forwarded to the host reader, never through the mutation
+        // admission or journal path: the reader enforces the sibling session.
+        let delivered = std::cell::RefCell::new(Vec::new());
+        let read = |input: Value| -> Result<Value, ServiceError> {
+            delivered.borrow_mut().push(input.clone());
+            Ok(json!({"advanced": 1}))
+        };
+        let result = serve_with_read(&context, "attempt-1", frame, budget, &cancel, &clock, &read)?;
+        assert_eq!(result["advanced"], 1);
+        assert_eq!(delivered.borrow()[0]["op"], "wake");
         Ok(())
     }
 }

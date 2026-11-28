@@ -9,6 +9,38 @@ pub(super) const MAX_FINDINGS: usize = 32;
 /// Soft per-node budget for inherited disposition descriptions.
 const DISPOSITION_TEXT_TARGET: usize = 64 * 1024;
 
+/// Coverage facts derived from one reviewed node's findings: which lenses
+/// covered which invariant. The finding ledger keeps this map per exact head;
+/// an invariant with no completed lens is uncovered, so the round is
+/// INCONCLUSIVE rather than a silent PASS.
+pub(super) fn finding_coverage<'a>(
+    findings: impl IntoIterator<Item = &'a Finding>,
+) -> (
+    std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
+    std::collections::BTreeSet<String>,
+) {
+    let mut invariants: std::collections::BTreeMap<String, std::collections::BTreeSet<String>> =
+        std::collections::BTreeMap::new();
+    let mut lenses = std::collections::BTreeSet::new();
+    for finding in findings {
+        let lens = finding
+            .lens
+            .as_deref()
+            .filter(|lens| !lens.trim().is_empty())
+            .map(str::to_owned);
+        if let Some(name) = lens.as_deref() {
+            lenses.insert(name.to_owned());
+        }
+        if let Some(invariant) = finding.named_invariant() {
+            invariants
+                .entry(invariant.to_owned())
+                .or_default()
+                .insert(lens.unwrap_or_else(|| "unknown".to_owned()));
+        }
+    }
+    (invariants, lenses)
+}
+
 /// Canonical JSON bytes of one character inside a string.
 pub(super) fn encoded_char(character: char) -> usize {
     match character {
@@ -581,26 +613,27 @@ fn parse_findings_mode(
             ));
             entry.remove("line");
         }
-        // A blank severity is missing, not a word, and keeps the fail-safe below.
+        // Any present but unrecognised severity, including an empty string,
+        // takes the documented high-severity fallback and warning.
         if let Some(severity) = entry.get("severity").and_then(serde_json::Value::as_str)
-            && !severity.trim().is_empty()
-            && severity_class(severity).is_none()
+            && model::decode_severity(severity).1
         {
             warnings.push(format!(
-                "finding: {}; treating it as should-fix",
+                "{}: finding: {}; treating it as high",
+                review::FINDING_SEVERITY_UNKNOWN.as_str(),
                 fail(
                     "severity",
                     &format!(
                         "unrecognised value; accepted words are {}",
                         SEVERITY_VOCABULARY
                             .iter()
-                            .map(|(word, _, _)| *word)
+                            .map(|(word, _)| *word)
                             .collect::<Vec<_>>()
                             .join(", ")
                     )
                 )
             ));
-            entry.insert("severity".into(), "should-fix".into());
+            entry.insert("severity".into(), "high".into());
         }
         // Expand one disposition to all copies, inheriting each separately.
         let copies: Vec<_> = source.map_or_else(
@@ -655,7 +688,7 @@ fn parse_findings_mode(
                     }
                     // A missing severity keeps the fail-safe blocking priority
                     // during compaction; an unrecognised word was already
-                    // reclassified as should-fix.
+                    // reclassified as high.
                     entry.insert(
                         field.into(),
                         match field {
@@ -949,7 +982,7 @@ pub(super) fn materialised_findings(
     checkpoint: &GraphCheckpoint,
     positions: &std::collections::BTreeMap<String, usize>,
 ) -> Vec<Finding> {
-    if let Some(outputs) = repair::panel_outputs(checkpoint, &checkpoint.nodes[index].id) {
+    if let Some(outputs) = repair::panel_outputs(plan, checkpoint, &checkpoint.nodes[index].id) {
         return outputs.findings.clone();
     }
     let Some(outputs) = checkpoint.nodes[index].outputs.as_ref() else {
@@ -1046,20 +1079,20 @@ pub(super) fn materialise_checkpoint_findings(
     Ok(())
 }
 
-type FindingOrigin = (String, String);
+pub(super) type RootIdentity = (String, String);
 
 #[derive(Clone)]
 pub(super) struct ResolvedFinding {
     source: String,
     stored_id: String,
     finding: Finding,
-    root: FindingOrigin,
+    root: RootIdentity,
 }
 
 /// Reserve unique stored IDs before qualifying colliding roots.
 fn display_ids(
-    roots: &std::collections::BTreeSet<FindingOrigin>,
-) -> std::collections::BTreeMap<FindingOrigin, String> {
+    roots: &std::collections::BTreeSet<RootIdentity>,
+) -> std::collections::BTreeMap<RootIdentity, String> {
     use std::collections::{BTreeMap, BTreeSet};
     let mut counts = BTreeMap::new();
     for (_, id) in roots {
@@ -1088,6 +1121,227 @@ fn display_ids(
         ids.insert((node.clone(), id.clone()), display);
     }
     ids
+}
+
+/// Materialise one node's complete findings with their structural source
+/// identities. Propagated findings keep the root resolved by the same input
+/// machinery used by settlement; new findings originate at the producing
+/// node. Ledger callers qualify collisions across the whole head afterwards.
+pub(super) fn materialised_finding_origins(
+    index: usize,
+    plan: &PlannedGraph,
+    checkpoint: &GraphCheckpoint,
+    positions: &std::collections::BTreeMap<String, usize>,
+) -> Vec<(RootIdentity, Finding)> {
+    let Some(node) = plan.nodes.get(index) else {
+        return Vec::new();
+    };
+    let upstream = if node.kind == Some(NodeKind::Adjudicate) {
+        fully_resolved_findings(node, plan, checkpoint, positions)
+    } else {
+        resolved_inputs(node, plan, checkpoint, positions, true)
+    };
+    materialised_findings(index, plan, checkpoint, positions)
+        .into_iter()
+        .map(|finding| {
+            let propagated = finding
+                .propagates
+                .as_deref()
+                .and_then(|marker| marker_root(marker, &upstream));
+            let exact = upstream
+                .iter()
+                .filter(|item| item.finding.id == finding.id)
+                .map(|item| item.root.clone())
+                .collect::<std::collections::BTreeSet<_>>();
+            let origin = propagated
+                .or_else(|| {
+                    (exact.len() == 1)
+                        .then(|| exact.into_iter().next())
+                        .flatten()
+                })
+                .unwrap_or_else(|| (node.id.clone(), finding.id.clone()));
+            (origin, finding)
+        })
+        .collect()
+}
+
+/// Resolve every full finding input for an adjudicator, bypassing capped panel
+/// projections while retaining the same qualified identity mapping used by
+/// staged input materialisation.
+pub(super) fn adjudication_input_findings(
+    index: usize,
+    plan: &PlannedGraph,
+    checkpoint: &GraphCheckpoint,
+    positions: &std::collections::BTreeMap<String, usize>,
+) -> Vec<(String, Finding)> {
+    let Some(node) = plan.nodes.get(index) else {
+        return Vec::new();
+    };
+    fully_resolved_findings(node, plan, checkpoint, positions)
+        .into_iter()
+        .map(|finding| (finding.source, finding.finding))
+        .collect()
+}
+
+#[derive(Clone)]
+struct FullFinding {
+    origin: RootIdentity,
+    projected_id: String,
+    finding: Finding,
+}
+
+/// Resolve an adjudicator's declared finding inputs through member
+/// materialisation, bypassing capped composite projections while preserving
+/// the same source prefixes and root identities used by ordinary inputs.
+fn fully_resolved_findings(
+    node: &PlannedNode,
+    plan: &PlannedGraph,
+    checkpoint: &GraphCheckpoint,
+    positions: &std::collections::BTreeMap<String, usize>,
+) -> Vec<ResolvedFinding> {
+    let mut selected = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+    for input in &node.inputs {
+        if !input.outputs.contains(&OutputKind::Findings) || !seen.insert(&input.node) {
+            continue;
+        }
+        let Some(index) = positions.get(&input.node).copied() else {
+            continue;
+        };
+        for full in fully_materialised_origins(index, plan, checkpoint, positions) {
+            let mut finding = full.finding;
+            finding.id.clone_from(&full.projected_id);
+            selected.push(ResolvedFinding {
+                source: input.node.clone(),
+                stored_id: full.projected_id,
+                finding,
+                root: full.origin,
+            });
+        }
+    }
+    let roots = selected
+        .iter()
+        .map(|item| item.root.clone())
+        .collect::<std::collections::BTreeSet<_>>();
+    let ids = display_ids(&roots);
+    for item in &mut selected {
+        if let Some(id) = ids.get(&item.root) {
+            item.finding.id.clone_from(id);
+        }
+    }
+    selected
+}
+
+fn fully_materialised_origins(
+    index: usize,
+    plan: &PlannedGraph,
+    checkpoint: &GraphCheckpoint,
+    positions: &std::collections::BTreeMap<String, usize>,
+) -> Vec<FullFinding> {
+    let Some(node) = plan.nodes.get(index) else {
+        return Vec::new();
+    };
+    if let Some(spec) = node.composite.as_ref() {
+        let mut findings = Vec::new();
+        let partial = spec.min_successful.is_some() || spec.reduce_verdict;
+        for export in &spec.exports {
+            if !export.outputs.contains(&OutputKind::Findings) {
+                continue;
+            }
+            let Some(member_index) = positions.get(&export.node).copied() else {
+                continue;
+            };
+            if repair::intentionally_skipped_lens(member_index, plan, checkpoint) {
+                continue;
+            }
+            let member = &checkpoint.nodes[member_index];
+            if partial
+                && member.state != NodeState::Succeeded
+                && !review::retained_findings(&plan.nodes[member_index], member)
+            {
+                continue;
+            }
+            if member.outputs.is_none() {
+                continue;
+            }
+            findings.extend(
+                fully_materialised_origins(member_index, plan, checkpoint, positions)
+                    .into_iter()
+                    .map(|mut full| {
+                        full.projected_id = format!("{}:{}", export.node, full.projected_id);
+                        full
+                    }),
+            );
+        }
+        return findings;
+    }
+    let upstream = fully_resolved_findings(node, plan, checkpoint, positions);
+    materialised_findings(index, plan, checkpoint, positions)
+        .into_iter()
+        .map(|finding| {
+            let exact = upstream
+                .iter()
+                .filter(|item| item.finding.id == finding.id)
+                .map(|item| item.root.clone())
+                .collect::<std::collections::BTreeSet<_>>();
+            let origin = finding
+                .propagates
+                .as_deref()
+                .and_then(|marker| marker_root(marker, &upstream))
+                .or_else(|| {
+                    (exact.len() == 1)
+                        .then(|| exact.into_iter().next())
+                        .flatten()
+                })
+                .unwrap_or_else(|| (node.id.clone(), finding.id.clone()));
+            FullFinding {
+                origin,
+                projected_id: finding.id.clone(),
+                finding,
+            }
+        })
+        .collect()
+}
+
+/// Apply the canonical output identity scheme to a complete finding set.
+pub(super) fn qualify_finding_origins(
+    findings: &mut [(RootIdentity, Finding)],
+    previous: &std::collections::BTreeMap<RootIdentity, String>,
+) {
+    let roots = findings
+        .iter()
+        .map(|(origin, _)| origin.clone())
+        .collect::<std::collections::BTreeSet<_>>();
+    let canonical = display_ids(&roots);
+    let mut ids = std::collections::BTreeMap::new();
+    let mut used = std::collections::BTreeSet::new();
+    for (origin, id) in previous {
+        if roots.contains(origin) && used.insert(id.clone()) {
+            ids.insert(origin.clone(), id.clone());
+        }
+    }
+    for origin in &roots {
+        if ids.contains_key(origin) {
+            continue;
+        }
+        let base = canonical
+            .get(origin)
+            .cloned()
+            .unwrap_or_else(|| origin.1.clone());
+        let mut candidate = base.clone();
+        let mut suffix = 1usize;
+        while used.contains(&candidate) {
+            candidate = format!("{}:{}:{suffix}", origin.0, origin.1);
+            suffix += 1;
+        }
+        used.insert(candidate.clone());
+        ids.insert(origin.clone(), candidate);
+    }
+    for (origin, finding) in findings {
+        if let Some(id) = ids.get(origin) {
+            finding.id.clone_from(id);
+        }
+    }
 }
 
 /// Resolve markers only against actual inputs, following each match to its root.
@@ -1149,24 +1403,41 @@ fn resolved_inputs_inner(
         };
         for finding in &materialised_findings(index, plan, checkpoint, positions) {
             let default = (input.node.clone(), finding.id.clone());
-            let root = finding
-                .propagates
-                .as_deref()
-                .and_then(|marker| {
-                    if plan.nodes[index].composite.is_some() {
-                        // The exporting member already resolved propagation
-                        // in its input scope. A raw marker cannot name a sibling.
+            let root = if plan.nodes[index].composite.is_some() {
+                // The exporting member already resolved propagation in its
+                // input scope. A raw marker cannot name a sibling. A finding
+                // the projection leaves under the member's own displayed id is
+                // that member's finding, so it keeps the member's root instead
+                // of minting a second identity at the aggregation boundary.
+                let displayed = upstream
+                    .iter()
+                    .filter(|item| item.finding.id == finding.id)
+                    .map(|item| &item.root)
+                    .collect::<std::collections::BTreeSet<_>>();
+                finding
+                    .propagates
+                    .as_deref()
+                    .and_then(|_| {
                         upstream
                             .iter()
                             .find(|item| {
                                 format!("{}:{}", item.source, item.stored_id) == finding.id
                             })
                             .map(|item| item.root.clone())
-                    } else {
-                        marker_root(marker, &upstream)
-                    }
-                })
-                .unwrap_or(default);
+                    })
+                    .or_else(|| {
+                        (displayed.len() == 1)
+                            .then(|| displayed.into_iter().next().cloned())
+                            .flatten()
+                    })
+                    .unwrap_or(default)
+            } else {
+                finding
+                    .propagates
+                    .as_deref()
+                    .and_then(|marker| marker_root(marker, &upstream))
+                    .unwrap_or(default)
+            };
             selected.push(ResolvedFinding {
                 source: input.node.clone(),
                 stored_id: finding.id.clone(),
@@ -1198,8 +1469,8 @@ fn resolved_inputs_inner(
 
 /// The declared marker form is `<input>:<id>`. A propagator that drops the input
 /// prefix still names one finding when that shorter form leads to a single root.
-fn marker_root(marker: &str, upstream: &[ResolvedFinding]) -> Option<FindingOrigin> {
-    let roots = |named: &dyn Fn(&str) -> bool| -> std::collections::BTreeSet<FindingOrigin> {
+fn marker_root(marker: &str, upstream: &[ResolvedFinding]) -> Option<RootIdentity> {
+    let roots = |named: &dyn Fn(&str) -> bool| -> std::collections::BTreeSet<RootIdentity> {
         upstream
             .iter()
             .filter(|item| {
@@ -1277,11 +1548,166 @@ pub(super) fn selected_findings(
     checkpoint: &GraphCheckpoint,
     positions: &std::collections::BTreeMap<String, usize>,
 ) -> Vec<(String, Finding)> {
-    resolved_inputs(node, plan, checkpoint, positions, false)
+    let threshold = schedule::effective_review_policy(node, checkpoint)
+        .accept_below
+        .value;
+    if repair_writer(node) {
+        return repair::ledger_findings(node, plan, checkpoint)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|finding| repair::repair_eligible_for(finding, threshold))
+            .map(|finding| ("review_ledger".to_owned(), finding))
+            .collect();
+    }
+    let mut selected: Vec<_> = resolved_inputs(node, plan, checkpoint, positions, false)
         .into_iter()
-        .filter(|item| !repair_writer(node) || repair::repair_eligible(&item.finding))
         .map(|item| (item.source, item.finding))
-        .collect()
+        .collect();
+    if let Some((_, findings, _, _)) = later_round_ledger(node, plan, checkpoint, positions) {
+        for finding in findings {
+            if !selected.iter().any(|(_, existing)| existing == &finding) {
+                selected.push(("review_ledger".to_owned(), finding));
+            }
+        }
+    }
+    selected
+}
+
+fn later_round_ledger(
+    node: &PlannedNode,
+    plan: &PlannedGraph,
+    checkpoint: &GraphCheckpoint,
+    positions: &std::collections::BTreeMap<String, usize>,
+) -> Option<(
+    review::RoundScope,
+    Vec<Finding>,
+    std::collections::BTreeSet<String>,
+    bool,
+)> {
+    let index = positions.get(&node.id).copied()?;
+    if node.round.as_ref().is_none_or(|round| round.round == 0) {
+        return None;
+    }
+    let scope = schedule::review_round_scope(index, plan, checkpoint, positions)?;
+    let owner = review::chain_owner_id(index, plan);
+    let ledger = checkpoint
+        .nodes
+        .iter()
+        .find(|progress| progress.id == owner)
+        .and_then(|progress| progress.finding_ledger.clone())
+        .or_else(|| {
+            node.round
+                .as_ref()
+                .and_then(|round| review::initial_chain_ledger(&round.loop_id, plan, checkpoint))
+        });
+    let Some(ledger) = ledger else {
+        return Some((scope, Vec::new(), Default::default(), false));
+    };
+    let entry = ledger
+        .last_reviewed_head
+        .as_deref()
+        .and_then(|head| ledger.heads.get(head));
+    let findings = entry.map_or_else(Vec::new, |entry| entry.unresolved.clone());
+    let mut invariants: std::collections::BTreeSet<String> = entry
+        .into_iter()
+        .flat_map(|entry| entry.invariant_coverage.keys().cloned())
+        .collect();
+    invariants.extend(
+        findings
+            .iter()
+            .filter_map(Finding::named_invariant)
+            .map(str::to_owned),
+    );
+    Some((scope, findings, invariants, entry.is_some()))
+}
+
+pub(super) fn review_ledger_artifact_required(
+    node: &PlannedNode,
+    plan: &PlannedGraph,
+    checkpoint: &GraphCheckpoint,
+    positions: &std::collections::BTreeMap<String, usize>,
+) -> bool {
+    let findings: Vec<_> = if repair_writer(node) {
+        selected_findings(node, plan, checkpoint, positions)
+            .into_iter()
+            .filter(|(source, _)| source == "review_ledger")
+            .map(|(_, finding)| finding)
+            .collect()
+    } else {
+        later_round_ledger(node, plan, checkpoint, positions)
+            .map(|(_, findings, _, _)| findings)
+            .unwrap_or_default()
+    };
+    findings.len() > MAX_FINDINGS || canonical_len(&findings) > FINDINGS_BYTES
+}
+
+pub(super) fn complete_review_artifact_required(
+    node: &PlannedNode,
+    plan: &PlannedGraph,
+    checkpoint: &GraphCheckpoint,
+    positions: &std::collections::BTreeMap<String, usize>,
+) -> bool {
+    node.kind == Some(NodeKind::Adjudicate)
+        || review_ledger_artifact_required(node, plan, checkpoint, positions)
+}
+
+pub(super) fn complete_review_artifact(
+    node: &PlannedNode,
+    requests: &[InputRequest],
+    materialised: Option<&MaterialisedInputs>,
+) -> bool {
+    if node.kind != Some(NodeKind::Adjudicate) {
+        return complete_review_ledger_artifact(requests, materialised);
+    }
+    let required: Vec<_> = requests
+        .iter()
+        .filter(|request| request.attempt_ref.is_some() || request.inline_findings.is_some())
+        .collect();
+    let Some(materialised) = materialised else {
+        return required.is_empty();
+    };
+    let complete_file = |request: &InputRequest, entry: &MaterialisedInput| {
+        matches!(entry, MaterialisedInput::File { label, omitted: 0, bytes, .. }
+            if label == &request.label && *bytes as usize <= NODE_INPUT_FILE_BYTES)
+    };
+    if requests.iter().any(|request| {
+        materialised.entries.iter().any(|entry| match entry {
+            MaterialisedInput::File { label, .. }
+            | MaterialisedInput::Capped { label }
+            | MaterialisedInput::Unavailable { label, .. }
+                if label == &request.label =>
+            {
+                !complete_file(request, entry)
+            }
+            _ => false,
+        })
+    }) {
+        return false;
+    }
+    required.iter().all(|request| {
+        materialised
+            .entries
+            .iter()
+            .any(|entry| complete_file(request, entry))
+    })
+}
+
+pub(super) fn complete_review_ledger_artifact(
+    requests: &[InputRequest],
+    materialised: Option<&MaterialisedInputs>,
+) -> bool {
+    if !requests
+        .iter()
+        .any(|request| request.label == "review_ledger" && request.inline_findings.is_some())
+    {
+        return false;
+    }
+    materialised.is_some_and(|materialised| {
+        materialised.entries.iter().any(|entry| {
+            matches!(entry, MaterialisedInput::File { label, omitted: 0, bytes, .. }
+                if label == "review_ledger" && *bytes as usize <= NODE_INPUT_FILE_BYTES)
+        })
+    })
 }
 
 pub(super) fn repair_writer(node: &PlannedNode) -> bool {
@@ -1391,10 +1817,13 @@ pub(super) fn required_input_unavailable(
     checkpoint: &GraphCheckpoint,
     positions: &std::collections::BTreeMap<String, usize>,
 ) -> Option<String> {
+    if repair_writer(node) && !repair::ledger_available(node, plan, checkpoint) {
+        return Some("review finding ledger".into());
+    }
     if repair_writer(node)
-        && resolved_inputs(node, plan, checkpoint, positions, false)
+        && selected_findings(node, plan, checkpoint, positions)
             .iter()
-            .any(|item| item.finding.triage().is_none())
+            .any(|(_, finding)| finding.triage().is_none())
     {
         return Some("checked finding triage before repair writer".into());
     }
@@ -1473,6 +1902,84 @@ pub(super) fn render_input(
     }
     prompt.push_str(INPUT_OPEN);
     let selected = selected_findings(node, plan, checkpoint, positions);
+    if let Some((scope, carry_forward, invariants, ledger_present)) =
+        later_round_ledger(node, plan, checkpoint, positions)
+    {
+        let mut summary = carry_forward.clone();
+        let full_artifact =
+            summary.len() > MAX_FINDINGS || canonical_len(&summary) > FINDINGS_BYTES;
+        if full_artifact {
+            summarise_findings(&mut summary, FINDINGS_BYTES);
+        }
+        let scope = match scope {
+            review::RoundScope::Delta { base, head } => format!("delta {base}..{head}"),
+            review::RoundScope::Full { head } => format!("full head {head}"),
+        };
+        let carry_json = serde_json::to_string(&summary).unwrap_or_else(|_| "[]".into());
+        let invariant_json = serde_json::to_string(&invariants).unwrap_or_else(|_| "[]".into());
+        let ledger_state = if ledger_present {
+            String::new()
+        } else {
+            "Prior review ledger unavailable; perform a full review of this head.\n".into()
+        };
+        let artifact_note = if full_artifact {
+            "Read the staged full review_ledger artifact for every unresolved finding and complete evidence.\n"
+        } else {
+            ""
+        };
+        let section = format!(
+            "Later review scope: {scope}.\n{ledger_state}Carry-forward unresolved findings: {carry_json}\nOpen invariants: {invariant_json}\n{artifact_note}"
+        );
+        if section.len() + INPUT_CLOSE.len() > cap.saturating_sub(prompt.len()) {
+            return (prompt, true);
+        }
+        prompt.push_str(&section);
+    }
+    if repair_writer(node) {
+        let mut ledger_findings: Vec<_> = selected
+            .iter()
+            .filter(|(source, _)| source == "review_ledger")
+            .map(|(_, finding)| finding.clone())
+            .collect();
+        let full_artifact = ledger_findings.len() > MAX_FINDINGS
+            || canonical_len(&ledger_findings) > FINDINGS_BYTES;
+        if full_artifact {
+            summarise_findings(&mut ledger_findings, FINDINGS_BYTES);
+        }
+        // Checked findings reach the writer grouped by root cause; a finding
+        // without triage is its own group rather than being dropped.
+        let findings = if full_artifact {
+            serde_json::to_string(&ledger_findings)
+        } else {
+            let mut groups: std::collections::BTreeMap<String, Vec<&Finding>> = Default::default();
+            for finding in &ledger_findings {
+                let key = finding
+                    .triage()
+                    .map_or_else(|| finding.id.clone(), |triage| triage.root_cause);
+                groups.entry(key).or_default().push(finding);
+            }
+            serde_json::to_string(
+                &groups
+                    .into_iter()
+                    .map(|(invariant, findings)| {
+                        serde_json::json!({"id":invariant,"invariant":invariant,"findings":findings})
+                    })
+                    .collect::<Vec<_>>(),
+            )
+        }
+        .unwrap_or_else(|_| "[]".into());
+        let section = if full_artifact {
+            format!(
+                "review_ledger findings (summary): {findings}\nReview the staged full review_ledger artifact for every unresolved finding and its complete evidence.\n"
+            )
+        } else {
+            format!("review_ledger findings: {findings}\n")
+        };
+        if section.len() + INPUT_CLOSE.len() > cap.saturating_sub(prompt.len()) {
+            return (prompt, true);
+        }
+        prompt.push_str(&section);
+    }
     for input in &node.inputs {
         let Some(outputs) = positions
             .get(&input.node)
@@ -1565,6 +2072,11 @@ pub(super) fn render_input(
                 }
                 prompt.push_str(&section);
             }
+            // A repair writer reads the ledger section above, never one
+            // reviewer's findings.
+            if *kind == OutputKind::Findings && repair_writer(node) {
+                continue;
+            }
             let value = match kind {
                 OutputKind::Result => serde_json::to_string(&outputs.result.as_ref().map(|result| serde_json::json!({"digest": result.digest, "excerpt": result.excerpt, "truncated": result.truncated,"repair_items":outputs.repair_items}))),
                 OutputKind::Verdict => serde_json::to_string(&outputs.verdict.as_ref().filter(|_| positions.get(&input.node).is_some_and(|index| verdict_available(&plan.nodes[*index], &checkpoint.nodes[*index], outputs)))),
@@ -1586,19 +2098,7 @@ pub(super) fn render_input(
                         summarise_findings(findings, FINDINGS_BYTES);
                     }
                     let findings = projection.as_ref().map(|findings| findings.iter().collect::<Vec<_>>());
-                    if repair_writer(node) {
-                        let mut groups: std::collections::BTreeMap<String, Vec<&Finding>> = Default::default();
-                        for finding in findings.into_iter().flatten() {
-                            if let Some(triage) = finding.triage() {
-                                groups.entry(triage.root_cause).or_default().push(finding);
-                            }
-                        }
-                        serde_json::to_string(&groups.into_iter().map(|(invariant, findings)| {
-                            serde_json::json!({"id":invariant,"invariant":invariant,"findings":findings})
-                        }).collect::<Vec<_>>())
-                    } else {
-                        serde_json::to_string(&findings)
-                    }
+                    serde_json::to_string(&findings)
                 },
                 OutputKind::Branch => serde_json::to_string(&outputs.branch),
                 OutputKind::Commit => serde_json::to_string(&outputs.commit.as_ref().filter(|commit| provenant_core::GitOid::parse(commit).is_ok())),
@@ -1719,7 +2219,11 @@ pub(super) fn upstream_results(
         let Some(outputs) = progress.outputs.as_ref() else {
             return;
         };
-        let inline_findings = (include_findings && outputs.result.is_none())
+        let checkpoint_artifact = outputs.full_artifact_findings.is_some()
+            || outputs.full_disposition_findings.is_some()
+            || outputs.artifact_findings.is_some();
+        let inline_findings = (include_findings
+            && (outputs.result.is_none() || checkpoint_artifact))
             .then(|| materialised_findings(index, plan, checkpoint, positions))
             .filter(|findings| !findings.is_empty());
         if outputs.result.is_none() && inline_findings.is_none() {
@@ -1765,6 +2269,21 @@ pub(super) fn upstream_results(
                 "",
             );
         }
+    }
+    let ledger_findings: Vec<_> = selected_findings(node, plan, checkpoint, positions)
+        .into_iter()
+        .filter(|(source, _)| source == "review_ledger")
+        .map(|(_, finding)| finding)
+        .collect();
+    if !repair_writer(node) && !ledger_findings.is_empty() {
+        found.push(InputRequest {
+            label: "review_ledger".into(),
+            attempt_ref: None,
+            attempt_key: None,
+            launch_actor: None,
+            inline_findings: Some(ledger_findings),
+            finding_prefix: Some(String::new()),
+        });
     }
     found
 }
@@ -1902,7 +2421,13 @@ pub(super) fn attempt_input_manifest(
             .writer_binding
             .as_ref()
             .map(|binding| binding.head.clone()),
-        review_base: progress.review_base.clone(),
+        review_base: schedule::review_base_for_attempt(
+            positions[&node.id],
+            plan,
+            checkpoint,
+            positions,
+        )
+        .or_else(|| progress.review_base.clone()),
         graph_review_base: checkpoint
             .bases
             .and_then(|bases| bases.review)
@@ -2013,364 +2538,5 @@ pub(super) fn attempt_input_manifest(
 }
 
 #[cfg(test)]
-mod alias_tests {
-    use super::*;
-
-    #[test]
-    fn missing_trigger_is_a_note_without_parse_refusal() {
-        let block = serde_json::json!({"schema_version":1,"findings":[{
-            "id":"F1","severity":"high","file":"a.rs","summary":"hypothesis","status":"open"
-        }]})
-        .to_string();
-        let parsed = parse_findings(&block, &[]).unwrap();
-        assert!(parsed.warnings.is_empty());
-        assert!(parsed.skipped.is_empty());
-        let findings = parsed.findings;
-        assert_eq!(findings[0].severity, "high");
-        assert_eq!(findings[0].effective_severity(), "note");
-        assert!(!repair::repair_eligible(&findings[0]));
-        let mut restored = findings[0].clone();
-        restored.trigger = Some(FindingTrigger {
-            sequence: "default invocation".into(),
-            reach: FindingReach::DefaultPath,
-            observed: true,
-        });
-        assert_eq!(restored.effective_severity(), "high");
-    }
-
-    #[test]
-    fn unrecognised_severity_is_a_warned_should_fix_not_an_invalid_review() {
-        let block = serde_json::json!({"schema_version":1,"findings":[{
-            "id":"F1","severity":"urgent","file":"a.rs","summary":"s","status":"open",
-            "trigger":{"sequence":"invoke the default operation","reach":"default_path","observed":true},
-            "triage":{"decision":"confirmed","reason":"reproduced","worth_fixing":true,
-                "root_cause":"constraint","blocking_class":"none","shared_flaw":false}
-        }]})
-        .to_string();
-        let text = format!("```findings\n{block}\n```\nVERDICT: PASS\n");
-        let mut capture = crate::result_capture::ResultCapture::new(None);
-        capture.push(text.as_bytes());
-        let outputs = make_outputs(Some(&capture.finish()), None, None, None, None);
-        assert_eq!(outputs.findings_available, Some(true));
-        assert_eq!(outputs.findings.len(), 1);
-        assert_eq!(outputs.findings[0].severity, "should-fix");
-        assert!(
-            outputs
-                .warnings
-                .iter()
-                .any(|warning| warning.contains("unrecognised value")
-                    && warning.contains("critical, blocker, blocking")),
-            "{:?}",
-            outputs.warnings
-        );
-        assert!(repair::repair_eligible(&outputs.findings[0]));
-        assert!(!repair::blocks_acceptance(&outputs.findings[0]));
-    }
-
-    #[test]
-    fn missing_severity_keeps_the_fail_safe_and_marks_findings_incomplete() {
-        let block = serde_json::json!({"schema_version":1,"findings":[{
-            "id":"F1","file":"a.rs","summary":"s","status":"open"
-        }]})
-        .to_string();
-        let parsed = parse_findings(&block, &[]).unwrap();
-        assert_eq!(parsed.findings[0].severity, "blocking");
-        assert!(
-            parsed
-                .skipped
-                .iter()
-                .any(|warning| warning.contains("field severity"))
-        );
-        assert!(parsed.warnings.is_empty());
-    }
-
-    #[test]
-    fn malformed_trigger_reports_the_field_and_expected_type() {
-        let block = serde_json::json!({"schema_version":1,"findings":[{
-            "id":"F1","severity":"blocking","file":"a.rs","summary":"trigger shape","status":"open",
-            "trigger":{"sequence":["call the command", "observe the refusal"],"reach":"default_path","observed":true}
-        }]})
-        .to_string();
-        let error = parse_findings(&block, &[]).unwrap_err();
-        assert!(
-            error.contains("entry 1 (F1) field findings.trigger.sequence"),
-            "{error}"
-        );
-        assert!(error.contains("expected a string"), "{error}");
-    }
-
-    #[test]
-    fn spec_concern_handoff_reaches_chair_view() {
-        let mut capture = crate::result_capture::ResultCapture::new(None);
-        let text = String::from_utf8_lossy(b"Report.\n```handoff\n{\"schema_version\":2,\"status\":\"done\",\"note\":\"done\",\"remaining\":[],\"decisions\":[],\"verify\":[],\"spec_concerns\":[{\"criterion\":\"Keep old format\",\"claim\":\"Format is retired\",\"evidence\":\"Approved scope removes reader\",\"proposed_change\":\"Use current format\",\"status\":\"as_written\"}]}\n```\n").into_owned();
-        capture.push(text.as_bytes());
-        let mut captured = capture.finish();
-        captured.handoff =
-            provenant_records::handoff::Handoff::from_json(text.lines().nth(2).unwrap().as_bytes())
-                .map(Some);
-        let outputs = make_outputs(Some(&captured), None, None, None, None);
-        let checkpoint: GraphCheckpoint = serde_json::from_value(serde_json::json!({
-            "schema_version":1,"graph_id":"g","plan_digest":"digest","asks":[],
-            "nodes":[{"id":"writer","state":"succeeded","worktree":null,"outputs":outputs,"attempts":[]}]
-        })).unwrap();
-        let view = graph_waits(&checkpoint);
-        assert_eq!(view[0].spec_concern_count, 1);
-        assert_eq!(view[0].spec_concerns[0].criterion, "Keep old format");
-        assert_eq!(
-            view[0].spec_concerns[0].status,
-            provenant_records::handoff::SpecConcernStatus::AsWritten
-        );
-
-        let mut malformed: serde_json::Value =
-            serde_json::from_str(text.lines().nth(2).unwrap()).unwrap();
-        malformed["verify"] = serde_json::json!([false]);
-        malformed["remaining"] = serde_json::json!(["Finish the work"]);
-        captured.handoff =
-            provenant_records::handoff::Handoff::from_json(malformed.to_string().as_bytes())
-                .map(Some);
-        let partial = make_outputs(Some(&captured), None, None, None, None);
-        assert_eq!(
-            partial.remaining.as_deref(),
-            Some(["Finish the work".to_owned()].as_slice())
-        );
-        assert_eq!(partial.spec_concern_count, Some(1));
-        assert!(
-            partial
-                .warnings
-                .iter()
-                .any(|warning| warning.contains("verify[0]"))
-        );
-
-        // An individual concern may fill the handoff's field limit. Its full
-        // content remains in the source while the checkpoint stays bounded.
-        let concern = serde_json::json!({
-            "criterion":"retired reader", "claim":"scope conflict", "evidence":"x".repeat(4096),
-            "proposed_change":"remove reader", "status":"as_written"
-        });
-        let full_handoff = serde_json::json!({
-            "schema_version":2, "status":"done", "note":"done", "remaining":["continue delivery"],
-            "decisions":[], "verify":[], "spec_concerns":[concern.clone(), concern]
-        });
-        let mut capture = crate::result_capture::ResultCapture::new(None);
-        let text = format!("```handoff\n{full_handoff}\n```\n");
-        capture.push(text.as_bytes());
-        let mut captured = capture.finish();
-        captured.handoff =
-            provenant_records::handoff::Handoff::from_json(full_handoff.to_string().as_bytes())
-                .map(Some);
-        assert_eq!(
-            captured
-                .handoff
-                .as_ref()
-                .unwrap()
-                .as_ref()
-                .unwrap()
-                .spec_concerns
-                .len(),
-            2
-        );
-        let outputs = make_outputs(
-            Some(&captured),
-            None,
-            Some("/attempt/result.md".into()),
-            None,
-            None,
-        );
-        assert_eq!(outputs.spec_concern_count, Some(2));
-        assert!(outputs.spec_concerns.as_ref().is_some_and(Vec::is_empty));
-        assert_eq!(
-            outputs.remaining.as_deref(),
-            Some(["continue delivery".to_owned()].as_slice())
-        );
-        assert!(
-            canonical_len(&serde_json::json!({
-                "remaining":outputs.remaining,
-                "spec_concerns":outputs.spec_concerns,
-                "spec_concern_count":outputs.spec_concern_count,
-            })) <= REMAINING_BYTES
-        );
-        assert!(
-            outputs
-                .warnings
-                .iter()
-                .any(|warning| warning.contains("retained 0 of 2")
-                    && warning.contains("/attempt/result.md"))
-        );
-
-        let remaining = "r".repeat(4090);
-        let no_concerns = serde_json::json!({
-            "schema_version":2, "status":"done", "note":"done", "remaining":[remaining],
-            "decisions":[], "verify":[]
-        });
-        let mut capture = crate::result_capture::ResultCapture::new(None);
-        let text = format!("```handoff\n{no_concerns}\n```\n");
-        capture.push(text.as_bytes());
-        let mut captured = capture.finish();
-        captured.handoff =
-            provenant_records::handoff::Handoff::from_json(no_concerns.to_string().as_bytes())
-                .map(Some);
-        let outputs = make_outputs(Some(&captured), None, None, None, None);
-        assert_eq!(outputs.remaining.as_ref().unwrap(), &vec!["r".repeat(4090)]);
-        assert!(outputs.spec_concerns.is_none());
-        assert!(outputs.spec_concern_count.is_none());
-        assert!(
-            !outputs
-                .warnings
-                .iter()
-                .any(|warning| warning.contains("remaining items cut"))
-        );
-    }
-
-    #[test]
-    fn display_id_uniqueness_property_for_colon_containing_roots() {
-        use std::collections::BTreeSet;
-        let roots: Vec<_> = ["a", "b", "a:F1"]
-            .into_iter()
-            .flat_map(|node| {
-                ["F1", "a:F1", "a:F1:1", "b:F1"]
-                    .into_iter()
-                    .map(move |id| (node.to_owned(), id.to_owned()))
-            })
-            .collect();
-        for mask in 0usize..(1 << roots.len()) {
-            let selected: BTreeSet<_> = roots
-                .iter()
-                .enumerate()
-                .filter(|(i, _)| mask & (1 << i) != 0)
-                .map(|(_, root)| root.clone())
-                .collect();
-            let ids = display_ids(&selected);
-            assert_eq!(
-                ids.values().collect::<BTreeSet<_>>().len(),
-                selected.len(),
-                "{selected:?}"
-            );
-            for root in &selected {
-                if selected.iter().filter(|other| other.1 == root.1).count() == 1 {
-                    assert_eq!(ids[root], root.1);
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn exact_identity_takes_precedence_over_suffix_alias() {
-        let finding = |id: &str, summary: &str| {
-            serde_json::from_value::<Finding>(serde_json::json!({
-                "id": id, "severity": "high", "file": "a.rs", "summary": summary, "status": "open"
-            }))
-            .unwrap()
-        };
-        let block = r#"{"schema_version":1,"findings":[{"id":"F1","disposition":"rejected","reason":"no"}]}"#;
-        let result = parse_findings(
-            block,
-            &[finding("lens-a:F1", "suffix"), finding("F1", "exact")],
-        )
-        .unwrap();
-        assert_eq!(result.findings[0].id, "F1");
-        assert_eq!(result.findings[0].summary, "exact");
-    }
-
-    #[test]
-    fn unknown_identity_warns_when_another_disposition_is_valid() {
-        let upstream: Finding = serde_json::from_value(serde_json::json!({
-            "id":"F1", "severity":"high", "file":"a.rs", "summary":"s", "status":"open"
-        }))
-        .unwrap();
-        let block = r#"{"schema_version":1,"findings":[{"id":"F1","disposition":"accepted","reason":"yes"},{"id":"F9","disposition":"rejected","reason":"no"}]}"#;
-        let mut capture = crate::result_capture::ResultCapture::new(Some("VERDICT: PASS"));
-        capture.push(format!("```findings\n{block}\n```\nVERDICT: PASS\n").as_bytes());
-        let outputs = make_outputs_with_upstream(
-            Some(&capture.finish()),
-            None,
-            None,
-            None,
-            None,
-            &[upstream],
-        );
-        assert_eq!(outputs.findings.len(), 1);
-        assert_eq!(outputs.findings[0].id, "F1");
-        assert_eq!(outputs.verdict.as_deref(), Some("VERDICT: PASS"));
-        assert!(outputs.warnings[0].contains("(F9) field id: unknown upstream identity"));
-    }
-
-    #[test]
-    fn large_inherited_dispositions_trim_optional_metadata() {
-        let mut upstream: Finding = serde_json::from_value(serde_json::json!({
-            "id":"F1", "severity":"high", "file":"src/lib.rs", "line":17,
-            "summary":"description", "status":"open", "detail":"x".repeat(8000),
-            "propagates":"review:F1", "lens":"tests", "evidence":"observed",
-            "proposed_fix":"repair", "design_defect":true, "risk_grew":true, "scope_grew":true
-        }))
-        .unwrap();
-        upstream.summary = "s".repeat(1000);
-        let upstream = vec![upstream; 240];
-        let mut capture = crate::result_capture::ResultCapture::new(Some("VERDICT: PASS"));
-        capture.push(b"```findings\n{\"schema_version\":1,\"findings\":[{\"id\":\"F1\",\"disposition\":\"accepted\",\"reason\":\"yes\"}]}\n```\nVERDICT: PASS\n");
-        let outputs =
-            make_outputs_with_upstream(Some(&capture.finish()), None, None, None, None, &upstream);
-        assert_eq!(outputs.findings.len(), upstream.len());
-        assert!(canonical_len(&outputs.findings) <= DISPOSITION_TEXT_TARGET);
-        assert!(
-            outputs
-                .warnings
-                .iter()
-                .any(|warning| warning.contains("findings metadata trimmed"))
-        );
-        for finding in outputs.findings {
-            assert_eq!(finding.id, "F1");
-            assert_eq!(finding.severity, "high");
-            assert_eq!(finding.effective_severity(), "note");
-            assert_eq!(finding.file, "src/lib.rs");
-            assert_eq!(finding.line, Some(17));
-            assert_eq!(finding.disposition.as_deref(), Some("accepted"));
-            assert_eq!(finding.reason.as_deref(), Some("yes"));
-            assert_eq!(finding.lens.as_deref(), Some("tests"));
-            assert_eq!(finding.evidence.as_deref(), Some("observed"));
-            assert_eq!(finding.proposed_fix.as_deref(), Some("repair"));
-            assert_eq!(finding.design_defect, Some(true));
-            assert_eq!(finding.risk_grew, Some(true));
-            assert_eq!(finding.scope_grew, Some(true));
-            assert_eq!(finding.propagates.as_deref(), Some("review:F1"));
-        }
-    }
-
-    #[test]
-    fn a_disposition_may_name_a_verified_finding_by_the_lens_finding_it_carries() {
-        let verified = serde_json::from_value::<Finding>(serde_json::json!({
-            "id": "F1", "severity": "high", "file": "a.rs", "summary": "s", "status": "open",
-            "propagates": "lenses--spec:F7"
-        }))
-        .unwrap();
-        for named in ["lenses--spec:F1", "lenses--spec:F7"] {
-            let block = format!(
-                r#"{{"schema_version":1,"findings":[{{"id":"{named}","disposition":"rejected","reason":"no"}}]}}"#
-            );
-            let parsed = parse_findings(&block, std::slice::from_ref(&verified)).unwrap();
-            assert_eq!(parsed.findings[0].id, "F1", "{named}");
-        }
-    }
-
-    #[test]
-    fn qualified_alias_requires_a_unique_colon_delimited_suffix() {
-        let finding = |id: &str| {
-            serde_json::from_value::<Finding>(serde_json::json!({
-                "id": id, "severity": "high", "file": "a.rs", "summary": "s", "status": "open"
-            }))
-            .unwrap()
-        };
-        let block = r#"{"schema_version":1,"findings":[{"id":"inner:F2","disposition":"rejected","reason":"no"}]}"#;
-        let ambiguous = parse_findings(block, &[finding("a:inner:F2"), finding("b:inner:F2")]);
-        assert!(
-            ambiguous
-                .unwrap_err()
-                .contains("ambiguous upstream identity")
-        );
-        let non_boundary = parse_findings(block, &[finding("a:xinner:F2")]);
-        assert!(
-            non_boundary
-                .unwrap_err()
-                .contains("unknown upstream identity")
-        );
-    }
-}
+#[path = "outputs_alias_tests.rs"]
+mod alias_tests;

@@ -9,6 +9,8 @@ pub use refs::*;
 mod ids;
 pub use bytes::{hex, unhex};
 pub use ids::*;
+pub mod deadline;
+pub use deadline::Deadline;
 mod line;
 pub use line::{bounded_line, bounded_tail};
 mod time;

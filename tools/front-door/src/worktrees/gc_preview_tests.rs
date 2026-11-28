@@ -761,7 +761,7 @@ fn gc_default_output_aggregates_routine_rows_and_keeps_exceptions() {
     assert!(serde_json::to_value(&data).unwrap_or_default()["removed"].is_array());
 }
 #[test]
-fn stopped_gc_budgets_return_exit_three_with_actionable_output()
+fn gc_budget_stop_exits_zero_partial_with_actionable_output()
 -> Result<(), Box<dyn std::error::Error>> {
     for (preview, setting) in [(true, "gc.preview_budget"), (false, "gc.sweep_budget")] {
         let data = GcData {
@@ -770,7 +770,25 @@ fn stopped_gc_budgets_return_exit_three_with_actionable_output()
             ..GcData::default()
         };
         let result = gc_result(&data, false);
-        assert_eq!(result.status.exit_code(), 3);
+        // A budget stop saved a cursor: it is progress, not an error.
+        assert_eq!(result.status.exit_code(), 0);
+        assert!(result.error.is_none());
+        assert_eq!(
+            serde_json::to_value(&result.data)?["partial"],
+            serde_json::json!(true)
+        );
+        assert!(!result.next.is_empty(), "a partial result resumes");
+        let warning = result
+            .warnings
+            .iter()
+            .find(|warning| warning.code.as_ref() == "GC_BUDGET_STOP")
+            .expect("a partial result names its budget");
+        assert!(warning.message.contains(setting), "{warning:?}");
+        assert_eq!(
+            warning.setting.as_ref().map(|setting| setting.key.as_str()),
+            Some(setting)
+        );
+        assert!(!warning.next.is_empty(), "the warning carries a next step");
         let mut output = Vec::new();
         provenant_cli::render(
             &result,
@@ -782,8 +800,7 @@ fn stopped_gc_budgets_return_exit_three_with_actionable_output()
             &mut output,
         )?;
         let output = String::from_utf8(output)?;
-        assert!(output.contains(setting), "{output}");
-        assert!(output.contains("raise"), "{output}");
+        assert!(output.contains("resume"), "{output}");
     }
     Ok(())
 }

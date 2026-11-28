@@ -813,6 +813,7 @@ error_kinds! {
     QueueFull => "QUEUE_FULL", "The host queue is full.";
     Contention => "CONTENTION", "The run store is contended or the call budget expired.";
     ForgeQuota => "FORGE_QUOTA", "The forge rate limit is exhausted; retry after the reset it names.";
+    ForgeQuotaExhausted => "FORGE_QUOTA_EXHAUSTED", "The forge allowance is exhausted until the named retry time.";
     Io => "IO", "Filesystem, database or other I/O failed.";
     Unsupported => "UNSUPPORTED", "The route or adapter does not support the requested launch.";
     ContinuationUnsupported => "CONTINUATION_UNSUPPORTED", "The attempt's provider session cannot be continued.";
@@ -835,8 +836,10 @@ error_kinds! {
     StateCorrupt => "STATE_CORRUPT", "A stored record or artifact is corrupt.";
     LaunchUnknown => "LAUNCH_UNKNOWN", "The launch handoff was not confirmed; reconcile the run.";
     UnknownHost => "UNKNOWN_HOST", "No configured peer has this host label.";
+    ProjectUnlocatable => "PEER_PROJECT_UNLOCATABLE", "The peer cannot locate the project for this launch; run without --host.";
     PeerUnavailable => "PEER_UNAVAILABLE", "The peer host could not be reached.";
     PeerVersion => "PEER_VERSION", "The peer host runs an incompatible version.";
+    PeerUpgradePending => "PEER_UPGRADE_PENDING", "Peer releases differ while an upgrade is in progress.";
     OwnerUnavailable => "OWNER_UNAVAILABLE", "The run owner is unavailable in this build or host.";
     BaseUnreachable => "BASE_UNREACHABLE", "The Git base cannot be resolved or fetched.";
     BranchExists => "BRANCH_EXISTS", "The branch already exists.";
@@ -924,20 +927,20 @@ impl ErrorKind {
             | Self::Conflict
             | Self::LaneDepth
             | Self::QueueFull
-            | Self::ForgeQuota
             | Self::Unsupported
             | Self::ContinuationUnsupported => "refused",
+            Self::ForgeQuotaExhausted | Self::PeerUpgradePending => "transient",
             _ => "error",
         }
     }
 
     /// The hard boundary this code protects; non-boundary failures remain typed.
-    pub const fn boundary_class(self) -> provenant_records::diagnostic::BoundaryClass {
-        use provenant_records::diagnostic::BoundaryClass as B;
+    pub const fn boundary_class(self) -> provenant_records::policy::Boundary {
+        use provenant_records::policy::Boundary as B;
         match self {
             Self::CredentialRoot | Self::SharedSettingsNeverSynced => B::Credentials,
-            Self::ObjectImportLimit | Self::StateCorrupt => B::Integrity,
-            Self::RetainedWriterImport | Self::WriterLeaseHeld => B::LaneGit,
+            Self::ObjectImportLimit | Self::StateCorrupt => B::Operation,
+            Self::RetainedWriterImport | Self::WriterLeaseHeld => B::OtherWork,
             Self::WriterScope
             | Self::WriterBusy
             | Self::WriterLockBusy
@@ -1010,7 +1013,6 @@ impl From<&RunError> for ErrorKind {
             RunError::Validation(_)
             | RunError::InvalidSealedRemote(_)
             | RunError::Handoff(_)
-            | RunError::WriterLineage(_)
             | RunError::WriterHeadNotLaneBranch
             | RunError::WriterSourceMismatch { .. }
             | RunError::ReviewAcceptanceRequired

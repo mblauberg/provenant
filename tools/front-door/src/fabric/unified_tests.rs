@@ -4,6 +4,64 @@ use provenant_fabric_runtime::graph::{
     GraphCheckpoint, GraphDocument, GraphExecution, GraphJournal,
 };
 
+#[test]
+fn invocation_wait_budget_uses_only_the_remaining_deadline() {
+    let clock = provenant_os::clock::SystemClock::new();
+    let budget = super::invocation_wait_budget(
+        &clock,
+        Some(super::super::invocation_deadline::after(
+            std::time::Duration::from_millis(100),
+        )),
+        55,
+    )
+    .unwrap();
+    assert!(budget.remaining(clock.mono_now()).as_micros() <= 100_000);
+
+    let expired = super::invocation_wait_budget(
+        &clock,
+        Some(super::super::invocation_deadline::after(
+            std::time::Duration::ZERO,
+        )),
+        55,
+    )
+    .unwrap();
+    assert_eq!(expired.remaining(clock.mono_now()).as_micros(), 0);
+}
+
+#[test]
+fn lane_status_read_wake_and_refresh_share_one_remaining_budget() {
+    use std::{cell::Cell, time::Duration};
+
+    let input = json!({"op":"status", "id":"graph"});
+    let budget = Cell::new(Duration::from_secs(10));
+    let mut read_budgets = Vec::new();
+    let mut wake_budget = None;
+    let result = super::read_lane_graph_with_deadline(
+        &input,
+        || budget.get(),
+        |remaining| {
+            read_budgets.push(remaining);
+            if read_budgets.len() == 1 {
+                budget.set(remaining.saturating_sub(Duration::from_secs(3)));
+            }
+            Ok(json!({"rows": []}))
+        },
+        |_, remaining| {
+            wake_budget = Some(remaining);
+            budget.set(remaining.saturating_sub(Duration::from_secs(2)));
+            super::super::progress::WakeOutcome::Advanced { transitions: 1 }
+        },
+    )
+    .unwrap();
+
+    assert_eq!(result, json!({"rows": []}));
+    assert_eq!(
+        read_budgets,
+        [Duration::from_secs(10), Duration::from_secs(5)]
+    );
+    assert_eq!(wake_budget, Some(Duration::from_secs(7)));
+}
+
 // Spec: docs/specs/delivery-queue.md#queue-and-controls
 #[test]
 fn status_projects_recorded_delivery_progress_into_the_digest()
@@ -183,6 +241,7 @@ fn composite_output_preserves_every_public_typed_export() {
         "warnings": []
     }));
     let command = provenant_cli::Output {
+        common: Default::default(),
         target: "typed-output/panel".parse().unwrap(),
         part: provenant_cli::Part::Result,
         to: None,
@@ -218,6 +277,7 @@ fn composite_progress(outputs: Value) -> provenant_fabric_runtime::graph::NodePr
 
 fn composite_output_command(offset: u64, max_bytes: u64) -> provenant_cli::Output {
     provenant_cli::Output {
+        common: Default::default(),
         target: "typed-output/panel".parse().unwrap(),
         part: provenant_cli::Part::Result,
         to: None,
@@ -1690,7 +1750,16 @@ fn unified_status_uses_one_row_contract_and_selects_attempts() {
     // resolve to the WorkKey and reference that produced it.
     let mut projected = checkpoint("g");
     projected.nodes[0].attempts[0].key.attempt = 7;
-    projected.nodes[0].warnings.push("retry warning".into());
+    projected.nodes[0]
+        .warnings
+        .push(provenant_records::Warning::new(
+            provenant_records::warning::LEGACY_WARNING,
+            "retry warning",
+            provenant_records::Source {
+                layer: provenant_records::Layer::Detected,
+                origin: Some("legacy graph warning".into()),
+            },
+        ));
     let run = graph_snapshot(projected);
     let graph = GraphTarget {
         graph: "g".into(),
@@ -1705,7 +1774,8 @@ fn unified_status_uses_one_row_contract_and_selects_attempts() {
     );
     for row in &rows {
         if row["kind"] == "node" && row["node_id"] == "parent" {
-            assert_eq!(row["warnings"], json!(["retry warning"]));
+            assert_eq!(row["warnings"][0]["code"], "LEGACY_WARNING");
+            assert_eq!(row["warnings"][0]["message"], "retry warning");
         } else if row["kind"] != "node" {
             assert!(row["warnings"].is_null());
         }

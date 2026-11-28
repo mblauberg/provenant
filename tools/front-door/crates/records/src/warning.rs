@@ -1,5 +1,6 @@
 //! The one way library code reports a warning: a typed value with a stable
 //! code and structured source, routed to a capture or the command's sink.
+use crate::command_result::{NextStep, SettingRef, Subject};
 use crate::provenance::Source;
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
@@ -17,11 +18,17 @@ pub struct Warning {
     /// What it is about: a path, key, branch, attempt or route.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subject: Option<String>,
+    /// Structured subject identity when one is available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subject_ref: Option<Subject>,
     /// The structured cause or origin of this event.
     pub source: Source,
-    /// One command or edit that clears it.
+    /// The setting that selected the behaviour reported by this warning.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub repair: Option<String>,
+    pub setting: Option<SettingRef>,
+    /// Suggested commands or conditions that address this warning.
+    #[serde(default)]
+    pub next: Vec<NextStep>,
     /// How repeats collapse. Never part of the wire.
     #[serde(skip)]
     pub dedup: Dedup,
@@ -49,6 +56,10 @@ impl WarningCode {
     }
 }
 
+/// An explicit `policy.<CODE>` named a boundary or operation row, which has
+/// no override. `--strict` and `policy.default` never emit this code.
+pub const CHECK_NOT_OVERRIDABLE: WarningCode = WarningCode("CHECK_NOT_OVERRIDABLE");
+
 /// A configured key was ignored: it is not part of the declared schema.
 pub const CONFIG_KEY_IGNORED: WarningCode = WarningCode("CONFIG_KEY_IGNORED");
 /// A configured value was malformed, so the default applied.
@@ -66,6 +77,8 @@ pub const NAME_ALIAS_USED: WarningCode = WarningCode("NAME_ALIAS_USED");
 pub const CROSS_PROJECT_TARGET_FOUND: WarningCode = WarningCode("CROSS_PROJECT_TARGET_FOUND");
 /// The lane's branch is behind its base and will be updated.
 pub const BRANCH_BEHIND_BASE: WarningCode = WarningCode("BRANCH_BEHIND_BASE");
+/// A branch exists but its ownership could not be recorded.
+pub const REF_OWNERSHIP_UNRECORDED: WarningCode = WarningCode("REF_OWNERSHIP_UNRECORDED");
 /// An existing worktree was adopted although it had uncommitted changes.
 pub const WORKTREE_ADOPTED_DIRTY: WarningCode = WarningCode("WORKTREE_ADOPTED_DIRTY");
 /// This release reads and writes a different live-record format.
@@ -78,6 +91,18 @@ pub const STATE_ROOT_OVERLAP: WarningCode = WarningCode("STATE_ROOT_OVERLAP");
 pub const FORGE_CONTEXT_UNRESOLVED: WarningCode = WarningCode("FORGE_CONTEXT_UNRESOLVED");
 /// A result exceeded the output cap and was bounded with a marker.
 pub const RESULT_TOO_LARGE: WarningCode = WarningCode("RESULT_TOO_LARGE");
+/// A host in a `--host all` fan-out did not answer; the remaining hosts are
+/// reported as a partial result.
+pub const PEER_UNREACHABLE: WarningCode = WarningCode("PEER_UNREACHABLE");
+/// `--host all` was passed to a verb that cannot aggregate across hosts; the
+/// verb serves the local host and the fan-out is ignored. Aggregation lives on
+/// `status` (FU8 extends it to the other peer-servable verbs).
+pub const HOST_ALL_UNSUPPORTED: WarningCode = WarningCode("HOST_ALL_UNSUPPORTED");
+/// A peer writer cannot receive the submitting checkout's uncommitted edits.
+pub const CARRY_PEER_UNSUPPORTED: WarningCode = WarningCode("CARRY_PEER_UNSUPPORTED");
+/// `lanes.carry_uncommitted` could not be read where it only shapes a warning
+/// or a peer request; the compiled default applies and the advance proceeds.
+pub const CARRY_SETTING_UNREADABLE: WarningCode = WarningCode("CARRY_SETTING_UNREADABLE");
 /// A lane's unfinished Git operation is retained while its committed tip settles.
 pub const GIT_OPERATION_RETAINED: WarningCode = WarningCode("GIT_OPERATION_RETAINED");
 /// A live provider emitted no output past its configured stall threshold.
@@ -87,6 +112,8 @@ pub const PROVIDER_STALLED: WarningCode = WarningCode("PROVIDER_STALLED");
 pub const ANSWER_DELIVERY_SKIPPED: WarningCode = WarningCode("ANSWER_DELIVERY_SKIPPED");
 /// An oversized stored answer was retained for Fabric mail during local delivery.
 pub const ANSWER_DELIVERY_RETAINED: WarningCode = WarningCode("ANSWER_DELIVERY_RETAINED");
+/// An older graph record stored this warning as free-form text.
+pub const LEGACY_WARNING: WarningCode = WarningCode("LEGACY_WARNING");
 /// A holder's terminal failure could not be retained in the settlement journal.
 pub const TERMINAL_FAILURE_UNRETAINED: WarningCode = WarningCode("TERMINAL_FAILURE_UNRETAINED");
 /// Terminal settlement was incomplete, so the writer reservation is retained.
@@ -420,18 +447,31 @@ pub const FORGE_SOURCE_UNRESOLVED: WarningCode = WarningCode("FORGE_SOURCE_UNRES
 pub const FORWARDER_UNAVAILABLE: WarningCode = WarningCode("FORWARDER_UNAVAILABLE");
 /// Retry admission skipped ambient credentials outside the bounded exact matcher.
 pub const RETRY_CREDENTIALS_SKIPPED: WarningCode = WarningCode("RETRY_CREDENTIALS_SKIPPED");
+/// A brief `Verification scope:` line overrode the `lanes.verification` knob; the brief wins.
+pub const VERIFICATION_BRIEF_OVERRIDES: WarningCode = WarningCode("VERIFICATION_BRIEF_OVERRIDES");
 /// A registered project's root has vanished; scheduled tasks skip it.
 pub const PROJECT_ROOT_VANISHED: WarningCode = WarningCode("PROJECT_ROOT_VANISHED");
 
 /// A route model is a full `ADAPTER/ID` that the effective catalogue does not
 /// know. The declared spelling is preserved; the warning names it.
 pub const ROUTE_MODEL_NOT_CATALOGUED: WarningCode = WarningCode("ROUTE_MODEL_NOT_CATALOGUED");
+/// A route identifier exceeded the host identifier byte cap. The route is
+/// retained verbatim; the warning names the field to correct.
+pub const ROUTE_IDENTIFIER_TOO_LONG: WarningCode = WarningCode("ROUTE_IDENTIFIER_TOO_LONG");
+/// A route identifier contained control characters. The route is retained
+/// verbatim; the warning names the field to correct.
+pub const ROUTE_IDENTIFIER_CONTROL_CHAR: WarningCode = WarningCode("ROUTE_IDENTIFIER_CONTROL_CHAR");
 /// An overlay entry or adapter selector could not be applied to the capability
 /// matrix; the matrix still reports the compiled facts.
 pub const ADAPTER_CAPABILITIES_OVERLAY: WarningCode = WarningCode("ADAPTER_CAPABILITIES_OVERLAY");
 /// A declaration succeeded but its journal is nearly full. The claim still
 /// succeeds; the named setting is the one to raise.
 pub const DECLARATION_JOURNAL_NEAR_FULL: WarningCode = WarningCode("DECLARATION_JOURNAL_NEAR_FULL");
+/// The install target already matched the recorded receipt, so no files were
+/// written and the caller proceeded straight to verification.
+pub const UPGRADE_ALREADY_INSTALLED: WarningCode = WarningCode("UPGRADE_ALREADY_INSTALLED");
+/// A verification scratch graph and worktree were kept under `upgrade --keep`.
+pub const SMOKE_GRAPH_RETAINED: WarningCode = WarningCode("SMOKE_GRAPH_RETAINED");
 
 /// Source label for an observed event whose producer has no narrower provenance.
 pub fn detected_source(code: WarningCode) -> Source {
@@ -453,8 +493,10 @@ impl Warning {
             code: Cow::Borrowed(code.0),
             message: message.into(),
             subject: None,
+            subject_ref: None,
             source,
-            repair: None,
+            setting: None,
+            next: Vec::new(),
             dedup: Dedup::default(),
         }
     }
@@ -465,15 +507,28 @@ impl Warning {
         self
     }
 
+    /// Attach machine-readable subject identity.
+    pub fn subject_ref(mut self, subject: Subject) -> Self {
+        self.subject_ref = Some(subject);
+        self
+    }
+
     /// Replace the initial detected-event source with a more specific cause.
     pub fn source(mut self, source: Source) -> Self {
         self.source = source;
         self
     }
 
-    /// State one command or edit that clears it.
+    /// Identify the setting and source that selected this warning.
+    pub fn setting(mut self, setting: SettingRef) -> Self {
+        self.setting = Some(setting);
+        self
+    }
+
+    /// Add one command or condition that addresses this warning.
     pub fn repair(mut self, repair: impl Into<String>) -> Self {
-        self.repair = Some(repair.into());
+        let repair: String = repair.into();
+        self.next.push(NextStep::from_text(&repair));
         self
     }
 
@@ -721,13 +776,25 @@ mod tests {
         // without a hand-kept list.
         let source = include_str!("warning.rs");
         let mut seen = std::collections::BTreeSet::new();
-        let mut rest = source;
-        while let Some(start) = rest.find("pub const ") {
-            rest = &rest[start + "pub const ".len()..];
-            let Some((name, tail)) = rest.split_once(':') else {
-                break;
+        let mut declaration = String::new();
+        for line in source.lines() {
+            if let Some(line) = line.strip_prefix("pub const ") {
+                declaration.clear();
+                declaration.push_str(line.trim());
+            } else if !declaration.is_empty() {
+                declaration.push(' ');
+                declaration.push_str(line.trim());
+            }
+
+            if !declaration.ends_with(';') {
+                continue;
+            }
+            let Some((name, tail)) = declaration.split_once(':') else {
+                declaration.clear();
+                continue;
             };
             let Some(body) = tail.trim_start().strip_prefix("WarningCode =") else {
+                declaration.clear();
                 continue;
             };
             let value = body
@@ -744,6 +811,7 @@ mod tests {
                 "{value}"
             );
             assert!(seen.insert(value.to_owned()), "{value} is declared twice");
+            declaration.clear();
         }
         assert!(seen.contains("STEER_TARGET_SETTLED"), "{seen:?}");
         assert!(seen.len() > 50, "the scan found only {seen:?}");

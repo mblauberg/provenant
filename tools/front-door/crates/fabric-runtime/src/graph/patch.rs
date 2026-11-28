@@ -261,6 +261,9 @@ pub struct LadderChoice {
     pub target: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tier: Option<String>,
+    /// The `fallback{from,to,cause}` fact for a model-unavailable hand-off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fallback: Option<provenant_routing::FallbackFact>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
@@ -388,6 +391,331 @@ pub fn admit_patch(
     context: &PatchContext<'_>,
 ) -> Result<Admitted, PatchError> {
     admit_patch_for_retry(graph, parent, patch, context, None)
+}
+
+/// The split evidence that continues one adjudicator: its review-chain item,
+/// node, the union of known split panels, the pinned head and the graph
+/// revision the caller read.
+#[derive(Clone, Copy)]
+pub(super) struct AdjudicatorContinuation<'a> {
+    pub(super) item: &'a str,
+    pub(super) node_id: &'a str,
+    pub(super) panels: &'a [String],
+    pub(super) head: Option<&'a str>,
+    pub(super) expected_revision: u64,
+}
+
+/// Continue a succeeded split adjudicator in place when later evidence for the
+/// same item and pinned head settles. The prior attempt remains immutable in
+/// history and its compact receipt; only the node's current inputs and verdict
+/// are replaced. This is intentionally narrower than `replace`, which refuses
+/// all started nodes.
+pub(super) fn continue_adjudicator(
+    graph: &mut LiveGraph<'_>,
+    request: &AdjudicatorContinuation<'_>,
+    limits: &crate::config::GraphLimits,
+    budget: &crate::config::GraphBudget,
+) -> Result<Admitted, PatchError> {
+    let AdjudicatorContinuation {
+        item,
+        node_id,
+        panels,
+        head,
+        expected_revision,
+    } = *request;
+    let current = revision(graph.checkpoint);
+    if expected_revision != current {
+        return Err(PatchError::new(
+            "stale_revision",
+            format!(
+                "adjudicator continuation expects revision {expected_revision}, graph is at {current}"
+            ),
+        ));
+    }
+    let mut expanded = plans::expand(
+        graph.document,
+        &graph.checkpoint.extensions,
+        &graph.checkpoint.expansions,
+        limits,
+    )?;
+    candidate::resolve_review_policies(&mut expanded, &graph.checkpoint.review_policy())
+        .map_err(|error| PatchError::invalid(error.to_string()))?;
+    let mut target = expanded
+        .nodes
+        .iter()
+        .find(|node| node.id == node_id)
+        .cloned()
+        .ok_or_else(|| PatchError::invalid(format!("unknown adjudicator {node_id}")))?;
+    let parent = match target.parent_node.clone() {
+        Some(parent)
+            if target.kind == Some(NodeKind::Adjudicate)
+                && target.access == AccessMode::ReadOnly
+                && target.route.is_some()
+                && target.routes.is_none() =>
+        {
+            parent
+        }
+        _ => {
+            return Err(PatchError::new(
+                "conflict",
+                format!("node {node_id} is not a parented read-only adjudicator"),
+            ));
+        }
+    };
+    match (&target.source, head) {
+        (Some(SourceBinding::Commit { commit }), Some(head)) if commit == head => {}
+        (None, None) => {}
+        _ => {
+            return Err(PatchError::new(
+                "conflict",
+                format!("adjudicator {node_id} is not pinned to the requested head"),
+            ));
+        }
+    }
+    let progress = graph
+        .checkpoint
+        .nodes
+        .iter()
+        .find(|progress| progress.id == node_id)
+        .ok_or_else(|| PatchError::invalid(format!("unknown adjudicator progress {node_id}")))?;
+    if progress.source_commit.as_deref() != head {
+        return Err(PatchError::new(
+            "conflict",
+            format!("adjudicator {node_id} progress is not pinned to the requested head"),
+        ));
+    }
+    let prior_outputs = progress
+        .outputs
+        .as_ref()
+        .ok_or_else(|| PatchError::new("conflict", "succeeded adjudicator has no outputs"))?;
+    let attempt = progress
+        .attempts
+        .last()
+        .filter(|attempt| attempt.state == AttemptState::Terminal)
+        .ok_or_else(|| PatchError::new("conflict", "adjudicator has no terminal attempt"))?;
+    let prior_verdict = match prior_outputs
+        .verdict
+        .clone()
+        .filter(|verdict| !verdict.is_empty())
+    {
+        Some(verdict)
+            if progress.state == NodeState::Succeeded
+                && attempt.outcome == Some(GraphAttemptOutcome::Succeeded) =>
+        {
+            verdict
+        }
+        _ => {
+            return Err(PatchError::new(
+                "conflict",
+                format!("adjudicator {node_id} is not a succeeded, receipted attempt"),
+            ));
+        }
+    };
+    let prior_output_bytes = serde_json::to_vec(prior_outputs)
+        .map_err(|error| {
+            PatchError::invalid(format!(
+                "prior adjudication output is not serialisable: {error}"
+            ))
+        })?
+        .len();
+    if prior_output_bytes > MAX_CHECKPOINT_BYTES as usize {
+        return Err(PatchError::new(
+            "review_adjudication_snapshot_unavailable",
+            format!(
+                "prior adjudication output exceeds the {} byte blob cap",
+                MAX_CHECKPOINT_BYTES
+            ),
+        ));
+    }
+    let pinned_head = head.map(str::to_owned);
+
+    let mut union: Vec<String> = target
+        .inputs
+        .iter()
+        .map(|input| input.node.clone())
+        .collect();
+    union.extend(panels.iter().cloned());
+    union.sort();
+    union.dedup();
+    let previous: BTreeSet<String> = target
+        .inputs
+        .iter()
+        .map(|input| input.node.clone())
+        .collect();
+    let added: Vec<String> = union
+        .iter()
+        .filter(|panel| !previous.contains(*panel))
+        .cloned()
+        .collect();
+    if added.is_empty() {
+        return Ok(Admitted {
+            revision: current,
+            replayed: true,
+            added: Vec::new(),
+        });
+    }
+    for panel in &added {
+        let panel_progress = graph
+            .checkpoint
+            .nodes
+            .iter()
+            .find(|progress| progress.id == *panel)
+            .ok_or_else(|| PatchError::invalid(format!("unknown split panel {panel}")))?;
+        if panel_progress.state != NodeState::Succeeded || panel_progress.outputs.is_none() {
+            return Err(PatchError::new(
+                "conflict",
+                format!("split panel {panel} has not settled with complete evidence"),
+            ));
+        }
+    }
+
+    let next_revision = current
+        .checked_add(1)
+        .ok_or_else(|| PatchError::invalid("patch revision exhausted"))?;
+    let digest = CanonicalV1::record_digest(
+        "review-adjudicator-continuation",
+        1,
+        &(item, node_id, &pinned_head, &union, current),
+    )
+    .map_err(|error| PatchError::invalid(format!("continuation is not canonical: {error}")))?
+    .to_string();
+    let key = format!("adjudicate-continuation:{digest}");
+    if let Some(record) = graph
+        .checkpoint
+        .expansions
+        .iter()
+        .filter_map(|expansion| expansion.patch.as_ref())
+        .find(|record| record.key.as_deref() == Some(key.as_str()))
+    {
+        return if record.digest == digest {
+            Ok(Admitted {
+                revision: record.revision,
+                replayed: true,
+                added: Vec::new(),
+            })
+        } else {
+            Err(PatchError::new(
+                "idempotency_conflict",
+                "adjudicator continuation key was used for a different input union",
+            ))
+        };
+    }
+
+    target.inputs = union
+        .iter()
+        .map(|panel| GraphInput {
+            extra: Default::default(),
+            node: panel.clone(),
+            outputs: vec![OutputKind::Verdict, OutputKind::Findings],
+            required_outputs: Vec::new(),
+        })
+        .collect();
+    target.after_settled.extend(added.iter().cloned());
+    target.after_settled.sort();
+    target.after_settled.dedup();
+    let output_digest = CanonicalV1::record_digest("review-adjudication-output", 1, prior_outputs)
+        .map_err(|error| PatchError::invalid(format!("prior output is not canonical: {error}")))?
+        .to_string();
+    let receipt = ReviewAdjudicationReceipt {
+        head: pinned_head,
+        panels: previous.into_iter().collect(),
+        added_panels: added,
+        prior_outputs: prior_outputs.clone(),
+        attempt_key: attempt.key.clone(),
+        attempt_ref: attempt.attempt_ref.clone(),
+        verdict: prior_verdict,
+        output_digest,
+    };
+    let expansion = Expansion {
+        extra: Default::default(),
+        delivery_review_disposition: None,
+        delivery_review_node: None,
+        retired: None,
+        retry_generation: None,
+        final_result: false,
+        final_fragment: false,
+        floor_warnings: Vec::new(),
+        source: parent.clone(),
+        nodes: Vec::new(),
+        uses: Vec::new(),
+        patch: Some(PatchRecord {
+            extra: Default::default(),
+            child_receipt: None,
+            revision: next_revision,
+            digest,
+            key: Some(key),
+            parent: Some(parent),
+            reason: Some("later split panel on the same review item and head".into()),
+            skipped: Vec::new(),
+            replaced: vec![target],
+            journaled: false,
+            restart: None,
+        }),
+    };
+    let mut prospective = graph.checkpoint.clone();
+    let progress_index = prospective
+        .nodes
+        .iter()
+        .position(|progress| progress.id == node_id)
+        .ok_or_else(|| PatchError::invalid(format!("unknown adjudicator progress {node_id}")))?;
+    let mut reset = reset_progress(&prospective.nodes[progress_index], false)?;
+    reset.review_adjudication_receipts.push(receipt);
+    prospective.nodes[progress_index] = reset;
+    prospective.expansions.push(expansion.clone());
+    asks::refresh_wake(&mut prospective);
+    let admitted = candidate::admit_candidate_with_review_policy(
+        graph.document,
+        Some(&prospective),
+        &[],
+        limits,
+        budget,
+        None,
+        &prospective.review_policy(),
+    )
+    .map_err(|error| {
+        let mut refusal = PatchError::invalid(error.to_string());
+        refusal.cause = match &error {
+            CandidateError::Structural(limit) | CandidateError::NodeStructural { limit, .. } => {
+                Some(PlanFailureFact::Structural(*limit))
+            }
+            CandidateError::Envelope(limit) => Some(PlanFailureFact::Envelope(*limit)),
+            _ => None,
+        };
+        refusal.candidate = Some(Box::new(error));
+        refusal
+    })?;
+    let preview = admitted.expanded;
+    let plan = admitted.plan;
+    // Nothing downstream may keep accepting the superseded verdict: every
+    // node that already settled on the adjudicator waits for fresh evidence.
+    let mut stale = BTreeSet::from([node_id.to_owned()]);
+    loop {
+        let before = stale.len();
+        for node in &preview.nodes {
+            if node.dependencies().any(|parent| stale.contains(parent)) {
+                stale.insert(node.id.clone());
+            }
+        }
+        if stale.len() == before {
+            break;
+        }
+    }
+    stale.remove(node_id);
+    for progress in &mut prospective.nodes {
+        if stale.contains(&progress.id) && progress.state != NodeState::Pending {
+            *progress = reset_progress(progress, false)?;
+        }
+    }
+    loops::reconcile(&mut prospective, &plan);
+    composites::reconcile_checkpoint(&plan, &mut prospective);
+    plans::remaining(&mut prospective, &preview, limits);
+    asks::refresh_wake(&mut prospective);
+    *graph.checkpoint = prospective;
+    Ok(Admitted {
+        revision: next_revision,
+        replayed: false,
+        added: Vec::new(),
+    })
 }
 
 /// Admit a chair disposition for one complete review result at one exact head.
@@ -569,13 +897,14 @@ pub fn admit_delivery_review_disposition(
     let mut candidate = graph.checkpoint.clone();
     candidate.nodes[progress_index].set_delivery_review_disposition(disposition);
     candidate.expansions.push(expansion.clone());
-    let admitted = admit_candidate(
+    let admitted = candidate::admit_candidate_with_review_policy(
         graph.document,
         Some(&candidate),
         &[],
         limits,
         budget,
         requester_path,
+        &candidate.review_policy(),
     )
     .map_err(|error| {
         let mut refusal = PatchError::invalid(error.to_string());
@@ -900,6 +1229,46 @@ pub fn retry_node(
     context: &PatchContext<'_>,
 ) -> Result<Admitted, PatchError> {
     retry_node_scope(graph, id, brief, context, RetryOptions::default())
+}
+
+/// Reset one failed review leaf onto its persisted retry route. The caller
+/// journals `ReviewRetryState.pending_retry` before entering this boundary and
+/// clears that intent only after the admitted reset has been saved.
+pub(super) fn retry_review_leaf(
+    graph: &mut LiveGraph<'_>,
+    id: &str,
+    route: &GraphRoute,
+    attempt: &AttemptKey,
+    context: &PatchContext<'_>,
+) -> Result<Admitted, PatchError> {
+    let valid_intent = graph
+        .checkpoint
+        .nodes
+        .iter()
+        .find(|progress| progress.id == id)
+        .and_then(|progress| progress.review_retry.as_ref())
+        .and_then(|state| state.pending_retry.as_ref())
+        .is_some_and(|intent| &intent.route == route && &intent.attempt == attempt);
+    if !valid_intent {
+        return Err(PatchError::invalid(
+            "review retry intent does not match the leaf",
+        ));
+    }
+    let reason = format!(
+        "review retry {id} after attempt {} route {}",
+        attempt.attempt, attempt.route_index
+    );
+    retry_node_scope(
+        graph,
+        id,
+        None,
+        context,
+        RetryOptions {
+            reason: Some((&reason, None)),
+            replacement_routes: Some(std::slice::from_ref(route)),
+            ..Default::default()
+        },
+    )
 }
 
 /// A host restart after a stop uses the same checked, journalled reset as an
@@ -1348,6 +1717,8 @@ fn reset_progress(old: &NodeProgress, container: bool) -> Result<NodeProgress, P
                 | "source_binding"
                 | "source_commit"
                 | "review_base"
+                | "review_retry"
+                | "review_adjudication_receipts"
                 | "round"
                 | "title"
         )
@@ -1556,6 +1927,7 @@ pub fn compile_submission(
         queue_ci_wait: None,
         queue: None,
         review: None,
+        review_policy: None,
         subject: None,
         exclude: Vec::new(),
         network: None,
@@ -2058,6 +2430,9 @@ pub(super) fn prepare(
             comparable.round = target.round.clone();
             comparable.after_expansion = target.after_expansion.clone();
             comparable.composite_members = target.composite_members.clone();
+            // A retry may restate the route as its replacement route list.
+            comparable.route = target.route.clone();
+            comparable.routes = target.routes.clone();
             comparable == *target
                 && (target.composite.is_none() && target.loop_body.is_none()
                     || node.prompt == target.prompt)
@@ -2183,13 +2558,14 @@ pub(super) fn prepare(
     candidate.expansions.push(expansion.clone());
     // Retry preparation may temporarily remove asks before it refreshes wake.
     asks::refresh_wake(&mut candidate);
-    let admitted = admit_candidate(
+    let admitted = candidate::admit_candidate_with_review_policy(
         source,
         Some(&candidate),
         &[],
         context.limits,
         &Default::default(),
         None,
+        &candidate.review_policy(),
     )
     .map_err(|error| {
         let mut refusal = PatchError::invalid(error.to_string());
@@ -2302,24 +2678,6 @@ pub(super) fn skipped_by_patch(checkpoint: &GraphCheckpoint, id: &str) -> bool {
             record.skipped.iter().any(|skipped| skipped == id)
                 && reason == format!("skipped by patch revision {}", record.revision)
         })
-}
-
-pub(super) fn correct_review_verdict(
-    graph: &mut LiveGraph<'_>,
-    id: &str,
-    brief: &str,
-    context: &PatchContext<'_>,
-) -> Result<Admitted, PatchError> {
-    retry_node_scope(
-        graph,
-        id,
-        Some(brief),
-        context,
-        RetryOptions {
-            reason: Some((&format!("correct review verdict {id}"), None)),
-            ..Default::default()
-        },
-    )
 }
 
 #[cfg(test)]

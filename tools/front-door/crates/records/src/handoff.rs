@@ -218,13 +218,13 @@ pub enum WriteScopeReport {
         base: String,
         head: String,
         strength: crate::policy::Strength,
-        source: crate::policy::Source,
+        source: crate::provenance::Source,
         out_of_scope_paths: Vec<crate::PathWire>,
     },
     Compact {
         code: String,
         strength: crate::policy::Strength,
-        source: crate::policy::Source,
+        source: crate::provenance::Source,
         paths_artifact: String,
         out_of_scope_count: usize,
         paths_omitted_from_handoff: bool,
@@ -250,7 +250,7 @@ impl WriteScopeReport {
             } => Self::Compact {
                 code: code.clone(),
                 strength: *strength,
-                source: *source,
+                source: source.clone(),
                 paths_artifact: "policy-write-scope.json".into(),
                 out_of_scope_count: out_of_scope_paths.len(),
                 paths_omitted_from_handoff: true,
@@ -454,7 +454,10 @@ mod tests {
             handoff.write_scope = Some(WriteScopeReport::Compact {
                 code: "write_scope".into(),
                 strength: crate::policy::Strength::Warn,
-                source: crate::policy::Source::Host,
+                source: crate::provenance::Source {
+                    layer: crate::Layer::Host,
+                    origin: Some("compiled policy table".to_owned()),
+                },
                 paths_artifact: "policy-write-scope.json".into(),
                 out_of_scope_count: 1,
                 paths_omitted_from_handoff: true,

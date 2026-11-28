@@ -1,7 +1,6 @@
 //! The lane pull-request policy (`lanes.pr`). A sourced knob: every effective
 //! value names the layer that set it, and the provider's `gh` tool enforces it
-//! before forwarding a command. Leaf implement writer lanes get `never` by
-//! default, so the chair owns publication after settlement.
+//! before forwarding a command. The deliver template can select `never`.
 use provenant_records::{Layer, run::HarnessProfile};
 use serde::{Deserialize, Serialize};
 
@@ -13,15 +12,13 @@ pub const KNOB: &str = "lanes.pr";
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PrPolicy {
-    /// Refuse every pull-request write from the lane. This is the registry
-    /// default and the default for leaf implement lanes in a graph.
-    #[default]
+    /// Refuse every pull-request write from the lane.
     Never,
     /// Permit creation only as a draft: the `gh` wrapper adds `--draft` when
     /// it is missing. Drafts cannot be promoted, merged or reopened by the lane.
     Draft,
-    /// Forward pull-request writes unchanged. Opt in only for lanes that must
-    /// manage their own pull requests.
+    /// Forward pull-request writes unchanged.
+    #[default]
     Allowed,
 }
 
@@ -69,8 +66,7 @@ pub struct ResolvedPrPolicy {
 
 impl ResolvedPrPolicy {
     /// Resolve from the sealed profile. Missing or unknown values fall back to
-    /// the registry default, `never`, so a leaf implement lane never opens a
-    /// pull request unless a host, launch or node setting opts it in.
+    /// the registry default, `allowed`.
     pub fn resolve(profile: &HarnessProfile) -> Self {
         Self {
             value: profile
@@ -108,14 +104,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_policy_defaults_to_never_and_reports_the_layer_that_set_it() {
+    fn the_policy_defaults_to_allowed_and_reports_the_layer_that_set_it() {
         let mut profile = HarnessProfile::default();
         let unset = ResolvedPrPolicy::resolve(&profile);
         assert_eq!(
             (unset.value, unset.source),
-            (PrPolicy::Never, Layer::Default)
+            (PrPolicy::Allowed, Layer::Default)
         );
-        assert_eq!(unset.receipt()["value"], "never");
+        assert_eq!(unset.receipt()["value"], "allowed");
         assert_eq!(unset.receipt()["source"], "default");
 
         profile.knobs.insert(KNOB.into(), "draft".into());
@@ -127,6 +123,9 @@ mod tests {
 
         profile.knobs.insert(KNOB.into(), "unknown".into());
         let unknown = ResolvedPrPolicy::resolve(&profile);
-        assert_eq!(unknown.value, PrPolicy::Never);
+        assert_eq!(unknown.value, PrPolicy::Allowed);
+
+        profile.knobs.insert(KNOB.into(), "never".into());
+        assert_eq!(ResolvedPrPolicy::resolve(&profile).value, PrPolicy::Never);
     }
 }

@@ -20,6 +20,64 @@ fn node_pr_opt_in_resolves_with_launch_source() {
 }
 
 #[test]
+fn launch_flags_seal_their_settings_at_the_launch_layer()
+-> Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    let roots = provenant_test_support::test_roots(temp.path())?
+        .resolve(&provenant_test_support::IdentityPathResolver)?;
+    let spec = AttemptSpec {
+        read_source: Some("1111111111111111111111111111111111111111".into()),
+        destination: Some("new".into()),
+        worktree_sharing: Some("refuse".into()),
+        checks_mode: Some("strict".into()),
+        ..Default::default()
+    };
+    let knobs = spec.lane_knobs();
+    assert!(knobs.contains(
+        &"lanes.read_source=1111111111111111111111111111111111111111".to_string()
+    ));
+    assert!(knobs.contains(&"lanes.destination.write=new".to_string()));
+    assert!(knobs.contains(&"lanes.worktree.sharing=refuse".to_string()));
+    assert!(knobs.contains(&"policy.default=refuse".to_string()));
+    let mut profile = provenant_config::read(&roots)?.dispatch_profile(&knobs)?;
+    profile.checks_mode = spec.checks_mode.clone();
+    for key in [
+        "lanes.read_source",
+        "lanes.destination.write",
+        "lanes.worktree.sharing",
+        "policy.default",
+    ] {
+        assert_eq!(
+            provenant_config::knob_source(&profile, key),
+            provenant_records::Layer::Launch,
+            "{key}"
+        );
+    }
+    // A conflicting policy supplied by the route remains below the sealed
+    // `checks_mode` flag through the profile used by launch and recovery.
+    profile
+        .policy_overrides
+        .insert("default".into(), provenant_records::policy::Strength::Warn);
+    let policy = provenant_config::policy::for_profile(
+        roots.state.as_path(),
+        "project",
+        &profile,
+    );
+    let (_, strict) = provenant_records::policy::resolve_setting(
+        "LANE_DEPTH",
+        None,
+        &policy.settings,
+    );
+    assert_eq!(strict.value, provenant_records::policy::Strength::Refuse);
+    assert_eq!(strict.source.layer, provenant_records::Layer::Launch);
+    assert_eq!(
+        strict.source.origin.as_deref(),
+        Some("--checks/--strict#policy.default")
+    );
+    Ok(())
+}
+
+#[test]
 fn node_attempt_spec_reaches_the_launch() {
     let spec = AttemptSpec {
         host: Some("workshop".into()),
@@ -294,7 +352,7 @@ fn alias_retry_receives_the_prior_model() {
         alias: Some("senior".into()),
         effort: None,
         account: None,
-    tier: None, };
+    tier: None, review_policy: None, effective_review_policy: None, };
     member.route = None;
     member.routes = Some(vec![alias.clone(), alias]);
     let mut limited = done_as("h/1");
@@ -464,7 +522,7 @@ fn panel_with_one_usage_limited_member_reaches_synthesis() {
         alias: Some("junior".into()),
         effort: None,
         account: None,
-    tier: None, };
+    tier: None, review_policy: None, effective_review_policy: None, };
     let mut nodes = Vec::new();
     for id in ["one", "two", "three"] {
         let mut member = node(id, route("first"));
@@ -824,15 +882,12 @@ fn a_required_separation_is_passed_to_the_router_and_recorded_when_refused() {
 fn light_preset_is_per_node_and_explicit_settings_override_it() {
     let light: AttemptSpec = serde_json::from_value(serde_json::json!({"preset":"light"})).unwrap();
     assert!(light.preset_known());
-    assert_eq!(light.effective_isolation(), "shared");
     assert_eq!(light.effective_receipts(), "none");
     let custom: AttemptSpec = serde_json::from_value(serde_json::json!({
-        "preset":"light", "isolation":"private", "receipts":"delivery"
+        "preset":"light", "receipts":"delivery"
     })).unwrap();
-    assert_eq!(custom.effective_isolation(), "private");
     assert_eq!(custom.effective_receipts(), "delivery");
     let default = AttemptSpec::default();
-    assert_eq!(default.effective_isolation(), "private");
     assert_eq!(default.effective_receipts(), "delivery");
     let unknown: AttemptSpec = serde_json::from_value(serde_json::json!({"preset":"future"})).unwrap();
     assert!(!unknown.preset_known());

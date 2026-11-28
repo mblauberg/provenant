@@ -276,7 +276,7 @@ pub(crate) fn pr_contribution_roundtrip() -> Result {
     let opened_warnings = warnings(&opened)?;
     assert!(opened_warnings.iter().any(|warning| {
         warning["code"] == "PR_CONTRIBUTION_BINDING_FAILED"
-            && warning["repair"]
+            && warning["next"][0]["why"]
                 .as_str()
                 .is_some_and(|repair| repair.contains("provenant pr contributions 1668 --bind"))
     }));
@@ -288,9 +288,9 @@ pub(crate) fn pr_contribution_roundtrip() -> Result {
         serde_json::to_vec(&open_view)?,
     )?;
     fs::write(landing.rig.project.join("checks-fail"), "")?;
-    let unbound_land = command(&landing.rig, &["land", NUMBER, "--json"])?;
+    let unbound_land = command(&landing.rig, &["land", NUMBER, "--wait=2s", "--json"])?;
     assert_ne!(code(&unbound_land), 0);
-    assert_eq!(json(&unbound_land)?["error"]["code"], "CI_UNAVAILABLE");
+    assert_eq!(json(&unbound_land)?["error"]["code"], "LAND_PENDING");
     // The v2 envelope carries warnings as typed values, not prose on stderr.
     // The `--bind` repair is owned by the `pr open` binding warning asserted
     // above; the land failure reports the capture diagnostic through the same
@@ -1133,7 +1133,25 @@ pub(crate) fn fake_gh(args: &[String]) -> Result<u8> {
             )?;
         }
         "api repos/{owner}/{repo}/branches/main" => {
-            io::stdout().write_all(br#"{"protected":false}"#)?;
+            // The base stays open to a direct push, which the landing probes
+            // here; the required set is served by the protection read below.
+            let body = provenant_test_support::fake_forge::branch_read("main", &[]);
+            io::stdout().write_all(&serde_json::to_vec(&body)?)?;
+        }
+        // The CI observer reads the required set from classic protection.
+        "api repos/{owner}/{repo}/branches/main/protection" => {
+            let contexts = provenant_test_support::fake_forge::required_checks(&dir);
+            match provenant_test_support::fake_forge::protection_read(&contexts) {
+                Some(body) => {
+                    io::stdout().write_all(b"HTTP/2.0 200 OK\r\n\r\n")?;
+                    io::stdout().write_all(&serde_json::to_vec(&body)?)?;
+                }
+                None => {
+                    io::stdout().write_all(b"HTTP/2.0 404 Not Found\r\n\r\n{}")?;
+                    writeln!(io::stderr(), "gh: Not Found (HTTP 404)")?;
+                    return Ok(1);
+                }
+            }
         }
         "api --paginate --slurp repos/{owner}/{repo}/rules/branches/main?per_page=100" => {
             io::stdout().write_all(b"[[]]")?;
@@ -1226,8 +1244,11 @@ fn landing_with_git_dir(separate: bool) -> Result<Landing> {
     *path = format!("{}:/usr/bin:/bin", bin.display()).into();
     fs::write(
         admin.join("info/exclude"),
-        "head.json\nview.json\ngh-calls\nwatched\nmerge-args\nchecks-fail\nmerge-completes\n",
+        "head.json\nview.json\ngh-calls\nwatched\nmerge-args\nchecks-fail\nmerge-completes\nrequired-checks\n",
     )?;
+    // A landing settles CI only against a required set: the check the fake
+    // forge's runs report.
+    provenant_test_support::fake_forge::require_checks(&rig.project, "ci-status")?;
     fs::write(rig.project.join(".gitignore"), ".worktrees/\n**/target/\n")?;
     git(&rig, &["add", ".gitignore"])?;
     git(&rig, &["commit", "-qm", "ignore build output"])?;
@@ -2306,6 +2327,92 @@ pub(crate) fn pr_land_deletes_an_unregistered_branch_only_at_the_merged_head() -
     Ok(())
 }
 
+#[allow(clippy::disallowed_methods)] // A real guardian proves native lease liveness.
+pub(crate) fn pr_land_refuses_branch_deletion_for_a_live_slot_lease() -> Result {
+    use provenant_core::{AttemptId, Clock, WaitBudget};
+    use provenant_os::fs::Directory;
+    use provenant_records::custody::{Scope, Sharing, WorktreeLease};
+    use provenant_supervisor::custody::WriterBinding;
+
+    let landing = landing()?;
+    let (roots, context) = super::worktree_tests::writer_context(&landing.rig)?;
+    let request = provenant_run::resolve_writer(
+        context.state_root.as_path(),
+        &landing.rig.project,
+        &landing.worktree,
+    )?;
+    let writer =
+        provenant_run::prepare_writer(&request, context.state_root.as_path(), context.project_id)?;
+    let binding = WriterBinding::from_verified(
+        writer.worktree.repo().root_dir(),
+        writer.worktree.repo().private_dir(),
+        writer.branch.as_str(),
+        provenant_core::GitOid::parse(&landing.head)?,
+    )?;
+    let slot = roots
+        .state
+        .as_path()
+        .join("worktrees")
+        .join(context.project_id.to_string())
+        .join(provenant_confinement::worktrees::state_dir_name(
+            &landing.worktree,
+        ));
+    let attempt = AttemptId::from_bytes([83; 16]);
+    let scope = Scope {
+        attempt,
+        generation: 1,
+    };
+    let clock = provenant_os::clock::SystemClock;
+    let cancel = provenant_core::CancelToken::new();
+    // A prepared reservation has no live holder. Publish a real, observable
+    // guardian so the destructive guard is exercised with positive evidence.
+    struct Child(std::process::Child);
+    impl Drop for Child {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let mut command = std::process::Command::new("/bin/sleep");
+    command.arg("60");
+    provenant_os::sys::fixture_session_on_exec(&mut command);
+    let child = Child(command.spawn()?);
+    let guardian = match provenant_supervisor::census::SystemProcessObserver
+        .observe(i64::from(child.0.id()))
+    {
+        provenant_supervisor::census::ProcessObservation::Present(fact) => fact.identity,
+        observation => return Err(format!("guardian was not observable: {observation:?}").into()),
+    };
+    let mut lease = provenant_supervisor::custody::acquire_writer(
+        Directory::open_anchor(&slot)?,
+        scope,
+        binding,
+        WaitBudget::nonblocking(clock.mono_now()),
+        &cancel,
+        &clock,
+    )?;
+    provenant_supervisor::fixture::record_spawned_provider(
+        &mut lease,
+        &Directory::open_anchor(&slot)?,
+        guardian.clone(),
+        guardian,
+    )?;
+    fs::write(
+        slot.join("lease.json"),
+        serde_json::to_vec(&WorktreeLease {
+            holder: attempt,
+            since: clock.wall_now()?,
+            sharing: Sharing::Inherit,
+        })?,
+    )?;
+
+    let refused =
+        super::pr::land::guard_branch_lease(&landing.rig.state, &landing.rig.project, "feat");
+    assert!(refused.is_err(), "a live lease must guard its branch");
+    drop(lease);
+    Ok(())
+}
+
 pub(crate) fn pr_land_keeps_a_branch_held_by_a_paused_rebase() -> Result {
     // The rebase leaves its worktree on a detached HEAD, so only the rebase
     // state records that `feat` is still in use.
@@ -2707,7 +2814,18 @@ pub(crate) fn pr_land_changes_nothing_when_the_merge_does_not_happen() -> Result
         } else {
             fs::write(rig.project.join(flag), "")?;
         }
-        let output = command(rig, &["land", NUMBER, "--head", &landing.head, "--json"])?;
+        // CI that cannot be read or settled stays pending to the wait bound.
+        let output = command(
+            rig,
+            &[
+                "land",
+                NUMBER,
+                "--head",
+                &landing.head,
+                "--wait=2s",
+                "--json",
+            ],
+        )?;
         assert_ne!(code(&output), 0, "{flag}");
         let value = json(&output)?;
         assert_eq!(value["data"]["merged"], false, "{value}");
@@ -2723,10 +2841,12 @@ pub(crate) fn pr_land_changes_nothing_when_the_merge_does_not_happen() -> Result
         r#"{"state":"OPEN","baseRefName":"main","headRefName":"feat","isCrossRepository":false}"#,
     )?;
     fs::write(landing.rig.project.join("checks-fail"), "")?;
-    let output = command(&landing.rig, &["land", NUMBER, "--json"])?;
+    let output = command(&landing.rig, &["land", NUMBER, "--wait=2s", "--json"])?;
     let value = json(&output)?;
     assert_ne!(code(&output), 0, "{value}");
-    assert_eq!(value["error"]["code"], "CI_UNAVAILABLE", "{value}");
+    // CI the observer cannot read stays pending to the wait bound: the
+    // landing reports it pending and changes nothing.
+    assert_eq!(value["error"]["code"], "LAND_PENDING", "{value}");
     assert_eq!(value["data"]["merged"], false);
     assert!(landing.worktree.exists());
     assert!(branch_exists(&landing.rig, "feat")?);

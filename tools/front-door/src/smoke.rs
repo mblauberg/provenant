@@ -14,7 +14,9 @@ use provenant_cli::{
         Settings, UNVERIFIED_KEY, Unverified,
     },
 };
-use provenant_core::{CancelToken, Clock, GitOid, HostId, WaitBudget, WallTime};
+use provenant_core::{
+    CancelToken, Clock, Deadline, DurationMicros, GitOid, HostId, MonoTime, WaitBudget, WallTime,
+};
 use provenant_fabric_runtime::{
     coordination::facade::FacadeError,
     hosts::{PeerAction, PeerResult, SmokeFixtureOp, SmokeFixtureReceipt},
@@ -587,6 +589,9 @@ pub(crate) fn smoke_run_argv(
     if let Some(host) = peer_host(args) {
         run.extend(["--host".into(), host.into()]);
     }
+    if let Some(timeout) = args.common.timeout_seconds() {
+        run.extend(["--timeout".into(), timeout.to_string().into()]);
+    }
     if let Some(route) = &args.route {
         run.extend(["--route".into(), route.clone().into()]);
     }
@@ -781,6 +786,33 @@ pub(crate) fn run_lifecycle(
     home: &Path,
     args: &Upgrade,
 ) -> Result<SmokeOutcome, String> {
+    let timeout = std::time::Duration::from_secs(args.common.timeout_seconds().unwrap_or(3_600));
+    run_lifecycle_with_timeout(clock, runner, program, state, home, args, timeout)
+}
+
+/// A monotonic deadline `timeout` after the clock's now, saturating at the far
+/// end of the coordinate rather than failing on an absurd timeout.
+pub(crate) fn deadline_after(clock: &dyn Clock, timeout: std::time::Duration) -> Deadline {
+    let budget =
+        DurationMicros::from_micros(u64::try_from(timeout.as_micros()).unwrap_or(u64::MAX));
+    Deadline::after(clock.mono_now(), budget)
+        .unwrap_or(Deadline::at(MonoTime::from_micros(u64::MAX)))
+}
+
+/// Whole seconds left before `deadline` on the clock's monotonic coordinate.
+pub(crate) fn remaining_seconds(clock: &dyn Clock, deadline: Deadline) -> u64 {
+    deadline.remaining(clock.mono_now()).as_micros() / 1_000_000
+}
+
+pub(crate) fn run_lifecycle_with_timeout(
+    clock: &dyn Clock,
+    runner: &crate::install::ChildRunner,
+    program: &Path,
+    state: &Path,
+    home: &Path,
+    args: &Upgrade,
+    timeout: std::time::Duration,
+) -> Result<SmokeOutcome, String> {
     let roots =
         crate::roots::child(home, home, state.to_path_buf()).map_err(|error| error.to_string())?;
     let (settings, origin) = settings(&roots);
@@ -909,8 +941,10 @@ pub(crate) fn run_lifecycle(
     let program = program.as_os_str().to_owned();
     let write_enabled = !set.iter().any(|item| item == "write=false");
     let mut output = String::new();
+    let deadline = deadline_after(clock, timeout);
+    let remaining = || remaining_seconds(clock, deadline);
     launch_phase.0 = clock.mono_now();
-    let launched = runner.execute(&run, None, 1_048_576, 3600);
+    let launched = runner.execute(&run, None, 1_048_576, remaining());
     launch_phase.1 = clock.mono_now();
     match launched {
         Ok(launched) => {
@@ -927,11 +961,11 @@ pub(crate) fn run_lifecycle(
                     "wait".into(),
                     graph.clone().into(),
                     "--timeout".into(),
-                    "3600".into(),
+                    remaining().to_string().into(),
                 ],
                 None,
                 1_048_576,
-                3700,
+                remaining(),
             );
             wait_phase.1 = clock.mono_now();
             status_phase.0 = clock.mono_now();
@@ -948,7 +982,7 @@ pub(crate) fn run_lifecycle(
                 ],
                 None,
                 1_048_576,
-                60,
+                remaining(),
             );
             status_phase.1 = clock.mono_now();
             output.push_str(

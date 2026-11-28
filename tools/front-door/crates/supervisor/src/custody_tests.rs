@@ -1343,12 +1343,32 @@ fn prelaunch_publication_failure_keeps_outcome_for_exact_retry() -> TestResult {
         before,
         std::fs::read(attempt.path().join("process-exit.json"))?
     );
-    assert!(
-        root.path()
-            .join(scope().attempt.to_string())
-            .join("reservation.json")
-            .is_file()
-    );
+    let reservation = root
+        .path()
+        .join(scope().attempt.to_string())
+        .join("reservation.json");
+    assert!(reservation.is_file());
+    // The failure keeps its cause, not the publication error, and the lease
+    // names the never-spawned phase: withdrawable, and never launched again.
+    assert!(matches!(*failure.error, CustodyError::Cancelled));
+    assert_eq!(writer.phase(), LaunchPhase::NeverSpawned);
+    let again = launch(
+        OwnedLaunch {
+            command: never_executed_command(root.path()),
+            lease: &mut writer,
+            handshake: WaitBudget::cli(clock.mono_now(), 1)?,
+            cancel: &CancelToken::new(),
+            clock: &clock,
+        },
+        CapturePlan::default(),
+        failure.custody,
+    )
+    .err()
+    .ok_or("a never-spawned lease launched again")?;
+    assert!(matches!(*again.error, CustodyError::Fenced));
+    writer.withdraw_unlaunched()?;
+    assert!(!reservation.exists());
+    assert!(attempt.path().join("process-exit.json").is_file());
     Ok(())
 }
 
@@ -1381,10 +1401,59 @@ fn unsupported_host_refuses_a_launch_before_the_reservation_records_a_handoff() 
     .err()
     .ok_or("launch on a host without provider custody succeeded")?;
     assert!(matches!(*failure.error, CustodyError::UnsupportedPlatform));
-    assert!(!writer.launched);
+    assert_eq!(writer.phase(), LaunchPhase::Unlaunched);
     let evidence = Directory::open_anchor(&root.path().join(scope().attempt.to_string()))?;
     let recorded: Reservation = read_record(&evidence, "reservation.json", RECORD_LIMIT)?;
     assert_eq!(recorded.launch_state, LaunchState::Prepared);
+    assert!(!attempt.path().join("process-exit.json").exists());
+    Ok(())
+}
+
+// Spec: docs/specs/run-launch.md#admission-and-custody
+// A launch is uncertain only once a guardian may hold its message. A failed
+// reservation write before the handoff contacts no guardian, so the lease
+// stays unlaunched and withdraws locally instead of fencing the attempt.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_failed_handoff_reservation_write_leaves_the_lease_unlaunched() -> TestResult {
+    let root = tempfile::tempdir()?;
+    let attempt = tempfile::tempdir()?;
+    let mut writer = acquire(root.path())?;
+    let clock = SystemClock::new();
+    let token = CancelToken::new();
+    let publication = PublicationReservation::prepare(
+        Directory::open_anchor(attempt.path())?,
+        WaitBudget::cli(clock.mono_now(), 1)?,
+        &token,
+        &clock,
+    )?;
+    TEST_FAIL_HANDOFF_RESERVATION.with(|fault| fault.set(true));
+    let failure = launch(
+        OwnedLaunch {
+            command: never_executed_command(root.path()),
+            lease: &mut writer,
+            handshake: WaitBudget::cli(clock.mono_now(), 1)?,
+            cancel: &token,
+            clock: &clock,
+        },
+        CapturePlan::default(),
+        publication,
+    )
+    .err()
+    .ok_or("a launch with a failed reservation write succeeded")?;
+    assert!(
+        !TEST_FAIL_HANDOFF_RESERVATION.with(std::cell::Cell::get),
+        "the launch never reached the handoff reservation write"
+    );
+    assert!(matches!(*failure.error, CustodyError::InvalidRecord));
+    assert_eq!(writer.phase(), LaunchPhase::Unlaunched);
+    assert!(failure.retry_exit_publication().is_err(), "no exit is owed");
+    let reservation = root
+        .path()
+        .join(scope().attempt.to_string())
+        .join("reservation.json");
+    writer.withdraw_unlaunched()?;
+    assert!(!reservation.exists());
     assert!(!attempt.path().join("process-exit.json").exists());
     Ok(())
 }
@@ -2489,10 +2558,10 @@ fn failed_ownership_publication_reports_retained_reservation() -> TestResult {
 
 #[test]
 fn never_spawned_resource_fact_survives_exit_storage() -> TestResult {
-    use provenant_records::diagnostic::{PortSettingSource, ResourceFact};
+    use provenant_records::diagnostic::ResourceFact;
     let fact = ResourceFact::LanePorts {
         blocks: 2,
-        origin: PortSettingSource::Configuration,
+        origin: provenant_records::Layer::Host,
     };
     let mut exit = ProcessExit::never_spawned(scope(), None, vec![]);
     exit.launch_refusal = Some(fact.clone());

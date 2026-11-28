@@ -4,8 +4,10 @@ use provenant_cli::brief::{BriefSource, read_brief, select_brief_source};
 use provenant_cli::{Edit, Globals, GraphRunArgs, Templates};
 use provenant_confinement::worktrees::WorkerObserver;
 use provenant_core::{CancelToken, Clock, WaitBudget};
+use provenant_fabric_runtime::graph::root_cause::is_upstream_blocked;
 use provenant_records::{
     CommandResult, Outcome,
+    lane_contract::{ContextInputs, LaunchMode},
     warning::{Warning, warn},
 };
 use provenant_routing::BareModelError;
@@ -24,7 +26,13 @@ fn decode(text: &str) -> Result<Value, String> {
 }
 fn response_outcome(command: &str, data: &Value) -> Outcome {
     if data["timed_out"] == true {
-        return Outcome::Waiting;
+        // An inline `run` that outlives `--timeout` reports 124 with
+        // `still_running`: the lane keeps its lease and the caller waits.
+        return if command == "run" {
+            Outcome::Timeout
+        } else {
+            Outcome::Waiting
+        };
     }
     if command == "run" && data["named"]["replayed"] != true {
         match data["status"].as_str() {
@@ -41,6 +49,12 @@ fn response_outcome(command: &str, data: &Value) -> Outcome {
 fn launch_error_node(data: &Value, outcome: Outcome) -> Option<&Value> {
     data["checkpoint"]["nodes"].as_array()?.iter().find(|node| {
         node["advance_note"].is_string()
+            // A dependant blocked by an upstream failure is not a launch
+            // error; the shared cause rule keeps `run` from naming it (#4102).
+            && !is_upstream_blocked(
+                node["advance_code"].as_str(),
+                node["advance_note"].as_str(),
+            )
             && node["attempts"].as_array().is_some_and(Vec::is_empty)
             && (matches!(outcome, Outcome::Failed | Outcome::Refused)
                 || node["state"] == "failed"
@@ -113,6 +127,184 @@ fn file_error(
     reason: &str,
 ) -> Box<provenant_records::diagnostic::Diagnostic> {
     cli_input_error(&format!("{flag} {}: {reason}", path.display()))
+}
+
+/// Compiled defaults from `config/harness-knobs.json`. The launch edge reads
+/// the configured value when one is present; these keep fresh-context and
+/// timeout handling deterministic when it is not.
+const CONTEXT_MAX_BYTES: usize = 262_144;
+const RUN_TIMEOUT_SECONDS: u64 = 1800;
+
+/// Read one integer knob at the command edge. An unreadable configuration is
+/// advisory: the compiled default keeps the launch bounded.
+fn knob_u64(globals: &Globals, key: &str, default: u64) -> u64 {
+    crate::roots::resolve(
+        globals,
+        crate::roots::Workspace::Directory,
+        crate::roots::Product::Optional,
+    )
+    .ok()
+    .and_then(|resolved| provenant_cli::config_reads::read_for(&resolved.roots, "run").ok())
+    .and_then(|config| config.knobs.get(key).cloned())
+    .and_then(|sourced| {
+        sourced
+            .value
+            .as_u64()
+            .or_else(|| sourced.value.as_str().and_then(|text| text.parse().ok()))
+    })
+    .unwrap_or(default)
+}
+
+fn knob_string(globals: &Globals, key: &str) -> Option<String> {
+    crate::roots::resolve(
+        globals,
+        crate::roots::Workspace::Directory,
+        crate::roots::Product::Optional,
+    )
+    .ok()
+    .and_then(|resolved| provenant_cli::config_reads::read_for(&resolved.roots, "run").ok())
+    .and_then(|config| config.knobs.get(key).cloned())
+    .and_then(|sourced| sourced.value.as_str().map(str::to_owned))
+}
+
+/// Resolve inline versus handle launch. An explicit `--wait` or `--no-wait`
+/// wins, then the `lanes.launch.mode` knob, then the template's shape: a leaf
+/// runs inline, a composite or queue returns a handle.
+fn launch_mode(wait: bool, no_wait: bool, knob: Option<&str>, composite: bool) -> LaunchMode {
+    if wait {
+        return LaunchMode::Inline;
+    }
+    if no_wait {
+        return LaunchMode::Handle;
+    }
+    match knob {
+        Some("inline") => LaunchMode::Inline,
+        Some("handle") => LaunchMode::Handle,
+        _ if composite => LaunchMode::Handle,
+        _ => LaunchMode::Inline,
+    }
+}
+
+/// A queue or composite template returns a handle; a leaf runs inline. The
+/// shape is read from the flags and the graph document at this edge, before
+/// the host compiles the template.
+fn is_composite(template: Option<&str>, over: &[String], document_nodes: usize) -> bool {
+    !over.is_empty()
+        || document_nodes > 1
+        || template.is_some_and(|name| {
+            matches!(name, "deliver" | "deliver.batch" | "batch")
+                || name.starts_with("queue")
+                || name.ends_with("-swarm")
+                || name == "review-panel"
+                || name == "review-shape"
+        })
+}
+
+/// Append opt-in context to a brief, cutting the whole result at `limit`
+/// bytes. The brief is written first so a large context file cannot displace
+/// the caller's own instruction. Returns whether text was cut.
+fn bounded_context(brief: &str, sections: &[(String, String)], limit: usize) -> (String, bool) {
+    let mut text = String::new();
+    text.push_str(brief);
+    for (label, body) in sections {
+        if body.trim().is_empty() {
+            continue;
+        }
+        text.push_str("\n\n--- ");
+        text.push_str(label);
+        text.push_str(" ---\n");
+        text.push_str(body);
+    }
+    if text.len() <= limit {
+        return (text, false);
+    }
+    let mut cut = limit;
+    while cut > 0 && !text.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    text.truncate(cut);
+    (text, true)
+}
+
+/// Read one named shared-note stream. Notes are advisory context: any failure
+/// leaves the brief untouched and the caller warns once.
+#[allow(clippy::disallowed_methods)]
+fn named_notes(globals: &Globals, name: &str) -> Option<String> {
+    use provenant_core::consumer_env::PARENT_ATTEMPT_ID;
+    use provenant_fabric_runtime::notes::{Host, Input, Scope};
+    let cancel = CancelToken::new();
+    let input = Input::Read {
+        reader: name.to_owned(),
+        scope: Scope::Project,
+        after: Some(0),
+        limit: None,
+    };
+    let page = if std::env::var_os(PARENT_ATTEMPT_ID).is_some() {
+        let attempt = std::env::var(PARENT_ATTEMPT_ID).ok()?.parse().ok()?;
+        provenant_cli::notes::from_lane(attempt, input, &cancel).ok()?
+    } else {
+        let clock = provenant_os::clock::SystemClock::new();
+        let resolved = crate::roots::resolve(
+            globals,
+            crate::roots::Workspace::Project,
+            crate::roots::Product::Optional,
+        )
+        .ok()?;
+        let ctx =
+            provenant_cli::fabric::Context::open(resolved.roots, &resolved.home, &resolved.project)
+                .ok()?;
+        let host = Host::chair(ctx.identity.project, None);
+        provenant_cli::notes::execute_host(&ctx, &host, input, &clock, &cancel).ok()?
+    };
+    let mut lines = Vec::new();
+    for event in page["events"].as_array()? {
+        if let Some(text) = event["detail"]["text"].as_str() {
+            lines.push(text.to_owned());
+        }
+    }
+    (!lines.is_empty()).then(|| lines.join("\n"))
+}
+
+fn context_warning(detail: String) -> Warning {
+    Warning::new(
+        provenant_records::warning::ARGUMENT_VALUE_SUSPECT,
+        detail,
+        provenant_records::warning::detected_source(
+            provenant_records::warning::ARGUMENT_VALUE_SUSPECT,
+        ),
+    )
+}
+
+/// Gather the opt-in context sections and inline them into the brief under one
+/// bound. A missing context file or an empty note stream is advisory: it warns
+/// and the other layers still launch.
+fn inline_context(
+    brief: &str,
+    files: &[PathBuf],
+    notes: &[String],
+    globals: &Globals,
+) -> (String, bool) {
+    let limit = knob_u64(globals, "lanes.context_max_bytes", CONTEXT_MAX_BYTES as u64) as usize;
+    let mut sections = Vec::new();
+    for path in files {
+        match std::fs::read_to_string(path) {
+            Ok(text) => sections.push((format!("context: {}", path.display()), text)),
+            Err(_) => warn(context_warning(format!(
+                "--context {}: file could not be read",
+                path.display()
+            ))),
+        }
+    }
+    for name in notes {
+        if let Some(text) = named_notes(globals, name) {
+            sections.push((format!("notes: {name}"), text));
+        } else {
+            warn(context_warning(format!(
+                "--notes {name}: no shared notes were read"
+            )));
+        }
+    }
+    bounded_context(brief, &sections, limit)
 }
 
 /// `NAME STATE MODEL WORKTREE`, naming the handle that
@@ -221,6 +413,49 @@ fn refusal_lines(checkpoint: &Value) -> String {
     text
 }
 
+fn format_elapsed(ms: u64) -> String {
+    let seconds = ms / 1000;
+    format!("{}m{:02}s", seconds / 60, seconds % 60)
+}
+
+/// The inline launch footer names the handle, model, elapsed time and access.
+fn run_footer(data: &Value, input: &Value) -> String {
+    let name = data["checkpoint"]["graph_id"]
+        .as_str()
+        .or_else(|| input["name"].as_str())
+        .unwrap_or("-");
+    let model = data["route"]["model"]
+        .as_str()
+        .or_else(|| input["model"].as_str())
+        .unwrap_or("-");
+    let elapsed = data["elapsed_ms"]
+        .as_u64()
+        .map_or_else(|| "-".to_owned(), format_elapsed);
+    let access = input["access"].as_str().unwrap_or("read-only");
+    let source = input["source"].as_str().unwrap_or("checkout");
+    let warnings = data["warnings"].as_array().map_or(0, Vec::len);
+    provenant_cli::bounded_text(
+        &format!("— {name} · {model} · {elapsed} · {access}, {source} · {warnings} warnings"),
+        provenant_cli::limits::SUMMARY_ROW_BYTES,
+    )
+}
+
+/// Keep each complete path visible, escaping terminal controls and newlines.
+fn carried_paths_footer(data: &Value) -> String {
+    let mut paths = std::collections::BTreeSet::new();
+    if let Some(nodes) = data["checkpoint"]["nodes"].as_array() {
+        for node in nodes {
+            if let Some(carried) = node["writer_binding"]["carried_paths"].as_array() {
+                paths.extend(carried.iter().filter_map(Value::as_str));
+            }
+        }
+    }
+    paths
+        .into_iter()
+        .map(|path| format!("  carried: {}\n", json!(path)))
+        .collect()
+}
+
 /// The compact `run` result: the headline, unless it was already announced,
 /// then the one next command. A refusal before admission adds its own line.
 fn run_human(
@@ -231,11 +466,15 @@ fn run_human(
     let graph = data["checkpoint"]["graph_id"].as_str().unwrap_or_default();
     // The reason comes from the run's own status: a copied command is useful
     // only when the reader knows which state made it the next step.
-    let (rest, why) = match data["status"].as_str() {
-        Some("complete") => (format!("output {graph}"), "the run is complete"),
-        Some("cancelled") => (format!("output {graph}"), "the run was cancelled"),
-        Some("paused") => (format!("status {graph}"), "the run is paused"),
-        _ => (format!("wait {graph}"), "the run is still running"),
+    let (rest, why) = if data["timed_out"] == true {
+        (format!("wait {graph}"), "the inline run is still running")
+    } else {
+        match data["status"].as_str() {
+            Some("complete") => (format!("output {graph}"), "the run is complete"),
+            Some("cancelled") => (format!("output {graph}"), "the run was cancelled"),
+            Some("paused") => (format!("status {graph}"), "the run is paused"),
+            _ => (format!("wait {graph}"), "the run is still running"),
+        }
     };
     let next = provenant_records::command_result::NextStep::from_command(
         &format!("provenant {rest}"),
@@ -272,11 +511,19 @@ fn run_human(
             lanes += &format!("warning: {warning}\n");
         }
     }
+    // A handle launch omits the inline summary, but still names any paths
+    // already carried by the time its admission response is observed.
+    let carried = carried_paths_footer(data);
+    let footer = if input["launch_mode"].as_str() == Some("handle") {
+        carried
+    } else {
+        format!("{}\n{carried}", run_footer(data, input))
+    };
     if announced {
-        (lanes, next)
+        (format!("{lanes}{footer}"), next)
     } else {
         let headline = run_headline(&data["checkpoint"], status, document, input);
-        (format!("{notice}{headline}\n{lanes}"), next)
+        (format!("{notice}{headline}\n{lanes}{footer}"), next)
     }
 }
 
@@ -287,7 +534,11 @@ fn invoke(
     input: Result<Value, Box<provenant_records::diagnostic::Diagnostic>>,
     globals: &Globals,
     workers: &'static dyn WorkerObserver,
+    timeout_seconds: Option<u64>,
 ) -> u8 {
+    // `--timeout` bounds the whole invocation; nested waits receive what is
+    // left of it through a smaller launch budget.
+    let cap = |seconds: u64| timeout_seconds.map_or(seconds, |timeout| seconds.min(timeout));
     let input = match input {
         Ok(input) => input,
         Err(projection) => {
@@ -304,7 +555,7 @@ fn invoke(
                 None,
                 &repair,
             );
-            error.diagnostic = Some(projection.as_ref().into());
+            error.set_diagnostic(Some(projection.as_ref().into()));
             result.error = Some(error);
             return crate::emit(&result, globals, "", false);
         }
@@ -315,9 +566,9 @@ fn invoke(
             && std::env::var_os(provenant_core::consumer_env::PARENT_ATTEMPT_ID).is_some()
         {
             let factory = fabric::read_factory(globals, workers)?;
-            let wait_seconds = input["wait_seconds"]
+            let wait_seconds = cap(input["wait_seconds"]
                 .as_u64()
-                .unwrap_or(factory.context.config.graph.launch_wait_seconds);
+                .unwrap_or(factory.context.config.graph.launch_wait_seconds));
             let budget = WaitBudget::cli(factory.clock.mono_now(), wait_seconds)?;
             return Ok(factory.relay_document(&input, budget, &CancelToken::new())?);
         }
@@ -327,10 +578,10 @@ fn invoke(
             fabric::factory(globals, workers)?
         };
         // `run` takes no wait: its launch, including binding a writer, has the
-        // configured launch allowance.
-        let wait_seconds = input["wait_seconds"]
+        // configured launch allowance, bounded by `--timeout`.
+        let wait_seconds = cap(input["wait_seconds"]
             .as_u64()
-            .unwrap_or(factory.context.config.graph.launch_wait_seconds);
+            .unwrap_or(factory.context.config.graph.launch_wait_seconds));
         let budget = WaitBudget::cli(factory.clock.mono_now(), wait_seconds)?;
         let local_branch = (command == "run" && input["host"].is_null())
             .then(|| input["branch"].as_str().map(str::to_owned))
@@ -411,7 +662,13 @@ fn invoke(
         Ok(result)
     })();
     match result {
-        Ok(data) => {
+        Ok(mut data) => {
+            if command == "run"
+                && data["timed_out"] == true
+                && input["launch_mode"].as_str() != Some("handle")
+            {
+                data["still_running"] = json!(true);
+            }
             let (human, next) = if command == "run"
                 && !globals.full
                 && data["checkpoint"]["graph_id"].is_string()
@@ -427,7 +684,17 @@ fn invoke(
             // A replay reports the graph its input already started; its failure
             // was reported when it happened.
             let replayed = data["named"]["replayed"] == true;
-            let mut result = CommandResult::new(command, response_outcome(command, &data), data);
+            let outcome = if command == "run"
+                && data["timed_out"] == true
+                && input["launch_mode"].as_str() == Some("handle")
+            {
+                // A handle returns at admission; it never reports the inline
+                // timeout outcome even though its launch budget was short.
+                Outcome::Ok
+            } else {
+                response_outcome(command, &data)
+            };
+            let mut result = CommandResult::new(command, outcome, data);
             result.next = next.into_iter().collect();
             if command == "run"
                 && let Some(refusal) = result.data["source_admission"]
@@ -513,7 +780,7 @@ fn invoke(
                 Some(cause.as_str()),
                 &repair,
             );
-            error.diagnostic = Some((&projection).into());
+            error.set_diagnostic(Some((&projection).into()));
             result.error = Some(error);
             crate::emit(&result, globals, "", false)
         }
@@ -685,12 +952,52 @@ pub(crate) fn run(
             ));
         }
     }
+    let timeout_seconds = request.common.timeout_seconds();
+    let briefs = request.brief_text.clone();
+    if briefs.len() > 1 {
+        // Fan-out: one lane per brief. Each result is printed under a bounded
+        // header and the worst status wins, so a single failed lane is not
+        // hidden by the others. The host runs the lanes concurrently under
+        // its own admission cap; this edge keeps their output ordered.
+        let total = briefs.len();
+        let mut worst = 0u8;
+        for (index, brief) in briefs.into_iter().enumerate() {
+            let mut one = request.clone();
+            one.brief = Some(brief.clone());
+            one.brief_text.clear();
+            one.brief_file = None;
+            let header = format!(
+                "== brief {}/{}: {} ==\n",
+                index + 1,
+                total,
+                provenant_cli::bounded_text(&brief, provenant_cli::limits::SUMMARY_ROW_BYTES)
+            );
+            let _ = crate::output::write_header(&header);
+            let input = match catalogue.as_ref() {
+                Ok(cat) => run_input(one, cat, globals),
+                Err(error) => Err(error.clone()),
+            };
+            worst = worst.max(invoke("run", input, globals, workers, timeout_seconds));
+        }
+        return worst;
+    }
     invoke(
         "run",
-        catalogue.and_then(|catalogue| run_input(request, &catalogue)),
+        catalogue.and_then(|catalogue| run_input(request, &catalogue, globals)),
         globals,
         workers,
+        timeout_seconds,
     )
+}
+
+fn smoke_host(common: &provenant_cli::CommonArgs) -> Result<Option<String>, &'static str> {
+    match common.target() {
+        provenant_cli::HostSelection::Local => Ok(None),
+        provenant_cli::HostSelection::Named(host) => Ok(Some(host)),
+        provenant_cli::HostSelection::Many(_) | provenant_cli::HostSelection::All => {
+            Err("run accepts at most one named host")
+        }
+    }
 }
 
 /// Drive the smoke lifecycle from the CLI edge and publish its typed output.
@@ -727,14 +1034,20 @@ fn smoke_lifecycle(
             );
         }
     };
+    let host = match smoke_host(&request.common) {
+        Ok(host) => host,
+        Err(detail) => return cli_input_error_emit("run", detail, globals),
+    };
     let args = provenant_cli::install::Upgrade {
+        common: request.common.clone(),
+        keep: false,
         yes: false,
         from_source: None,
         hosts: "all".into(),
         verify: true,
         verify_only: false,
         dry_run: false,
-        host: request.host.clone(),
+        host,
         route: request.route.clone(),
         set: request.set.clone(),
     };
@@ -869,8 +1182,22 @@ fn implementation_template(name: &str) -> bool {
 fn run_input(
     request: GraphRunArgs,
     catalogue: &provenant_routing::Catalogue,
+    globals: &Globals,
 ) -> Result<Value, Box<provenant_records::diagnostic::Diagnostic>> {
     (|| {
+        // Capture the native-lane launch flags before the request's other
+        // fields are moved into the graph input.
+        let context_files = request.context.clone();
+        let note_names = request.notes.clone();
+        let strict = request.strict;
+        let checks = request.checks.clone();
+        let isolated = request.isolated;
+        let destination = request.destination.clone();
+        let commit = request.commit.clone();
+        let worktree_sharing = request.worktree_sharing.clone();
+        let wait = request.wait;
+        let no_wait = request.no_wait;
+        let timeout_seconds = request.common.timeout_seconds();
         let plan = request.plan;
         let implementation = request.template.as_deref().is_some_and(|name| {
             implementation_template(name) || name == "deliver" || name == "batch"
@@ -878,7 +1205,7 @@ fn run_input(
         let sandbox = request.sandbox_override();
         let brief_source = select_brief_source([
             request.brief.map(BriefSource::Text),
-            request.brief_text.map(BriefSource::Text),
+            request.brief_text.into_iter().next().map(BriefSource::Text),
             request.brief_file.map(BriefSource::file),
         ])
         .map_err(|error| cli_input_error(&error.to_string()))?;
@@ -891,7 +1218,13 @@ fn run_input(
             input["preamble_file"] = json!(path);
         }
         for (field, value) in [
-            ("host", request.host),
+            (
+                "host",
+                request.common.host.first().map(|host| match host {
+                    provenant_cli::HostArg::All => "all".to_owned(),
+                    provenant_cli::HostArg::Named(name) => name.clone(),
+                }),
+            ),
             ("model", model),
             ("effort", request.effort),
             ("account", request.account),
@@ -935,6 +1268,7 @@ fn run_input(
         // Values travel as the text the caller wrote. The launch owner holds the
         // template library, so it types each one by the declaration it meets.
         let mut parameters = json!({});
+        let mut review_policy = json!({});
         for item in request.set {
             let (key, value) = item
                 .split_once('=')
@@ -943,7 +1277,12 @@ fn run_input(
                 return Err(cli_input_error("--set parameter name is empty"));
             }
             validate_set_path(key)?;
-            if key == "attempt" {
+            if let Some(field) = key.strip_prefix("domains.review.") {
+                let value = toml_edit::de::from_str::<Value>(&format!("value = {value}"))
+                    .map(|parsed| parsed["value"].clone())
+                    .unwrap_or_else(|_| json!(value));
+                review_policy[field] = value;
+            } else if key == "attempt" {
                 let parsed: Value = toml_edit::de::from_str(&format!("value = {value}"))
                     .map_err(|_| cli_input_error("--set `attempt`: value is not valid TOML"))?;
                 validate_set_value_path(key, &parsed["value"])?;
@@ -968,6 +1307,12 @@ fn run_input(
         if !policy_inputs.is_empty() {
             parameters["attempt.policy_inputs"] = json!(policy_inputs);
         }
+        if review_policy
+            .as_object()
+            .is_some_and(|policy| !policy.is_empty())
+        {
+            input["review_policy"] = review_policy;
+        }
         input["set"] = parameters;
         if let Some(source) = brief_source {
             let brief = read_brief(source, provenant_cli::brief::MAX_BRIEF_BYTES)
@@ -975,8 +1320,25 @@ fn run_input(
             if brief.trim().is_empty() {
                 return Err(cli_input_error("brief is empty"));
             }
+            // Fresh context is the brief plus the standing preamble (carried
+            // on the attempt) and only the explicitly named files and notes.
+            let (brief, truncated) = inline_context(&brief, &context_files, &note_names, globals);
+            if truncated {
+                warn(context_warning(format!(
+                    "context exceeded {} bytes and was cut; --full lists the sources",
+                    CONTEXT_MAX_BYTES
+                )));
+            }
             input["brief"] = json!(brief);
         }
+        input["context_inputs"] = serde_json::to_value(ContextInputs {
+            files: context_files
+                .iter()
+                .map(|path| path.to_string_lossy().into_owned())
+                .collect(),
+            notes: note_names,
+        })
+        .unwrap_or_default();
         if let Some(path) = request.file {
             let text = std::fs::read_to_string(&path).map_err(|_| file_input_error(&path))?;
             if text.trim().is_empty() {
@@ -994,6 +1356,64 @@ fn run_input(
                     ));
                 }
             }
+        }
+        // Launch mode comes from explicit flags, then the knob, then the
+        // template's shape. A composite or queue returns a handle, so its
+        // launch does not block the caller for the whole lane.
+        let over: Vec<String> = input["over"].as_array().map_or_else(Vec::new, |rows| {
+            rows.iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect()
+        });
+        let composite = !over.is_empty()
+            || input["over"].is_string()
+            || is_composite(
+                input["template"].as_str(),
+                &over,
+                input["document"]["nodes"].as_array().map_or(0, Vec::len),
+            );
+        let mode = launch_mode(
+            wait,
+            no_wait,
+            knob_string(globals, "lanes.launch.mode").as_deref(),
+            composite,
+        );
+        input["launch_mode"] = serde_json::to_value(mode).unwrap_or_default();
+
+        // `--strict`, `--checks` and `--isolated` select launch-layer policy.
+        // The host applies `checks_mode` with `Policy::apply_checks`, which
+        // cannot raise a boundary or operation row.
+        let checks_mode = if strict {
+            Some("strict".to_owned())
+        } else {
+            checks
+                .filter(|value| provenant_records::policy::ChecksMode::from_checks(value).is_some())
+        };
+        if let Some(value) = checks_mode {
+            input["checks_mode"] = json!(value);
+        }
+        if isolated {
+            input["isolated"] = json!(true);
+            input["sandbox"] = json!("on");
+            input["destination"] = json!("new");
+            input["worktree_sharing"] = json!("refuse");
+            input["checks_mode"] = json!("strict");
+        }
+        if let Some(value) = destination {
+            input["destination"] = json!(value);
+        }
+        if let Some(value) = commit {
+            input["commit"] = json!(value);
+        }
+        if let Some(value) = worktree_sharing {
+            input["worktree_sharing"] = json!(value);
+        }
+        let timeout = timeout_seconds
+            .unwrap_or_else(|| knob_u64(globals, "domains.cli.timeouts.run", RUN_TIMEOUT_SECONDS));
+        input["timeout_seconds"] = json!(timeout);
+        if matches!(mode, LaunchMode::Handle) && !wait {
+            input["wait_seconds"] = json!(0);
         }
         Ok(input)
     })()
@@ -1014,7 +1434,7 @@ fn validate_set_path(key: &str) -> Result<(), Box<provenant_records::diagnostic:
         )),
         "host" | "account" | "confidential" | "provider_timeout" | "capabilities"
         | "capability" | "build_heavy" | "build_weight" | "write_roots" | "write_root"
-        | "ci_scope" | "pr" | "preset" | "isolation" | "receipts" | "sandbox" | "policy_inputs"
+        | "ci_scope" | "pr" | "preset" | "receipts" | "sandbox" | "policy_inputs"
         | "token_budget" | "on_budget" | "budget_grace" => Ok(()),
         _ if path.starts_with("mode.") => {
             Err(cli_input_error("use --mode for attempt access mode"))
@@ -1048,6 +1468,7 @@ pub(crate) fn edit(request: Edit, globals: &Globals, workers: &'static dyn Worke
         document(&request.file).map(|patch| json!({"op":"edit","id":request.name,"patch":patch})),
         globals,
         workers,
+        None,
     )
 }
 pub(crate) fn templates_summary(
@@ -1156,632 +1577,7 @@ pub(crate) fn templates(
         }
         Ok(input)
     })();
-    invoke("templates", input, globals, workers)
+    invoke("templates", input, globals, workers, None)
 }
 #[cfg(test)]
-#[allow(
-    unused_imports,
-    dead_code,
-    reason = "the custom worktree driver includes this module without libtest"
-)]
-mod tests {
-    use super::*;
-
-    fn run_input_fixture(
-        request: GraphRunArgs,
-    ) -> Result<Value, Box<provenant_records::diagnostic::Diagnostic>> {
-        run_input(request, &provenant_routing::Catalogue::bundled().unwrap())
-    }
-
-    #[test]
-    fn configuration_cause_and_selected_state_survive_projection() {
-        let error = provenant_cli::fabric::EdgeError::Config(
-            provenant_config::ConfigError::Refused("typed cause".into()),
-        );
-        assert!(config_cause(&error).is_some());
-        let globals = Globals {
-            state_dir: Some("/tmp/state with 'quote".into()),
-            ..Globals::default()
-        };
-        let repair = config_repair(&globals);
-        assert!(repair.contains("--state-dir"));
-        assert!(repair.ends_with(" check config --json"));
-        assert!(repair.contains("'\\''"));
-    }
-
-    // Spec: docs/specs/state.md#config-never-widens-authority
-    #[test]
-    fn unsafe_project_binding_state_has_local_mode_and_owner_repairs() {
-        use std::path::PathBuf;
-
-        let path = PathBuf::from("/private/state with 'quote");
-        let mode_error = provenant_config::ConfigError::ProjectBindingDirectoryUnsafe {
-            path: path.clone(),
-            mode: 0o755,
-            owner_matches: true,
-        };
-        let mode = config_projection(&mode_error, &Globals::default());
-        assert!(mode.detail.as_deref().is_some_and(|detail| {
-            detail.contains("mode 0755") && detail.contains("other users can")
-        }));
-        let mode_repair = mode.next.unwrap();
-        assert!(mode_repair.contains("chmod 700 '/private/state with '\\''quote'"));
-        assert!(!mode_repair.contains("chown"));
-        assert!(!mode_error.to_string().contains("/private"));
-
-        let owner_error = provenant_config::ConfigError::ProjectBindingDirectoryUnsafe {
-            path,
-            mode: 0o700,
-            owner_matches: false,
-        };
-        let owner = config_projection(&owner_error, &Globals::default());
-        assert!(
-            owner
-                .detail
-                .as_deref()
-                .is_some_and(|detail| { detail.contains("not owned by the current user") })
-        );
-        let owner_repair = owner.next.unwrap();
-        assert!(owner_repair.contains("sudo chown \"$(id -u)\""));
-        assert!(owner_repair.contains("&& chmod 700 '/private/state with '\\''quote'"));
-    }
-
-    #[allow(
-        dead_code,
-        reason = "the custom worktree driver omits libtest functions"
-    )]
-    fn run_request() -> GraphRunArgs {
-        GraphRunArgs {
-            host: None,
-            model: None,
-            effort: None,
-            account: None,
-            name: None,
-            brief: None,
-            brief_text: None,
-            brief_file: None,
-            preamble_file: None,
-            template: None,
-            route: None,
-            mode: None,
-            source: None,
-            worktree: None,
-            branch: None,
-            base: None,
-            pr: None,
-            head: None,
-            write_scope: Vec::new(),
-            over: Vec::new(),
-            set: Vec::new(),
-            plan: false,
-            file: None,
-            detached: false,
-            sandbox: false,
-            no_sandbox: false,
-            explain: false,
-        }
-    }
-
-    #[test]
-    fn review_pr_reaches_host_launch_input() {
-        let mut request = run_request();
-        request.template = Some("review.correctness".into());
-        request.pr = Some(7);
-        let input = run_input_fixture(request).unwrap();
-        assert_eq!(input["pr"], 7);
-    }
-
-    #[test]
-    fn review_head_reaches_host_launch_input() {
-        let mut request = run_request();
-        request.template = Some("review.correctness".into());
-        request.pr = Some(7);
-        request.head = Some("aabbccddeeff00112233445566778899aabbccdd".into());
-        let input = run_input_fixture(request).unwrap();
-        assert_eq!(input["pr"], 7);
-        assert_eq!(input["head"], "aabbccddeeff00112233445566778899aabbccdd");
-    }
-
-    #[test]
-    fn plan_sets_parameter_for_implementation_templates() {
-        let mut request = run_request();
-        request.template = Some("implement".into());
-        request.plan = true;
-        let input = run_input_fixture(request).unwrap();
-        assert_eq!(input["set"]["plan"], true);
-
-        let mut task = run_request();
-        task.template = Some("task".into());
-        task.plan = true;
-        let input = run_input_fixture(task).unwrap();
-        assert!(input["set"].get("plan").is_none());
-    }
-
-    #[test]
-    fn malformed_set_and_missing_file_preserve_input_detail()
-    -> Result<(), Box<dyn std::error::Error>> {
-        for (setting, detail) in [
-            ("broken", "--set expects NAME=VALUE"),
-            ("=1", "--set parameter name is empty"),
-            ("attempt=", "TOML"),
-        ] {
-            let mut request = run_request();
-            request.set.push(setting.into());
-            let error = run_input_fixture(request)
-                .err()
-                .ok_or("invalid set was accepted")?;
-            let diagnostic = error;
-            assert_eq!(diagnostic.code, "invalid_input");
-            assert!(
-                diagnostic
-                    .detail
-                    .as_deref()
-                    .is_some_and(|text| text.contains(detail))
-            );
-        }
-        let mut request = run_request();
-        request.set.push("attempt='PROMPT_SENTINEL".into());
-        let diagnostic = run_input_fixture(request).unwrap_err();
-        assert!(!serde_json::to_string(&diagnostic)?.contains("PROMPT_SENTINEL"));
-        let directory = tempfile::tempdir()?;
-        let mut request = run_request();
-        request.file = Some(directory.path().join("missing.json"));
-        let error = run_input_fixture(request)
-            .err()
-            .ok_or("missing file was accepted")?;
-        let diagnostic = error;
-        assert_eq!(diagnostic.code, "invalid_input");
-        assert!(
-            diagnostic
-                .detail
-                .as_deref()
-                .is_some_and(|text| text.contains("--file") && text.contains("missing.json"))
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn run_flags_and_attempt_settings_reach_the_graph_request() {
-        let provenant_cli::ParseOutcome::Invocation(invocation) = provenant_cli::parse(
-            [
-                "run",
-                "Inspect",
-                "--host",
-                "workshop",
-                "--model",
-                "codex/gpt-6-luna",
-                "--effort",
-                "high",
-                "--account",
-                "work",
-                "--set",
-                "attempt.build_heavy=true",
-                "--set",
-                "attempt.confidential=true",
-                "--set",
-                "attempt.provider_timeout=42",
-                "--set",
-                "attempt.host='other'",
-            ]
-            .map(std::ffi::OsString::from),
-        ) else {
-            panic!("run should parse");
-        };
-        let provenant_cli::Command::Run(request) = invocation.command else {
-            panic!("run command");
-        };
-        let input = run_input_fixture(*request).unwrap();
-        assert_eq!(input["host"], "workshop");
-        assert_eq!(input["model"], "codex/gpt-6-luna");
-        assert_eq!(input["effort"], "high");
-        assert_eq!(input["account"], "work");
-        // Values travel as written; the launch owner types them by declaration.
-        assert!(input.get("operation_id").is_none());
-        for (key, text) in [
-            ("attempt.build_heavy", "true"),
-            ("attempt.confidential", "true"),
-            ("attempt.provider_timeout", "42"),
-            ("attempt.host", "'other'"),
-        ] {
-            assert_eq!(input["set"][key], text);
-        }
-    }
-
-    #[test]
-    fn sandbox_flags_set_the_attempt_sandbox_and_conflict() {
-        let parse = |flags: &[&str]| {
-            provenant_cli::parse(
-                ["run", "Inspect"]
-                    .iter()
-                    .chain(flags)
-                    .map(std::ffi::OsString::from),
-            )
-        };
-        for (flag, value) in [("--sandbox", "on"), ("--no-sandbox", "off")] {
-            let provenant_cli::ParseOutcome::Invocation(invocation) = parse(&[flag]) else {
-                panic!("{flag} should parse");
-            };
-            let provenant_cli::Command::Run(request) = invocation.command else {
-                panic!("run command");
-            };
-            let input = run_input_fixture(*request).unwrap();
-            assert_eq!(input["set"]["attempt.sandbox"], value);
-        }
-        assert!(!matches!(
-            parse(&["--sandbox", "--no-sandbox"]),
-            provenant_cli::ParseOutcome::Invocation(_)
-        ));
-    }
-
-    #[test]
-    fn bare_model_resolves_to_its_provider_and_refuses_otherwise() {
-        let with_model = |model: &str| {
-            let mut request = run_request();
-            request.model = Some(model.into());
-            run_input_fixture(request)
-        };
-        // One provider offers it: the bare name becomes ADAPTER/ID.
-        let input = with_model("claude-haiku-5-5").unwrap();
-        assert_eq!(input["model"], "claude/claude-haiku-5-5");
-        // Several providers offer it: refused as ambiguous, naming each ADAPTER/ID.
-        for (bare, expected) in [
-            (
-                "claude-sonnet-5-5",
-                ["claude/claude-sonnet-5-5", "agy/claude-sonnet-5-5"],
-            ),
-            (
-                "claude-opus-5-5",
-                ["claude/claude-opus-5-5", "agy/claude-opus-5-5"],
-            ),
-        ] {
-            let ambiguous = with_model(bare).unwrap_err();
-            assert_eq!(ambiguous.code, "invalid_input");
-            let detail = ambiguous.detail.unwrap_or_default();
-            for candidate in expected {
-                assert!(detail.contains(candidate), "{detail}");
-            }
-        }
-        // The provider-qualified form is passed through unchanged.
-        let input = with_model("codex/gpt-6.1-terra").unwrap();
-        assert_eq!(input["model"], "codex/gpt-6.1-terra");
-        // No provider offers it: refused as invalid input, naming the form to use.
-        let refusal = with_model("no-such-model-9").unwrap_err();
-        assert_eq!(refusal.code, "invalid_input");
-        let detail = refusal.detail.unwrap_or_default();
-        assert!(
-            detail.contains("unknown model `no-such-model-9`"),
-            "{detail}"
-        );
-        assert!(detail.contains("provider/model form"), "{detail}");
-    }
-
-    // Spec: docs/specs/routing.md#provider-model-discovery
-    #[test]
-    fn bare_model_uses_the_effective_discovery_snapshot() {
-        let snapshot = provenant_routing::parse_codex_models(
-            br#"{"models":[{"slug":"gpt-9-sol","supported_reasoning_levels":[]}]}"#,
-            1,
-        )
-        .unwrap();
-        let catalogue = provenant_routing::Catalogue::bundled()
-            .unwrap()
-            .with_discovery(&[snapshot])
-            .unwrap();
-        let mut request = run_request();
-        request.model = Some("gpt-9-sol".into());
-        assert_eq!(
-            run_input(request, &catalogue).unwrap()["model"],
-            "codex/gpt-9-sol"
-        );
-    }
-
-    #[test]
-    fn ambiguous_bare_model_names_each_provider_form() {
-        let detail = bare_model_detail(
-            "gpt-6.1-terra",
-            &BareModelError::Ambiguous {
-                candidates: vec!["codex/gpt-6.1-terra".into(), "cursor/gpt-6.1-terra".into()],
-            },
-        );
-        assert_eq!(
-            detail,
-            "model `gpt-6.1-terra` is offered by several providers: codex/gpt-6.1-terra, cursor/gpt-6.1-terra; name one as provider/model"
-        );
-        // A name that is not identifier-shaped is never echoed, even when the
-        // refusal carries close matches.
-        let secret = bare_model_detail(
-            "sk-x y",
-            &BareModelError::Unknown {
-                candidates: vec!["gpt-6.1-terra".into()],
-            },
-        );
-        assert!(!secret.contains("sk-x y"), "{secret}");
-        assert!(secret.contains("close matches: gpt-6.1-terra"), "{secret}");
-    }
-
-    #[test]
-    fn attempt_access_paths_refuse_and_name_the_launch_flag() {
-        for (setting, flag) in [
-            ("attempt.mode='worktree-write'", "--mode"),
-            ("attempt.worktree='W'", "--worktree"),
-            ("attempt.branch='B'", "--branch B --base REF"),
-            ("attempt={mode='worktree-write'}", "--mode"),
-            ("attempt.unapplied=true", "declared template parameter"),
-        ] {
-            let mut request = run_request();
-            request.set.push(setting.into());
-            let error =
-                run_input_fixture(request).expect_err("unsupported launch path must refuse");
-            assert!(
-                error
-                    .detail
-                    .as_deref()
-                    .is_some_and(|detail| detail.contains(flag)),
-                "{setting}: {error:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn attempt_cloud_placement_is_refused_in_both_set_forms() {
-        let cloud = "{target='t',provider='p'}";
-        for setting in [
-            format!("attempt.cloud={cloud}"),
-            format!("attempt={{cloud={cloud}}}"),
-            format!("attempt.placement={cloud}"),
-        ] {
-            let mut request = run_request();
-            request.set.push(setting.clone());
-            let error = run_input_fixture(request).expect_err("cloud placement must refuse");
-            assert!(
-                error
-                    .detail
-                    .as_deref()
-                    .is_some_and(|detail| detail.contains("cloud launch")),
-                "{setting}: {error:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn pending_graph_projects_failed_pre_attempt_node() {
-        let data = json!({"status":"pending", "checkpoint":{"nodes":[
-            {"id":"retry", "state":"blocked", "attempts":[], "advance_note":"retrying"},
-            {"id":"writer", "state":"failed", "attempts":[], "advance_note":"binding failed"},
-            {"id":"other", "state":"running", "attempts":[{}]}
-        ]}});
-        assert_eq!(response_outcome("run", &data), Outcome::Waiting);
-        assert_eq!(
-            launch_error_node(&data, Outcome::Waiting).map(|node| &node["id"]),
-            Some(&json!("writer"))
-        );
-        let mut timed_out = data.clone();
-        timed_out["timed_out"] = json!(true);
-        assert_eq!(response_outcome("run", &timed_out), Outcome::Waiting);
-        assert_eq!(
-            launch_error_node(&timed_out, Outcome::Waiting).map(|node| &node["id"]),
-            Some(&json!("writer"))
-        );
-    }
-
-    #[test]
-    fn pending_graph_projects_definitive_blocked_launch_errors() {
-        for code in ["launch_refused", "launch_retry_exhausted"] {
-            let data = json!({"status":"pending", "timed_out":true, "checkpoint":{"nodes":[
-                {"id":"slow", "state":"running", "attempts":[{}]},
-                {"id":"writer", "state":"blocked", "attempts":[],
-                 "advance_note":"bounded launch refused", "advance_code":code,
-                 "advance_owner_code":"writer_lock_busy"}
-            ]}});
-            assert_eq!(response_outcome("run", &data), Outcome::Waiting);
-            let node = launch_error_node(&data, Outcome::Waiting).unwrap();
-            assert_eq!(node["id"], "writer");
-            assert_eq!(node["advance_owner_code"], "writer_lock_busy");
-            let mut retrying = data.clone();
-            retrying["checkpoint"]["nodes"][1]["advance_code"] = json!("retrying");
-            assert!(launch_error_node(&retrying, Outcome::Waiting).is_none());
-            let mut launched = data.clone();
-            launched["checkpoint"]["nodes"][1]["attempts"] = json!([{}]);
-            assert!(launch_error_node(&launched, Outcome::Waiting).is_none());
-        }
-    }
-
-    #[test]
-    fn refusal_lines_use_latest_attempt_outcome_not_advance_code() {
-        let checkpoint = json!({"nodes":[
-            {"id":"refused", "advance_code":"route_refused", "advance_note":"route unavailable",
-             "attempts":[{"outcome":{"preparation_refused":"route_resolution_refused"}}]},
-            {"id":"launched", "advance_code":"route_refused", "advance_note":"other failure",
-             "attempts":[{"outcome":{"preparation_refused":"route_resolution_refused"}},
-                         {"outcome":"failed"}]}
-        ]});
-        assert_eq!(
-            refusal_lines(&checkpoint),
-            "refused refused: route unavailable\n"
-        );
-    }
-
-    #[test]
-    fn run_receipt_is_bounded_and_ends_in_one_next_command() {
-        let nodes: Vec<_> = (0..40)
-            .map(|n| {
-                json!({"id":format!("n{n}"), "state":"failed", "advance_code":"route_refused",
-                "advance_note":"x".repeat(1000), "attempts":[{"outcome":{"preparation_refused":"route_resolution_refused"}}]})
-            })
-            .collect();
-        for (status, command, why) in [
-            (
-                "pending",
-                "provenant wait review-1",
-                "the run is still running",
-            ),
-            (
-                "complete",
-                "provenant output review-1",
-                "the run is complete",
-            ),
-            (
-                "cancelled",
-                "provenant output review-1",
-                "the run was cancelled",
-            ),
-            ("paused", "provenant status review-1", "the run is paused"),
-        ] {
-            let data =
-                json!({"status":status, "checkpoint":{"graph_id":"review-1", "nodes":nodes}});
-            for announced in [false, true] {
-                let (human, step) = run_human(&data, &json!({"op":"run"}), announced);
-                assert!(
-                    human.starts_with(if announced { "refused" } else { "review-1" }),
-                    "{human}"
-                );
-                // The suggested command is a typed step; the edge renders the
-                // human line from the same argv and state-derived why it puts
-                // on the JSON envelope.
-                assert_eq!(step.argv, command.split_whitespace().collect::<Vec<_>>());
-                assert_eq!(step.why, why);
-                assert_eq!(
-                    provenant_cli::next_steps_text(
-                        &[step],
-                        &provenant_workflow::session::CommandPrefix::default()
-                    ),
-                    format!("next: {why}; {command}\n")
-                );
-                assert!(!human.lines().any(|line| line.starts_with("next:")));
-                assert!(
-                    human
-                        .lines()
-                        .all(|line| line.len() <= provenant_cli::limits::SUMMARY_ROW_BYTES)
-                );
-                assert!(human.lines().count() <= provenant_cli::limits::SUMMARY_ROWS + 4);
-            }
-        }
-    }
-
-    #[test]
-    fn compact_run_reports_resolved_lane_access() {
-        let data = json!({"status":"pending", "checkpoint":{"graph_id":"work", "nodes":[]},
-            "lane_accesses":[{"access":"isolated","source":"route","key":"rules.policy.lane.access"}]});
-        let (human, _) = run_human(&data, &json!({}), true);
-        assert!(human.contains("access: isolated (rules.policy.lane.access route)\n"));
-    }
-
-    // Spec: docs/specs/fabric.md#graph-admission-and-refusal-causes
-    #[test]
-    fn compact_run_prints_field_only_policy_warnings() {
-        let input = json!({"brief":"ghp_abcdefghijklmnopqrstuvwxyz0123456789"});
-        {
-            let _mode = provenant_redact::scoped(provenant_redact::Mode::Off);
-            assert!(
-                provenant_fabric_runtime::graph::refusal::input_warnings(
-                    &input,
-                    &Default::default()
-                )
-                .is_empty()
-            );
-        }
-        let _mode = provenant_redact::scoped(provenant_redact::Mode::Secrets);
-        let warnings =
-            provenant_fabric_runtime::graph::refusal::input_warnings(&input, &Default::default());
-        let warning = warnings.first().expect("a field-only policy warning");
-        assert_eq!(warning.code.as_ref(), "SECRET_SHAPED_INPUT");
-        assert!(warning.message.contains("brief looks like a credential"));
-        assert!(
-            !warning
-                .message
-                .contains("ghp_abcdefghijklmnopqrstuvwxyz0123456789")
-        );
-        // The facade carries typed warnings to the compact surface as their
-        // messages; the code stays with the typed value in the v2 envelope.
-        let messages: Vec<String> = warnings
-            .into_iter()
-            .map(|warning| warning.message)
-            .collect();
-        let data = json!({"checkpoint":{"graph_id":"example","nodes":[]},"status":"pending","warnings":messages});
-        for announced in [false, true] {
-            let (output, _) = run_human(&data, &json!({"op":"run"}), announced);
-            assert!(output.contains("warning: [SECRET_SHAPED_INPUT]"));
-            assert!(output.contains("brief looks like a credential"));
-            assert!(!output.contains("ghp_abcdefghijklmnopqrstuvwxyz0123456789"));
-        }
-    }
-
-    #[test]
-    fn a_suffixed_name_is_announced_and_a_replay_is_not_a_failure() {
-        let data = json!({"status":"pending", "named":{"requested":"fix", "graph":"fix-2", "superseded":"fix"},
-            "checkpoint":{"graph_id":"fix-2", "nodes":[]}});
-        let (human, _) = run_human(&data, &json!({}), false);
-        assert!(
-            human.starts_with("started fix-2 (fix exists with a different input)\n"),
-            "{human}"
-        );
-        // An already-announced launch carries the next step on the envelope;
-        // the notice was the first line written at launch time and is never
-        // duplicated in the result.
-        let (announced, step) = run_human(&data, &json!({}), true);
-        assert!(
-            !announced.contains("exists with a different input"),
-            "{announced}"
-        );
-        assert_eq!(step.argv, ["provenant", "wait", "fix-2"]);
-        assert!(announced.is_empty(), "{announced}");
-        let replay = json!({"status":"complete", "outcome":"failed", "named":{"graph":"fix", "replayed":true}});
-        assert_eq!(response_outcome("run", &replay), Outcome::Ok);
-        let fresh = json!({"status":"complete", "outcome":"failed"});
-        assert_eq!(response_outcome("run", &fresh), Outcome::Failed);
-    }
-
-    #[test]
-    fn announced_headline_reads_the_document_before_any_attempt() {
-        let checkpoint = json!({"graph_id":"g-2", "nodes":[
-            {"id":"one", "state":"pending", "attempts":[]},
-            {"id":"two", "state":"pending", "attempts":[]}
-        ]});
-        let document = json!({"graph_id":"g-2", "nodes":[
-            {"id":"one", "route":{"alias":"senior"},
-             "attempt":{"new_worktree":{"branch":"batch/work", "base":"main"}}},
-            {"id":"two", "routes":[{"adapter":"codex", "model":"gpt"}]}
-        ]});
-        assert_eq!(
-            run_headline(&checkpoint, "pending", Some(&document), &json!({})),
-            "g-2 pending senior new:batch/work"
-        );
-        assert_eq!(
-            run_headline(&checkpoint, "pending", None, &json!({})),
-            "g-2 pending - -"
-        );
-    }
-
-    #[test]
-    fn failed_attempt_does_not_project_launch_error() {
-        let data = json!({"checkpoint":{"nodes":[
-            {"id":"task", "state":"failed", "attempts":[{}], "advance_note":"fallback_route_pinned"}
-        ]}});
-        assert!(launch_error_node(&data, Outcome::Failed).is_none());
-    }
-
-    #[test]
-    fn run_reports_the_graph_outcome_and_status_reads_remain_successful() {
-        for (status, outcome, expected) in [
-            ("complete", "failed", Outcome::Failed),
-            ("complete", "succeeded", Outcome::Ok),
-            ("complete", "partial", Outcome::Ok),
-            ("cancelled", "failed", Outcome::Cancelled),
-            ("paused", "failed", Outcome::Refused),
-            ("refused", "failed", Outcome::Refused),
-            ("pending", "partial", Outcome::Waiting),
-        ] {
-            let data = json!({"status":status,"outcome":outcome});
-            assert_eq!(response_outcome("run", &data), expected);
-            assert_eq!(response_outcome("status", &data), Outcome::Ok);
-        }
-        assert_eq!(
-            response_outcome("run", &json!({"document":{}})),
-            Outcome::Ok
-        );
-        assert_eq!(
-            response_outcome("run", &json!({"timed_out":true})),
-            Outcome::Waiting
-        );
-    }
-}
+include!("graph_interface_tests.rs");

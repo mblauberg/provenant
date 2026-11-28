@@ -14,8 +14,8 @@ use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
 pub(super) mod observation;
+use observation::wait_graph_updates;
 pub(super) use observation::wait_submission;
-use observation::{launch_retry_due, observation_clock_error, wait_graph_updates};
 
 /// A `wait_seconds` that is not a usable wait budget.
 fn wait_seconds_invalid() -> FacadeError {
@@ -26,12 +26,76 @@ pub(super) fn graph_input_reason(reason: impl std::fmt::Display) -> FacadeError 
     FacadeError::invalid(InvalidInputDetail::graph_reason(reason))
 }
 
+fn merge_review_policy_override(
+    target: &mut provenant_fabric_runtime::graph::ReviewPolicyOverride,
+    overlay: provenant_fabric_runtime::graph::ReviewPolicyOverride,
+) {
+    if overlay.later_rounds.is_some() {
+        target.later_rounds = overlay.later_rounds;
+    }
+    if overlay.adjudicator_route.is_some() {
+        target.adjudicator_route = overlay.adjudicator_route;
+    }
+    if overlay.accept_below.is_some() {
+        target.accept_below = overlay.accept_below;
+    }
+    if overlay.evidence_retries.is_some() {
+        target.evidence_retries = overlay.evidence_retries;
+    }
+    if overlay.lens_retry.is_some() {
+        target.lens_retry = overlay.lens_retry;
+    }
+}
+
+fn extract_review_policy_set(mut input: Value) -> Result<Value, FacadeError> {
+    let Some(set) = input.get_mut("set").and_then(Value::as_object_mut) else {
+        return Ok(input);
+    };
+    let entries = set
+        .iter()
+        .filter_map(|(key, value)| {
+            key.strip_prefix("domains.review.")
+                .map(|field| (key.clone(), field.to_owned(), value.clone()))
+        })
+        .collect::<Vec<_>>();
+    for (key, _, _) in &entries {
+        set.remove(key);
+    }
+    for (_, field, raw) in entries {
+        let value = if matches!(field.as_str(), "evidence_retries" | "lens_retry") {
+            match raw {
+                Value::String(text) => text
+                    .parse::<usize>()
+                    .map(|value| json!(value))
+                    .map_err(|_| FacadeError::invalid(InvalidInputDetail::Field(field.clone())))?,
+                value if value.as_u64().is_some() => value,
+                _ => return Err(FacadeError::invalid(InvalidInputDetail::Field(field))),
+            }
+        } else {
+            raw
+        };
+        if input.get("review_policy").is_none_or(Value::is_null) {
+            input["review_policy"] = json!({});
+        }
+        let Some(policy) = input
+            .get_mut("review_policy")
+            .and_then(Value::as_object_mut)
+        else {
+            return Err(FacadeError::invalid(InvalidInputDetail::Field(
+                "review_policy".into(),
+            )));
+        };
+        policy.insert(field, value);
+    }
+    Ok(input)
+}
+
 pub(super) fn seal_delivery_queue_knobs(
     config: &provenant_fabric_runtime::config::QueueConfig,
     origins: &BTreeMap<String, provenant_config::Origin>,
     authored: Option<&QueueKnobs>,
 ) -> Result<QueueKnobs, FacadeError> {
-    use provenant_fabric_runtime::graph::template::seal_queue_knobs;
+    use provenant_fabric_runtime::graph::template::seal_settings;
     use provenant_fabric_runtime::graph::{
         QUEUE_CI_SLOTS_KEY, QUEUE_MAX_PARALLEL_KEY, QUEUE_PREP_RETRIES_KEY,
     };
@@ -60,7 +124,18 @@ pub(super) fn seal_delivery_queue_knobs(
             candidates.entry(key).or_default().push(value);
         }
     }
-    let knobs = seal_queue_knobs(&candidates);
+    let shipped = QueueKnobs::default();
+    let defaults: BTreeMap<&str, usize> = BTreeMap::from([
+        (QUEUE_MAX_PARALLEL_KEY, shipped.max_parallel.value),
+        (QUEUE_CI_SLOTS_KEY, shipped.ci_slots.value),
+        (QUEUE_PREP_RETRIES_KEY, shipped.prep_retries.value),
+    ]);
+    let sealed = seal_settings(&defaults, &candidates);
+    let knobs = QueueKnobs {
+        max_parallel: sealed[QUEUE_MAX_PARALLEL_KEY].clone(),
+        ci_slots: sealed[QUEUE_CI_SLOTS_KEY].clone(),
+        prep_retries: sealed[QUEUE_PREP_RETRIES_KEY].clone(),
+    };
     knobs.validate().map_err(graph_input_reason)?;
     Ok(knobs)
 }
@@ -220,6 +295,99 @@ fn control_receipt_unfinished(
     }
 }
 
+/// The launch flags decoded once, here at the host interface edge. Every
+/// setting they select is written at `Layer::Launch`, so warnings, receipts
+/// and custody can all name the flag that chose it.
+#[derive(Clone, Debug, Default)]
+struct LaunchFlags {
+    checks_mode: Option<String>,
+    isolated: bool,
+    destination: Option<String>,
+    worktree_sharing: Option<String>,
+}
+
+impl LaunchFlags {
+    fn from_input(input: &Value) -> Self {
+        Self {
+            checks_mode: input
+                .get("checks_mode")
+                .and_then(Value::as_str)
+                .filter(|value| provenant_records::policy::ChecksMode::from_checks(value).is_some())
+                .map(str::to_owned),
+            isolated: input["isolated"] == true,
+            destination: input
+                .get("destination")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            worktree_sharing: input
+                .get("worktree_sharing")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+        }
+    }
+}
+
+/// One launch setting in the receipt, in the same `Sourced` shape other
+/// settings use: the value with the layer and origin that selected it.
+fn launch_setting(value: Value, origin: &str) -> Value {
+    json!({"value": value, "source": {"layer": "launch", "origin": origin}})
+}
+
+/// The effective launch-layer settings, reported by both `run --explain` and
+/// the launch receipt so the flags are never silently dropped.
+fn launch_settings_report(
+    flags: &LaunchFlags,
+    read_source: &provenant_cli::run::ReadSourceChoice,
+) -> Value {
+    let mut settings = serde_json::Map::new();
+    if let Some(mode) = &flags.checks_mode
+        && let Some(strength) = match provenant_records::policy::ChecksMode::from_checks(mode) {
+            Some(provenant_records::policy::ChecksMode::Strict) => Some("refuse"),
+            Some(provenant_records::policy::ChecksMode::Warn) => Some("warn"),
+            Some(provenant_records::policy::ChecksMode::Off) => Some("off"),
+            Some(provenant_records::policy::ChecksMode::On) | None => None,
+        }
+    {
+        settings.insert(
+            "policy.default".into(),
+            launch_setting(json!(strength), "--checks/--strict"),
+        );
+    }
+    if flags.isolated {
+        for (key, value, origin) in [
+            ("lanes.access", "isolated", "--isolated"),
+            ("lanes.sandbox", "on", "--isolated"),
+            ("lanes.destination.write", "new", "--isolated"),
+            ("lanes.worktree.sharing", "refuse", "--isolated"),
+        ] {
+            settings.insert(key.into(), launch_setting(json!(value), origin));
+        }
+        settings.insert(
+            "lanes.read_source".into(),
+            launch_setting(json!(read_source.source.to_string()), "--isolated"),
+        );
+        if flags.checks_mode.is_none() {
+            settings.insert(
+                "policy.default".into(),
+                launch_setting(json!("refuse"), "--isolated"),
+            );
+        }
+    }
+    if let Some(destination) = &flags.destination {
+        settings.insert(
+            "lanes.destination.write".into(),
+            launch_setting(json!(destination), "--destination"),
+        );
+    }
+    if let Some(sharing) = &flags.worktree_sharing {
+        settings.insert(
+            "lanes.worktree.sharing".into(),
+            launch_setting(json!(sharing), "--worktree-sharing"),
+        );
+    }
+    Value::Object(settings)
+}
+
 /// Attempt settings are reserved launch controls, not template parameters.
 pub(super) fn launch_input(input: &Value) -> Result<Value, FacadeError> {
     let mut input = input.clone();
@@ -254,6 +422,43 @@ pub(super) fn launch_input(input: &Value) -> Result<Value, FacadeError> {
     // `lane_knobs` records it as `lanes.brief_preamble` from the launch layer.
     if let Some(value) = input.get("preamble_file").filter(|value| !value.is_null()) {
         attempt["preamble_file"] = value.clone();
+    }
+    // The launch flags are launch-layer settings. Carry them on the attempt so
+    // `lane_knobs` seals them with Layer::Launch for every consumer: policy,
+    // destination, sharing and read source. Explicit flags applied by the CLI
+    // after `--isolated` win, and a per-attempt setting wins over the bundle.
+    let flags = LaunchFlags::from_input(&input);
+    if flags.isolated {
+        if attempt.get("lane_access").is_none() {
+            attempt["lane_access"] = json!("isolated");
+        }
+        if attempt.get("sandbox").is_none() {
+            attempt["sandbox"] = input
+                .get("sandbox")
+                .filter(|value| !value.is_null())
+                .cloned()
+                .unwrap_or_else(|| json!("on"));
+        }
+        if attempt.get("checks_mode").is_none() {
+            attempt["checks_mode"] = json!("strict");
+        }
+    }
+    if let Some(mode) = &flags.checks_mode {
+        attempt["checks_mode"] = json!(mode);
+    }
+    if let Some(destination) = &flags.destination {
+        attempt["destination"] = json!(destination);
+    }
+    if let Some(sharing) = &flags.worktree_sharing {
+        attempt["worktree_sharing"] = json!(sharing);
+    }
+    if let Some(commit) = input.get("commit").filter(|value| !value.is_null()) {
+        if commit != "own" {
+            return Err(FacadeError::invalid(InvalidInputDetail::Field(
+                "commit".into(),
+            )));
+        }
+        attempt["commit"] = json!("own_paths");
     }
     // Retain provenance when these run controls are merged onto a template.
     for field in ["token_budget", "on_budget", "budget_grace", "lane_access"] {
@@ -1025,7 +1230,7 @@ impl Factory {
         reason = "warn operator when policy is unavailable and defaults are used"
     )]
     pub(super) fn graph_input_warnings(&self, value: &Value) -> Result<Vec<String>, FacadeError> {
-        let policy =
+        let mut policy =
             match provenant_cli::config_reads::read_for(&self.context.roots, "run admission") {
                 Ok(config) => config.domains.policy.resolve_with_knobs(
                     &self.context.identity.project.to_string(),
@@ -1053,6 +1258,19 @@ impl Factory {
                     )
                 }
             };
+        let flags = LaunchFlags::from_input(value);
+        let checks_mode = flags
+            .checks_mode
+            .as_deref()
+            .and_then(provenant_records::policy::ChecksMode::from_checks)
+            .or_else(|| {
+                flags
+                    .isolated
+                    .then_some(provenant_records::policy::ChecksMode::Strict)
+            });
+        if let Some(mode) = checks_mode {
+            policy.apply_checks(mode);
+        }
         Ok(
             provenant_fabric_runtime::graph::refusal::input_warnings(value, &policy)
                 .into_iter()
@@ -1389,6 +1607,7 @@ impl Factory {
                 "integration_branch",
                 "limits",
                 "delivery",
+                "review_policy",
                 "review_base",
                 "decision_session",
                 "retry",
@@ -1928,7 +2147,7 @@ impl Factory {
             return super::queue_dispatch::submit_queue(self, input, budget, cancel, announce);
         }
         let submitted = input;
-        let prepared = launch_input(input)?;
+        let prepared = extract_review_policy_set(launch_input(input)?)?;
         let queue_launch = if prepared.get("queue_item").is_some() {
             let registry =
                 super::queue_registry::QueueRegistry::open(self.context.roots.state.as_path())
@@ -2098,6 +2317,16 @@ impl Factory {
             }
             input["set"] = Value::Object(typed);
         }
+        // `--isolated` pins the read source to this HEAD at the launch layer.
+        // Resolve it once here, before admission reads the source choice, so
+        // the sealed subject carries the Launch provenance too.
+        if LaunchFlags::from_input(&input).isolated
+            && input.get("source").is_none_or(Value::is_null)
+            && let Some(head) = provenant_os::git::git_executable()
+                .and_then(|git| provenant_run::resolve_git_base(&git, &self.cwd, "HEAD").ok())
+        {
+            input["source"] = json!(head);
+        }
         let input = &input;
         let source_choice = input.get("source").filter(|value| !value.is_null());
         if let Some(choice) = source_choice
@@ -2138,7 +2367,7 @@ impl Factory {
             read,
             warnings: subject_warnings,
             review_warning,
-            read_source,
+            mut read_source,
             writer_base_setting,
             read_pin,
             writer_warnings,
@@ -2150,6 +2379,16 @@ impl Factory {
             cancel,
         )?;
         input_warnings.extend(subject_warnings);
+        let flags = LaunchFlags::from_input(input);
+        if flags.isolated {
+            // `--isolated` pins the read source to the admitted HEAD at the
+            // launch layer, without re-reading a ref after admission.
+            if let Some(head) = subject.as_ref().map(|subject| subject.head.to_string()) {
+                read_source.source = provenant_cli::run::ReadSource::Ref(head);
+            }
+            read_source.layer = Layer::Launch;
+            read_source.origin = Some("--isolated".into());
+        }
         let review_pin = subject
             .as_ref()
             .filter(|_| review_launch)
@@ -2371,6 +2610,13 @@ impl Factory {
             )
             .map_err(graph_patch_error)?
         };
+        if let Some(launch_policy) = input.get("review_policy").filter(|value| !value.is_null()) {
+            let launch_policy = decode_input::<
+                provenant_fabric_runtime::graph::ReviewPolicyOverride,
+            >(launch_policy.clone(), "review_policy")?;
+            let target = document.review_policy.get_or_insert_with(Default::default);
+            merge_review_policy_override(target, launch_policy);
+        }
         // Borrow the optional base: the prompt binding below still needs it
         // after the document has been given its own copy.
         // The host overwrites any caller-supplied subject and review base with
@@ -2617,13 +2863,14 @@ impl Factory {
         // Static admission is the single compile gate: a launch no longer seals
         // the submission patch above, so admit here to keep every entry on the
         // same typed (redacted) refusal.
-        provenant_fabric_runtime::graph::admit_candidate(
+        provenant_fabric_runtime::graph::admit_candidate_with_review_policy(
             &document,
             None,
             &[],
             &self.context.config.graph.limits,
             &self.context.config.graph.budget,
             Some(&self.requester_lane_path()?),
+            &self.context.review_policy,
         )
         .map_err(FacadeError::graph_candidate)?;
         if !writer_launch && let Some(selected) = &default_source {
@@ -2792,6 +3039,7 @@ impl Factory {
                         config.origins.get("domains.fabric.batch.max_parallel").map(|origin| json!(origin)).unwrap_or(json!("default"))
                     }
                 },
+                "launch_settings": launch_settings_report(&flags, &read_source),
             }));
         }
         let mut result = match self.launch_submission(
@@ -2826,6 +3074,7 @@ impl Factory {
             &writer_base_setting,
             writer_base_source,
         );
+        result["launch_settings"] = launch_settings_report(&flags, &read_source);
         result["named"] = json!({
             "requested": requested, "graph": id, "replayed": replayed, "superseded": taken,
         });
@@ -3395,7 +3644,7 @@ impl Factory {
         let (run, wait_observation, observation_wait, remote_read_allowed) = if replayed {
             (run, None, None, true)
         } else {
-            self.wait_document(run, input, budget, cancel, &path, &scratch)?
+            self.wait_document(run, input, budget, cancel)?
         };
         let timed_out = !replayed
             && input.get("wait_seconds").and_then(Value::as_u64).is_some()
@@ -3972,8 +4221,6 @@ impl Factory {
         input: &Value,
         budget: WaitBudget,
         cancel: &CancelToken,
-        document: &Path,
-        scratch: &Path,
     ) -> Result<
         (
             provenant_fabric_runtime::graph::GraphRun,
@@ -4003,31 +4250,20 @@ impl Factory {
             &mut observation,
             Some(self.context.identity.host),
             |id| {
-                let observed = self.graph(
+                let _ = super::unified::graph_wait::wake_graph_for_reader(
+                    self,
+                    id,
+                    crate::fabric::progress::WakeReason::InlineRun,
+                    wait,
+                    cancel,
+                );
+                self.graph(
                     GraphInput::Status {
                         extra: Default::default(),
                         id: id.to_owned(),
                     },
                     wait,
                     cancel,
-                )?;
-                // A waited submission owns admission progress. Status itself remains
-                // read-only; only a due launch retry is advanced under the journal lock.
-                let due =
-                    launch_retry_due(&observed, &self.clock).map_err(observation_clock_error)?;
-                if !due || wait.remaining(self.clock.mono_now()).as_micros() == 0 {
-                    return Ok(observed);
-                }
-                self.graph_with_scratch(
-                    GraphInput::Run {
-                        extra: Default::default(),
-                        document: document.to_owned(),
-                    },
-                    wait,
-                    cancel,
-                    Some(scratch),
-                    None,
-                    None,
                 )
             },
             |run| {

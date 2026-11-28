@@ -90,11 +90,20 @@ observation cannot substitute for the original free locks or positive non-occupa
 - Why: a stale process checkpoint cannot prove same-boot guardian death; the original kernel lock
   supplies that evidence without PID-reuse heuristics.
 
-A launch is uncertain only once its reservation may record a handoff. A host that cannot hold
+A launch is uncertain only once a guardian may hold its whole launch message; the outcome follows
+what the guardian acknowledged, not whether a write started. A host that cannot hold
 provider custody refuses before that point: the attempt ends with `unsupported_platform` and
 its custody is withdrawn. A launch cancelled or refused before it spawns records `never_spawned`
-on every host. Admission and provisioning precede that boundary, so a graph may be admitted and
-its planned worktrees created on such a host; the platform refusal is neither an admission nor a
+on every host: so does one whose guardian failed to spawn, closed the channel before the message
+was delivered or refused it before accepting custody. Each ends as a local refusal under its own
+cause: its reservation is withdrawn, the
+exit is kept as evidence and the attempt is never `LAUNCH_UNKNOWN`. The exit is recorded before
+the withdrawal: while it cannot be written the attempt keeps protected custody. Reconcile then
+records the exit, and only once it is durable withdraws a read-only attempt or settles a writer
+lost and releases its custody; a reconcile interrupted after the exit finishes on its next pass.
+The writer's terminal record carries no exit evidence, since a never-spawned exit has nothing to
+import, so its private evidence is retained. Admission and provisioning precede that boundary,
+so a graph may be admitted and its planned worktrees created on such a host; the platform refusal is neither an admission nor a
 route refusal.
 - Why: a launch that cannot start must not look like a lost lane, and a missing custody backend
   must not hide whether the graph itself was admissible.
@@ -483,10 +492,9 @@ entry is filtered, copied or rewritten.
 
 ### Lane pull requests
 
-`lanes.pr` resolves to `never` (the default), `draft` or `allowed`, and every
-effective value names the layer that set it. The default is `never`, so a leaf
-implement writer lane in a graph does not open a pull request; the chair owns
-publication after settlement. Host, launch and node settings opt a lane in.
+`lanes.pr` resolves to `never`, `draft` or `allowed` (the default), and every
+effective value names the layer that set it. The deliver template sets `never`
+so the chair owns publication after settlement. Host, launch and node settings may override it.
 Set `attempt.pr = "draft"` or `"allowed"` on a graph node, or pass
 `--set attempt.pr=draft` at launch; the node override is reported as the launch
 source and takes precedence over the host setting.
@@ -502,7 +510,7 @@ refused; `draft` adds `--draft`
 to `pr create`, permits edit, close, comment and review, and refuses promotion,
 merge, reopen, lock, unlock, update-branch, revert and forge writes. Unknown PR
 subcommands are refused under both restrictive policies until classified;
-`allowed` forwards unchanged. A missing or unknown value falls back to `never`.
+`allowed` forwards unchanged. A missing or unknown value falls back to `allowed`.
 The effective value and source appear in the writer preamble, the launch
 receipt and `run --explain`. This is a cooperative policy mediating ordinary
 `gh` use, not a sandbox against a lane deliberately evading it: a lane that runs

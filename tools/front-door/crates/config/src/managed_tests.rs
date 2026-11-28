@@ -2,6 +2,7 @@
 use super::*;
 use provenant_core::RootInputs;
 use provenant_os::clock::SystemClock;
+use provenant_records::Layer;
 use provenant_records::{SourceInput, source_digest};
 use provenant_test_support::IdentityPathResolver;
 use std::{
@@ -156,7 +157,7 @@ mod account_sync;
 // Spec: docs/specs/state.md#config-never-widens-authority
 #[test]
 fn targets_retain_supplied_project_policy() {
-    use provenant_records::policy::{Source, Strength};
+    use provenant_records::policy::Strength;
     let fixture = Fixture::new();
     let mut settings = crate::policy::Settings::default();
     settings.projects.insert(
@@ -184,8 +185,12 @@ fn targets_retain_supplied_project_policy() {
         Strength::Refuse
     );
     assert_eq!(
-        targets.policy.rule("INSTALL_HOOKS_UNAVAILABLE").source,
-        Source::Project
+        targets
+            .policy
+            .rule("INSTALL_HOOKS_UNAVAILABLE")
+            .source
+            .layer,
+        Layer::Project
     );
 }
 
@@ -3650,7 +3655,7 @@ fn declared_hooks_render_and_symlinked_configs_refuse_before_any_write() {
             "INSTALL_HOOKS_UNAVAILABLE".to_owned(),
             provenant_records::policy::Strength::Refuse,
         )]),
-        provenant_records::policy::Source::Project,
+        provenant_records::Layer::Project,
     );
     f.targets.policy = std::sync::Arc::new(strict);
     assert!(matches!(
@@ -4734,4 +4739,83 @@ fn install_leaves_codex_config_alone() {
     apply(&f);
     assert!(!f.home.join(".codex/config.toml").exists());
     assert!(f.link().is_symlink());
+}
+
+#[test]
+fn unchanged_install_target_is_detected_from_the_receipt() {
+    use provenant_records::{AbsolutePath, FileDigest, InstallReceipt, SourceDigest};
+
+    let target = InstallReceipt {
+        extra: Default::default(),
+        schema_version: provenant_records::INSTALL_RECEIPT_SCHEMA_VERSION,
+        state_format_version: provenant_records::STATE_FORMAT_VERSION,
+        live_record_format: None,
+        source_digest: SourceDigest::from_bytes([1; 32]),
+        manifest_digest: FileDigest::from_bytes([2; 32]),
+        asset_digest: SourceDigest::from_bytes([3; 32]),
+        target: "fixture".into(),
+        toolchain: "fixture".into(),
+        bin_dir: AbsolutePath::new(&PathBuf::from("/bin")).unwrap(),
+        harnesses: Vec::new(),
+        harness_targets: Vec::new(),
+        entries: Vec::new(),
+        migrations: Vec::new(),
+    };
+    let mut same = target.clone();
+    same.migrations.push("later-step".into());
+    assert!(
+        super::same_install_target(&target, &same),
+        "a different migration log does not change the installed target"
+    );
+    let mut moved_head = target.clone();
+    moved_head.source_digest = SourceDigest::from_bytes([9; 32]);
+    assert!(!super::same_install_target(&target, &moved_head));
+    let mut moved_asset = target.clone();
+    moved_asset.asset_digest = SourceDigest::from_bytes([8; 32]);
+    assert!(!super::same_install_target(&target, &moved_asset));
+}
+
+#[test]
+fn install_lock_holder_is_published_and_removed_with_the_lock() {
+    let temp = tempfile::tempdir().unwrap();
+    let install = temp.path().join("install");
+    fs::create_dir(&install).unwrap();
+    // A deterministic clock pins the holder's start time to the injected
+    // boundary; ambient wall time would not report this value.
+    let clock = provenant_core::TestClock::new(
+        provenant_core::WallTime::from_unix_seconds(1_700_000_000).unwrap(),
+        provenant_core::MonoTime::from_micros(0),
+    );
+    let guard = super::publish_install_lock_holder(&install, &clock);
+    let detail = super::install_lock_holder_detail(&install);
+    assert!(
+        detail.contains(&format!("pid {}", std::process::id())),
+        "{detail}"
+    );
+    assert!(detail.contains("started 1700000000"), "{detail}");
+    assert!(detail.contains("version "), "{detail}");
+    drop(guard);
+    assert!(!super::install_lock_holder_path(&install).exists());
+    assert_eq!(
+        super::install_lock_holder_detail(&install),
+        "holder details unavailable"
+    );
+}
+
+#[test]
+fn unchanged_install_target_is_a_no_op_under_the_lock() {
+    let f = Fixture::new();
+    let plan = f.plan();
+    let clock = SystemClock::new();
+    let cancel = CancelToken::new();
+    let ctx = context(&clock, &cancel);
+    let first = install(&plan, &ctx, &mut Reporter::default(), &Smoke, false).unwrap();
+    assert!(!first.already_installed);
+    assert!(!first.actions.is_empty());
+    let second = install(&plan, &ctx, &mut Reporter::default(), &Smoke, false).unwrap();
+    assert!(
+        second.already_installed,
+        "an unchanged receipt under the install lock is a no-op"
+    );
+    assert!(second.actions.is_empty());
 }

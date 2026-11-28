@@ -9,12 +9,6 @@
 //! its space-joined path and calls its verb.
 //!
 //! Spec: docs/specs/rust-workspace.md#one-owner-per-command-domain
-//!
-//! The registry contract returns `CommandError` by value; it is the type the
-//! result envelope already carries, and boxing it would allocate on every
-//! refusal to satisfy a size heuristic. One scope-level allow keeps the
-//! contracted signature across every domain.
-#![allow(clippy::result_large_err)]
 mod accounts;
 mod adapter;
 mod admit;
@@ -25,6 +19,7 @@ mod ci;
 mod cloud;
 mod config;
 mod console;
+mod contracts;
 mod custody;
 mod declaration;
 mod disk;
@@ -50,6 +45,7 @@ mod process_tree;
 mod quota;
 mod reconcile;
 mod result;
+mod retire;
 mod retry;
 mod root;
 mod route;
@@ -82,6 +78,7 @@ pub static DOMAINS: &[&Domain] = &[
     &ci::DOMAIN,
     &cloud::DOMAIN,
     &config::DOMAIN,
+    &contracts::DOMAIN,
     &console::DOMAIN,
     &custody::DOMAIN,
     &declaration::DOMAIN,
@@ -107,6 +104,7 @@ pub static DOMAINS: &[&Domain] = &[
     &process_tree::DOMAIN,
     &quota::DOMAIN,
     &reconcile::DOMAIN,
+    &retire::DOMAIN,
     &result::DOMAIN,
     &retry::DOMAIN,
     &root::DOMAIN,
@@ -165,5 +163,16 @@ pub(crate) fn mismatched() -> Result<Outcome, CommandError> {
         "the command registry dispatched a command to the wrong domain",
         None,
         "report this internal dispatch error; rerun the command",
+    ))
+}
+
+/// A batch contract may parse before its execution slice lands. Keep that
+/// state explicit at the command boundary instead of dispatching as success.
+pub(crate) fn not_implemented(path: &str) -> Result<Outcome, CommandError> {
+    Err(CommandError::new(
+        "CONTRACT_NOT_IMPLEMENTED",
+        format!("`{path}` is declared but its execution path has not landed"),
+        None,
+        "continue after the command implementation is available",
     ))
 }

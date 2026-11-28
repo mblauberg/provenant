@@ -1449,6 +1449,14 @@ pub fn depletion_facts(
         },
     )
     .map_err(|error| text(&error))?;
+    // `routing.pin` is a declared knob; the registry validates its value at
+    // load. An absent key keeps the declared default (`family`).
+    let pin = resolved
+        .knobs
+        .get(provenant_routing::RoutePin::KEY)
+        .and_then(|sourced| sourced.value.as_str())
+        .and_then(|value| value.parse::<provenant_routing::RoutePin>().ok())
+        .unwrap_or_default();
     Ok(provenant_fabric_runtime::graph::DepletionFacts {
         config: routing_config,
         catalogue,
@@ -1460,6 +1468,7 @@ pub fn depletion_facts(
         intent,
         confidential: profile.confidential,
         now,
+        pin,
     })
 }
 

@@ -532,6 +532,22 @@ impl SparingTracker {
 
 pub use crate::process_os::census::SystemProcessObserver;
 
+/// The observer whose boot key matches the one a record carries. A fixture
+/// build runs holders under an injected boot key the system observer never
+/// reports, so reading them with it would call a live fixture holder gone.
+#[cfg(feature = "fixture")]
+pub(crate) fn boot_observer(recorded: &str) -> &'static dyn ProcessObserver {
+    if recorded == "fixture-recorded-boot-v1" {
+        &crate::fixture::RecordedBootObserver
+    } else {
+        &SystemProcessObserver
+    }
+}
+#[cfg(not(feature = "fixture"))]
+pub(crate) fn boot_observer(_recorded: &str) -> &'static dyn ProcessObserver {
+    &SystemProcessObserver
+}
+
 /// Current-process observation for excluding the management caller from a
 /// repository worker census. This grants no signal or adoption authority.
 pub fn current_process() -> ProcessObservation {

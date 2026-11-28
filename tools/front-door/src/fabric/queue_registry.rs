@@ -243,6 +243,11 @@ pub(super) fn bounded_wait_deadlines(
     ))
 }
 
+/// Directory and lock used for every delivery queue registry operation.
+pub(crate) fn registry_lock_path(state: &Path) -> std::path::PathBuf {
+    state.join("fabric/delivery-queue").join(REGISTRY_LOCK)
+}
+
 /// Serialises all queue ownership decisions in the host state domain.
 pub(super) struct QueueRegistry {
     directory: Directory,
@@ -250,8 +255,9 @@ pub(super) struct QueueRegistry {
 
 impl QueueRegistry {
     pub(super) fn open(state: &Path) -> Result<Self, String> {
-        let path = state.join("fabric/delivery-queue");
-        let directory = provenant_config::private_directory(&path, true)
+        let lock = registry_lock_path(state);
+        let path = lock.parent().ok_or("registry lock has no parent")?;
+        let directory = provenant_config::private_directory(path, true)
             .map_err(|error| format!("delivery queue state unavailable: {error}"))?;
         Ok(Self { directory })
     }
@@ -703,6 +709,33 @@ impl QueueRegistry {
         self.claim_runnable_for(Some(queue_id), runnable_parked, now, budget, cancel, clock)
     }
 
+    /// Run the ordinary queue selection but persist and return only the named
+    /// item's claim. Earlier runnable items still occupy their place in the
+    /// selection, so a reader cannot jump the queue.
+    pub(super) fn claim_item_with_parked(
+        &self,
+        (queue_id, item_id): (&str, &str),
+        runnable_parked: &BTreeSet<QueueIdentity>,
+        now: WallTime,
+        budget: WaitBudget,
+        cancel: &CancelToken,
+        clock: &dyn Clock,
+    ) -> Result<QueueSchedule, String> {
+        self.locked(budget, cancel, clock, |registry| {
+            let queue = registry
+                .queues
+                .get_mut(queue_id)
+                .ok_or_else(|| format!("unknown queue `{queue_id}`"))?;
+            Ok(claim_one_item(
+                queue_id,
+                queue,
+                item_id,
+                runnable_parked,
+                now,
+            ))
+        })
+    }
+
     fn claim_runnable_for(
         &self,
         only_queue: Option<&str>,
@@ -1002,6 +1035,27 @@ fn launch_state_allowed(state: QueueItemState, checkpoint_exists: bool) -> bool 
         | QueueItemState::Resuming
         | QueueItemState::Terminal => false,
     }
+}
+
+fn claim_one_item(
+    queue_id: &str,
+    queue: &mut QueueRecord,
+    item_id: &str,
+    runnable_parked: &BTreeSet<QueueIdentity>,
+    now: WallTime,
+) -> QueueSchedule {
+    let before = queue.items.clone();
+    let mut schedule = QueueSchedule::default();
+    claim_runnable_items(queue_id, queue, runnable_parked, now, &mut schedule);
+    for (current, previous) in queue.items.iter_mut().zip(before) {
+        if current.identity.item != item_id {
+            *current = previous;
+        }
+    }
+    schedule
+        .launch
+        .retain(|(_, item)| item.identity.item == item_id);
+    schedule
 }
 
 fn claim_runnable_items(
@@ -1466,6 +1520,28 @@ mod tests {
             overflow_reason: None,
             items,
         }
+    }
+
+    #[test]
+    fn selecting_one_item_preserves_order_and_leaves_other_claims_untouched() {
+        let mut queue = queue(vec![
+            item(identity("first"), 0, QueueItemState::Pending),
+            item(identity("second"), 1, QueueItemState::Pending),
+        ]);
+        let now = WallTime::from_micros(0).unwrap();
+        let skipped = claim_one_item("queue-1", &mut queue, "second", &BTreeSet::new(), now);
+        assert!(skipped.launch.is_empty());
+        assert!(
+            queue
+                .items
+                .iter()
+                .all(|item| item.state == QueueItemState::Pending)
+        );
+        let selected = claim_one_item("queue-1", &mut queue, "first", &BTreeSet::new(), now);
+        assert_eq!(selected.launch.len(), 1);
+        assert_eq!(selected.launch[0].1.identity.item, "first");
+        assert_eq!(queue.items[0].state, QueueItemState::Launching);
+        assert_eq!(queue.items[1].state, QueueItemState::Pending);
     }
 
     #[test]

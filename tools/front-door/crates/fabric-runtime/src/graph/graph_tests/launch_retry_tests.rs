@@ -8,8 +8,12 @@ fn uncertain_handoff_reobserves_one_guardian_on_the_same_route() {
         calls: Vec<(AttemptKey, GraphRoute)>,
         guardians: usize,
         now: Option<provenant_core::WallTime>,
+        warnings: Vec<provenant_records::Warning>,
     }
     impl AttemptOwner for UncertainOwner {
+        fn take_launch_warnings(&mut self) -> Vec<provenant_records::Warning> {
+            std::mem::take(&mut self.warnings)
+        }
         type Error = FacadeError;
         fn worktree_layout(&self) -> provenant_config::WorktreeLayoutPort {
             provenant_config::PortTable::builtin().worktree_layout
@@ -32,7 +36,14 @@ fn uncertain_handoff_reobserves_one_guardian_on_the_same_route() {
             self.calls.push((key.clone(), route.clone()));
             if self.calls.len() == 1 {
                 self.guardians += 1;
+                let code = provenant_records::warning::WarningCode("CUSTODY_CHANGED");
+                self.warnings.push(provenant_records::Warning::new(
+                    code,
+                    "fixture custody changed",
+                    provenant_records::warning::detected_source(code),
+                ));
                 Err(FacadeError::LaunchUnknown {
+                    detail: Some("fixture handshake timed out".into()),
                     operation_id: provenant_core::OperationId::parse("uncertain-operation")
                         .unwrap(),
                 })
@@ -57,6 +68,19 @@ fn uncertain_handoff_reobserves_one_guardian_on_the_same_route() {
         pending.checkpoint.nodes[0].advance_owner_code.as_deref(),
         Some("LAUNCH_UNKNOWN")
     );
+    // Status names the launcher's cause, not only the code.
+    let note = pending.checkpoint.nodes[0]
+        .status_note()
+        .unwrap_or_default();
+    assert!(note.contains("fixture handshake timed out"), "{note}");
+    // The failed launch's warnings stay on its node.
+    assert!(
+        pending.checkpoint.nodes[0]
+            .warnings
+            .iter()
+            .any(|warning| warning.message == "fixture custody changed")
+    );
+    assert!(owner.warnings.is_empty());
     assert_eq!(pending.checkpoint.nodes[0].attempts.len(), 1);
     owner.now = Some(at(5));
     let done = advance(&document, &mut owner, &mut journal).unwrap();
@@ -153,10 +177,7 @@ fn launch_retry_policy_limits_failures_and_persists_the_source() {
         }
         let node = &journal.0.as_ref().unwrap().nodes[0];
         assert_eq!(node.state, NodeState::Blocked);
-        assert_eq!(
-            node.advance_code.as_deref(),
-            Some("launch_retry_exhausted")
-        );
+        assert_eq!(node.advance_code.as_deref(), Some("launch_retry_exhausted"));
         let last = node
             .last_launch_retry
             .as_ref()
@@ -383,15 +404,17 @@ fn settling_writer_lease_waits_but_a_live_holder_refuses() {
     };
 
     let mut waiting = new_checkpoint();
-    assert!(crate::graph::defer_launch_contention(
-        &mut waiting,
-        0,
-        &settling,
-        Some(at(0)),
-        allowance,
-        policy.clone(),
-    )
-    .unwrap());
+    assert!(
+        crate::graph::defer_launch_contention(
+            &mut waiting,
+            0,
+            &settling,
+            Some(at(0)),
+            allowance,
+            policy.clone(),
+        )
+        .unwrap()
+    );
     assert_eq!(waiting.nodes[0].state, NodeState::Running);
     assert_eq!(
         waiting.nodes[0].advance_owner_code.as_deref(),
@@ -405,15 +428,17 @@ fn settling_writer_lease_waits_but_a_live_holder_refuses() {
     );
 
     let mut refused = new_checkpoint();
-    assert!(!crate::graph::defer_launch_contention(
-        &mut refused,
-        0,
-        &live,
-        Some(at(0)),
-        allowance,
-        policy,
-    )
-    .unwrap());
+    assert!(
+        !crate::graph::defer_launch_contention(
+            &mut refused,
+            0,
+            &live,
+            Some(at(0)),
+            allowance,
+            policy,
+        )
+        .unwrap()
+    );
     assert_eq!(refused.nodes[0].state, NodeState::Pending);
     assert!(refused.nodes[0].launch_retry.is_none());
 }
@@ -721,7 +746,7 @@ fn nonterminal_observation_transitions_need_no_owner_or_journal() {
         input_cap_source: None,
         input_manifest: None,
         usage: None,
-    cause: None,
+        cause: None,
     };
     let mut state = NodeState::Pending;
     apply_unknown_observation(&mut attempt, &mut state, None);
@@ -778,10 +803,7 @@ fn a_permanent_refusal_blocks_the_node_at_once_with_reason_and_remedy() {
     assert!(progress.launch_retry.is_none());
     assert_eq!(progress.attempts.len(), 1);
     assert_eq!(progress.attempts[0].state, AttemptState::Starting);
-    assert_eq!(
-        progress.advance_code.as_deref(),
-        Some("launch_refused")
-    );
+    assert_eq!(progress.advance_code.as_deref(), Some("launch_refused"));
     let reason = progress.advance_note.as_deref().expect("blocked reason");
     assert!(reason.contains("invalid input"));
     assert!(reason.contains("provenant retry g-test/one"));
@@ -863,6 +885,7 @@ fn launch_retry_kinds_are_decided_from_the_typed_error_only() {
             path: None,
         },
         FacadeError::LaunchUnknown {
+            detail: None,
             operation_id: operation,
         },
     ] {
@@ -975,5 +998,103 @@ fn concurrent_launch_waits_the_full_provisioning_allowance_for_a_held_writer_loc
     assert!(
         reason.contains("provenant retry"),
         "settled contention must offer retry: {reason}"
+    );
+}
+
+// A deferred launch keeps the warnings its own provisioning raised; the next
+// node launched in the same advance never inherits them.
+#[test]
+fn a_contention_deferred_launch_keeps_its_own_warnings() {
+    use crate::coordination::facade::FacadeError;
+    struct DeferringOwner {
+        now: provenant_core::WallTime,
+        warnings: Vec<provenant_records::Warning>,
+        launched: Vec<String>,
+    }
+    impl AttemptOwner for DeferringOwner {
+        type Error = FacadeError;
+        fn take_launch_warnings(&mut self) -> Vec<provenant_records::Warning> {
+            std::mem::take(&mut self.warnings)
+        }
+        fn worktree_layout(&self) -> provenant_config::WorktreeLayoutPort {
+            provenant_config::PortTable::builtin().worktree_layout
+        }
+        fn actor(&self) -> String {
+            "fixture".into()
+        }
+        fn wall_now(&self) -> Option<provenant_core::WallTime> {
+            Some(self.now)
+        }
+        fn provision_child_worktree(
+            &mut self,
+            _: &str,
+            _: &str,
+            _owner: Option<provenant_core::Digest>,
+            _: Option<&WriterCarryRequest<'_>>,
+        ) -> Result<Option<ChildWorktreeProvision>, Self::Error> {
+            let code = provenant_records::warning::CARRY_SETTING_UNREADABLE;
+            self.warnings.push(provenant_records::Warning::new(
+                code,
+                "fixture carry setting is unreadable",
+                provenant_records::warning::detected_source(code),
+            ));
+            Err(FacadeError::WriterLockBusy { holder: None })
+        }
+        fn observe_or_start(
+            &mut self,
+            key: &AttemptKey,
+            _: NodeInput<'_>,
+            _: &GraphRoute,
+            _: AccessMode,
+            _: Option<&str>,
+            _: Replay<'_>,
+        ) -> Result<AttemptObservation, Self::Error> {
+            self.launched.push(key.node_id.clone());
+            Ok(terminal(GraphAttemptOutcome::Succeeded))
+        }
+    }
+    let mut writer = node("writer", route("first"));
+    writer.access = AccessMode::WorktreeWrite;
+    writer.worktree = Some(".worktrees/topic-fix".into());
+    writer.provision_worktree = true;
+    writer.source = Some(SourceBinding::Commit {
+        commit: "a".repeat(40),
+    });
+    let mut document = graph(vec![writer, node("reader", route("first"))]);
+    document.schema_version = 2;
+    let (plan, _) = validate_plan(&document).unwrap();
+    let digest = plan_digest(&plan).unwrap().to_string();
+    let mut checkpoint =
+        transitions::initial_checkpoint(&document, &plan, digest, None, None, None);
+    transitions::record_provisioning(
+        &plan.nodes[0],
+        &mut checkpoint,
+        0,
+        ".worktrees/topic-fix",
+        &"a".repeat(40),
+    );
+    let mut journal = MemoryJournal(Some(checkpoint));
+    let mut owner = DeferringOwner {
+        now: at(0),
+        warnings: Vec::new(),
+        launched: Vec::new(),
+    };
+    let advanced = advance(&document, &mut owner, &mut journal).unwrap();
+    let nodes = &advanced.checkpoint.nodes;
+    assert_eq!(nodes[0].state, NodeState::Running, "the writer is deferred");
+    assert!(nodes[0].attempts.is_empty());
+    assert_eq!(owner.launched, ["reader"], "the reader launches meanwhile");
+    let codes = |index: usize| -> Vec<String> {
+        nodes[index]
+            .warnings
+            .iter()
+            .map(|warning| warning.code.as_ref().to_owned())
+            .collect()
+    };
+    assert_eq!(codes(0), ["CARRY_SETTING_UNREADABLE"]);
+    assert!(codes(1).is_empty(), "{:?}", codes(1));
+    assert_eq!(
+        journal.0.as_ref().unwrap().nodes[0].warnings,
+        nodes[0].warnings
     );
 }

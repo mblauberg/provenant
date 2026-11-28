@@ -499,7 +499,7 @@ mod gap_policy_tests {
     use super::*;
     use crate::{
         Layer, Source,
-        policy::{Policy, Source as PolicySource, Strength},
+        policy::{Policy, Strength},
     };
     use std::collections::BTreeMap;
 
@@ -562,7 +562,7 @@ mod gap_policy_tests {
                 let mut policy = Policy::default();
                 policy.overlay(
                     &BTreeMap::from([(policy_code(field).to_string(), strength)]),
-                    PolicySource::Host,
+                    Layer::Host,
                 );
                 let policy_request = LaunchRequest {
                     gap_policy: CapabilityOverlay::default().gap_policy("command", &policy),
@@ -680,7 +680,7 @@ mod gap_policy_tests {
                     Strength::Refuse,
                 ),
             ]),
-            PolicySource::Host,
+            Layer::Host,
         );
         let overlay = CapabilityOverlay {
             entries: vec![AdapterOverride {
@@ -1066,7 +1066,7 @@ mod batch_invariant_tests {
     fn no_gap_setting_changes_a_refuse_only_field() {
         use crate::{
             Layer, Source,
-            policy::{Policy, Source as PolicySource, Strength},
+            policy::{Policy, Strength},
         };
         use std::collections::BTreeMap;
 
@@ -1116,7 +1116,7 @@ mod batch_invariant_tests {
                     ("LAUNCH_EFFORT_UNSUPPORTED".to_string(), strength),
                     ("LAUNCH_IMAGE_INPUT_UNSUPPORTED".to_string(), strength),
                 ]),
-                PolicySource::Host,
+                Layer::Host,
             );
             for field in [
                 LaunchField::Resume,

@@ -799,7 +799,7 @@ fn account_spend_and_expiring_override_ignore_reserve() -> Result<(), Box<dyn st
                     provenant_records::policy::Strength::Warn,
                 ),
             ]),
-            provenant_records::policy::Source::Dispatch,
+            provenant_records::Layer::Route,
         );
         let mut ctx = context(&catalogue, &config, now()?);
         ctx.registry = &registry;

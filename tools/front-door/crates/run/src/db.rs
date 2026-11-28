@@ -18,6 +18,9 @@ pub struct ExecutionContext {
     pub actor_id: ActorId,
     pub read_prompts: bool,
 }
+/// The least time a launcher waits for a guardian to accept custody: the
+/// guardian's own bound for reading the launch message.
+pub const HANDSHAKE_FLOOR: std::time::Duration = std::time::Duration::from_secs(10);
 pub struct Request<'a> {
     pub clock: &'a dyn Clock,
     pub cancel: &'a CancelToken,
@@ -30,8 +33,20 @@ impl Request<'_> {
     }
     /// Custody ACK uses one bounded store-integrity allowance, without a
     /// separate launch retry window. Missing proof still refuses the transfer.
+    ///
+    /// The handshake is a process exchange, not a store lock wait, so it
+    /// ignores a thread's scoped busy timeout and never drops below
+    /// [`HANDSHAKE_FLOOR`]. A nonblocking status read that advances a graph
+    /// scopes its store waits to zero; a zero handshake can never confirm a
+    /// handoff and would leave the launched reservation fenced.
     pub fn handshake_budget(&self) -> WaitBudget {
-        self.lock_budget()
+        let timeout = provenant_sqlite::configured_busy_timeout().max(HANDSHAKE_FLOOR);
+        WaitBudget::up_to(
+            self.clock.mono_now(),
+            provenant_core::DurationMicros::from_micros(
+                u64::try_from(timeout.as_micros()).unwrap_or(u64::MAX),
+            ),
+        )
     }
     pub(crate) fn check(&self) -> Result<()> {
         if self.cancel.is_cancelled() {
@@ -132,6 +147,18 @@ impl RunStore {
         request: &Request<'_>,
     ) -> Result<Option<Self>> {
         Self::open_read_only_mode(context, request, false)
+    }
+
+    /// [`Self::open_read_only`] with SQLite's busy wait bounded by `busy`, so a
+    /// caller with its own deadline never waits past it on a contended store.
+    pub fn open_read_only_within(
+        context: &ExecutionContext,
+        request: &Request<'_>,
+        busy: std::time::Duration,
+    ) -> Result<Option<Self>> {
+        provenant_sqlite::with_busy_timeout(busy, || {
+            Self::open_read_only_mode(context, request, false)
+        })
     }
 
     /// Inspect an existing store, including committed WAL frames. SQLite may
@@ -407,4 +434,35 @@ pub(crate) fn decode_attempt(bytes: &[u8]) -> Result<AttemptRecord> {
 
 pub(crate) fn sql_int(value: u64) -> Result<i64> {
     i64::try_from(value).map_err(|_| RunError::Validation("integer exceeds SQLite range"))
+}
+
+#[cfg(test)]
+mod handshake_budget_tests {
+    use super::*;
+    use provenant_core::{MonoTime, TestClock, WallTime};
+
+    /// A nonblocking store scope must not make the custody handshake
+    /// nonblocking: the guardian could never accept and the launch would stay
+    /// fenced as LAUNCH_UNKNOWN.
+    #[test]
+    fn handshake_ignores_a_scoped_nonblocking_store_wait() {
+        let clock = TestClock::new(
+            WallTime::from_micros(0).unwrap(),
+            MonoTime::from_micros(1_000),
+        );
+        let cancel = CancelToken::new();
+        let call = Request {
+            clock: &clock,
+            cancel: &cancel,
+        };
+        let (lock, handshake) =
+            provenant_sqlite::with_busy_timeout(std::time::Duration::ZERO, || {
+                (call.lock_budget(), call.handshake_budget())
+            });
+        assert_eq!(lock.remaining(clock.mono_now()).as_micros(), 0);
+        assert!(
+            handshake.remaining(clock.mono_now()).as_micros()
+                >= u64::try_from(HANDSHAKE_FLOOR.as_micros()).unwrap()
+        );
+    }
 }

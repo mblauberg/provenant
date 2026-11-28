@@ -16,18 +16,6 @@ impl fmt::Display for Layer {
 /// Maximum UTF-8 bytes in each projected field, after terminal escaping.
 pub const MAX_DIAGNOSTIC_BYTES: usize = 1024;
 
-/// The hard boundary protected by a typed refusal, if any.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum BoundaryClass {
-    #[default]
-    None,
-    LaneGit,
-    Credentials,
-    Integrity,
-    Authority,
-}
-
 /// Closed preparation failures; paths and provider output never enter receipts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -307,49 +295,12 @@ pub enum PacingReserveSetting {
     Account,
     Free,
 }
-/// Source of the reserve selected by routing. Adapter overrides need the
-/// configuration loader's per-field origin before they are projected.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PacingSettingSource {
-    Configuration,
-    ShippedDefault,
-    Unresolved,
-}
-impl PacingSettingSource {
-    pub fn description(self) -> &'static str {
-        match self {
-            Self::Configuration => "host configuration",
-            Self::ShippedDefault => "shipped default",
-            Self::Unresolved => "origin unavailable",
-        }
-    }
-}
-
 /// Details identifying the account, window and configuration behind a pacing hold.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PacingHold {
     pub account: String,
     pub window: String,
     pub setting_path: String,
-}
-
-/// Origin of a lane-port block count in the handed-off plan.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PortSettingSource {
-    Configuration,
-    ShippedDefault,
-    RecordedPlan,
-}
-impl PortSettingSource {
-    pub fn description(self) -> &'static str {
-        match self {
-            Self::Configuration => "host configuration",
-            Self::ShippedDefault => "shipped default",
-            Self::RecordedPlan => "recorded plan",
-        }
-    }
 }
 
 /// Configurable budgets for copying retained provider state. These never alter
@@ -417,12 +368,12 @@ pub enum ResourceFact {
     },
     LanePorts {
         blocks: u32,
-        origin: PortSettingSource,
+        origin: Layer,
     },
     PacingReserve {
         percent: u8,
         setting: PacingReserveSetting,
-        origin: PacingSettingSource,
+        origin: Layer,
         #[serde(flatten)]
         hold: Box<PacingHold>,
     },
@@ -695,6 +646,10 @@ pub struct Diagnostic {
     pub detail: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next: Option<String>,
+    /// Typed retry metadata that command envelopes preserve when projecting
+    /// this diagnostic into their error class.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_class: Option<crate::command_result::ErrorClass>,
     #[serde(skip)]
     pub fact: Option<DiagnosticFact>,
 }
@@ -708,6 +663,10 @@ pub struct DiagnosticFields {
     pub detail: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next: Option<String>,
+    /// Internal projection metadata. The final envelope stores this in its
+    /// established `class` field, so this must not serialize a second key.
+    #[serde(skip)]
+    pub error_class: Option<crate::command_result::ErrorClass>,
 }
 impl From<&Diagnostic> for DiagnosticFields {
     fn from(value: &Diagnostic) -> Self {
@@ -715,6 +674,7 @@ impl From<&Diagnostic> for DiagnosticFields {
             category: value.category.clone(),
             detail: value.detail.clone(),
             next: value.next.clone(),
+            error_class: value.error_class.clone(),
         }
     }
 }
@@ -728,6 +688,7 @@ impl Diagnostic {
             category: None,
             detail: None,
             next: None,
+            error_class: None,
             fact: None,
         }
     }
@@ -741,6 +702,10 @@ impl Diagnostic {
     }
     pub fn next(mut self, value: impl AsRef<str>) -> Self {
         self.next = Some(safe_text(value.as_ref()));
+        self
+    }
+    pub fn error_class(mut self, value: crate::command_result::ErrorClass) -> Self {
+        self.error_class = Some(value);
         self
     }
     pub fn fact(mut self, fact: DiagnosticFact) -> Self {

@@ -30,7 +30,14 @@ pub use fabric::Fabric;
 pub use quota::Quota;
 pub use route::Route;
 pub use workflow::Workflow;
+#[cfg(test)]
+#[allow(clippy::panic)]
+#[path = "advice_scan_tests.rs"]
+mod advice_scan_tests;
 mod grammar;
+mod help_constraints;
+mod wait_args;
+use help_constraints::{WAIT_JSON_CONTRACT, constraints};
 pub mod inbox;
 pub mod install;
 pub mod limits;
@@ -846,6 +853,14 @@ fn validate(inv: &Invocation) -> Result<(), CliError> {
         return invalid("--json is invalid for hook/internal execution");
     }
     match &inv.command {
+        Command::Run(request)
+            if request.common.host.len() > 1
+                || matches!(request.common.host.first(), Some(HostArg::All)) =>
+        {
+            return invalid(
+                "run accepts exactly one named --host; aggregation is not available for run",
+            );
+        }
         Command::Route(Route::Resolve(resolve)) => {
             if resolve.name.is_none()
                 && resolve.request.model.is_none()
@@ -1293,6 +1308,8 @@ pub struct Call<'a> {
     /// Space-joined command path, such as `quota tick`.
     pub leaf: &'a str,
     pub process: &'a dyn Process,
+    /// Shared host selection and bounded deadline resolved by the process edge.
+    pub common: Option<VerbCommon>,
 }
 
 /// The domains the binary registered at its process edge.
@@ -1324,7 +1341,6 @@ pub fn domains() -> &'static [&'static Domain] {
 pub(crate) fn install_test_domains() {
     static FIXTURE: std::sync::OnceLock<&'static [&'static Domain]> = std::sync::OnceLock::new();
     let fixture = FIXTURE.get_or_init(|| {
-        #[allow(clippy::result_large_err)]
         fn unused(_: &Call) -> Result<Outcome, CommandError> {
             Ok(Outcome::Ok)
         }
@@ -1355,69 +1371,6 @@ pub(crate) fn install_test_domains() {
     });
     install_domains(fixture);
 }
-const WAIT_JSON_CONTRACT: &str = "With --json, wait writes JSONL: zero or more event objects followed by one terminal command-result envelope. Events have an `event` field; the terminal envelope has `command`, `status` and `data`. Settlement events are emitted without --follow; --follow also emits each observed transition.";
-
-fn constraints(path: &str) -> Vec<String> {
-    if path == "provenant output" {
-        return vec![
-            "target is NAME[/NODE[#N]]; a node reads its newest settled attempt".into(),
-            format!(
-                "--tail N bounds the last N bytes; --tail-lines N bounds the last N lines and clamps above {0}",
-                limits::TAIL_LINES
-            ),
-            format!(
-                "a result page shows whole up to {} KiB, then a short head and tail; --final --to FILE exports the complete sealed result; at most {} changed paths of {} bytes are named; missing evidence is null",
-                (limits::FINAL_HEAD_BYTES + limits::FINAL_TAIL_BYTES) / 1024,
-                limits::OUTPUT_PATHS,
-                limits::PATH_BYTES
-            ),
-            "peer tail scans share a 30-second deadline and reject changing artifacts".into(),
-        ];
-    }
-    let values: &[&str] = match path {
-        "provenant run" => &[
-            "run needs a template; `provenant templates` lists them",
-            "--set binds a string parameter as written and any other type as TOML; quote nothing for a string",
-            "--plan sets plan=true for implementation templates",
-            "--file reads a graph document; a plain text brief goes in BRIEF, --brief or --brief-file",
-            "inside a lane, work joins the calling node's graph as a child",
-        ],
-        "provenant route resolve" => &[
-            "exactly one of NAME, model or route",
-            "fallback has at most two distinct models",
-        ],
-        "provenant telemetry stats" => &[
-            "dates mean midnight UTC; timestamps need an offset",
-            "since must precede until",
-        ],
-        "provenant retry" => &[
-            "target is NAME[/NODE[#N]]: a graph recovers, a node starts its next attempt, an attempt continues",
-            "a settled graph of one node infers that node; a wider graph needs /NODE",
-        ],
-        "provenant chair log append" => &[
-            "operation-id and issued-at are generated when omitted; supply both for planned retries",
-        ],
-        "provenant land" => &[
-            "checks once by default; wait without a value means one hour; use --wait=30m for a duration",
-            "required checks must register and pass on the same head; head changes refuse merging",
-            "already-merged PRs retry safe cleanup without CI or another merge",
-        ],
-        "provenant status" => &[
-            "every unsettled graph is shown; settled graphs from the last 24 hours fill up to 20 rows, with an omission count",
-            "--all pages every graph with --limit and --cursor",
-        ],
-        "provenant wait" => &[
-            "every target resolves before the wait starts; no target waits for this project's running graphs",
-            "`--pr --until complete` defaults to domains.wait.pr_complete_timeout_seconds (60 minutes); an explicit --timeout still wins",
-            "exit 0 success, 1 settled without success, 2 invalid or not found, 5 needs input, 124 timeout, 130 cancelled",
-            WAIT_JSON_CONTRACT,
-        ],
-        "provenant hook" | "provenant internal" => &["json transport is invalid for execution"],
-        _ => &[],
-    };
-    values.iter().map(|value| (*value).into()).collect()
-}
-
 #[cfg(test)]
 #[allow(clippy::panic)]
 mod tests {
@@ -1549,6 +1502,17 @@ mod tests {
             "--worktree",
             ".",
         ]);
+    }
+
+    #[test]
+    fn run_accepts_declared_source_values_and_refs() {
+        for source in ["auto", "live", "default_branch", "feature/topic"] {
+            let invocation = valid(&["run", "task", "Review the tree", "--source", source]);
+            let Command::Run(request) = invocation.command else {
+                panic!("expected run");
+            };
+            assert_eq!(request.source.as_deref(), Some(source));
+        }
     }
 
     #[test]
@@ -2173,7 +2137,7 @@ mod tests {
         };
         assert_eq!(request.template.as_deref(), Some("explore"));
         assert_eq!(request.brief.as_deref(), Some("Inspect the code"));
-        assert_eq!(request.brief_text, None);
+        assert!(request.brief_text.is_empty());
         assert_eq!(request.name.as_deref(), Some("inspect"));
         assert_eq!(request.route.as_deref(), Some("junior"));
         assert_eq!(request.over, ["cli", "runtime"]);
@@ -2191,7 +2155,7 @@ mod tests {
         else {
             panic!("run")
         };
-        assert_eq!(named.brief_text.as_deref(), Some("Named brief"));
+        assert_eq!(named.brief_text, ["Named brief"]);
         invalid(&["run", "explore", "positional", "--brief", "named"]);
         valid(&[
             "retry",
@@ -2250,8 +2214,30 @@ mod tests {
         valid(&["templates"]);
         valid(&["upgrade", "--verify", "--dry-run"]);
         valid(&[
-            "upgrade", "--verify", "--host", "peer-a", "--route", "junior",
+            "upgrade",
+            "--verify",
+            "--verify-host",
+            "peer-a",
+            "--route",
+            "junior",
         ]);
+        valid(&["upgrade", "--host", "all"]);
+        invalid(&["upgrade", "--hosts", "all"]);
+        valid(&["run", "task", "--brief", "one", "--brief", "two"]);
+        valid(&[
+            "run",
+            "task",
+            "--timeout",
+            "90s",
+            "--source",
+            "feature/topic",
+        ]);
+        valid(&["config", "explain", "domains.wait.advance"]);
+        valid(&["tick", "--task", "graphs"]);
+        valid(&["retire", "graph:example"]);
+        valid(&["ci", "patch", "pr", "17", "--apply"]);
+        valid(&["lane", "share", "refuse"]);
+        valid(&["queue", "hold", "issue:17"]);
         invalid(&["upgrade", "--dry-run"]);
         valid(&[
             "templates",
@@ -2266,6 +2252,98 @@ mod tests {
         valid(&["run", "task", "--plan", "example"]);
         for flag in ["--preset", "--prompt-file", "--manifest"] {
             invalid(&["run", "task", flag, "example"]);
+        }
+    }
+
+    #[test]
+    fn upgrade_host_and_verify_host_are_independent() {
+        let Command::Upgrade(upgrade) = valid(&[
+            "upgrade",
+            "--host",
+            "all",
+            "--verify",
+            "--verify-host",
+            "peer-a",
+        ])
+        .command
+        else {
+            panic!("upgrade command");
+        };
+        assert_eq!(upgrade.common.host, vec![crate::grammar::HostArg::All]);
+        assert_eq!(upgrade.host.as_deref(), Some("peer-a"));
+    }
+
+    #[test]
+    fn common_host_and_timeout_options_parse_on_owned_verbs() {
+        let cases: &[&[&str]] = &[
+            &["status", "--host", "host-a", "--timeout", "90s"],
+            &["output", "task", "--host", "host-a", "--timeout", "10m"],
+            &["result", "task", "--host", "host-a", "--timeout", "2h"],
+            &["events", "--host", "host-a", "--timeout", "90s"],
+            &["wait", "task", "--host", "host-a", "--timeout", "10m"],
+            &["gc", "--host", "host-a", "--timeout", "2h"],
+            &["run", "task", "--host", "host-a", "--timeout", "90s"],
+            &["upgrade", "--host", "all", "--timeout", "10m"],
+            &[
+                "ci",
+                "failures",
+                "--pr",
+                "12",
+                "--host",
+                "host-a",
+                "--timeout",
+                "2h",
+            ],
+            &[
+                "ci",
+                "failures",
+                "pr",
+                "12",
+                "--host",
+                "host-a",
+                "--timeout",
+                "90s",
+            ],
+            &[
+                "ci",
+                "patch",
+                "pr",
+                "12",
+                "--apply",
+                "--host",
+                "host-a",
+                "--timeout",
+                "10m",
+            ],
+            &[
+                "retire",
+                "graph:graph-a",
+                "--host",
+                "host-a",
+                "--timeout",
+                "2h",
+            ],
+            &[
+                "queue",
+                "hold",
+                "issue:12",
+                "--host",
+                "host-a",
+                "--timeout",
+                "90s",
+            ],
+            &[
+                "queue",
+                "--host",
+                "all",
+                "--timeout",
+                "10m",
+                "hold",
+                "issue:12",
+            ],
+        ];
+        for words in cases {
+            valid(words);
         }
     }
     #[test]
@@ -2812,238 +2890,6 @@ mod tests {
         );
     }
 
-    /// Every `provenant <words...>` written in a user-facing Rust string
-    /// literal must name a live command, so a retired or misspelt name in
-    /// advice, a `next:` value or an error fails CI like
-    /// `scripts/check-retired-names` does for module names.
-    ///
-    /// The extraction is deliberately simple: scan the `.rs` files under
-    /// `tools/front-door/src` and `tools/front-door/crates/*/src` at test time,
-    /// skip `#[cfg(test)]` modules (their strings are assertions, not advice)
-    /// and clap derive attributes, read ordinary double-quoted string literals
-    /// (byte strings are hashes, not advice), and take the words after a
-    /// lowercase `provenant ` while they look like subcommands. A flag, a
-    /// placeholder (`NAME`, `N`, `PATH`), a format brace or a value such as
-    /// `fix-login/review` ends the path. Resolution walks the same clap command
-    /// model the CLI parses with; once a command is a leaf, the remaining words
-    /// are example arguments and are ignored.
-    #[test]
-    fn advice_in_string_literals_names_live_commands() {
-        use std::path::{Path, PathBuf};
-
-        fn workspace_root() -> PathBuf {
-            // CARGO_MANIFEST_DIR is tools/front-door/crates/cli.
-            Path::new(env!("CARGO_MANIFEST_DIR"))
-                .parent()
-                .and_then(Path::parent)
-                .expect("cli crate lives under tools/front-door/crates")
-                .to_owned()
-        }
-
-        fn rust_sources(root: &Path) -> Vec<PathBuf> {
-            let mut roots = vec![root.join("src")];
-            if let Ok(crates) = std::fs::read_dir(root.join("crates")) {
-                for entry in crates.flatten() {
-                    let src = entry.path().join("src");
-                    if src.is_dir() {
-                        roots.push(src);
-                    }
-                }
-            }
-            let mut files = Vec::new();
-            let mut stack = roots;
-            while let Some(dir) = stack.pop() {
-                if let Ok(entries) = std::fs::read_dir(dir) {
-                    for entry in entries.flatten() {
-                        let path = entry.path();
-                        if path.is_dir() {
-                            stack.push(path);
-                        } else if path.extension().is_some_and(|ext| ext == "rs") {
-                            files.push(path);
-                        }
-                    }
-                }
-            }
-            files.sort();
-            files
-        }
-
-        // One-line ordinary double-quoted string literal contents. A `b"`
-        // prefix marks a byte string (a hash or discriminator), not advice.
-        fn string_literals(code: &str) -> Vec<String> {
-            let bytes = code.as_bytes();
-            let mut out = Vec::new();
-            let mut i = 0;
-            while i < bytes.len() {
-                if bytes[i] != b'"' {
-                    i += 1;
-                    continue;
-                }
-                let byte_string = i > 0
-                    && bytes[i - 1] == b'b'
-                    && (i < 2 || !bytes[i - 2].is_ascii_alphanumeric());
-                let start = i + 1;
-                i += 1;
-                while i < bytes.len() && bytes[i] != b'"' {
-                    i += usize::from(bytes[i] == b'\\') + 1;
-                }
-                if !byte_string && i <= bytes.len() {
-                    out.push(code[start..i].to_owned());
-                }
-                i += 1;
-            }
-            out
-        }
-
-        // The words after each `provenant ` in a literal, while they look like
-        // subcommands: lowercase identifiers. Uppercase placeholders, flags,
-        // braces and value punctuation stop the path. An empty path is prose
-        // such as "provenant OpenCode hook", not a command.
-        fn command_words(literal: &str) -> Vec<Vec<String>> {
-            const NEEDLE: &[u8] = b"provenant ";
-            let bytes = literal.as_bytes();
-            let mut found = Vec::new();
-            let mut pos = 0;
-            while pos + NEEDLE.len() <= bytes.len() {
-                if &bytes[pos..pos + NEEDLE.len()] != NEEDLE
-                    || (pos > 0 && bytes[pos - 1].is_ascii_alphanumeric())
-                {
-                    pos += 1;
-                    continue;
-                }
-                let mut cursor = pos + NEEDLE.len();
-                let mut words = Vec::new();
-                loop {
-                    while bytes.get(cursor) == Some(&b' ') {
-                        cursor += 1;
-                    }
-                    let begin = cursor;
-                    while cursor < bytes.len()
-                        && (bytes[cursor].is_ascii_lowercase()
-                            || bytes[cursor].is_ascii_digit()
-                            || bytes[cursor] == b'-'
-                            || bytes[cursor] == b'_')
-                    {
-                        cursor += 1;
-                    }
-                    if cursor == begin || !bytes[begin].is_ascii_lowercase() {
-                        break;
-                    }
-                    words.push(literal[begin..cursor].to_owned());
-                }
-                if !words.is_empty() {
-                    found.push(words);
-                }
-                pos += NEEDLE.len();
-            }
-            found
-        }
-
-        fn resolves(model: &clap::Command, words: &[String]) -> Result<(), String> {
-            let mut current = model;
-            for (index, word) in words.iter().enumerate() {
-                if let Some(child) = current.find_subcommand(word) {
-                    current = child;
-                } else if current.get_subcommands().next().is_none() {
-                    // A leaf command: the rest are example arguments.
-                    return Ok(());
-                } else {
-                    return Err(format!(
-                        "`{word}` is not a subcommand of `provenant {}`",
-                        words[..index].join(" ")
-                    ));
-                }
-            }
-            Ok(())
-        }
-
-        let root = workspace_root();
-        let model = command_model();
-        let mut failures = Vec::new();
-        let mut checked = 0;
-        for file in rust_sources(&root) {
-            let text = std::fs::read_to_string(&file).expect("read workspace Rust source");
-            let relative = file.strip_prefix(&root).unwrap_or(&file);
-            let mut skip_depth: Option<usize> = None;
-            let mut pending_test = false;
-            let mut depth = 0usize;
-            for (line_number, line) in text.lines().enumerate() {
-                let trimmed = line.trim_start();
-                // Track braces outside string literals so a `#[cfg(test)]`
-                // module can be skipped without breaking the file's depth.
-                let code = line.split("//").next().unwrap_or(line);
-                let mut mask = String::with_capacity(code.len());
-                let mut in_string = false;
-                let mut escaped = false;
-                for ch in code.chars() {
-                    if in_string {
-                        if escaped {
-                            escaped = false;
-                        } else if ch == '\\' {
-                            escaped = true;
-                        } else if ch == '"' {
-                            in_string = false;
-                        }
-                        mask.push(' ');
-                    } else if ch == '"' {
-                        in_string = true;
-                        mask.push(' ');
-                    } else {
-                        mask.push(ch);
-                    }
-                }
-                let before = depth;
-                for ch in mask.chars() {
-                    match ch {
-                        '{' => depth += 1,
-                        '}' => depth = depth.saturating_sub(1),
-                        _ => {}
-                    }
-                }
-                if skip_depth.is_some_and(|target| before <= target && depth < target) {
-                    skip_depth = None;
-                }
-                if skip_depth.is_some() {
-                    continue;
-                }
-                if trimmed.starts_with("#[cfg(test)]") {
-                    pending_test = true;
-                    continue;
-                }
-                if pending_test && trimmed.starts_with("mod ") && trimmed.contains('{') {
-                    skip_depth = Some(depth);
-                    pending_test = false;
-                    continue;
-                }
-                if trimmed.starts_with('#') {
-                    continue; // clap derive attributes declare the tree itself
-                }
-                if trimmed.starts_with("//") {
-                    continue;
-                }
-                for literal in string_literals(code) {
-                    for words in command_words(&literal) {
-                        checked += 1;
-                        if let Err(reason) = resolves(&model, &words) {
-                            failures.push(format!(
-                                "{}:{}: `provenant {}`: {reason}",
-                                relative.display(),
-                                line_number + 1,
-                                words.join(" ")
-                            ));
-                        }
-                    }
-                }
-            }
-        }
-        assert!(checked > 0, "the advice scan found no command strings");
-        assert!(
-            failures.is_empty(),
-            "advice names commands that are not live:\n{}",
-            failures.join("\n")
-        );
-    }
-
     /// Target parsers declared on the command model, with the option that takes one.
     fn target_commands() -> Vec<(
         Vec<String>,
@@ -3351,7 +3197,7 @@ mod tests {
             };
             assert_eq!(
                 crate::wait::Settings::default().timeout(
-                    wait.timeout,
+                    wait.common.timeout.map(|timeout| timeout.seconds()),
                     &crate::wait::Origin::compiled(Default::default())
                 ),
                 provenant_core::MAX_LANE_RUNTIME_SECONDS
@@ -3559,6 +3405,47 @@ mod tests {
             "2026-10-24",
         ]); // timebomb: allow tests the equal-window boundary
         invalid(&["telemetry", "stats", "--since", "2026-10-24T00:00:00"]); // timebomb: allow offset requirement
+    }
+
+    #[test]
+    fn worktree_remove_since_accepts_only_a_git_oid() {
+        let oid = "a".repeat(40);
+        let invocation = valid(&[
+            "worktree",
+            "remove",
+            "--merged",
+            "--integration",
+            "main",
+            "--since",
+            &oid,
+        ]);
+        let Command::Worktree(Worktree::Remove(remove)) = invocation.command else {
+            panic!("worktree remove");
+        };
+        assert_eq!(
+            remove.since,
+            Some(provenant_core::GitOid::parse(&oid).unwrap())
+        );
+        invalid(&[
+            "worktree",
+            "remove",
+            "--merged",
+            "--integration",
+            "main",
+            "--since",
+            "not-an-oid",
+        ]);
+        invalid(&[
+            "worktree",
+            "remove",
+            "--merged",
+            "--integration",
+            "main",
+            "--since",
+            &oid,
+            "--branch",
+            "lane",
+        ]);
     }
 
     #[test]

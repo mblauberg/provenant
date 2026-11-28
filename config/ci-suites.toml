@@ -86,14 +86,15 @@ cost_minutes = 5
 jobs = ["repo-checks"]
 inert = []
 
-# Linux Rust: format, lint, dependency policy, generated reference and the
-# affected-crate test partitions.
+# Linux Rust: format, lint, dependency policy, generated reference and
+# artefacts, and the affected-crate test partitions.
 [[suite]]
 name = "rust"
 tier = "pr"
 cost_minutes = 12
 jobs = [
   "generated-reference",
+  "generated",
   "rust-lint",
   "rust-dependencies",
   "rust-test-archive",

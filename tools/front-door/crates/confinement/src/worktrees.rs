@@ -4,6 +4,7 @@ mod archive;
 pub use archive::{ArchiveError, ArchiveInfo, ArchiveReport, collect_archives};
 mod census;
 mod census_excusal;
+mod cleanliness;
 mod context;
 mod custody;
 mod doctor;
@@ -25,6 +26,7 @@ mod removal;
 mod setup;
 mod stranded;
 pub use census::*;
+pub use cleanliness::*;
 pub use context::{
     with_context, with_context_using_facts, with_context_using_workers,
     with_context_using_workers_and_facts,
@@ -64,8 +66,8 @@ pub use owner::{
 pub use refs::{RefLedger, RefObservation, RefRecord};
 pub use removal::{
     Artefact, ArtefactClass, ArtefactOutcome, ArtefactState, RefDeletion, branch_checked_out,
-    created_branch, delete_ref_leased, delete_ref_leased_when, has_commit, landing_in_repo,
-    ref_tip,
+    created_branch, delete_ref_leased, delete_ref_leased_when, guard_destructive_branch,
+    has_commit, landing_in_repo, ref_tip,
 };
 pub use stranded::{EditStats, edit_stats};
 
@@ -244,6 +246,19 @@ pub enum WorktreeError {
     DetachedWorktree { head: GitOid },
     #[error("worktree writer is busy{}", .holder.as_ref().map_or_else(String::new, |attempt| format!(", held by attempt {attempt}")))]
     WriterBusy { holder: Option<AttemptId> },
+    /// A boundary-free custody refusal produced by the shared destruction
+    /// guard: an operation would destroy another live lane's work or branch.
+    #[error("error [{code}] {message}")]
+    CustodyRefused {
+        code: &'static str,
+        message: String,
+        cause: Option<String>,
+        holder: Option<AttemptId>,
+    },
+    /// A typed refusal from the shared custody policy, preserved to the
+    /// command result boundary with its setting source and next step.
+    #[error("error [{code}] {message}", code = .0.code, message = .0.message)]
+    CustodyCommand(Box<provenant_records::CommandError>),
     #[error(
         "writer lease held by attempt {holder} (branch {branch}, worktree {}, reservation age {age}, live: {live})",
         .worktree.display(), live = .live.map_or("unknown", |live| if live { "true" } else { "false" })

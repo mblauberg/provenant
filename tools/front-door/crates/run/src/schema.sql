@@ -49,4 +49,4 @@ CREATE TABLE cursors (
  project TEXT NOT NULL, actor TEXT NOT NULL, selection TEXT NOT NULL,
  sequence INTEGER NOT NULL CHECK(sequence>=0), PRIMARY KEY(project,actor,selection)
 ) STRICT;
-PRAGMA user_version=16;
+PRAGMA user_version=17;
