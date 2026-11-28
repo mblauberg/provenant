@@ -1303,8 +1303,12 @@ fn submit_after_probe(
     probe: impl FnOnce() -> Result<provenant_fabric_runtime::hosts::PeerResponse, PeerError>,
     submit: impl FnOnce() -> Result<provenant_fabric_runtime::hosts::PeerResponse, PeerError>,
 ) -> Result<provenant_fabric_runtime::hosts::PeerResponse, PeerFailure> {
-    if let Ok(response) = probe() {
-        check_submit_health(peer, response.result)?;
+    match probe() {
+        Ok(response) => check_submit_health(peer, response.result)?,
+        Err(error) if error.code() == provenant_fabric_runtime::hosts::PEER_UPGRADE_PENDING => {
+            return Err(peer_failure(peer, &error));
+        }
+        Err(_) => {}
     }
     submit().map_err(|error| peer_failure(peer, &error))
 }

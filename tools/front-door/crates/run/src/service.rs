@@ -838,6 +838,7 @@ error_kinds! {
     ProjectUnlocatable => "PEER_PROJECT_UNLOCATABLE", "The peer cannot locate the project for this launch; run without --host.";
     PeerUnavailable => "PEER_UNAVAILABLE", "The peer host could not be reached.";
     PeerVersion => "PEER_VERSION", "The peer host runs an incompatible version.";
+    PeerUpgradePending => "PEER_UPGRADE_PENDING", "Peer releases differ while an upgrade is in progress.";
     OwnerUnavailable => "OWNER_UNAVAILABLE", "The run owner is unavailable in this build or host.";
     BaseUnreachable => "BASE_UNREACHABLE", "The Git base cannot be resolved or fetched.";
     BranchExists => "BRANCH_EXISTS", "The branch already exists.";

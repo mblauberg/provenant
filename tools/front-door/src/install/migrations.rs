@@ -863,6 +863,34 @@ fn held_store_locks(state_root: &Path) -> Vec<String> {
             }
         }
     }
+    if let Ok(projects) = std::fs::read_dir(state_root.join("worktrees")) {
+        for project in projects.flatten() {
+            if !project.file_type().is_ok_and(|kind| kind.is_dir()) {
+                continue;
+            }
+            let Ok(slots) = std::fs::read_dir(project.path()) else {
+                continue;
+            };
+            for slot in slots.flatten() {
+                if !slot.file_type().is_ok_and(|kind| kind.is_dir()) {
+                    continue;
+                }
+                let Ok(directory) = Directory::open_anchor(&slot.path()) else {
+                    continue;
+                };
+                if matches!(
+                    directory.try_flock_foreign(OsStr::new("writer.lock"), LockMode::Exclusive),
+                    Ok(ForeignLock::Held)
+                ) {
+                    held.push(format!(
+                        "worktrees/{}/{}/writer.lock",
+                        project.file_name().to_string_lossy(),
+                        slot.file_name().to_string_lossy()
+                    ));
+                }
+            }
+        }
+    }
     held.sort();
     held.dedup();
     held

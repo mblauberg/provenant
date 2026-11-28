@@ -533,6 +533,25 @@ fn submit_preflight_refuses_old_or_incapable_stub_before_launch()
 }
 
 #[test]
+fn peer_upgrade_pending_keeps_its_code_through_the_cli_projection() {
+    let error = super::FacadeError::RunKind {
+        run_code: "PEER_UPGRADE_PENDING".into(),
+        next: "wait 5 seconds and retry".into(),
+        detail: None,
+        resource: None,
+    };
+    let (outcome, kind) = super::facade_outcome(&error);
+    assert_eq!(outcome, provenant_records::Outcome::Error);
+    assert_eq!(kind.code(), "PEER_UPGRADE_PENDING");
+    let projected =
+        provenant_records::CommandError::new(kind.code(), error.to_string(), None, "retry");
+    assert!(matches!(
+        projected.class,
+        provenant_records::command_result::ErrorClass::Transient { .. }
+    ));
+}
+
+#[test]
 fn graph_setting_origins_distinguish_domain_default_from_explicit_same_value()
 -> Result<(), Box<dyn std::error::Error>> {
     use provenant_records::Layer;

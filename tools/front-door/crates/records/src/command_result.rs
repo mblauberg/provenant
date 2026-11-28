@@ -128,12 +128,18 @@ impl CommandError {
         repair: impl Into<String>,
     ) -> Self {
         let repair = repair.into();
+        let code = code.into();
+        let class = if code == "PEER_UPGRADE_PENDING" {
+            ErrorClass::Transient { retry_at: None }
+        } else {
+            ErrorClass::Operation
+        };
         Self(Box::new(CommandErrorPayload {
             diagnostic: None,
-            code: code.into(),
+            code,
             message: message.into(),
             cause: cause.map(Into::into),
-            class: ErrorClass::Operation,
+            class,
             subject: None,
             setting: None,
             root: None,

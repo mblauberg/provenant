@@ -630,6 +630,59 @@ pub fn peer(
             crate::roots::Product::Required,
         )?;
         let home = host.home;
+        // A fixture-create request names a project that does not exist yet.
+        // Its release probe authenticates the host and sender without opening
+        // or creating that project; the actual create still takes the normal
+        // project and mutation path below.
+        let probe = decode_request(&bytes)?;
+        if matches!(probe.action, PeerAction::Health { .. })
+            && probe
+                .extra
+                .get("release_probe")
+                .and_then(|value| value.as_bool())
+                == Some(true)
+        {
+            let local = provenant_config::lookup_host(&host.roots)?.ok_or(PeerError::Project)?;
+            let config = provenant_cli::config_reads::read_for(&host.roots, "fabric context")?;
+            probe.validate(local, &config.domains.fabric, &home)?;
+            let response = PeerResponse {
+                extra: Default::default(),
+                version: 1,
+                protocol: probe.protocol,
+                host: local,
+                project: probe.project.key,
+                result: PeerResult::Health {
+                    data: provenant_fabric_runtime::hosts::PeerHealth {
+                        extra: Default::default(),
+                        host: local,
+                        available: true,
+                        execution: false,
+                        release: env!("CARGO_PKG_VERSION").into(),
+                        run_capabilities: provenant_fabric_runtime::runs::RunCapabilities {
+                            submit: false,
+                            list: false,
+                            status: false,
+                            wait: false,
+                            cancel: false,
+                            resume: false,
+                            output: false,
+                            events: false,
+                        },
+                        readiness: provenant_fabric_runtime::hosts::PeerReadiness::reporting(),
+                    },
+                    extra: Default::default(),
+                },
+            };
+            let projector = provenant_confinement::publication::Projector::ambient()?;
+            let mut reply =
+                provenant_fabric_runtime::hosts::encode_peer_response(response, &projector)?;
+            reply.push(b'\n');
+            provenant_os::sys::hook_io::write_stdout(
+                &reply,
+                Instant::now() + std::time::Duration::from_secs(30),
+            )?;
+            return Ok(());
+        }
         if !in_process {
             let state = host.roots.state.clone();
             // Only an unreachable agent falls back; a sent request is never repeated.
