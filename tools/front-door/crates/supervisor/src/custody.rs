@@ -586,6 +586,10 @@ impl CustodyLease {
     pub fn scope(&self) -> Scope {
         self.reservation.scope
     }
+    /// Whether launch recorded a handoff; until then no guardian was contacted.
+    pub fn launched(&self) -> bool {
+        self.launched
+    }
     pub fn lock_directory(&self) -> &Directory {
         &self.lock_directory
     }
@@ -1351,18 +1355,13 @@ impl CustodyHandle {
             .is_ok_and(|metadata| metadata.same_identity(identity))
     }
 }
-#[derive(Debug)]
+#[derive(Debug, Error)]
+#[error("{error}")]
 pub struct LaunchFailure {
     pub error: Box<CustodyError>,
     pub custody: PublicationReservation,
     pending_exit: Option<Box<ProcessExit>>,
 }
-impl std::fmt::Display for LaunchFailure {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.error.fmt(f)
-    }
-}
-impl std::error::Error for LaunchFailure {}
 impl LaunchFailure {
     /// Retry the bounded never-spawned outcome while retaining attempt custody.
     /// Conflicting terminal bytes are never replaced.

@@ -650,7 +650,7 @@ impl RunStore {
             reservation,
         );
         if let Err(failure) = launched {
-            match launch_failure(&failure.error) {
+            match launch_failure(&policy, &failure.error, lease.launched()) {
                 uncertain @ HandOff::Uncertain(_) => return Err(uncertain),
                 refused => local_or_withdraw!(Err::<(), _>(refused)),
             }
@@ -659,16 +659,23 @@ impl RunStore {
     }
 }
 
-/// A launch failure is uncertain once the reservation may record a handoff.
-/// A host that cannot hold provider custody refuses before that point, so the
-/// attempt ends with a typed cause instead of waiting for a receipt that never
-/// comes.
-fn launch_failure(error: &custody::CustodyError) -> HandOff {
+/// A launch failure is uncertain only once the lease recorded a handoff, or
+/// a never-spawned exit whose settlement reconciliation owns. Before that no
+/// guardian was contacted: the failure is a local refusal under its own cause
+/// and the caller withdraws the lease, instead of fencing an attempt for a
+/// receipt that never comes. A host that cannot hold provider custody keeps
+/// its typed cause.
+fn launch_failure(
+    policy: &provenant_records::policy::Policy,
+    error: &custody::CustodyError,
+    launched: bool,
+) -> HandOff {
     match error {
         custody::CustodyError::UnsupportedPlatform => HandOff::TypedLocal {
             message: format!("provider custody: {error}"),
             cause: CauseKind::UnsupportedPlatform,
         },
+        _ if !launched => custody_local(policy, "provider custody", error),
         _ => HandOff::Uncertain(error.to_string()),
     }
 }
@@ -1008,13 +1015,20 @@ mod tests {
     // Spec: docs/specs/run-launch.md#admission-and-custody
     #[test]
     fn only_a_possible_handoff_makes_a_launch_failure_uncertain() {
-        assert!(matches!(
-            launch_failure(&custody::CustodyError::UnsupportedPlatform),
-            HandOff::TypedLocal {
-                cause: CauseKind::UnsupportedPlatform,
-                ..
-            }
-        ));
+        let policy = test_policy();
+        for launched in [false, true] {
+            assert!(matches!(
+                launch_failure(
+                    &policy,
+                    &custody::CustodyError::UnsupportedPlatform,
+                    launched
+                ),
+                HandOff::TypedLocal {
+                    cause: CauseKind::UnsupportedPlatform,
+                    ..
+                }
+            ));
+        }
         for error in [
             custody::CustodyError::HandoffUnknown("fixture".into()),
             custody::CustodyError::ProfileHandoffUnknown("fixture".into()),
@@ -1022,10 +1036,26 @@ mod tests {
             custody::CustodyError::InvalidRecord,
         ] {
             assert!(
-                matches!(launch_failure(&error), HandOff::Uncertain(_)),
+                matches!(launch_failure(&policy, &error, true), HandOff::Uncertain(_)),
                 "{error}"
             );
+            // Before the lease records a handoff no guardian was contacted:
+            // the refusal is local, keeps its cause and can be withdrawn.
+            let refused = launch_failure(&policy, &error, false);
+            assert!(!matches!(refused, HandOff::Uncertain(_)), "{error}");
+            let (HandOff::Local(message) | HandOff::Boundary { message, .. }) = refused else {
+                panic!("{error}: unexpected refusal kind");
+            };
+            assert!(message.contains(&error.to_string()), "{message}");
         }
+        assert!(matches!(
+            launch_failure(
+                &policy,
+                &custody::CustodyError::Io(std::io::Error::other("fixture")),
+                false
+            ),
+            HandOff::Local(_)
+        ));
     }
 
     #[test]
