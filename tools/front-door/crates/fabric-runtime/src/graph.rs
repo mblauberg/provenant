@@ -478,6 +478,22 @@ pub struct DeliveryCiRequest<'a> {
     pub waited_millis: u64,
 }
 
+/// Identity and launch override for a carry into a new local writer.
+pub struct WriterCarryRequest<'a> {
+    pub graph: &'a str,
+    pub node: &'a str,
+    pub mode: Option<provenant_records::lane_contract::CarryMode>,
+}
+
+/// Result of provisioning a host-managed child writer checkout.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ChildWorktreeProvision {
+    /// Paths carried into this checkout from the chair's uncommitted tree.
+    pub carried_paths: Vec<String>,
+    /// Whether the launch examined carry state, including an eligible empty snapshot.
+    pub carry_examined: bool,
+}
+
 /// `observe_or_start` must be idempotent by `AttemptKey`. It starts the run
 /// only when that key has no accepted operation, and otherwise observes it.
 /// A `stored_ref` from the checkpoint names an accepted attempt: observe it as
@@ -842,6 +858,7 @@ pub trait AttemptOwner {
         _branch: &str,
         _base: &str,
         _owner: Option<provenant_core::Digest>,
+        _carry: Option<&WriterCarryRequest<'_>>,
     ) -> Result<Option<WriterWorktreeBinding>, Self::Error> {
         Ok(None)
     }
@@ -852,8 +869,9 @@ pub trait AttemptOwner {
         _path: &str,
         _source: &str,
         _owner: Option<provenant_core::Digest>,
-    ) -> Result<bool, Self::Error> {
-        Ok(false)
+        _carry: Option<&WriterCarryRequest<'_>>,
+    ) -> Result<Option<ChildWorktreeProvision>, Self::Error> {
+        Ok(None)
     }
 
     /// Graph-wide review and integration bases bound by the execution owner.
@@ -1867,6 +1885,7 @@ fn bind_expanded_writer<R: AttemptOwner, J: GraphJournal>(
                 .find_map(|row| row.provisioned_owner);
             checkpoint.nodes[node_index].provisioned_owner = inherited;
         }
+        let mut child_provision = None;
         if node.provision_worktree
             && (relay::pending_provisioning(&*checkpoint)
                 .iter()
@@ -1943,30 +1962,54 @@ fn bind_expanded_writer<R: AttemptOwner, J: GraphJournal>(
                     .find_map(|row| row.provisioned_owner)
             });
             checkpoint.nodes[node_index].provisioned_owner = creation_owner;
-            match owner.provision_child_worktree(path, &source, creation_owner) {
-                Ok(true) => {}
-                Ok(false) => {
-                    return Err(GraphError::Refused(
-                        "host cannot provision writer worktrees".into(),
-                    ));
-                }
-                Err(error) => {
-                    if defer_launch_contention(
-                        &mut *checkpoint,
-                        node_index,
-                        &error,
-                        owner.wall_now(),
-                        owner.admission_timeout_seconds().unwrap_or(3600),
-                        owner.launch_retry_policy(),
-                    )
-                    .map_err(GraphError::Refused)?
-                    {
-                        journal.save(&*checkpoint).map_err(GraphError::Journal)?;
-                        return Ok(LoopStep::Break);
+            let carried_elsewhere = checkpoint.nodes.iter().any(|progress| {
+                progress.writer_binding.as_ref().is_some_and(|binding| {
+                    binding
+                        .extra
+                        .get("carry_examined")
+                        .and_then(serde_json::Value::as_bool)
+                        == Some(true)
+                })
+            });
+            let carry = (node.source.is_none()
+                && document.peer_origin_work_key.is_none()
+                && creation_owner.is_none()
+                && !carried_elsewhere)
+                .then_some(WriterCarryRequest {
+                    graph: &document.graph_id,
+                    node: &node.id,
+                    mode: node
+                        .attempt
+                        .as_ref()
+                        .and_then(|attempt| attempt.carry_uncommitted),
+                });
+            let provision =
+                match owner.provision_child_worktree(path, &source, creation_owner, carry.as_ref())
+                {
+                    Ok(Some(provision)) => provision,
+                    Ok(None) => {
+                        return Err(GraphError::Refused(
+                            "host cannot provision writer worktrees".into(),
+                        ));
                     }
-                    return Err(GraphError::Run(error));
-                }
-            }
+                    Err(error) => {
+                        if defer_launch_contention(
+                            &mut *checkpoint,
+                            node_index,
+                            &error,
+                            owner.wall_now(),
+                            owner.admission_timeout_seconds().unwrap_or(3600),
+                            owner.launch_retry_policy(),
+                        )
+                        .map_err(GraphError::Refused)?
+                        {
+                            journal.save(&*checkpoint).map_err(GraphError::Journal)?;
+                            return Ok(LoopStep::Break);
+                        }
+                        return Err(GraphError::Run(error));
+                    }
+                };
+            child_provision = Some(provision);
         }
         if apply_pending_cancellation(document, &mut *checkpoint, journal, resume)? {
             return Ok(LoopStep::Reschedule);
@@ -2024,11 +2067,38 @@ fn bind_expanded_writer<R: AttemptOwner, J: GraphJournal>(
                     .find_map(|row| row.provisioned_owner)
             });
             checkpoint.nodes[node_index].provisioned_owner = creation_owner;
-            owner.provision_writer_worktree(path, &spec.branch, &base, creation_owner)
+            let carried_elsewhere = checkpoint.nodes.iter().any(|progress| {
+                progress.writer_binding.as_ref().is_some_and(|binding| {
+                    binding
+                        .extra
+                        .get("carry_examined")
+                        .and_then(serde_json::Value::as_bool)
+                        == Some(true)
+                })
+            });
+            let carry = (spec.default_base
+                && document.peer_origin_work_key.is_none()
+                && creation_owner.is_none()
+                && !carried_elsewhere)
+                .then_some(WriterCarryRequest {
+                    graph: &document.graph_id,
+                    node: &node.id,
+                    mode: node
+                        .attempt
+                        .as_ref()
+                        .and_then(|attempt| attempt.carry_uncommitted),
+                });
+            owner.provision_writer_worktree(
+                path,
+                &spec.branch,
+                &base,
+                creation_owner,
+                carry.as_ref(),
+            )
         } else {
             owner.bind_writer_worktree(path)
         };
-        let binding = match binding_result {
+        let mut binding = match binding_result {
             Ok(binding) => binding,
             Err(error) => {
                 return settle_writer_binding_failure(
@@ -2041,6 +2111,19 @@ fn bind_expanded_writer<R: AttemptOwner, J: GraphJournal>(
                 );
             }
         };
+        if let (Some(child_provision), Some(binding)) = (child_provision, binding.as_mut()) {
+            if child_provision.carry_examined {
+                binding
+                    .extra
+                    .insert("carry_examined".into(), serde_json::json!(true));
+            }
+            if !child_provision.carried_paths.is_empty() {
+                binding.extra.insert(
+                    "carried_paths".into(),
+                    serde_json::json!(child_provision.carried_paths),
+                );
+            }
+        }
         transitions::apply_writer_binding(
             node,
             &mut checkpoint.nodes[node_index],
