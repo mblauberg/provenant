@@ -753,7 +753,14 @@ pub(crate) fn execute(
             };
             let globals = globals_with_full(globals, *full);
             let reply = with_edge(&globals, |edge| {
-                unified::unified_graph_output(&command, edge, &globals, workers)
+                let remaining = budget.remaining(clock.mono_now()).as_micros();
+                unified::unified_graph_output(
+                    &command,
+                    edge,
+                    &globals,
+                    workers,
+                    std::time::Instant::now() + std::time::Duration::from_micros(remaining),
+                )
             })?;
             Ok(reply.result)
         }

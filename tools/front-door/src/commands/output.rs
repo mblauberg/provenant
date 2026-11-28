@@ -19,7 +19,17 @@ fn run(inv: &Call) -> Result<Outcome, CommandError> {
     let command = inv.command.clone();
     let status = match command {
         Command::Output(cmd) => crate::run_edge(inv.leaf, globals, |edge| {
-            crate::fabric::unified_graph_output(&cmd, edge, globals, process.workers())
+            crate::fabric::unified_graph_output(
+                &cmd,
+                edge,
+                globals,
+                process.workers(),
+                std::time::Instant::now()
+                    + inv
+                        .common
+                        .as_ref()
+                        .map_or(std::time::Duration::from_secs(30), |common| common.deadline),
+            )
         }),
         _ => return crate::commands::mismatched(),
     };

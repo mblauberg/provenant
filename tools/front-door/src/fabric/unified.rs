@@ -1747,6 +1747,19 @@ pub(crate) fn command_fail(
     error: &(dyn std::error::Error + 'static),
     globals: &provenant_cli::Globals,
 ) -> u8 {
+    if error
+        .downcast_ref::<FacadeError>()
+        .is_some_and(|error| matches!(error, FacadeError::Timeout))
+    {
+        return crate::fail(
+            name,
+            provenant_records::Outcome::Timeout,
+            "TIMEOUT",
+            "the invocation deadline expired while reading graph state",
+            "retry with a longer --timeout",
+            globals,
+        );
+    }
     match command_target_fault(error, None) {
         Some((outcome, code, message)) => crate::fail(
             name,
@@ -1805,16 +1818,30 @@ fn validate_retry_brief_target(
 /// Read one graph target through the host relay. Inside a lane the host
 /// resolves the target (cli.md "Targets"), so the read needs neither host
 /// configuration nor state, which a confined lane cannot open.
-fn lane_graph_read(input: Value) -> Result<Value, FacadeError> {
+fn lane_graph_read(
+    input: Value,
+    deadline: Option<std::time::Instant>,
+) -> Result<Value, FacadeError> {
     let cancel = CancelToken::new();
-    let within = std::time::Duration::from_secs(55);
+    let within = deadline.map_or(std::time::Duration::from_secs(55), |deadline| {
+        deadline.saturating_duration_since(std::time::Instant::now())
+    });
+    if within.is_zero() {
+        return Err(FacadeError::Timeout);
+    }
     let read = || {
+        let remaining = deadline.map_or(std::time::Duration::from_secs(55), |deadline| {
+            deadline.saturating_duration_since(std::time::Instant::now())
+        });
+        if remaining.is_zero() {
+            return Err(FacadeError::Timeout);
+        }
         provenant_cli::fabric::graph_relay::from_lane(
             &provenant_fabric_runtime::graph::relay::RelayOp::Read {
                 input: input.clone(),
             },
             &cancel,
-            within,
+            remaining,
         )
         .map_err(super::interface::relay_error)
     };
@@ -1841,6 +1868,26 @@ type GraphCommandReply = (
     Option<provenant_records::command_result::NextStep>,
 );
 
+/// Use the invocation's remaining time when supplied; otherwise preserve the
+/// configured graph wait for internal status, stop and retry readers.
+fn invocation_wait_budget(
+    clock: &dyn provenant_core::Clock,
+    deadline: Option<std::time::Instant>,
+    fallback_seconds: u64,
+) -> Result<WaitBudget, Box<dyn std::error::Error>> {
+    let Some(deadline) = deadline else {
+        return Ok(WaitBudget::cli(clock.mono_now(), fallback_seconds)?);
+    };
+    let micros = deadline
+        .saturating_duration_since(std::time::Instant::now())
+        .as_micros()
+        .min(u64::MAX as u128) as u64;
+    Ok(WaitBudget::up_to(
+        clock.mono_now(),
+        provenant_core::DurationMicros::from_micros(micros),
+    ))
+}
+
 /// Read or control graph targets. Every target resolves before any is read
 /// or changed, so one unknown target changes nothing. Inside a lane the host
 /// resolves the target, and an empty list reads the lane's own graph.
@@ -1849,13 +1896,14 @@ pub(crate) fn unified_graph_command(
     command: GraphCommand<'_>,
     globals: &provenant_cli::Globals,
     workers: &'static dyn WorkerObserver,
+    deadline: Option<std::time::Instant>,
 ) -> u8 {
     let name = match command {
         GraphCommand::Status => "status",
         GraphCommand::Stop { .. } => "stop",
         GraphCommand::Retry { .. } => "retry",
     };
-    let result = graph_command_read(targets, command, globals, workers);
+    let result = graph_command_read(targets, command, globals, workers, deadline);
     match result {
         Ok((data, human, next_steps, superseded_next)) => {
             let summary = if name == "status" {
@@ -1898,6 +1946,7 @@ fn graph_command_read(
     command: GraphCommand<'_>,
     globals: &provenant_cli::Globals,
     workers: &'static dyn WorkerObserver,
+    deadline: Option<std::time::Instant>,
 ) -> Result<GraphCommandReply, Box<dyn std::error::Error>> {
     let name = match command {
         GraphCommand::Status => "status",
@@ -2088,7 +2137,7 @@ fn graph_command_read(
                 });
             }
             let Some(factory) = &factory else {
-                let mut data = lane_graph_read(input)?;
+                let mut data = lane_graph_read(input, deadline)?;
                 let rows = data["rows"].as_array().ok_or(FacadeError::StateCorrupt)?;
                 human.push_str(&render_graph_status(rows));
                 next_steps.extend(graph_status_next(rows));
@@ -2100,8 +2149,9 @@ fn graph_command_read(
                 .map(|binding| project_factory(factory, binding))
                 .transpose()?;
             let reader = project_reader.as_ref().unwrap_or(factory);
-            let budget = WaitBudget::cli(
-                reader.clock.mono_now(),
+            let budget = invocation_wait_budget(
+                &reader.clock,
+                deadline,
                 reader.context.config.graph.launch_wait_seconds,
             )?;
             if matches!(command, GraphCommand::Status)
@@ -2176,7 +2226,8 @@ pub(crate) fn graph_status_data(
     globals: &provenant_cli::Globals,
     workers: &'static dyn WorkerObserver,
 ) -> Result<Value, Box<dyn std::error::Error>> {
-    graph_command_read(targets, GraphCommand::Status, globals, workers).map(|(data, _, _, _)| data)
+    graph_command_read(targets, GraphCommand::Status, globals, workers, None)
+        .map(|(data, _, _, _)| data)
 }
 
 /// Outcomes of one `steer` command. Settled targets are handled by the sourced
@@ -2986,6 +3037,7 @@ fn collect_graph_listing(
     command: &provenant_cli::Status,
     globals: &provenant_cli::Globals,
     workers: &'static dyn WorkerObserver,
+    deadline: Option<std::time::Instant>,
 ) -> Result<Listing, Box<dyn std::error::Error>> {
     (|| -> Result<Listing, Box<dyn std::error::Error>> {
         let factory = match read_factory(globals, workers) {
@@ -3092,7 +3144,7 @@ fn collect_graph_listing(
             &cancel,
             now,
         );
-        let budget = WaitBudget::cli(factory.clock.mono_now(), 55)?;
+        let budget = invocation_wait_budget(&factory.clock, deadline, 55)?;
         let (mut finished, gathered) = listing_with_evidence(
             graphs,
             &mut projections,
@@ -3125,8 +3177,9 @@ pub(crate) fn graph_listing(
     command: &provenant_cli::Status,
     globals: &provenant_cli::Globals,
     workers: &'static dyn WorkerObserver,
+    deadline: std::time::Instant,
 ) -> u8 {
-    let result = collect_graph_listing(command, globals, workers);
+    let result = collect_graph_listing(command, globals, workers, Some(deadline));
     match result {
         Ok(listing) => {
             let now = SystemClock::new()
@@ -3318,7 +3371,7 @@ pub(crate) fn graph_listing_data(
     globals: &provenant_cli::Globals,
     workers: &'static dyn WorkerObserver,
 ) -> Result<Value, Box<dyn std::error::Error>> {
-    let listing = collect_graph_listing(command, globals, workers)?;
+    let listing = collect_graph_listing(command, globals, workers, None)?;
     let live = live_lanes(&listing);
     let rows: Vec<_> = listing
         .rows
@@ -3692,7 +3745,7 @@ pub(crate) fn unified_graph_trace(
         };
         // A lane reads through the host, which holds the configuration.
         if provenant_cli::fabric::in_lane() {
-            let mut data = lane_graph_read(json!({"op":"trace", "id":id}))?;
+            let mut data = lane_graph_read(json!({"op":"trace", "id":id}), None)?;
             add_cache_share(&mut data);
             return Ok(data);
         }
@@ -4037,6 +4090,7 @@ pub(crate) fn unified_graph_output(
     edge: &provenant_cli::run::Edge<'_>,
     globals: &provenant_cli::Globals,
     workers: &'static dyn WorkerObserver,
+    deadline: std::time::Instant,
 ) -> provenant_cli::run::Reply {
     if !provenant_cli::fabric::in_lane() {
         let read = || -> Result<provenant_cli::run::Reply, Box<dyn std::error::Error>> {
@@ -4047,8 +4101,9 @@ pub(crate) fn unified_graph_output(
                     error
                 }
             })?;
-            let budget = WaitBudget::cli(
-                factory.clock.mono_now(),
+            let budget = invocation_wait_budget(
+                &factory.clock,
+                Some(deadline),
                 factory.context.config.graph.launch_wait_seconds,
             )?;
             if let Ok(Some(target)) = factory.graph_target(&command.target.to_string()) {
@@ -4084,17 +4139,33 @@ pub(crate) fn unified_graph_output(
             let input = json!({"op":"output", "id":page.target.to_string(),
                 "render":true, "part":part, "offset":page.offset, "full":false,
                 "max_bytes":page.max_bytes});
+            let timeout = deadline.saturating_duration_since(std::time::Instant::now());
+            if timeout.is_zero() {
+                return Err(provenant_cli::run::Fail::new(
+                    provenant_records::Outcome::Timeout,
+                    provenant_run::ErrorKind::Timeout,
+                    "output deadline expired",
+                ));
+            }
             let response = provenant_cli::fabric::graph_relay::from_lane(
                 &provenant_fabric_runtime::graph::relay::RelayOp::Read { input },
                 &CancelToken::new(),
-                std::time::Duration::from_secs(55),
+                timeout,
             )
             .map_err(|error| {
-                provenant_cli::run::Fail::new(
-                    provenant_records::Outcome::Error,
-                    provenant_run::ErrorKind::Fabric,
-                    error.to_string(),
-                )
+                if std::time::Instant::now() >= deadline {
+                    provenant_cli::run::Fail::new(
+                        provenant_records::Outcome::Timeout,
+                        provenant_run::ErrorKind::Timeout,
+                        "output deadline expired",
+                    )
+                } else {
+                    provenant_cli::run::Fail::new(
+                        provenant_records::Outcome::Error,
+                        provenant_run::ErrorKind::Fabric,
+                        error.to_string(),
+                    )
+                }
             })?;
             let result: provenant_records::CommandResult<Value> =
                 serde_json::from_value(response["result"].clone()).map_err(|error| {
@@ -4122,11 +4193,21 @@ pub(crate) fn unified_graph_output(
         let input = json!({"op":"output", "id":command.target.to_string(),
             "render":true,"part":part,"offset":command.offset,"tail":command.tail,
             "tail_lines":command.tail_lines,"full":globals.full,"max_bytes":command.max_bytes});
-        let response = provenant_cli::fabric::graph_relay::from_lane(
+        let timeout = deadline.saturating_duration_since(std::time::Instant::now());
+        if timeout.is_zero() {
+            return Err(FacadeError::Timeout.into());
+        }
+        let response = match provenant_cli::fabric::graph_relay::from_lane(
             &provenant_fabric_runtime::graph::relay::RelayOp::Read { input },
             &CancelToken::new(),
-            std::time::Duration::from_secs(55),
-        )?;
+            timeout,
+        ) {
+            Ok(response) => response,
+            Err(_) if std::time::Instant::now() >= deadline => {
+                return Err(FacadeError::Timeout.into());
+            }
+            Err(error) => return Err(error.into()),
+        };
         let mut reply = provenant_cli::run::Reply {
             result: serde_json::from_value(response["result"].clone())?,
             human: response["human"].as_str().unwrap_or_default().to_owned(),
@@ -4528,6 +4609,16 @@ fn output_fail(
 }
 
 fn output_error(error: &(dyn std::error::Error + 'static)) -> provenant_cli::run::Reply {
+    if error
+        .downcast_ref::<FacadeError>()
+        .is_some_and(|error| matches!(error, FacadeError::Timeout))
+    {
+        return output_fail(
+            provenant_records::Outcome::Timeout,
+            "TIMEOUT",
+            "the invocation deadline expired while reading output",
+        );
+    }
     match command_target_fault(error, None) {
         Some((outcome, code, message)) => output_fail(outcome, code, &message),
         None => output_fail(

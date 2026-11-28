@@ -4,6 +4,26 @@ use provenant_fabric_runtime::graph::{
     GraphCheckpoint, GraphDocument, GraphExecution, GraphJournal,
 };
 
+#[test]
+fn invocation_wait_budget_uses_only_the_remaining_deadline() {
+    let clock = provenant_os::clock::SystemClock::new();
+    let budget = super::invocation_wait_budget(
+        &clock,
+        Some(std::time::Instant::now() + std::time::Duration::from_millis(100)),
+        55,
+    )
+    .unwrap();
+    assert!(budget.remaining(clock.mono_now()).as_micros() <= 100_000);
+
+    let expired = super::invocation_wait_budget(
+        &clock,
+        Some(std::time::Instant::now() - std::time::Duration::from_millis(1)),
+        55,
+    )
+    .unwrap();
+    assert_eq!(expired.remaining(clock.mono_now()).as_micros(), 0);
+}
+
 // Spec: docs/specs/delivery-queue.md#queue-and-controls
 #[test]
 fn status_projects_recorded_delivery_progress_into_the_digest()

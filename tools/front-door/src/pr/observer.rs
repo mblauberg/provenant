@@ -83,7 +83,11 @@ pub(crate) enum ObserveError {
 /// The one error-contract projection for an exhausted forge allowance: a
 /// transient condition carrying the reset, never a CI verdict and never bad
 /// input. Spec: docs/specs/agent-native.md#33-error-and-warning-contract
-fn forge_quota_error(reset: jiff::Timestamp, pr: Option<u64>, cause: Option<&str>) -> CommandError {
+pub(crate) fn forge_quota_error(
+    reset: jiff::Timestamp,
+    pr: Option<u64>,
+    cause: Option<&str>,
+) -> CommandError {
     let mut error = CommandError::new(
         "FORGE_QUOTA_EXHAUSTED",
         format!("forge rate limit; retry after {reset}"),

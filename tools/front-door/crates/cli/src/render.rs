@@ -425,14 +425,14 @@ pub enum RenderMode<'a> {
     },
 }
 
-/// How a published overflow is presented. The envelope status must always
-/// agree with the process exit code; the policy decides which one changes.
+/// How an unpublished overflow is presented. A successful publication always
+/// keeps the command outcome and adds the artifact pointer and warning.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OverflowPolicy {
     /// Page the complete result once, warn on stderr and keep the result's
     /// status. The envelope and the exit code both stay with the result.
     Proceed,
-    /// Refuse with a typed `RESULT_TOO_LARGE` Error envelope and exit 3.
+    /// Keep the legacy refusal only when publication cannot provide a report.
     Refuse,
 }
 
@@ -1671,6 +1671,13 @@ pub fn render_or_publish<T: Serialize>(
                 artifact: Option<provenant_records::AbsolutePath>,
             }
             let published = publish(result);
+            // Once the complete result is safely published, size alone cannot
+            // turn its real outcome into a command failure.
+            let policy = if published.is_ok() {
+                OverflowPolicy::Proceed
+            } else {
+                policy
+            };
             match policy {
                 OverflowPolicy::Refuse => {
                     let (code, message, artifact, repair) = match &published {
@@ -1881,15 +1888,15 @@ mod overflow_tests {
             },
             OverflowPolicy::Refuse,
         );
-        assert!(matches!(outcome, Err(RenderError::TooLarge)), "{outcome:?}");
+        assert!(matches!(outcome, Ok(Outcome::Refused)), "{outcome:?}");
         assert_eq!(published, 1);
-        assert!(output.is_empty());
-        assert!(String::from_utf8(errors)?.contains("RESULT_TOO_LARGE"));
+        assert!(String::from_utf8(output)?.contains("/fixture/result.json"));
+        assert!(!String::from_utf8(errors)?.contains("RESULT_TOO_LARGE"));
         Ok(())
     }
 
     #[test]
-    fn oversize_publishes_once_or_reports_io_without_partial_output()
+    fn published_oversize_keeps_outcome_and_unpublished_oversize_reports_io()
     -> Result<(), Box<dyn std::error::Error>> {
         let result = CommandResult::new("dispatch", Outcome::Ok, "x".repeat(MAX_RESULT_BYTES));
         let mut output = Vec::new();
@@ -1906,11 +1913,19 @@ mod overflow_tests {
             },
             OverflowPolicy::Refuse,
         );
-        assert!(matches!(outcome, Err(RenderError::TooLarge)), "{outcome:?}");
+        assert!(matches!(outcome, Ok(Outcome::Ok)), "{outcome:?}");
         assert_eq!(published, 1);
         let value: serde_json::Value = serde_json::from_slice(&output)?;
-        assert_eq!(value["error"]["code"], "RESULT_TOO_LARGE");
+        assert_eq!(value["status"], "ok");
+        assert!(value["error"].is_null());
         assert!(value["data"]["artifact"].is_object());
+        assert!(
+            value["warnings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|warning| { warning["code"] == "RESULT_TOO_LARGE" })
+        );
         output.clear();
         render_or_publish(
             &result,
