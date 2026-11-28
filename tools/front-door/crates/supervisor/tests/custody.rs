@@ -3198,6 +3198,28 @@ fn a_fake_provider_passing_the_token_budget_is_stopped(root: &Path) -> Result<()
     assert_eq!(exit.stop_reason, Some(StopReason::TokenBudget));
     Ok(())
 }
+/// A warn-only deadline enforces no wall bound: the plan is admitted, the
+/// provider launches and it exits on its own.
+fn an_unenforced_deadline_launches_without_a_wall_bound(root: &Path) -> Result<()> {
+    let (_writer, handle) = start(
+        root,
+        "unbounded",
+        "bytes",
+        &[],
+        CapturePlan {
+            wall_ms: None,
+            ..CapturePlan::default()
+        },
+    )?;
+    let exit = exited(&handle)?;
+    assert!(!exit.never_spawned, "{exit:?}");
+    assert_eq!(exit.stop_reason, None, "{exit:?}");
+    assert_eq!(
+        exit.termination,
+        Some(provenant_os::exec::Termination::Exit(0))
+    );
+    Ok(())
+}
 fn wall_deadline_is_the_execution_bound(root: &Path) -> Result<()> {
     let socket = root.join("wall.sock");
     let listener = UnixListener::bind(&socket)?;
@@ -3207,7 +3229,7 @@ fn wall_deadline_is_the_execution_bound(root: &Path) -> Result<()> {
         "socket-blocked",
         &[socket.into_os_string()],
         CapturePlan {
-            wall_ms: 1000,
+            wall_ms: Some(1000),
             root_flush_ms: 30,
             descendant_grace_ms: 10,
             ..CapturePlan::default()
@@ -3239,7 +3261,7 @@ fn a_host_sleep_cannot_extend_the_wall_deadline(root: &Path) -> Result<()> {
         &[socket.into_os_string()],
         CapturePlan {
             // An hour of monotonic time would not pass inside this test.
-            wall_ms: 3_600_000,
+            wall_ms: Some(3_600_000),
             root_flush_ms: 30,
             descendant_grace_ms: 10,
             ..CapturePlan::default()
@@ -3588,6 +3610,10 @@ const CASES: &[Case] = &[
     (
         "a_host_sleep_cannot_extend_the_wall_deadline",
         a_host_sleep_cannot_extend_the_wall_deadline,
+    ),
+    (
+        "an_unenforced_deadline_launches_without_a_wall_bound",
+        an_unenforced_deadline_launches_without_a_wall_bound,
     ),
     ("natural_exit_races_cancel", natural_exit_races_cancel),
     (

@@ -1267,8 +1267,12 @@ impl Driver<'_> {
         let clock: &dyn Clock = &system;
         let wall_now = || clock.wall_now().ok();
         let wall_started = wall_now();
-        let budgets =
-            Budgets::with_cleanup(plan.wall_ms, plan.root_flush_ms, plan.descendant_grace_ms);
+        // No enforced wall bound is a deadline neither clock reaches.
+        let budgets = Budgets::with_cleanup(
+            plan.wall_ms.unwrap_or(u64::MAX),
+            plan.root_flush_ms,
+            plan.descendant_grace_ms,
+        );
         let mut state = State::prepared(budgets);
         let mut budget_warned = false;
         let mut budget_stop_sent = false;

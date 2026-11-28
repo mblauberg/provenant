@@ -304,6 +304,24 @@ mod tests {
         assert!(!blind.preamble().contains("fresh tokens"));
     }
 
+    /// A warn-only deadline is no enforced wall bound, never an invalid one:
+    /// the plan launches and only an enforced deadline bounds it.
+    #[test]
+    fn a_warn_only_deadline_carries_no_wall_bound() {
+        let task = writer_task();
+        let mut limits = deadline_only(600);
+        assert_eq!(
+            crate::launch::capture_plan(&task, &limits).wall_ms,
+            Some(600_000)
+        );
+        limits.deadline_seconds.as_mut().unwrap().strength = LimitStrength::Advisory;
+        assert_eq!(crate::launch::capture_plan(&task, &limits).wall_ms, None);
+        assert_eq!(
+            crate::launch::capture_plan(&task, &LaneLimits::default()).wall_ms,
+            None
+        );
+    }
+
     #[test]
     fn wrap_up_keeps_its_allowance_and_defers_context_restart() {
         let state = state("");

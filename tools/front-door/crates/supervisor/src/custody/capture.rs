@@ -9,25 +9,31 @@ const GRACE_LIMIT_MS: u64 = 60_000;
 
 impl CapturePlan {
     /// Refuse a plan outside its bounds, naming the field and value so a
-    /// never-spawned launch says what to fix.
+    /// never-spawned launch says what to fix. An absent wall bound is valid:
+    /// the deadline is not enforced.
     pub(crate) fn validate(&self) -> Result<()> {
-        let bounds: [(&'static str, u64, RangeInclusive<u64>); 6] = [
-            ("stdout limit", self.stdout.limit(), 0..=STREAM_LIMIT),
-            ("stderr limit", self.stderr.limit(), 0..=STREAM_LIMIT),
+        let bounds: [(&'static str, Option<u64>, RangeInclusive<u64>); 6] = [
+            ("stdout limit", Some(self.stdout.limit()), 0..=STREAM_LIMIT),
+            ("stderr limit", Some(self.stderr.limit()), 0..=STREAM_LIMIT),
             ("wall_ms", self.wall_ms, 1..=WALL_LIMIT_MS),
             (
                 "descendant_grace_ms",
-                self.descendant_grace_ms,
+                Some(self.descendant_grace_ms),
                 0..=GRACE_LIMIT_MS,
             ),
-            ("root_flush_ms", self.root_flush_ms, 0..=GRACE_LIMIT_MS),
+            (
+                "root_flush_ms",
+                Some(self.root_flush_ms),
+                0..=GRACE_LIMIT_MS,
+            ),
             (
                 "retained_custody_ms",
-                self.retained_custody_ms,
+                Some(self.retained_custody_ms),
                 1..=MAX_RETAINED_CUSTODY_SECONDS * 1_000,
             ),
         ];
         for (field, value, bound) in bounds {
+            let Some(value) = value else { continue };
             if !bound.contains(&value) {
                 return Err(CustodyError::CapturePlan {
                     field,
@@ -48,7 +54,7 @@ mod tests {
     fn a_rejected_plan_names_its_field_and_value() {
         assert!(CapturePlan::default().validate().is_ok());
         let plan = CapturePlan {
-            wall_ms: 0,
+            wall_ms: Some(0),
             ..CapturePlan::default()
         };
         let error = plan.validate().unwrap_err();
@@ -75,5 +81,15 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    /// An unenforced deadline is no wall bound, never an invalid one.
+    #[test]
+    fn a_plan_without_a_wall_bound_is_valid() {
+        let plan = CapturePlan {
+            wall_ms: None,
+            ..CapturePlan::default()
+        };
+        assert!(plan.validate().is_ok());
     }
 }

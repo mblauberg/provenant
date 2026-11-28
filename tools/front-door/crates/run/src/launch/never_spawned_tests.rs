@@ -6,9 +6,10 @@ use crate::dispatch_tests::Ready;
 use crate::tests::{call, clock, context, input};
 use provenant_core::CancelToken;
 
-/// Prepares a plan with a valid capture plan; no guardian ever runs it.
-struct Bounded;
-impl Providers for Bounded {
+/// Prepares a plan with an enforced deadline of this many seconds; no
+/// guardian ever runs it.
+struct Deadline(u64);
+impl Providers for Deadline {
     fn prepare(
         &self,
         task: &TaskRequest,
@@ -17,7 +18,7 @@ impl Providers for Bounded {
         resume: Option<&AttemptRecord>,
     ) -> std::result::Result<PreparedLaunch, Box<PrepareRefusal>> {
         let mut plan = Ready.prepare(task, prompt, paths, resume)?;
-        plan.limits = crate::limits::deadline_only(60);
+        plan.limits = crate::limits::deadline_only(self.0);
         Ok(plan)
     }
     fn decode(
@@ -35,10 +36,17 @@ impl Providers for Bounded {
 #[test]
 fn a_never_spawned_launch_is_a_local_refusal_with_its_cause()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
-    // Ready carries no enforced deadline, so its capture plan has wall_ms=0.
+    // A deadline past a day is an invalid capture plan. Ready carries no
+    // enforced deadline: its plan has no wall bound and is valid, and its
+    // fixture command is refused before any guardian spawns.
     for (providers, cancel_inside, expected) in [
-        (&Ready as &dyn Providers, false, "capture plan wall_ms is 0"),
-        (&Bounded, true, hand_off::CANCELLED_BEFORE_LAUNCH),
+        (
+            &Deadline(86_401) as &dyn Providers,
+            false,
+            "capture plan wall_ms is 86401000",
+        ),
+        (&Deadline(60), true, hand_off::CANCELLED_BEFORE_LAUNCH),
+        (&Ready, false, "the provider never spawned"),
     ] {
         let temp = tempfile::tempdir()?;
         let (clock, cancel) = (clock(), CancelToken::new());

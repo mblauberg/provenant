@@ -1280,7 +1280,9 @@ impl StreamMode {
 pub struct CapturePlan {
     pub stdout: StreamMode,
     pub stderr: StreamMode,
-    pub wall_ms: u64,
+    /// The enforced wall-clock bound on the attempt. `None` is no enforced
+    /// bound: an advisory (warn-only) or absent deadline never stops the run.
+    pub wall_ms: Option<u64>,
     pub descendant_grace_ms: u64,
     pub root_flush_ms: u64,
     /// Tokens the attempt may use, from the usage its provider reports while
@@ -1319,7 +1321,7 @@ impl Default for CapturePlan {
             stderr: StreamMode::Capture {
                 limit: provenant_os::exec::DEFAULT_CAPTURE_LIMIT as u64,
             },
-            wall_ms: 3600000,
+            wall_ms: Some(3_600_000),
             descendant_grace_ms: crate::machine::DEFAULT_DESCENDANT_GRACE_MS,
             root_flush_ms: crate::machine::DEFAULT_ROOT_FLUSH_MS,
             token_budget: 0,

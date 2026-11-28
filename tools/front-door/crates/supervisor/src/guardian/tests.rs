@@ -486,7 +486,7 @@ fn guardian_missing_attempt_finishes_unresolved_group_cleanup() {
     let capture = CapturePlan {
         root_flush_ms: 50,
         descendant_grace_ms: 100,
-        wall_ms: 5_000,
+        wall_ms: Some(5_000),
         ..CapturePlan::default()
     };
     crate::custody::liveness::prepare_guardian_lifetime(
@@ -980,7 +980,7 @@ fn spawn_missing_attempt_guardian(
         capture: CapturePlan {
             root_flush_ms: 50,
             descendant_grace_ms: 100,
-            wall_ms: 5_000,
+            wall_ms: Some(5_000),
             ..CapturePlan::default()
         },
     };

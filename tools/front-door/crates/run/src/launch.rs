@@ -509,7 +509,7 @@ pub fn capture_plan(task: &TaskRequest, limits: &provenant_records::LaneLimits) 
         limit
             .as_ref()
             .filter(|limit| limit.enforced())
-            .map_or(0, |limit| limit.value)
+            .map(|limit| limit.value)
     };
     CapturePlan {
         stdout: if matches!(&task.route, crate::RequestedRoute::Adapter { provider, .. }
@@ -522,13 +522,14 @@ pub fn capture_plan(task: &TaskRequest, limits: &provenant_records::LaneLimits) 
         } else {
             CapturePlan::default().stdout
         },
-        wall_ms: enforced(&limits.deadline_seconds).saturating_mul(1000),
-        token_budget: enforced(&limits.token_budget),
+        // An advisory or absent deadline carries no wall bound.
+        wall_ms: enforced(&limits.deadline_seconds).map(|seconds| seconds.saturating_mul(1000)),
+        token_budget: enforced(&limits.token_budget).unwrap_or(0),
         budget_action: limits.budget_policy.clone().unwrap_or_default().action,
         // Writers only: a fresh attempt continues a writer's retained
         // worktree from its handoff. 0 or unset is off; a provider that
         // reports no per-call context figure is never stopped for it.
-        context_handoff: enforced(&limits.context_handoff),
+        context_handoff: enforced(&limits.context_handoff).unwrap_or(0),
         ..CapturePlan::default()
     }
 }
