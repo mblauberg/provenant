@@ -21,11 +21,11 @@ fn run(inv: &Call) -> Result<Outcome, CommandError> {
     let globals = inv.globals;
     let process = inv.process;
     let command = inv.command.clone();
-    let deadline = std::time::Instant::now()
-        + inv
-            .common
+    let deadline = crate::fabric::invocation_deadline::after(
+        inv.common
             .as_ref()
-            .map_or(std::time::Duration::from_secs(30), |common| common.deadline);
+            .map_or(std::time::Duration::from_secs(30), |common| common.deadline),
+    );
     let status = match command {
         Command::Status(cmd) => {
             if cmd.session_stream {

@@ -114,7 +114,11 @@ pub(super) fn recover(
         return Ok(None);
     }
     with_target(owner, target, |_context, tree| {
-        let bytes = match tree.repo().private_dir().read_stable(OsStr::new(RECEIPT), 1024 * 1024) {
+        let bytes = match tree
+            .repo()
+            .private_dir()
+            .read_stable(OsStr::new(RECEIPT), 1024 * 1024)
+        {
             Ok(bytes) => bytes,
             Err(error) if error.is_not_found() => return Ok(None),
             Err(error) => return Err(error.into()),
@@ -261,7 +265,12 @@ pub(super) fn apply(
         }
         tree.repo()
             .private_dir()
-            .atomic_write(OsStr::new(RECEIPT), ".carry-", &bytes, PublishMode::NoReplace)?
+            .atomic_write(
+                OsStr::new(RECEIPT),
+                ".carry-",
+                &bytes,
+                PublishMode::NoReplace,
+            )?
             .require_durable()
             .map_err(|error| failure(target, error))?;
         let head = if snapshot.is_empty() {

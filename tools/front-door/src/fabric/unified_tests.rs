@@ -9,7 +9,9 @@ fn invocation_wait_budget_uses_only_the_remaining_deadline() {
     let clock = provenant_os::clock::SystemClock::new();
     let budget = super::invocation_wait_budget(
         &clock,
-        Some(std::time::Instant::now() + std::time::Duration::from_millis(100)),
+        Some(super::super::invocation_deadline::after(
+            std::time::Duration::from_millis(100),
+        )),
         55,
     )
     .unwrap();
@@ -17,7 +19,9 @@ fn invocation_wait_budget_uses_only_the_remaining_deadline() {
 
     let expired = super::invocation_wait_budget(
         &clock,
-        Some(std::time::Instant::now() - std::time::Duration::from_millis(1)),
+        Some(super::super::invocation_deadline::after(
+            std::time::Duration::ZERO,
+        )),
         55,
     )
     .unwrap();

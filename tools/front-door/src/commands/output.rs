@@ -24,11 +24,11 @@ fn run(inv: &Call) -> Result<Outcome, CommandError> {
                 edge,
                 globals,
                 process.workers(),
-                std::time::Instant::now()
-                    + inv
-                        .common
+                crate::fabric::invocation_deadline::after(
+                    inv.common
                         .as_ref()
                         .map_or(std::time::Duration::from_secs(30), |common| common.deadline),
+                ),
             )
         }),
         _ => return crate::commands::mismatched(),

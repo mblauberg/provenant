@@ -4,6 +4,7 @@ mod graph_inputs;
 mod graph_status;
 pub(crate) mod host_events;
 pub(crate) mod host_read;
+pub(crate) mod invocation_deadline;
 pub(crate) use graph_status::node_digests;
 mod interface;
 #[cfg(test)]
