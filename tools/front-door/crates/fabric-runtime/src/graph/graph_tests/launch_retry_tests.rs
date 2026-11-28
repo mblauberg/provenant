@@ -153,10 +153,7 @@ fn launch_retry_policy_limits_failures_and_persists_the_source() {
         }
         let node = &journal.0.as_ref().unwrap().nodes[0];
         assert_eq!(node.state, NodeState::Blocked);
-        assert_eq!(
-            node.advance_code.as_deref(),
-            Some("launch_retry_exhausted")
-        );
+        assert_eq!(node.advance_code.as_deref(), Some("launch_retry_exhausted"));
         let last = node
             .last_launch_retry
             .as_ref()
@@ -383,15 +380,17 @@ fn settling_writer_lease_waits_but_a_live_holder_refuses() {
     };
 
     let mut waiting = new_checkpoint();
-    assert!(crate::graph::defer_launch_contention(
-        &mut waiting,
-        0,
-        &settling,
-        Some(at(0)),
-        allowance,
-        policy.clone(),
-    )
-    .unwrap());
+    assert!(
+        crate::graph::defer_launch_contention(
+            &mut waiting,
+            0,
+            &settling,
+            Some(at(0)),
+            allowance,
+            policy.clone(),
+        )
+        .unwrap()
+    );
     assert_eq!(waiting.nodes[0].state, NodeState::Running);
     assert_eq!(
         waiting.nodes[0].advance_owner_code.as_deref(),
@@ -405,15 +404,17 @@ fn settling_writer_lease_waits_but_a_live_holder_refuses() {
     );
 
     let mut refused = new_checkpoint();
-    assert!(!crate::graph::defer_launch_contention(
-        &mut refused,
-        0,
-        &live,
-        Some(at(0)),
-        allowance,
-        policy,
-    )
-    .unwrap());
+    assert!(
+        !crate::graph::defer_launch_contention(
+            &mut refused,
+            0,
+            &live,
+            Some(at(0)),
+            allowance,
+            policy,
+        )
+        .unwrap()
+    );
     assert_eq!(refused.nodes[0].state, NodeState::Pending);
     assert!(refused.nodes[0].launch_retry.is_none());
 }
@@ -721,7 +722,7 @@ fn nonterminal_observation_transitions_need_no_owner_or_journal() {
         input_cap_source: None,
         input_manifest: None,
         usage: None,
-    cause: None,
+        cause: None,
     };
     let mut state = NodeState::Pending;
     apply_unknown_observation(&mut attempt, &mut state, None);
@@ -778,10 +779,7 @@ fn a_permanent_refusal_blocks_the_node_at_once_with_reason_and_remedy() {
     assert!(progress.launch_retry.is_none());
     assert_eq!(progress.attempts.len(), 1);
     assert_eq!(progress.attempts[0].state, AttemptState::Starting);
-    assert_eq!(
-        progress.advance_code.as_deref(),
-        Some("launch_refused")
-    );
+    assert_eq!(progress.advance_code.as_deref(), Some("launch_refused"));
     let reason = progress.advance_note.as_deref().expect("blocked reason");
     assert!(reason.contains("invalid input"));
     assert!(reason.contains("provenant retry g-test/one"));
