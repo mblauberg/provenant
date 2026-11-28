@@ -489,8 +489,8 @@ mod tests {
     use crate::{
         coordination::{CoordinationError, EventsInput, EventsResult},
         hosts::{
-            CoordinationInput, CoordinationResult, PROTOCOL, PeerAction, PeerError, PeerRequest,
-            PeerResponse, PeerResult, PeerTransport, ProjectLocator,
+            CoordinationInput, CoordinationResult, PEER_UPGRADE_PENDING, PROTOCOL, PeerAction,
+            PeerError, PeerRequest, PeerResponse, PeerResult, PeerTransport, ProjectLocator,
         },
         identity::CrossHostProjectKey,
     };
