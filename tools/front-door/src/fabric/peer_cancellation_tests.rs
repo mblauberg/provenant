@@ -121,13 +121,22 @@ fn lost_peer_reply_cancellation_survives_reconnect_and_stops_receiver_subtree() 
     let ssh = origin_rig.root.join("cancel-ssh");
     let response = origin_rig.root.join("cancel-response");
     let frame = origin_rig.root.join("cancel-request");
+    let health = origin_rig.root.join("cancel-health");
+    write_health_reply(
+        &health,
+        remote_host,
+        ProjectLocator::new(&origin.context.identity, &origin.home)?.key,
+    )?;
     std::fs::write(
         &ssh,
-        format!(
-            "#!/bin/sh\ncat > '{}'\nif test -f '{}'; then cat '{}'; else exit 255; fi\n",
-            frame.display(),
-            response.display(),
-            response.display()
+        probing_ssh(
+            &health,
+            &format!(
+                "printf '%s' \"$request\" > '{}'\nif test -f '{}'; then cat '{}'; else exit 255; fi\n",
+                frame.display(),
+                response.display(),
+                response.display()
+            ),
         ),
     )?;
     std::fs::set_permissions(&ssh, std::fs::Permissions::from_mode(0o700))?;

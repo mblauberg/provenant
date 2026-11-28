@@ -538,7 +538,7 @@ mod explanation_tests {
         );
         assert!(matches!(
             host.check(code, Facts::violation("fixture")),
-            Effect::Refuse(_)
+            Effect::Stop(_)
         ));
         let host_explain = explain(&format!("policy.{code}"), &roots, Some(&checkout)).unwrap();
         assert_eq!(
@@ -572,7 +572,7 @@ mod explanation_tests {
         );
         assert!(matches!(
             strict.check(code, Facts::violation("fixture")),
-            Effect::Refuse(_)
+            Effect::Stop(_)
         ));
     }
 

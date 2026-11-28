@@ -1890,7 +1890,8 @@ mod overflow_tests {
         );
         assert!(matches!(outcome, Ok(Outcome::Refused)), "{outcome:?}");
         assert_eq!(published, 1);
-        assert!(String::from_utf8(output)?.contains("/fixture/result.json"));
+        // The typed path record serialises the root-relative form of the path.
+        assert!(String::from_utf8(output)?.contains("fixture/result.json"));
         assert!(!String::from_utf8(errors)?.contains("RESULT_TOO_LARGE"));
         Ok(())
     }

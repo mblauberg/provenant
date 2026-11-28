@@ -2031,11 +2031,17 @@ fn review_shape_selects_the_expected_template_nodes() -> Result {
                 {
                     out.push(id.to_owned());
                     if matches!(id, "lenses" | "verify") && map.contains_key("composite") {
-                        // A lens panel carries its configured reviewer count into
-                        // settlement as the coverage minimum (docs/specs/fabric.md,
-                        // review panels); verification still needs one success.
+                        // A lens panel needs all but one lens, at least one
+                        // (docs/specs/agent-native.md, review panels);
+                        // verification still needs one success.
                         let minimum = if id == "lenses" {
-                            json!(map["composite"]["nodes"].as_array().map_or(0, Vec::len))
+                            json!(
+                                map["composite"]["nodes"]
+                                    .as_array()
+                                    .map_or(0, Vec::len)
+                                    .saturating_sub(1)
+                                    .max(1)
+                            )
                         } else {
                             json!(1)
                         };

@@ -3092,9 +3092,10 @@ mod result_tests {
         let attempt = provenant_core::AttemptId::from_bytes([8; 16]);
         let ssh = rig.root.join("ssh");
         let response = rig.root.join("response");
+        let health = rig.root.join("health");
         std::fs::write(
             &ssh,
-            format!("#!/bin/sh\ncat >/dev/null\ncat '{}'\n", response.display()),
+            super::peer_tests::probing_ssh(&health, &format!("cat '{}'\n", response.display())),
         )?;
         std::fs::set_permissions(&ssh, std::fs::Permissions::from_mode(0o700))?;
         std::fs::write(
@@ -3130,12 +3131,13 @@ mod result_tests {
         let locator = ProjectLocator::new(&factory.context.identity, &rig.home)?;
         let origin =
             provenant_records::WorkKey::new(factory.context.identity.project, "g", "review", 1)?;
+        super::peer_tests::write_health_reply(&health, remote_host, locator.key.clone())?;
         let mut reply = PeerResponse {
             extra: Default::default(),
             version: 1,
             protocol: provenant_fabric_runtime::hosts::OUTPUT_AUDIENCE_PROTOCOL,
             host: remote_host,
-            project: locator.key,
+            project: locator.key.clone(),
             result: PeerResult::Output {
                 extra: Default::default(),
                 data: Box::new(OutputResult::Chunk {

@@ -383,7 +383,7 @@ fn depletion_keeps_the_pinned_account_and_refuses_a_higher_tier_candidate() {
     }
 }
 
-fn review_shape_minima(with: Value) -> std::collections::BTreeMap<String, usize> {
+fn review_shape_minima(lenses: &[&str]) -> std::collections::BTreeMap<String, usize> {
     use std::collections::BTreeMap;
     let library = template::TemplateLibrary::bundled();
     let resolvers = BTreeMap::from([
@@ -396,16 +396,18 @@ fn review_shape_minima(with: Value) -> std::collections::BTreeMap<String, usize>
         ),
         (
             "review-panel".to_owned(),
-            vec!["security".to_owned(), "tests".to_owned()],
+            lenses.iter().map(|lens| (*lens).to_owned()).collect(),
         ),
-        ("review-advice-security".to_owned(), vec![String::new()]),
-        ("review-advice-tests".to_owned(), vec![String::new()]),
     ]);
+    let mut resolvers = resolvers;
+    for lens in lenses {
+        resolvers.insert(format!("review-advice-{lens}"), vec![String::new()]);
+    }
     let node = template::Compiler {
         library: &library,
         resolvers: &resolvers,
     }
-    .compile(&json!({"id":"shape","use":"review-shape","with":with}))
+    .compile(&json!({"id":"shape","use":"review-shape"}))
     .unwrap();
     node.composite
         .unwrap()
@@ -417,12 +419,20 @@ fn review_shape_minima(with: Value) -> std::collections::BTreeMap<String, usize>
 }
 
 #[test]
-fn review_minimum_is_an_input_with_the_existing_default() {
-    for (with, minimum) in [(json!({}), 1), (json!({"min_ok": 2}), 2)] {
-        let minima = review_shape_minima(with);
-        for stage in ["lenses", "verify"] {
-            assert_eq!(minima.get(stage), Some(&minimum));
-        }
+fn review_panel_minimum_defaults_to_all_lenses_but_one_and_verification_to_one() {
+    for lenses in [
+        vec!["security"],
+        vec!["security", "tests"],
+        vec!["security", "tests", "adversarial"],
+    ] {
+        let minima = review_shape_minima(&lenses);
+        assert_eq!(
+            minima.get("lenses"),
+            Some(&template::default_review_minimum(lenses.len())),
+            "{lenses:?}"
+        );
+        assert_eq!(minima.get("lenses"), Some(&lenses.len().saturating_sub(1).max(1)));
+        assert_eq!(minima.get("verify"), Some(&1), "{lenses:?}");
     }
 }
 

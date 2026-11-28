@@ -2000,7 +2000,8 @@ fn launch_resolvers_with(
         }
     }
     let mut panel = selection_review.resolve_panel(&request, measured_size, &paths, false)?;
-    let coverage_minimum = panel.slots.len().saturating_sub(1).max(1);
+    let coverage_minimum =
+        provenant_fabric_runtime::graph::template::default_review_minimum(panel.slots.len());
     if (!panel.minimum_family_counts.is_empty()
         || panel
             .slots

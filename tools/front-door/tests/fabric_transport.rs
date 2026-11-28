@@ -21,6 +21,41 @@ fn federated_identity(rig: &mut TestRig) -> Result<Value> {
     Ok(serde_json::from_slice(&output.stdout.bytes)?)
 }
 
+/// Encode a peer frame as the sending release writes it: the release it was built
+/// from rides in the envelope, and a receiver on another release defers the call.
+fn frame(request: &Value) -> Result<Vec<u8>> {
+    let mut request = request.clone();
+    request["release"] = json!(env!("CARGO_PKG_VERSION"));
+    Ok(serde_json::to_vec(&request)?)
+}
+
+/// The reply of a healthy peer on this release, as the probe the client sends
+/// before every non-health action expects it.
+fn health_frame(host: impl std::fmt::Display, project: &Value) -> Value {
+    let host = host.to_string();
+    json!({
+        "version": 1, "protocol": PROTOCOL, "host": host, "project": project,
+        "result": {"result": "health", "data": {
+            "host": host, "available": true, "execution": true,
+            "release": env!("CARGO_PKG_VERSION"),
+            "run_capabilities": {
+                "submit": true, "list": true, "status": true, "wait": true,
+                "cancel": true, "resume": true, "output": true, "events": true
+            },
+            "readiness": {"state": "unknown", "reason": "not_probed"}
+        }}
+    })
+}
+
+/// Shell for a fake `ssh`: read the frame into `$request`, answer the release
+/// probe from `health`, and fall through to `body` for the action itself.
+fn probing_ssh(health: &Path, body: &str) -> String {
+    format!(
+        "#!/bin/sh\nrequest=$(cat)\ncase \"$request\" in *'\"action\":\"health\"'*) cat '{}'; exit 0;; esac\n{body}",
+        health.display()
+    )
+}
+
 fn next_host(host: provenant_core::HostId) -> Result<provenant_core::HostId> {
     let mut bytes = *host.as_bytes();
     for index in (0..bytes.len()).rev() {
@@ -67,7 +102,7 @@ fn peer_health_advertises_graph_submission() -> Result {
     let output = rig.execute_os(
         Path::new(env!("CARGO_BIN_EXE_provenant")),
         &["fabric".into(), "peer".into()],
-        Some(&serde_json::to_vec(&request)?),
+        Some(&frame(&request)?),
     )?;
     assert_eq!(code(&output), 0, "{output:?}");
     let response: Value = serde_json::from_slice(&output.stdout.bytes)?;
@@ -107,7 +142,7 @@ fn peer_doctor_returns_the_local_report() -> Result {
             "fabric".into(),
             "peer".into(),
         ],
-        Some(&serde_json::to_vec(&request)?),
+        Some(&frame(&request)?),
     )?;
     assert_eq!(
         code(&output),
@@ -136,6 +171,8 @@ fn hosts_doctor_uses_the_configured_peer_transport() -> Result {
     let args = rig.root.join("ssh-args");
     let request = rig.root.join("ssh-request");
     let response = rig.root.join("ssh-response");
+    let health = rig.root.join("ssh-health");
+    std::fs::write(&health, serde_json::to_vec(&health_frame(host, &json!(key)))?)?;
     std::fs::write(
         &response,
         serde_json::to_vec(&json!({
@@ -154,11 +191,14 @@ fn hosts_doctor_uses_the_configured_peer_transport() -> Result {
     )?;
     std::fs::write(
         &ssh,
-        format!(
-            "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\ncat > '{}'\ncat '{}'\n",
-            args.display(),
-            request.display(),
-            response.display()
+        probing_ssh(
+            &health,
+            &format!(
+                "printf '%s\\n' \"$@\" > '{}'\nprintf '%s' \"$request\" > '{}'\ncat '{}'\n",
+                args.display(),
+                request.display(),
+                response.display()
+            ),
         ),
     )?;
     std::fs::set_permissions(&ssh, std::fs::Permissions::from_mode(0o700))?;
@@ -211,16 +251,15 @@ fn hosts_doctor_rejects_untrusted_peer_reports() -> Result {
         .ok_or("project key")?;
     let ssh = rig.root.join("ssh");
     let response_path = rig.root.join("ssh-response");
+    let health = rig.root.join("ssh-health");
+    std::fs::write(&health, serde_json::to_vec(&health_frame(host, &json!(key)))?)?;
     let good = json!({
         "claude":[{"label":"default","signin":{"state":"signed_out","token_validity":"unverified"}}],
         "peer_agent":"running","login_accounts":[],"managed":[],"warnings":[]
     });
     std::fs::write(
         &ssh,
-        format!(
-            "#!/bin/sh\ncat >/dev/null\ncat '{}'\n",
-            response_path.display()
-        ),
+        probing_ssh(&health, &format!("cat '{}'\n", response_path.display())),
     )?;
     std::fs::set_permissions(&ssh, std::fs::Permissions::from_mode(0o700))?;
     std::fs::write(
@@ -295,7 +334,7 @@ fn peer_run_statuses_refuses_more_than_one_page() -> Result {
             "fabric".into(),
             "peer".into(),
         ],
-        Some(&serde_json::to_vec(&request)?),
+        Some(&frame(&request)?),
     )?;
     assert_eq!(code(&output), 0);
     let response: Value = serde_json::from_slice(&output.stdout.bytes)?;
@@ -331,7 +370,7 @@ fn peer_console_inbox_is_read_only_and_refuses_an_oversized_page() -> Result {
                 "fabric".into(),
                 "peer".into(),
             ],
-            Some(&serde_json::to_vec(&request)?),
+            Some(&frame(&request)?),
         )?;
         assert_eq!(code(&output), 0);
         Ok(serde_json::from_slice(&output.stdout.bytes)?)
@@ -379,7 +418,7 @@ fn peer_wait_refuses_remote_fanout() -> Result {
             "fabric".into(),
             "peer".into(),
         ],
-        Some(&serde_json::to_vec(&request)?),
+        Some(&frame(&request)?),
     )?;
     assert_eq!(code(&output), 0);
     let response: Value = serde_json::from_slice(&output.stdout.bytes)?;
@@ -412,7 +451,7 @@ fn peer_ingress_refuses_protocol_before_decoding_or_running_mutations() -> Resul
             let output = rig.execute_os(
                 Path::new(env!("CARGO_BIN_EXE_provenant")),
                 &["fabric".into(), "peer".into()],
-                Some(&serde_json::to_vec(&input)?),
+                Some(&frame(&input)?),
             )?;
             assert_eq!(code(&output), 0, "{:?}", output.stderr.bytes);
             let reply: Value = serde_json::from_slice(&output.stdout.bytes)?;
@@ -431,7 +470,7 @@ fn peer_ingress_rejects_wrong_host_before_coordination_mutation() -> Result {
     let output = rig.execute_os(
         Path::new(env!("CARGO_BIN_EXE_provenant")),
         &["fabric".into(), "peer".into()],
-        Some(&serde_json::to_vec(&input)?),
+        Some(&frame(&input)?),
     )?;
     assert_eq!(code(&output), 3);
     assert!(output.stdout.bytes.is_empty());
@@ -464,7 +503,7 @@ fn peer_ingress_refuses_the_target_host_as_source() -> Result {
             "peer".into(),
             "--in-process".into(),
         ],
-        Some(&serde_json::to_vec(&request)?),
+        Some(&frame(&request)?),
     )?;
     // Validation failures exit before a PeerResponse is framed.
     assert_eq!(code(&output), 3);
@@ -498,12 +537,12 @@ fn peer_ingress_refuses_a_trace_naming_another_host_than_the_sender() -> Result 
         "peer".into(),
     ];
     let binary = Path::new(env!("CARGO_BIN_EXE_provenant"));
-    let refused = rig.execute_os(binary, &args, Some(&serde_json::to_vec(&request)?))?;
+    let refused = rig.execute_os(binary, &args, Some(&frame(&request)?))?;
     assert_ne!(code(&refused), 0);
     assert!(refused.stdout.bytes.is_empty());
     // The same request traced to its sender is served.
     request["trace"] = json!({"host": source});
-    let served = rig.execute_os(binary, &args, Some(&serde_json::to_vec(&request)?))?;
+    let served = rig.execute_os(binary, &args, Some(&frame(&request)?))?;
     assert_eq!(code(&served), 0, "{:?}", served.stderr.bytes);
     let reply: Value = serde_json::from_slice(&served.stdout.bytes)?;
     assert_eq!(reply["result"]["result"], "health", "{reply}");
@@ -525,7 +564,7 @@ fn peer_replays_a_home_mutation_once_with_the_original_actor() -> Result {
     let source = next_host(host.as_str().ok_or("host")?.parse()?)?;
     configure_fixture_peer(&rig, source)?;
     let request = json!({"version":1,"protocol":PROTOCOL,"target_host":host,"source_host":source,"agent":"worker","project":{"key":key,"common_dir":"repo/.git"},"action":{"action":"coordination","input":{"domain":"events","input":{"op":"note","note":"remote note","dedup_key":null}},"operation_id":"note-once"}});
-    let input = serde_json::to_vec(&request)?;
+    let input = frame(&request)?;
     let args: Vec<OsString> = vec![
         "--state-dir".into(),
         rig.state.clone().into(),
@@ -582,7 +621,7 @@ fn peer_frames_a_local_run_event_failure() -> Result {
             "fabric".into(),
             "peer".into(),
         ],
-        Some(&serde_json::to_vec(&request)?),
+        Some(&frame(&request)?),
     )?;
     assert_eq!(
         code(&output),
@@ -1247,7 +1286,7 @@ fn json_command(rig: &TestRig, args: &[&str]) -> Result<(i64, Value)> {
 // Adapted from the pre-graph peer dispatch regressions. Placement and replay
 // now travel through the graph attempt owner, then the existing peer protocol.
 #[test]
-fn peer_dispatch_recovers_receipt_when_probes_fail() -> Result {
+fn peer_dispatch_recovers_receipt_when_the_submit_reply_is_lost() -> Result {
     let mut rig = TestRig::new()?;
     let cleanup = rig.process_cleanup();
     let peer = loopback_peer(&mut rig)?;
@@ -1264,7 +1303,7 @@ fn peer_dispatch_recovers_receipt_when_probes_fail() -> Result {
     std::fs::write(
         &ssh,
         format!(
-            "#!/bin/sh\nrequest=$(cat)\ncase \"$request\" in\n  *'\"action\":\"health\"'*) exit 1;;\n  *'\"action\":\"submit\"'*) if [ -f '{}' ]; then printf '%s\\n' \"$request\" | '{}' >/dev/null; rm '{}'; exit 1; fi;;\nesac\nprintf '%s\\n' \"$request\" | '{}'\n",
+            "#!/bin/sh\nrequest=$(cat)\ncase \"$request\" in\n  *'\"action\":\"submit\"'*) if [ -f '{}' ]; then printf '%s\\n' \"$request\" | '{}' >/dev/null; rm '{}'; exit 1; fi;;\nesac\nprintf '%s\\n' \"$request\" | '{}'\n",
             lost.display(),
             real.display(),
             lost.display(),
@@ -1513,13 +1552,7 @@ fn unanswered_peer_submission_is_recorded_as_launch_uncertainty() -> Result {
     let health = rig.root.join("peer-health.json");
     std::fs::write(
         &health,
-        serde_json::to_vec(&json!({
-            "version": 1, "protocol": PROTOCOL, "host": host,
-            "project": identity["data"]["federation"]["key"],
-            "result": {"result":"health", "data":{
-                "host":host, "available":true, "execution":true
-            }}
-        }))?,
+        serde_json::to_vec(&health_frame(host, &identity["data"]["federation"]["key"]))?,
     )?;
     let submitted = rig.root.join("submitted");
     std::fs::write(
@@ -1593,7 +1626,7 @@ fn peer_smoke_fixture_create_and_remove_without_a_staged_fixture() -> Result {
         })
     };
     let call = |action: Value| -> Result<Value> {
-        let input = serde_json::to_vec(&request(action))?;
+        let input = frame(&request(action))?;
         let output = rig.execute_os(
             Path::new(env!("CARGO_BIN_EXE_provenant")),
             &[
@@ -2108,9 +2141,14 @@ fn inbox_hosts_names_why_a_peer_gave_no_page() -> Result {
     // Replace the peer with one that does not know this project.
     let ssh = rig.root.join("ssh");
     let real = std::fs::read_to_string(&ssh)?;
+    let health = rig.root.join("peer-health.json");
+    std::fs::write(&health, serde_json::to_vec(&health_frame(peer, &json!(key)))?)?;
     std::fs::write(
         &ssh,
-        "#!/bin/sh\ncat >/dev/null\necho 'provenant: fabric peer: peer project is outside the selected home' >&2\nexit 3\n",
+        probing_ssh(
+            &health,
+            "echo 'provenant: fabric peer: peer project is outside the selected home' >&2\nexit 3\n",
+        ),
     )?;
     let unknown = peers(&rig)?;
     assert_eq!(unknown["state"], "partial", "{unknown}");
@@ -2127,7 +2165,7 @@ fn inbox_hosts_names_why_a_peer_gave_no_page() -> Result {
     )?;
     std::fs::write(
         &ssh,
-        format!("#!/bin/sh\ncat >/dev/null\ncat '{}'\n", frame.display()),
+        probing_ssh(&health, &format!("cat '{}'\n", frame.display())),
     )?;
     let invalid = peers(&rig)?;
     assert_eq!(invalid["state"], "partial", "{invalid}");
@@ -2278,7 +2316,7 @@ fn remote_inbox_owner() -> Result {
                 "peer".into(),
                 "--in-process".into(),
             ],
-            Some(&serde_json::to_vec(&request)?),
+            Some(&frame(&request)?),
         )?;
         assert_eq!(
             code(&output),

@@ -876,6 +876,14 @@ pub enum CompositeBehaviour {
     ReviewRepair,
 }
 
+/// The successes a review panel of `lenses` members needs by default: all but
+/// one, never fewer than one. Panel selection and template lowering both read
+/// this, so a launch and a compiled panel cannot disagree.
+#[must_use]
+pub fn default_review_minimum(lenses: usize) -> usize {
+    lenses.saturating_sub(1).max(1)
+}
+
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ReviewCoverageFloor {
@@ -2112,6 +2120,11 @@ impl<'a> Compiler<'a> {
         composite.insert("exports".into(), Value::Array(exports));
         if let Some(min_ok) = min_ok {
             composite.insert("min_successful".into(), min_ok);
+        } else if lens_panel {
+            composite.insert(
+                "min_successful".into(),
+                Value::from(default_review_minimum(items.len())),
+            );
         }
         if let Some(max_parallel) = max_parallel {
             composite.insert("max_parallel".into(), max_parallel.clone());
