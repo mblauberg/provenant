@@ -54,8 +54,7 @@ refs intact. Failed and cancelled lanes keep their worktrees.
   `projects/PROJECT_ID/github.json` under the state root; matching calls warn
   and continue. The lane's `gh` warns every `lanes.gh_budget` calls and never
   stops one.
-- A lane's pull requests follow `lanes.pr` (default `never`, so a leaf implement
-  lane does not open one against the wrong base). `never` makes the lane's `gh`
+- A lane's pull requests follow `lanes.pr` (default `allowed`; the deliver template sets `never`). `never` makes the lane's `gh`
   refuse PR mutations and forge writes; `draft` adds `--draft` to `pr create`,
   permits edit, close, comment and review, and refuses other PR writes and forge
   writes. Both refuse unknown PR subcommands until classified; `allowed` forwards

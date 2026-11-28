@@ -483,10 +483,9 @@ entry is filtered, copied or rewritten.
 
 ### Lane pull requests
 
-`lanes.pr` resolves to `never` (the default), `draft` or `allowed`, and every
-effective value names the layer that set it. The default is `never`, so a leaf
-implement writer lane in a graph does not open a pull request; the chair owns
-publication after settlement. Host, launch and node settings opt a lane in.
+`lanes.pr` resolves to `never`, `draft` or `allowed` (the default), and every
+effective value names the layer that set it. The deliver template sets `never`
+so the chair owns publication after settlement. Host, launch and node settings may override it.
 Set `attempt.pr = "draft"` or `"allowed"` on a graph node, or pass
 `--set attempt.pr=draft` at launch; the node override is reported as the launch
 source and takes precedence over the host setting.
@@ -502,7 +501,7 @@ refused; `draft` adds `--draft`
 to `pr create`, permits edit, close, comment and review, and refuses promotion,
 merge, reopen, lock, unlock, update-branch, revert and forge writes. Unknown PR
 subcommands are refused under both restrictive policies until classified;
-`allowed` forwards unchanged. A missing or unknown value falls back to `never`.
+`allowed` forwards unchanged. A missing or unknown value falls back to `allowed`.
 The effective value and source appear in the writer preamble, the launch
 receipt and `run --explain`. This is a cooperative policy mediating ordinary
 `gh` use, not a sandbox against a lane deliberately evading it: a lane that runs

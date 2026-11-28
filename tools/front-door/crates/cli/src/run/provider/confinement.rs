@@ -352,6 +352,12 @@ pub(super) fn confinement_request(
         .optional()
         .network_for(access.network(writer.is_some()));
     Ok(PlanRequest {
+        policy: match &sandbox_context {
+            InventoryContext::Launch(task, _, _) => {
+                run::launch_policy(roots.state, &project_id.to_string(), task)
+            }
+            _ => provenant_records::policy::Policy::default(),
+        },
         scope: WorkScope::Project(project_id),
         permissions: PlanPermissions {
             credential_roots: policy.mandatory().credential_roots().clone(),

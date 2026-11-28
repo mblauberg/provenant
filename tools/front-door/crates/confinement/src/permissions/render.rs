@@ -339,6 +339,7 @@ fn compile_sbpl_inner(
             anchors,
             &credentials,
             lane_access,
+            policy,
         )?),
     };
     if let Some(read_only) = &plan.read_only {
@@ -520,7 +521,7 @@ fn compile_sbpl_inner(
     // SBPL grants pathnames, so rebind them to their held identities after
     // rendering, immediately before returning the launch profile.
     if let AccessMode::WorktreeWrite(authority) = &plan.mode {
-        verify_worktree_authority(authority, anchors, &credentials, lane_access)?;
+        verify_worktree_authority(authority, anchors, &credentials, lane_access, policy)?;
     }
     verify_private_scratch(&plan.scratch, &scratch_exclusions, anchors)?;
     if let Some(state) = &plan.private_state {

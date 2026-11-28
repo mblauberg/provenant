@@ -779,6 +779,14 @@ fn delivery_composites_compile_both_review_shapes() {
 #[test]
 fn delivery_review_waits_on_the_single_ci_outcome_boundary() {
     let doc = compiled_delivery(json!({"plan": false}), false);
+    let writer = find_compiled_node(&doc.nodes[0], "implement").unwrap();
+    assert_eq!(
+        writer
+            .attempt
+            .as_ref()
+            .and_then(|attempt| attempt.pr.as_deref()),
+        Some("never")
+    );
     let expanded = expanded_delivery(&doc, &limits());
     let ci = expanded
         .nodes

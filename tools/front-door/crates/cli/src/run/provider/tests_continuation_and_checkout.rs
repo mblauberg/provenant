@@ -817,6 +817,7 @@ fn read_only_plan_runs_host_git_with_a_private_home_outside_the_child_store()
         scope: PathScope::Subtree,
     };
     let request = PlanRequest {
+        policy: provenant_records::policy::Policy::default(),
         scope: WorkScope::Project(ProjectId::from_bytes([1; 16])),
         permissions: PlanPermissions {
             credential_roots: roots.credential_roots().clone(),

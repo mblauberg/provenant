@@ -166,6 +166,7 @@ fn claimed_launch_reports_once_when_a_prepared_attempt_is_replayed()
     let policy = provenant_confinement::run_config::RunConfig::default()
         .policy_for_launch(Path::new("/fixture/state"), mandatory);
     let plan = ConfinedPlan::new(PlanRequest {
+        policy: provenant_records::policy::Policy::default(),
         scope: WorkScope::Project(store.context.project_id),
         codex: CodexPolicy::Clean,
         extensions: ExtensionPolicy::Deny,

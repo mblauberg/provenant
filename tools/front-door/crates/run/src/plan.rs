@@ -265,6 +265,7 @@ mod tests {
             .join(binding.project_id().to_string())
             .join("read-only.json");
         let request = || PlanRequest {
+            policy: provenant_records::policy::Policy::default(),
             scope: WorkScope::Project(context.project_id),
             codex: CodexPolicy::Clean,
             extensions: ExtensionPolicy::Deny,

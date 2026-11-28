@@ -549,6 +549,7 @@ fn read_only_extension_guard_uses_layered_confinement_policy() {
     let (permissions, _) = write_grants_fixture();
     let (plan, warnings) = provenant_records::warning::capture(|| {
         ConfinedPlan::new(PlanRequest {
+            policy: provenant_records::policy::Policy::default(),
             scope: provenant_core::WorkScope::Project(provenant_core::ProjectId::from_bytes(
                 [1; 16],
             )),
@@ -660,6 +661,7 @@ fn worktree_access_read_only_profile_limits_checkout_writes()
     let lane_policy = crate::run_config::RunConfig::default().policy_for_launch(&state, mandatory);
     let plan = ConfinedPlan::new(
         PlanRequest {
+            policy: provenant_records::policy::Policy::default(),
             scope: WorkScope::Project(binding.project_id()),
             permissions: PlanPermissions {
                 credential_roots: provenant_core::CredentialRoots::for_home(&home),
@@ -840,6 +842,7 @@ fn worktree_access_read_only_profile_limits_checkout_writes()
     strict_permissions.read_roots.clear();
     let strict = ConfinedPlan::new(
         PlanRequest {
+            policy: provenant_records::policy::Policy::default(),
             scope: WorkScope::Project(binding.project_id()),
             permissions: strict_permissions,
             codex: CodexPolicy::Clean,

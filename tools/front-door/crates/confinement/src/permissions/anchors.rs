@@ -206,6 +206,7 @@ impl Anchors<'_> {
         &self,
         grant: &PathGrant,
         code: &'static str,
+        policy: &Policy,
     ) -> Result<(), PermissionError> {
         if grant.scope != PathScope::Exact {
             return Err(PermissionError::InvalidPath(grant.path.clone()));
@@ -214,7 +215,7 @@ impl Anchors<'_> {
             && metadata.links > 1
         {
             let detail = format!("{}: file has other hard links", grant.path.display());
-            Policy::default().warn_or(code, Facts::violation(detail), |_| {
+            policy.warn_or(code, Facts::violation(detail), |_| {
                 anchor_at(&grant.path, "file has other hard links")
             })?;
         }

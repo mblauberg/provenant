@@ -1230,6 +1230,7 @@ fn search_path_is_independent_of_unencodable_git_shim_directory() {
     let mut permissions = base.permissions().clone();
     permissions.scratch.path = scratch_path;
     let plan = ConfinedPlan::new(PlanRequest {
+        policy: provenant_records::policy::Policy::default(),
         scope: base.scope(),
         permissions,
         codex: CodexPolicy::Clean,

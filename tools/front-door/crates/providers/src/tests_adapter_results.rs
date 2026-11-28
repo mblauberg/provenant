@@ -190,6 +190,7 @@ fn command_credentials_stay_denied_in_every_network_mode() {
         let mut permissions = base.permissions().clone();
         permissions.network = network;
         let plan = ConfinedPlan::new(PlanRequest {
+            policy: provenant_records::policy::Policy::default(),
             scope: base.scope(),
             permissions,
             codex: CodexPolicy::Clean,
@@ -390,6 +391,7 @@ fn prepared_git_binding_is_not_ambient_for_every_adapter() -> Result<(), Provide
                     Some(ReadOnlyGrants::for_test("/fixture/repo".into(), vec![]));
             }
             let plan = ConfinedPlan::new(PlanRequest {
+                policy: provenant_records::policy::Policy::default(),
                 scope: base.scope(),
                 permissions,
                 codex: CodexPolicy::Clean,
@@ -489,6 +491,7 @@ fn worktree_writer_attempts_isolate_git_state_and_config() -> Result<(), Provide
     let mut permissions = base.permissions().clone();
     permissions.scratch.path = Path::new("/fixture/attempt-two/scratch").to_path_buf();
     let second_plan = ConfinedPlan::new(PlanRequest {
+        policy: provenant_records::policy::Policy::default(),
         scope: base.scope(),
         permissions,
         codex: CodexPolicy::Clean,
@@ -544,6 +547,7 @@ fn prepared_git_accepts_non_utf8_scratch() -> Result<(), ProviderError> {
         std::ffi::OsString::from_vec(b"/fixture/scratch-\xff".to_vec()).into();
     permissions.read_only = Some(ReadOnlyGrants::for_test("/fixture/repo".into(), vec![]));
     let plan = ConfinedPlan::new(PlanRequest {
+        policy: provenant_records::policy::Policy::default(),
         scope: base.scope(),
         permissions,
         codex: CodexPolicy::Clean,
@@ -693,6 +697,7 @@ fn exercise_prepared_private_git(access: Access) -> Result<(), Box<dyn std::erro
             permissions.mode = serde_json::from_value(mode)?;
         }
         let plan = ConfinedPlan::new(PlanRequest {
+            policy: provenant_records::policy::Policy::default(),
             scope: base.scope(),
             permissions,
             codex: CodexPolicy::Clean,

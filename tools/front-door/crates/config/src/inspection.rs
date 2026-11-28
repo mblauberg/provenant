@@ -220,7 +220,7 @@ fn flatten(
     }
 }
 
-fn section_values(text: &str, section: &str) -> Vec<(String, serde_json::Value)> {
+pub(crate) fn section_values(text: &str, section: &str) -> Vec<(String, serde_json::Value)> {
     let mut out = Vec::new();
     let Ok(document) = text.parse::<toml_edit::DocumentMut>() else {
         return out;
@@ -247,11 +247,14 @@ fn host_text(roots: &Roots) -> Result<Option<String>, ConfigError> {
 
 /// Read an optional project file through the no-follow boundary. An unreadable
 /// or absent policy file has no candidates; it never stops an explanation.
-fn project_text(project: Option<&Path>, name: &str) -> Option<String> {
+pub(crate) fn project_text(project: Option<&Path>, name: &str) -> Option<String> {
     let dir = provenant_os::fs::Directory::open_anchor(&project?.join(".provenant")).ok()?;
     let file = dir.open_read(std::ffi::OsStr::new(name)).ok()?;
     let mut bytes = Vec::new();
     file.take(1024 * 1024 + 1).read_to_end(&mut bytes).ok()?;
+    if bytes.len() > 1024 * 1024 {
+        return None;
+    }
     String::from_utf8(bytes).ok()
 }
 
@@ -356,30 +359,22 @@ pub fn explain(
                         3,
                     ));
                 }
-                if let Some(text) = &host {
-                    for (name, value) in section_values(text, "policy") {
-                        if name == suffix {
-                            candidates.push(candidate(
-                                &full,
-                                value,
-                                Layer::Host,
-                                &format!("config.toml#policy.{suffix}"),
-                                specificity,
-                            ));
-                        }
-                    }
-                }
-                if let Some(text) = project_text(project, "policy.toml") {
-                    for (name, value) in section_values(&text, "policy") {
-                        if name == suffix {
-                            candidates.push(candidate(
-                                &full,
-                                value,
-                                Layer::Project,
-                                &format!(".provenant/policy.toml#policy.{suffix}"),
-                                specificity,
-                            ));
-                        }
+                let project_id = project
+                    .and_then(crate::project_binding::project_id_for_path)
+                    .map(|id| id.to_string());
+                let project_id = project_id.as_deref().unwrap_or("");
+                let checkout = crate::policy::project_checkout(roots.state.as_path(), project_id);
+                for source in
+                    crate::policy::sources(roots.state.as_path(), project_id, checkout.as_deref())
+                {
+                    if source.key == suffix {
+                        candidates.push(candidate(
+                            &full,
+                            serde_json::json!(source.strength),
+                            source.layer,
+                            &source.origin,
+                            specificity,
+                        ));
                     }
                 }
             }
@@ -513,6 +508,72 @@ mod explanation_tests {
                 .as_deref()
                 .is_some_and(|origin| origin.contains("harness-knobs.json"))
         );
+    }
+
+    #[test]
+    fn explain_and_enforcement_share_host_and_project_policy_sources() {
+        use provenant_records::policy::{Effect, Facts, Strength};
+        let temp = tempfile::tempdir().unwrap();
+        let roots = roots(temp.path());
+        let checkout = temp.path().join("project");
+        let git = checkout.join(".git");
+        std::fs::create_dir_all(git.join("objects")).unwrap();
+        std::fs::write(git.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+        std::fs::create_dir_all(checkout.join(".provenant")).unwrap();
+        let checkout = std::fs::canonicalize(checkout).unwrap();
+        let git = std::fs::canonicalize(git).unwrap();
+        let location =
+            crate::project_binding::ProjectLocation::from_verified_primary_checkout(git, &checkout)
+                .unwrap();
+        let binding = crate::project_binding::bind_project(&roots, location).unwrap();
+        let code = "PLAN_CONFINEDPLAN_NEW_AUTHORITY";
+        write_config(
+            temp.path(),
+            "schema_version = 1\nprofile = 'balanced'\n[policy]\ndefault = 'refuse'\n",
+        );
+        let host = crate::policy::read(
+            roots.state.as_path(),
+            &binding.project_id().to_string(),
+            &Default::default(),
+        );
+        assert!(matches!(
+            host.check(code, Facts::violation("fixture")),
+            Effect::Refuse(_)
+        ));
+        let host_explain = explain(&format!("policy.{code}"), &roots, Some(&checkout)).unwrap();
+        assert_eq!(
+            host_explain.winner.unwrap().value,
+            serde_json::json!("refuse")
+        );
+        std::fs::write(
+            checkout.join(".provenant/policy.toml"),
+            "[policy]\ndefault = 'warn'\n",
+        )
+        .unwrap();
+        let project = crate::policy::read(
+            roots.state.as_path(),
+            &binding.project_id().to_string(),
+            &Default::default(),
+        );
+        assert!(matches!(
+            project.check(code, Facts::violation("fixture")),
+            Effect::Warn(_)
+        ));
+        let explained = explain(&format!("policy.{code}"), &roots, Some(&checkout)).unwrap();
+        let winner = explained.winner.unwrap();
+        assert_eq!(
+            (winner.layer, winner.value),
+            (Layer::Project, serde_json::json!("warn"))
+        );
+        let strict = crate::policy::read(
+            roots.state.as_path(),
+            &binding.project_id().to_string(),
+            &std::collections::BTreeMap::from([("default".into(), Strength::Refuse)]),
+        );
+        assert!(matches!(
+            strict.check(code, Facts::violation("fixture")),
+            Effect::Refuse(_)
+        ));
     }
 
     #[test]

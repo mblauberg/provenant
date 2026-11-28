@@ -122,6 +122,7 @@ impl PlanRequest {
 }
 
 pub struct PlanRequest {
+    pub policy: Policy,
     pub scope: WorkScope,
     pub permissions: PlanPermissions,
     pub codex: CodexPolicy,
@@ -154,20 +155,20 @@ impl PlanError {
     }
 }
 
-fn plan_boundary_error(code: &str, error: PlanError) -> PlanError {
+fn plan_boundary_error(policy: &Policy, code: &str, error: PlanError) -> PlanError {
     let detail = error.to_string();
-    Policy::default().boundary_error(code, Facts::violation(detail), error)
+    policy.boundary_error(code, Facts::violation(detail), error)
 }
 
-fn warn_plan_root_overlap(detail: impl Into<String>) -> Result<(), PlanError> {
-    Policy::default().warn_or(
+fn warn_plan_root_overlap(policy: &Policy, detail: impl Into<String>) -> Result<(), PlanError> {
+    policy.warn_or(
         "PLAN_CONFINEDPLAN_NEW_DATA_INTEGRITY",
         Facts::violation(detail.into()),
         |_| PlanError::InvalidRoots,
     )
 }
 
-fn plan_permission_error(error: PermissionError) -> PlanError {
+fn plan_permission_error(policy: &Policy, error: PermissionError) -> PlanError {
     use PermissionError as E;
     let code = match &error {
         E::CredentialRoot
@@ -182,11 +183,7 @@ fn plan_permission_error(error: PermissionError) -> PlanError {
     match code {
         Some(code) => {
             let detail = error.to_string();
-            PlanError::Permission(Policy::default().boundary_error(
-                code,
-                Facts::violation(detail),
-                error,
-            ))
+            PlanError::Permission(policy.boundary_error(code, Facts::violation(detail), error))
         }
         None => PlanError::Permission(error),
     }
@@ -235,6 +232,7 @@ pub struct ConfinedPlan {
 impl ConfinedPlan {
     pub fn new(input: PlanRequest) -> Result<Self, PlanError> {
         let p = &input.permissions;
+        let policy = &input.policy;
         if matches!(p.mode, AccessMode::ReadOnly)
             && (input.codex != CodexPolicy::Clean || input.extensions != ExtensionPolicy::Deny)
         {
@@ -250,7 +248,7 @@ impl ConfinedPlan {
             // a `none` row in the `confinement` group: warn and keep the plain
             // profile. A configured stop still routes through the shared
             // resolution under `--strict` or an explicit policy.<CODE>.
-            Policy::default().warn_or(
+            policy.warn_or(
                 "PLAN_CONFINEDPLAN_NEW_AUTHORITY",
                 Facts::violation(format!(
                     "read-only plan requested {requested}; the plain profile is kept"
@@ -263,6 +261,7 @@ impl ConfinedPlan {
             // produce a valid result: this is a typed operation error, not a
             // policy refusal and not one of the three authority boundaries.
             return Err(plan_boundary_error(
+                policy,
                 "PLAN_NESTED_CONFINEMENT_UNSUPPORTED",
                 PlanError::Permission(PermissionError::NestedConfinementUnsupported),
             ));
@@ -272,7 +271,7 @@ impl ConfinedPlan {
                 && let Err(error) = policy.mandatory().validate_extra_write(grant)
             {
                 if matches!(&error, PermissionError::ProtectedOverlap) {
-                    warn_plan_root_overlap("extra write grant overlaps a protected root")?;
+                    warn_plan_root_overlap(policy, "extra write grant overlaps a protected root")?;
                 } else {
                     let code = match &error {
                         PermissionError::CredentialRoot
@@ -286,14 +285,15 @@ impl ConfinedPlan {
                         | PermissionError::NonUtf8Path => "PLAN_CONFINEDPLAN_NEW_AUTHORITY_2",
                         _ => return Err(error.into()),
                     };
-                    return Err(plan_boundary_error(code, error.into()));
+                    return Err(plan_boundary_error(policy, code, error.into()));
                 }
             }
             validate_noncredential_for_plan(grant, p).map_err(|error| {
-                plan_permission_error(error.with_credential_path(&grant.path, None))
+                plan_permission_error(policy, error.with_credential_path(&grant.path, None))
             })?;
             if p.secret_roots.iter().any(|root| grant.overlaps(root)) {
                 return Err(plan_boundary_error(
+                    policy,
                     "PLAN_CONFINEDPLAN_NEW_CREDENTIALS",
                     PlanError::InvalidRoots,
                 ));
@@ -305,28 +305,32 @@ impl ConfinedPlan {
                 .any(|root| grant.overlaps(root))
             {
                 warn_plan_root_overlap(
+                    policy,
                     "extra write grant overlaps protected data or private state",
                 )?;
             }
         }
         for grant in &p.read_roots {
             validate_read_exec_for_plan(grant, p).map_err(|error| {
-                plan_permission_error(error.with_credential_path(&grant.path, None))
+                plan_permission_error(policy, error.with_credential_path(&grant.path, None))
             })?;
         }
         for grant in &p.protected_roots {
             validate_noncredential_for_plan(grant, p).map_err(|error| {
-                plan_permission_error(error.with_credential_path(&grant.path, None))
+                plan_permission_error(policy, error.with_credential_path(&grant.path, None))
             })?;
         }
         for secret in &p.secret_roots {
-            secret.validate().map_err(plan_permission_error)?;
+            secret
+                .validate()
+                .map_err(|error| plan_permission_error(policy, error))?;
             if p.read_roots
                 .iter()
                 .chain(&p.protected_roots)
                 .any(|g| g.overlaps(secret))
             {
                 return Err(plan_boundary_error(
+                    policy,
                     "PLAN_CONFINEDPLAN_NEW_CREDENTIALS",
                     PlanError::InvalidRoots,
                 ));
@@ -334,10 +338,11 @@ impl ConfinedPlan {
         }
         for private in std::iter::once(&p.scratch).chain(&p.private_state) {
             validate_noncredential_for_plan(private, p).map_err(|error| {
-                plan_permission_error(error.with_credential_path(&private.path, None))
+                plan_permission_error(policy, error.with_credential_path(&private.path, None))
             })?;
             if private.scope != PathScope::Subtree {
                 return Err(plan_boundary_error(
+                    policy,
                     "PLAN_CONFINEDPLAN_NEW_AUTHORITY_2",
                     PlanError::InvalidRoots,
                 ));
@@ -348,11 +353,13 @@ impl ConfinedPlan {
                 .any(|g| private.overlaps(g))
             {
                 warn_plan_root_overlap(
+                    policy,
                     "scratch or private state overlaps a read or protected root",
                 )?;
             }
             if p.secret_roots.iter().any(|secret| private.overlaps(secret)) {
                 return Err(plan_boundary_error(
+                    policy,
                     "PLAN_CONFINEDPLAN_NEW_CREDENTIALS",
                     PlanError::InvalidRoots,
                 ));
@@ -362,7 +369,7 @@ impl ConfinedPlan {
             .as_ref()
             .is_some_and(|g| g.overlaps(&p.scratch))
         {
-            warn_plan_root_overlap("private state overlaps scratch")?;
+            warn_plan_root_overlap(policy, "private state overlaps scratch")?;
         }
         let agy_home = input
             .agy_state
@@ -373,15 +380,19 @@ impl ConfinedPlan {
                 };
                 // Only allowlisted state files are read by the recipe, never
                 // a provider grant to the source credential-containing subtree.
-                selected.validate().map_err(plan_permission_error)?;
+                selected
+                    .validate()
+                    .map_err(|error| plan_permission_error(policy, error))?;
                 let private = p.private_state.as_ref().ok_or_else(|| {
                     plan_boundary_error(
+                        policy,
                         "PLAN_CONFINEDPLAN_NEW_AUTHORITY_2",
                         PlanError::InvalidRoots,
                     )
                 })?;
                 if selected.overlaps(private) || selected.overlaps(&p.scratch) {
                     warn_plan_root_overlap(
+                        policy,
                         "selected Agy source overlaps private state or scratch",
                     )?;
                 }
@@ -390,6 +401,7 @@ impl ConfinedPlan {
                     .any(|secret| selected.overlaps(secret))
                 {
                     return Err(plan_boundary_error(
+                        policy,
                         "PLAN_CONFINEDPLAN_NEW_CREDENTIALS_2",
                         PlanError::InvalidRoots,
                     ));
@@ -398,7 +410,10 @@ impl ConfinedPlan {
                     .iter()
                     .any(|protected| selected.overlaps(protected))
                 {
-                    warn_plan_root_overlap("selected Agy source overlaps a protected root")?;
+                    warn_plan_root_overlap(
+                        policy,
+                        "selected Agy source overlaps a protected root",
+                    )?;
                 }
                 // Fixed allowlist only. No credential files, executable helpers,
                 // extensions, config or arbitrary home entries are mirrored.
@@ -407,12 +422,14 @@ impl ConfinedPlan {
                     private.path.clone(),
                     RelativePath::parse("agy-home").map_err(|_| {
                         plan_boundary_error(
+                            policy,
                             "PLAN_CONFINEDPLAN_NEW_AUTHORITY_2",
                             PlanError::InvalidRoots,
                         )
                     })?,
                     RelativePath::parse(".gemini/antigravity-cli").map_err(|_| {
                         plan_boundary_error(
+                            policy,
                             "PLAN_CONFINEDPLAN_NEW_AUTHORITY_2",
                             PlanError::InvalidRoots,
                         )

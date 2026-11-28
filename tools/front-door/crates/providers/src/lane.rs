@@ -310,7 +310,7 @@ impl Default for GhShim<'static> {
             budget: provenant_config::DEFAULT_GH_BUDGET,
             budget_source: "default",
             label_ci_warning: false,
-            pr_policy: provenant_config::PrPolicy::Never,
+            pr_policy: provenant_config::PrPolicy::default(),
             pr_source: "default",
         }
     }
@@ -1914,6 +1914,7 @@ mod tests {
         mode["authority"]["git_state"] = serde_json::json!({"path": scratch, "scope": "subtree"});
         permissions.mode = serde_json::from_value(mode)?;
         let plan = ConfinedPlan::new(PlanRequest {
+            policy: provenant_records::policy::Policy::default(),
             scope: base.scope(),
             permissions,
             codex: CodexPolicy::Clean,
@@ -2172,6 +2173,7 @@ mod tests {
         sibling_mode["authority"]["git_state"]["path"] = serde_json::to_value(&sibling_scratch)?;
         sibling_permissions.mode = serde_json::from_value(sibling_mode)?;
         let sibling_plan = ConfinedPlan::new(PlanRequest {
+            policy: provenant_records::policy::Policy::default(),
             scope: plan.scope(),
             permissions: sibling_permissions,
             codex: CodexPolicy::Clean,

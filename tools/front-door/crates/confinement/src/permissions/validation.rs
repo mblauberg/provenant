@@ -33,13 +33,14 @@ pub(super) fn verify_worktree_authority(
     anchors: &Anchors<'_>,
     credentials: &CredentialRoots,
     access: &LaneAccessReceipt,
+    policy: &Policy,
 ) -> Result<WorktreeWriteGrants, PermissionError> {
     // The compiled rule for this site is `none/warn` and applies only to the
     // hard-link predicate handled in the exact-grant loop below. Every other
     // failure is already a typed `PermissionError` whose own boundary refuses
     // at the caller; routing it through `boundary_error` here would assert
     // against a non-boundary rule and panic.
-    verify_worktree_authority_inner(authority, anchors, credentials, access)
+    verify_worktree_authority_inner(authority, anchors, credentials, access, policy)
 }
 
 #[cfg(target_os = "macos")]
@@ -48,6 +49,7 @@ fn verify_worktree_authority_inner(
     anchors: &Anchors<'_>,
     credentials: &CredentialRoots,
     access: &LaneAccessReceipt,
+    policy: &Policy,
 ) -> Result<WorktreeWriteGrants, PermissionError> {
     let host_credentials;
     let credentials = if access.access == LaneAccess::Host {
@@ -82,6 +84,7 @@ fn verify_worktree_authority_inner(
             PathScope::Exact => anchors.verify_single_link_grant_advisory(
                 grant,
                 "VALIDATION_VERIFY_WORKTREE_AUTHORITY_GIT_ISOLATION",
+                policy,
             )?,
         }
     }
@@ -92,7 +95,7 @@ fn verify_worktree_authority_inner(
     for grant in worktree_git_state_writes(&authority.git_state) {
         anchors.verify_grant_held(&grant)?;
     }
-    verify_git_control_links(verified.repo())?;
+    verify_git_control_links(verified.repo(), policy)?;
     Ok(grants)
 }
 
@@ -104,6 +107,7 @@ fn verify_worktree_authority_inner(
 #[cfg(target_os = "macos")]
 pub(super) fn verify_git_control_links(
     repo: &crate::repo::VerifiedRepo,
+    policy: &Policy,
 ) -> Result<(), PermissionError> {
     match verify_git_control_links_inner(repo) {
         Ok(()) => Ok(()),
@@ -113,7 +117,7 @@ pub(super) fn verify_git_control_links(
         // stop; credential stores use a separate strict check.
         Err(error) if matches!(&error, PermissionError::GitControlHardLinked(_)) => {
             let detail = error.to_string();
-            Policy::default().warn_or(
+            policy.warn_or(
                 "VALIDATION_VERIFY_GIT_CONTROL_LINKS_GIT_ISOLATION",
                 Facts::violation(detail),
                 |_| error,

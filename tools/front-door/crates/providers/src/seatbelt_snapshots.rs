@@ -66,6 +66,7 @@ fn prepared(
         permissions.network = network;
     }
     let confined = provenant_confinement::ConfinedPlan::new(provenant_confinement::PlanRequest {
+        policy: provenant_records::policy::Policy::default(),
         scope: base.scope(),
         permissions,
         codex: provenant_confinement::CodexPolicy::Clean,

@@ -1019,6 +1019,7 @@ fn read_only_lane_fetches_into_private_git_with_host_metadata_denied() -> Result
         scope: PathScope::Subtree,
     };
     let request = PlanRequest {
+        policy: provenant_records::policy::Policy::default(),
         scope: WorkScope::Project(binding.project_id()),
         codex: CodexPolicy::Clean,
         extensions: ExtensionPolicy::Deny,
