@@ -19,6 +19,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use thiserror::Error;
 
+mod capture;
 mod indexes;
 mod writer_release;
 pub use indexes::{
@@ -97,6 +98,12 @@ pub enum CustodyError {
     UnknownIdentity,
     #[error("record is invalid or belongs to another generation")]
     InvalidRecord,
+    #[error("capture plan {field} is {value}, outside {bound}")]
+    CapturePlan {
+        field: &'static str,
+        value: u64,
+        bound: String,
+    },
     #[error(
         "attempt evidence was written before shared worktree leases and a holder may still be live; stop that holder and run `provenant reconcile` to clear the reservation"
     )]
@@ -1308,22 +1315,6 @@ impl Default for CapturePlan {
         }
     }
 }
-impl CapturePlan {
-    pub(crate) fn validate(&self) -> Result<()> {
-        if self.stdout.limit() > 64 * 1024 * 1024
-            || self.stderr.limit() > 64 * 1024 * 1024
-            || self.wall_ms == 0
-            || self.wall_ms > 86400000
-            || self.descendant_grace_ms > 60000
-            || self.root_flush_ms > 60000
-            || self.retained_custody_ms == 0
-            || self.retained_custody_ms > MAX_RETAINED_CUSTODY_SECONDS * 1_000
-        {
-            return Err(CustodyError::InvalidRecord);
-        }
-        Ok(())
-    }
-}
 pub struct OwnedLaunch<'a> {
     pub command: ProviderCommand,
     pub lease: &'a mut CustodyLease,
@@ -1443,7 +1434,8 @@ pub fn launch(
         Err(error) => return Err(failure(error.into(), publication)),
     };
     owned.lease.reservation.requester = Some(requester);
-    if owned.cancel.is_cancelled() || capture.validate().is_err() {
+    let invalid_capture = capture.validate().err();
+    if owned.cancel.is_cancelled() || invalid_capture.is_some() {
         owned.lease.reservation.launch_state = LaunchState::NeverSpawned;
         owned.lease.reservation.unresolved_cleanup = false;
         owned.lease.reservation.census_incomplete = false;
@@ -1473,7 +1465,7 @@ pub fn launch(
         let error = match publication_result {
             Err(error) => error,
             Ok(()) if reason.is_some() => CustodyError::Cancelled,
-            Ok(()) => CustodyError::InvalidRecord,
+            Ok(()) => invalid_capture.unwrap_or(CustodyError::InvalidRecord),
         };
         return Err(LaunchFailure {
             error: Box::new(error),
