@@ -633,7 +633,7 @@ pub fn run(
         &mut result,
         mode,
         |value| context::publish(value, roots),
-        crate::OverflowPolicy::Refuse,
+        crate::OverflowPolicy::Proceed,
     ) {
         Ok(status) => crate::exit_status(&status),
         Err(_) => {

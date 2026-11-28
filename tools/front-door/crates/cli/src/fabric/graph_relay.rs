@@ -1983,17 +1983,8 @@ fn launch_resolvers_with(
         }
     };
     let selection_review = fallback_review.as_ref().unwrap_or(review);
-    let applied_floors = selection_review.path_floors(&paths);
     let mut hard_review_coverage = false;
-    let mut hard_floor_tier: Option<String> = None;
     let mut hard_floor_lenses = Vec::new();
-    let risk_rank = |tier: &str| match tier {
-        "routine" => 0,
-        "substantial" => 1,
-        "crucial" => 2,
-        "terminal" => 3,
-        _ => 0,
-    };
     // Only a floor the project declared `hard = true` refuses; every other
     // class warns about a shortfall and names the missing lenses.
     for path in &paths {
@@ -2002,13 +1993,6 @@ fn launch_resolvers_with(
             continue;
         }
         hard_review_coverage = true;
-        let tier = floors.tier.as_deref().unwrap_or("routine");
-        if hard_floor_tier
-            .as_deref()
-            .is_none_or(|current| risk_rank(tier) > risk_rank(current))
-        {
-            hard_floor_tier = Some(tier.to_owned());
-        }
         for lens in floors.lenses {
             if !hard_floor_lenses.contains(&lens) {
                 hard_floor_lenses.push(lens);
@@ -2016,14 +2000,7 @@ fn launch_resolvers_with(
         }
     }
     let mut panel = selection_review.resolve_panel(&request, measured_size, &paths, false)?;
-    let coverage_minimum = hard_floor_tier
-        .as_deref()
-        .or(applied_floors.tier.as_deref())
-        .and_then(|tier| selection_review.select.by_risk.get(tier))
-        .and_then(|shape| selection_review.shapes.get(shape))
-        .or_else(|| selection_review.shapes.get(&panel.shape))
-        .map(|shape| shape.reviewers.iter().map(|reviewer| reviewer.count).sum())
-        .unwrap_or(panel.slots.len());
+    let coverage_minimum = panel.slots.len().saturating_sub(1).max(1);
     if (!panel.minimum_family_counts.is_empty()
         || panel
             .slots

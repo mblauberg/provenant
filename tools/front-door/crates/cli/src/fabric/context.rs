@@ -1500,6 +1500,11 @@ pub fn facade_outcome(error: &FacadeError) -> (Outcome, provenant_run::ErrorKind
         FacadeError::NotTerminal => (Outcome::Refused, ErrorKind::Nonterminal),
         FacadeError::OperationConflict => (Outcome::Refused, ErrorKind::OperationConflict),
         FacadeError::Busy => (Outcome::Refused, ErrorKind::QueueFull),
+        FacadeError::RecordedRefusal { refusal_code, .. }
+            if refusal_code == "FORGE_QUOTA_EXHAUSTED" =>
+        {
+            (Outcome::Unavailable, ErrorKind::ForgeQuotaExhausted)
+        }
         FacadeError::ConfinementRefused { .. }
         | FacadeError::GraphRelayRefused { .. }
         | FacadeError::RecordedRefusal { .. } => (Outcome::Refused, ErrorKind::Refused),
@@ -1547,6 +1552,7 @@ pub fn facade_outcome(error: &FacadeError) -> (Outcome, provenant_run::ErrorKind
             let outcome = match kind.category() {
                 "invalid" => Outcome::Invalid,
                 "refused" => Outcome::Refused,
+                "transient" => Outcome::Unavailable,
                 _ => Outcome::Error,
             };
             (outcome, kind)

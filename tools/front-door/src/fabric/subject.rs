@@ -133,14 +133,31 @@ fn subject_from_entry(entry: &crate::pr::status::batch::Entry) -> Option<PullSna
     })
 }
 
-/// `RunKind` carries the run's stable `FORGE_QUOTA` code through `code()` and
-/// the facade's typed outcome; the reset lives in the safe `next` repair.
+/// Reuse the observer's `FORGE_QUOTA_EXHAUSTED` projection and retain its
+/// transient category and timestamp-bearing next step across the facade.
 fn forge_quota_error(reset: jiff::Timestamp) -> FacadeError {
-    FacadeError::RunKind {
-        run_code: "FORGE_QUOTA".into(),
-        next: format!("retry after {reset}"),
-        detail: Some(format!("GitHub rate limit; reset {reset}")),
-        resource: None,
+    let projected = crate::pr::observer::forge_quota_error(reset, None, None);
+    let category = if matches!(
+        projected.class,
+        provenant_records::ErrorClass::Transient { retry_at: Some(_) }
+    ) {
+        "transient"
+    } else {
+        "operation"
+    };
+    let next = projected
+        .next
+        .iter()
+        .map(|step| step.why.as_str())
+        .collect::<Vec<_>>()
+        .join("; ");
+    let diagnostic = provenant_records::diagnostic::Diagnostic::new(&projected.code)
+        .category(category)
+        .detail(&projected.message)
+        .next(next);
+    FacadeError::RecordedRefusal {
+        refusal_code: projected.code.clone(),
+        diagnostic: Box::new(diagnostic),
     }
 }
 
@@ -1158,13 +1175,12 @@ mod tests {
         Ok(())
     }
 
-    /// Issue #3986: a spent REST core quota is a typed, retryable refusal, not
+    /// A spent REST core quota uses the shared typed transient projection, not
     /// an invalid input field the caller never supplied. With no GraphQL row
     /// available the reset is carried in the safe repair. The forge port is
     /// disabled here so the fallback cannot answer and no real forge is read.
     #[test]
-    fn rate_limited_subject_is_a_typed_retryable_refusal() -> crate::worktree_tests::support::Result
-    {
+    fn rate_limited_subject_is_a_typed_transient() -> crate::worktree_tests::support::Result {
         use super::*;
 
         let state = tempfile::tempdir()?;
@@ -1174,6 +1190,13 @@ mod tests {
         std::fs::write(state.path().join("ports.json"), serde_json::to_vec(&ports)?)?;
 
         let reset = jiff::Timestamp::from_second(2_000_000_000).expect("reset");
+        let shared = crate::pr::observer::forge_quota_error(reset, None, None);
+        assert!(matches!(
+            shared.class,
+            provenant_records::ErrorClass::Transient {
+                retry_at: Some(retry_at)
+            } if retry_at == reset
+        ));
         let error = subject_read_result(
             state.path(),
             project.path(),
@@ -1181,19 +1204,20 @@ mod tests {
             crate::pr::observer::ObserveError::RateLimited { reset },
         )
         .err()
-        .ok_or("a rate-limited subject must refuse")?;
-        assert_eq!(error.code(), "FORGE_QUOTA", "{error:?}");
+        .ok_or("a rate-limited subject must report a transient quota condition")?;
+        assert_eq!(error.code(), "FORGE_QUOTA_EXHAUSTED", "{error:?}");
         let diagnostic = error.diagnostic();
+        assert_eq!(diagnostic.category.as_deref(), Some("transient"));
         let next = diagnostic.next.as_deref().unwrap_or_default();
-        assert!(next.contains("retry after"), "{next}");
+        assert!(next.contains("Unix timestamp 2000000000"), "{next}");
         assert!(next.contains(&reset.to_string()), "{next}");
         let detail = diagnostic.detail.as_deref().unwrap_or_default();
         assert!(detail.contains("rate limit"), "{detail}");
         assert_eq!(
             provenant_cli::fabric::facade_outcome(&error),
             (
-                provenant_records::Outcome::Refused,
-                provenant_run::ErrorKind::ForgeQuota
+                provenant_records::Outcome::Unavailable,
+                provenant_run::ErrorKind::ForgeQuotaExhausted
             )
         );
         Ok(())

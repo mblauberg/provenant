@@ -2596,6 +2596,22 @@ mod panel_tests {
         assert!(!quick["review-panel"].iter().any(|lens| lens == "tests"));
         let quick_floor: Value = serde_json::from_str(&quick["review-coverage-floor"][0]).unwrap();
         assert_eq!(quick_floor["hard"], false);
+        let library = TemplateLibrary::bundled();
+        let compiled = provenant_fabric_runtime::graph::template::Compiler {
+            library: &library,
+            resolvers: &quick,
+        }
+        .compile(&json!({"id":"review","use":"review-panel"}))
+        .unwrap();
+        let shape = compiled.composite.as_ref().unwrap().nodes[0]
+            .composite
+            .as_ref()
+            .unwrap();
+        let lenses = shape.nodes.iter().find(|node| node.id == "lenses").unwrap();
+        assert_eq!(
+            lenses.composite.as_ref().unwrap().min_successful,
+            Some(quick["review-panel"].len().saturating_sub(1).max(1))
+        );
 
         let boundary_diff = || {
             ReviewDiffSelection::Captured(vec![provenant_run::ReviewDiffContext {
@@ -2649,12 +2665,8 @@ mod panel_tests {
         let required = floor["required_lenses"].as_array().unwrap();
         assert!(required.iter().any(|lens| lens == "adversarial"));
         assert!(!required.iter().any(|lens| lens == "tests"));
-        let hard_reviewers: usize = project.shapes[&project.select.by_risk["crucial"]]
-            .reviewers
-            .iter()
-            .map(|g| g.count)
-            .sum();
-        assert_eq!(floor["minimum"], hard_reviewers);
+        let hard_panel_minimum = protected["review-panel"].len().saturating_sub(1).max(1);
+        assert_eq!(floor["minimum"], hard_panel_minimum);
 
         let library = TemplateLibrary::bundled();
         let compiled = provenant_fabric_runtime::graph::template::Compiler {
@@ -2664,13 +2676,14 @@ mod panel_tests {
         .compile(&json!({"id":"protected-panel", "use":"review-panel", "min_ok":1}))
         .unwrap();
         let root = compiled.composite.as_ref().unwrap();
+        assert_eq!(root.min_successful, Some(1), "explicit min_ok is preserved");
         assert!(root.hard_review_coverage);
         assert!(root.required_review_lenses.contains(&"adversarial".into()));
         let shape = root.nodes[0].composite.as_ref().unwrap();
         let lenses = shape.nodes.iter().find(|node| node.id == "lenses").unwrap();
         let lens_floor = lenses.composite.as_ref().unwrap();
         assert!(lens_floor.hard_review_coverage);
-        assert_eq!(lens_floor.min_successful, Some(hard_reviewers));
+        assert_eq!(lens_floor.min_successful, Some(hard_panel_minimum));
         assert!(
             lens_floor
                 .required_review_lenses

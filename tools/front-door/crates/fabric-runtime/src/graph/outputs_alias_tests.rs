@@ -79,6 +79,26 @@ fn unrecognised_severity_is_warned_and_treated_as_high() {
 }
 
 #[test]
+fn empty_severity_is_warned_and_treated_as_high() {
+    let block = serde_json::json!({"schema_version":1,"findings":[{
+        "id":"F1","severity":"","file":"a.rs","summary":"s","status":"open"
+    }]})
+    .to_string();
+    let text = format!("```findings\n{block}\n```\nVERDICT: PASS\n");
+    let mut capture = crate::result_capture::ResultCapture::new(None);
+    capture.push(text.as_bytes());
+    let outputs = make_outputs(Some(&capture.finish()), None, None, None, None);
+    assert_eq!(outputs.findings[0].severity, "high");
+    assert!(
+        outputs.warnings.iter().any(|warning| {
+            warning.contains("FINDING_SEVERITY_UNKNOWN") && warning.contains("treating it as high")
+        }),
+        "{:?}",
+        outputs.warnings
+    );
+}
+
+#[test]
 fn missing_severity_keeps_the_fail_safe_and_marks_findings_incomplete() {
     let block = serde_json::json!({"schema_version":1,"findings":[{
         "id":"F1","file":"a.rs","summary":"s","status":"open"
