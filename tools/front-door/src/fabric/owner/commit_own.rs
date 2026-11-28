@@ -2,6 +2,51 @@
 use super::*;
 use std::path::{Path, PathBuf};
 
+/// Commit a finished shared child's claimed paths in the checkout it was
+/// admitted to. `None` when the attempt did not run in a shared checkout.
+pub(super) fn commit_shared_child(
+    owner: &BoundGraphOwner<'_>,
+    store: &provenant_run::RunStore,
+    call: &provenant_run::Request<'_>,
+    attempt: &provenant_records::run::AttemptRecord,
+) -> Result<Option<String>, FacadeError> {
+    let request = store.request(attempt.attempt_id, call).map_err(run_error)?;
+    let Some(expected) = request.task.access.shared_worktree.as_ref() else {
+        return Ok(None);
+    };
+    let corrupt = |detail: String| FacadeError::StateCorruptDetail { detail };
+    let writer = request
+        .task
+        .writer
+        .as_ref()
+        .ok_or_else(|| corrupt("shared child request has no writer checkout".into()))?;
+    let current = provenant_cli::fabric::inspect_checkout_subject(
+        &owner.factory.context.roots,
+        &writer.worktree,
+    )
+    .map_err(|error| {
+        corrupt(format!(
+            "inspect shared checkout {}: {error}",
+            writer.worktree.display()
+        ))
+    })?;
+    if current.as_ref() != Some(expected) {
+        return Err(corrupt(format!(
+            "shared checkout {} is no longer the one the child was admitted to",
+            writer.worktree.display()
+        )));
+    }
+    commit(
+        &writer.worktree,
+        &request.task.profile.write_scope,
+        attempt.attempt_id,
+        &owner.factory.home,
+        &owner.factory.executor,
+        owner.cancel,
+    )
+    .map(Some)
+}
+
 pub(super) fn commit(
     worktree: &Path,
     claims: &[String],

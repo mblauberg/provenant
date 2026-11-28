@@ -3862,7 +3862,7 @@ impl BoundGraphOwner<'_> {
 
     /// Report a terminal attempt as its graph observation.
     fn observe_terminal(
-        &self,
+        &mut self,
         owner: &mut BinaryRunOwner<'_>,
         attempt: provenant_records::run::AttemptRecord,
         target: AttemptTarget,
@@ -3919,33 +3919,26 @@ impl BoundGraphOwner<'_> {
                 }
                 let own_head = if !remote && launched_for_own_commit(&attempt, own_commit.as_ref())
                 {
-                    let request = store
-                        .request(attempt.attempt_id, &call)
-                        .map_err(run_error)?;
-                    if let Some(expected) = request.task.access.shared_worktree.as_ref() {
-                        let writer = request
-                            .task
-                            .writer
-                            .as_ref()
-                            .ok_or(FacadeError::StateCorrupt)?;
-                        let current = provenant_cli::fabric::inspect_checkout_subject(
-                            &self.factory.context.roots,
-                            &writer.worktree,
-                        )
-                        .map_err(|_| FacadeError::StateCorrupt)?;
-                        if current.as_ref() != Some(expected) {
-                            return Err(FacadeError::StateCorrupt);
+                    // The commit is idempotent by its attempt marker. A failure
+                    // keeps this attempt observed, with its cause, instead of
+                    // aborting the whole advance; the next observation retries.
+                    match commit_own::commit_shared_child(self, &store, &call, &attempt) {
+                        Ok(head) => head,
+                        Err(error) => {
+                            let code = WarningCode("OWN_COMMIT_PENDING");
+                            let warning = Warning::new(
+                                code,
+                                format!(
+                                    "OWN_COMMIT_PENDING: claimed paths are not committed yet: {error}"
+                                ),
+                                provenant_records::warning::detected_source(code),
+                            );
+                            warn(warning.clone());
+                            self.launch_warnings.push(warning);
+                            return Ok(AttemptObservation::Unknown {
+                                attempt_ref: reference,
+                            });
                         }
-                        Some(commit_own::commit(
-                            &writer.worktree,
-                            &request.task.profile.write_scope,
-                            attempt.attempt_id,
-                            &self.factory.home,
-                            &self.factory.executor,
-                            self.cancel,
-                        )?)
-                    } else {
-                        None
                     }
                 } else {
                     None
