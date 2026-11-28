@@ -267,8 +267,8 @@ impl ConfinedPlan {
             ));
         }
         for grant in &p.write_roots {
-            if let Some(policy) = &p.policy
-                && let Err(error) = policy.mandatory().validate_extra_write(grant)
+            if let Some(lane_policy) = &p.policy
+                && let Err(error) = lane_policy.mandatory().validate_extra_write(grant)
             {
                 if matches!(&error, PermissionError::ProtectedOverlap) {
                     warn_plan_root_overlap(policy, "extra write grant overlaps a protected root")?;
