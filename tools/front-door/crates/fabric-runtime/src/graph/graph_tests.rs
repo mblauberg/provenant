@@ -72,6 +72,12 @@ struct FakeOwner {
     implicit_bindings: usize,
     provisions: Vec<(String, String, String)>,
     provisioned: Vec<(String, String)>,
+    carry_requests: Vec<(
+        String,
+        String,
+        Option<provenant_records::lane_contract::CarryMode>,
+    )>,
+    child_provision: Option<ChildWorktreeProvision>,
     provision_fail_once: bool,
     source_commits: Vec<Option<String>>,
     resolved_review_base: Option<String>,
@@ -267,7 +273,12 @@ impl AttemptOwner for FakeOwner {
         branch: &str,
         base: &str,
         _owner: Option<provenant_core::Digest>,
+        carry: Option<&WriterCarryRequest<'_>>,
     ) -> Result<Option<WriterWorktreeBinding>, Self::Error> {
+        if let Some(carry) = carry {
+            self.carry_requests
+                .push((carry.graph.to_owned(), carry.node.to_owned(), carry.mode));
+        }
         self.provisions
             .push((path.into(), branch.into(), base.into()));
         self.implicit_head = Some(base.into());
@@ -278,12 +289,21 @@ impl AttemptOwner for FakeOwner {
         path: &str,
         source: &str,
         _owner: Option<provenant_core::Digest>,
-    ) -> Result<bool, Self::Error> {
+        carry: Option<&WriterCarryRequest<'_>>,
+    ) -> Result<Option<ChildWorktreeProvision>, Self::Error> {
         self.provisioned.push((path.into(), source.into()));
+        if let Some(carry) = carry {
+            self.carry_requests
+                .push((carry.graph.to_owned(), carry.node.to_owned(), carry.mode));
+        }
         if std::mem::take(&mut self.provision_fail_once) {
             return Err(NoObservation);
         }
-        Ok(true)
+        Ok(Some(if carry.is_some() {
+            self.child_provision.clone().unwrap_or_default()
+        } else {
+            ChildWorktreeProvision::default()
+        }))
     }
 
     fn bound_graph_bases(

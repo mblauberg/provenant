@@ -694,6 +694,9 @@ pub struct AttemptSpec {
     /// `lanes.worktree.sharing` at the launch layer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree_sharing: Option<String>,
+    /// Carry setting selected for a newly provisioned local writer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub carry_uncommitted: Option<provenant_records::lane_contract::CarryMode>,
     /// Check mode from `--checks`/`--strict`, carried as `policy.default` at
     /// the launch layer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -862,6 +865,14 @@ impl AttemptSpec {
         if let Some(sharing) = &self.worktree_sharing {
             knobs.push(format!("lanes.worktree.sharing={sharing}"));
         }
+        if let Some(mode) = self.carry_uncommitted {
+            let mode = match mode {
+                provenant_records::lane_contract::CarryMode::Off => "off",
+                provenant_records::lane_contract::CarryMode::Tracked => "tracked",
+                provenant_records::lane_contract::CarryMode::All => "all",
+            };
+            knobs.push(format!("lanes.carry_uncommitted={mode}"));
+        }
         if let Some(strength) = self.checks_mode.as_deref().and_then(checks_default) {
             knobs.push(format!("policy.default={strength}"));
         }
@@ -903,6 +914,7 @@ impl AttemptSpec {
             && self.read_source.is_none()
             && self.destination.is_none()
             && self.worktree_sharing.is_none()
+            && self.carry_uncommitted.is_none()
             && self.checks_mode.is_none()
             && self.preamble_file.is_none()
             && self.preset.is_none()

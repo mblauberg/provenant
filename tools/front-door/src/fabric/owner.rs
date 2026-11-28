@@ -1734,6 +1734,7 @@ impl BoundGraphOwner<'_> {
 
 #[path = "owner/attempt_owner.rs"]
 mod attempt_owner;
+mod carry;
 
 /// Reconstruct an [`AttemptSpec`] from an accepted task request and the node's admitter,
 /// round-tripping all fields that affect dispatch and request hashing.

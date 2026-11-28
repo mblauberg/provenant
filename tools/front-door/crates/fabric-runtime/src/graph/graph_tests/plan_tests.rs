@@ -4450,6 +4450,10 @@ fn planner_writer_without_worktree_is_provisioned_before_launch_and_replayed() {
     writer["access"] = json!("worktree_write");
     let output = result(vec![writer]);
     let mut owner = fixture_owner(&[&output, "written", "checked"]);
+    owner.child_provision = Some(ChildWorktreeProvision {
+        carried_paths: vec!["src/edited.rs".into()],
+        carry_examined: true,
+    });
     let mut journal = MemoryJournal::default();
     let run = advance(&doc, &mut owner, &mut journal).unwrap();
     assert_eq!(
@@ -4462,6 +4466,11 @@ fn planner_writer_without_worktree_is_provisioned_before_launch_and_replayed() {
         owner.provisioned,
         vec![(".worktrees/planned-plan--write".into(), "a".repeat(40))]
     );
+    assert_eq!(owner.carry_requests, vec![("planned".into(), "plan--write".into(), None)]);
+    let binding = run.checkpoint.nodes.iter().find(|node| node.id == "plan--write")
+        .and_then(|node| node.writer_binding.as_ref()).expect("writer binding");
+    assert_eq!(binding.extra["carried_paths"], json!(["src/edited.rs"]));
+    assert_eq!(binding.extra["carry_examined"], json!(true));
     assert_eq!(
         owner.permissions[1].1.as_deref(),
         Some("/fixture/.worktrees/planned-plan--write")
@@ -4472,6 +4481,19 @@ fn planner_writer_without_worktree_is_provisioned_before_launch_and_replayed() {
     assert_eq!(replay.status, GraphStatus::Complete);
     assert_eq!(owner.calls.len(), launches);
     assert_eq!(owner.provisioned.len(), 1);
+    assert_eq!(owner.carry_requests.len(), 1);
+
+    let mut peer_doc = doc.clone();
+    let project = provenant_core::ProjectId::from_bytes([1; 16]);
+    peer_doc.peer_origin_work_key = Some(
+        provenant_records::WorkKey::new(project, "sender", "writer", 1).unwrap(),
+    );
+    let mut peer = fixture_owner(&[&output, "written", "checked"]);
+    let mut peer_journal = MemoryJournal::default();
+    let peer_run = advance(&peer_doc, &mut peer, &mut peer_journal).unwrap();
+    assert_eq!(peer_run.status, GraphStatus::Complete);
+    assert_eq!(peer.provisioned.len(), 1);
+    assert!(peer.carry_requests.is_empty(), "peer checkout edits are not the chair's edits");
 }
 
 #[test]
@@ -4507,6 +4529,29 @@ fn planner_writer_provisioning_recovers_fenced_source_after_crash() {
             .all(|(_, source)| source == &"a".repeat(40))
     );
     assert!(relay::pending_provisioning(&recovered.checkpoint).is_empty());
+}
+
+#[test]
+fn planned_writers_carry_chair_snapshot_only_once() {
+    let doc = planner(2);
+    let mut first = slice("first", &["src/a"]);
+    let mut second = slice("second", &["src/b"]);
+    first["access"] = json!("worktree_write");
+    second["access"] = json!("worktree_write");
+    let output = result(vec![first, second]);
+    let mut owner = fixture_owner(&[&output, "written first", "written second", "checked"]);
+    owner.child_provision = Some(ChildWorktreeProvision {
+        carried_paths: vec!["chair.txt".into()],
+        carry_examined: true,
+    });
+    let mut journal = MemoryJournal::default();
+    let run = advance(&doc, &mut owner, &mut journal).unwrap();
+    assert_eq!(run.status, GraphStatus::Complete);
+    assert_eq!(owner.provisioned.len(), 2);
+    assert_eq!(owner.carry_requests.len(), 1);
+    assert_eq!(run.checkpoint.nodes.iter().filter(|node| {
+        node.writer_binding.as_ref().and_then(|binding| binding.extra.get("carried_paths")).is_some()
+    }).count(), 1);
 }
 
 #[test]

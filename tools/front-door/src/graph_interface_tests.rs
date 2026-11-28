@@ -772,6 +772,21 @@ mod tests {
     }
 
     #[test]
+    fn carried_paths_are_listed_in_inline_and_handle_launches() {
+        let data = json!({
+            "status": "complete",
+            "checkpoint": {"graph_id": "task", "nodes": [
+                {"writer_binding": {"carried_paths": ["src/a.rs", "odd\nname"]}}
+            ]}
+        });
+        for mode in ["inline", "handle"] {
+            let (human, _) = run_human(&data, &json!({"launch_mode":mode}), false);
+            assert!(human.contains("carried: \"src/a.rs\""), "{human}");
+            assert!(human.contains("carried: \"odd\\nname\""), "{human}");
+        }
+    }
+
+    #[test]
     fn inline_timeout_is_124_still_running() {
         let mut data = json!({
             "status":"pending",

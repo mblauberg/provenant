@@ -835,12 +835,24 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
         branch: &str,
         base: &str,
         owner: Option<provenant_core::Digest>,
+        carry_request: Option<&provenant_fabric_runtime::graph::WriterCarryRequest<'_>>,
     ) -> Result<Option<provenant_fabric_runtime::graph::WriterWorktreeBinding>, Self::Error> {
+        let target = self.factory.context.project_root.join(path);
+        let recovered = match carry_request {
+            Some(request) => super::carry::recover(self, &target, request, base)?,
+            None => None,
+        };
+        let snapshot = match (carry_request, &recovered) {
+            (Some(request), None) => super::carry::capture(self, request, base)?,
+            _ => None,
+        };
+        let carry_examined = recovered.is_some() || snapshot.is_some();
+        let provision_base = recovered.as_ref().map_or(base, |(head, _)| head.as_str());
         let provisioned = provenant_cli::fabric::graph_relay::provision_writer_checked(
             &self.factory.context,
             path,
             branch,
-            base,
+            provision_base,
             owner.as_ref(),
             self.writer_launch_budget.unwrap_or(self.budget),
             self.cancel,
@@ -849,7 +861,26 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
         let path = provisioned
             .to_str()
             .ok_or_else(|| FacadeError::field("worktree"))?;
-        self.bind_writer_worktree(path)
+        let paths = match (carry_request, snapshot) {
+            (Some(request), Some(snapshot)) => {
+                super::carry::apply(self, &provisioned, request, base, &snapshot)?
+            }
+            _ => recovered.map_or_else(Vec::new, |(_, paths)| paths),
+        };
+        let mut binding = self.bind_writer_worktree(path)?;
+        if let Some(binding) = binding.as_mut() {
+            if carry_examined {
+                binding
+                    .extra
+                    .insert("carry_examined".into(), serde_json::json!(true));
+            }
+            if !paths.is_empty() {
+                binding
+                    .extra
+                    .insert("carried_paths".into(), serde_json::json!(paths));
+            }
+        }
+        Ok(binding)
     }
 
     fn provision_child_worktree(
@@ -857,7 +888,19 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
         path: &str,
         source: &str,
         owner: Option<provenant_core::Digest>,
-    ) -> Result<bool, Self::Error> {
+        carry_request: Option<&provenant_fabric_runtime::graph::WriterCarryRequest<'_>>,
+    ) -> Result<Option<provenant_fabric_runtime::graph::ChildWorktreeProvision>, Self::Error> {
+        let target = self.factory.context.project_root.join(path);
+        let recovered = match carry_request {
+            Some(request) => super::carry::recover(self, &target, request, source)?,
+            None => None,
+        };
+        let snapshot = match (carry_request, &recovered) {
+            (Some(request), None) => super::carry::capture(self, request, source)?,
+            _ => None,
+        };
+        let carry_examined = recovered.is_some() || snapshot.is_some();
+        let provision_source = recovered.as_ref().map_or(source, |(head, _)| head.as_str());
         // The graph has already selected a managed worktree path. Admit the
         // child through the shared request so destination and claims are one
         // decision; a host `refuse` here is a configured stop, not a busy lock.
@@ -901,13 +944,24 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
         provenant_cli::fabric::graph_relay::provision_child_with_budget(
             &self.factory.context,
             path,
-            source,
+            provision_source,
             owner.as_ref(),
             self.writer_launch_budget.unwrap_or(self.budget),
             self.cancel,
         )
-        .map(|()| true)
-        .map_err(super::super::interface::relay_error)
+        .map_err(super::super::interface::relay_error)?;
+        let carried_paths = match (carry_request, snapshot) {
+            (Some(request), Some(snapshot)) => {
+                super::carry::apply(self, &target, request, source, &snapshot)?
+            }
+            _ => recovered.map_or_else(Vec::new, |(_, paths)| paths),
+        };
+        Ok(Some(
+            provenant_fabric_runtime::graph::ChildWorktreeProvision {
+                carried_paths,
+                carry_examined,
+            },
+        ))
     }
 
     fn bound_graph_bases(

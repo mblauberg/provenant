@@ -418,9 +418,7 @@ fn format_elapsed(ms: u64) -> String {
     format!("{}m{:02}s", seconds / 60, seconds % 60)
 }
 
-/// The inline launch footer: one bounded line naming the handle, model,
-/// elapsed wall time, access and read source, and the warning count. A handle
-/// launch omits it because no answer is on this invocation.
+/// The inline launch footer names the handle, model, elapsed time and access.
 fn run_footer(data: &Value, input: &Value) -> String {
     let name = data["checkpoint"]["graph_id"]
         .as_str()
@@ -440,6 +438,22 @@ fn run_footer(data: &Value, input: &Value) -> String {
         &format!("— {name} · {model} · {elapsed} · {access}, {source} · {warnings} warnings"),
         provenant_cli::limits::SUMMARY_ROW_BYTES,
     )
+}
+
+/// Keep each complete path visible, escaping terminal controls and newlines.
+fn carried_paths_footer(data: &Value) -> String {
+    let mut paths = std::collections::BTreeSet::new();
+    if let Some(nodes) = data["checkpoint"]["nodes"].as_array() {
+        for node in nodes {
+            if let Some(carried) = node["writer_binding"]["carried_paths"].as_array() {
+                paths.extend(carried.iter().filter_map(Value::as_str));
+            }
+        }
+    }
+    paths
+        .into_iter()
+        .map(|path| format!("  carried: {}\n", json!(path)))
+        .collect()
 }
 
 /// The compact `run` result: the headline, unless it was already announced,
@@ -497,13 +511,13 @@ fn run_human(
             lanes += &format!("warning: {warning}\n");
         }
     }
-    // A handle launch returns at admission and prints only the handle; an
-    // inline launch carries its final answer and closes with the one-line
-    // footer before the rendered next step.
+    // A handle launch omits the inline summary, but still names any paths
+    // already carried by the time its admission response is observed.
+    let carried = carried_paths_footer(data);
     let footer = if input["launch_mode"].as_str() == Some("handle") {
-        String::new()
+        carried
     } else {
-        format!("{}\n", run_footer(data, input))
+        format!("{}\n{carried}", run_footer(data, input))
     };
     if announced {
         (format!("{lanes}{footer}"), next)
