@@ -135,7 +135,9 @@ pub(crate) fn spawn(
     }
     provenant_os::sys::raw_exec::verify_child_wait_policy()?;
     let reaper = provenant_os::sys::reaper::Reaper::new(1)?;
-    let permit = reaper.reserve().ok_or(CustodyError::HandoffUnknown)?;
+    let permit = reaper
+        .reserve()
+        .ok_or_else(|| CustodyError::HandoffUnknown("no guardian reaper slot".into()))?;
     let (mut parent, child_channel) = UnixStream::pair()?;
     let mut descriptors = vec![
         child_channel.as_fd(),
@@ -220,25 +222,40 @@ pub(crate) fn spawn(
         end.saturating_duration_since(Instant::now()),
         cancel,
     )
-    .map_err(|_| handoff_unknown(profile.is_some()))?;
+    .map_err(|error| {
+        handoff_unknown(
+            profile.is_some(),
+            format!(
+                "sending the {}-byte launch message within {timeout:?}: {error}",
+                payload.len()
+            ),
+        )
+    })?;
     let remaining = end.saturating_duration_since(Instant::now());
-    let response = receive_cancellable(&mut parent, remaining, cancel)
-        .map_err(|_| handoff_unknown(profile.is_some()))?;
+    let response = receive_cancellable(&mut parent, remaining, cancel).map_err(|error| {
+        handoff_unknown(
+            profile.is_some(),
+            format!("awaiting the guardian's acceptance within {timeout:?}: {error}"),
+        )
+    })?;
     if response == b"custody-accepted-v1" {
         Ok(())
     } else {
         if response == b"sandbox-profile-transport-refused-v1" {
             return Err(io::Error::other("sandbox profile transport refused by guardian").into());
         }
-        Err(CustodyError::HandoffUnknown)
+        Err(CustodyError::HandoffUnknown(format!(
+            "unexpected {}-byte guardian response",
+            response.len()
+        )))
     }
 }
 
-fn handoff_unknown(profile: bool) -> CustodyError {
+fn handoff_unknown(profile: bool, detail: String) -> CustodyError {
     if profile {
-        CustodyError::ProfileHandoffUnknown
+        CustodyError::ProfileHandoffUnknown(detail)
     } else {
-        CustodyError::HandoffUnknown
+        CustodyError::HandoffUnknown(detail)
     }
 }
 

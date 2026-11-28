@@ -165,6 +165,7 @@ fn validate_graph_steer(
     let origin = &graph_context.origin_work_key;
     let receipt = peer_retained_receipt(factory, launch_operation, actor)?.ok_or(
         FacadeError::LaunchUnknown {
+            detail: None,
             operation_id: (*launch_operation).clone(),
         },
     )?;
@@ -282,6 +283,7 @@ pub(super) fn validate_graph_output(
     };
     let receipt = peer_retained_receipt(factory, operation, *actor)?.ok_or_else(|| {
         FacadeError::LaunchUnknown {
+            detail: None,
             operation_id: operation.clone(),
         }
     })?;
@@ -1420,6 +1422,7 @@ pub fn peer(
                             peer_result(
                                 receipt.and_then(|receipt| {
                                     receipt.ok_or_else(|| FacadeError::LaunchUnknown {
+                                        detail: None,
                                         operation_id: operation_id.clone(),
                                     })
                                 }),
@@ -1893,6 +1896,7 @@ pub(super) fn peer_graph_receipt(
         .first()
         .and_then(|node| node.attempts.last())
         .ok_or_else(|| FacadeError::LaunchUnknown {
+            detail: None,
             operation_id: operation_id.clone(),
         })?;
     if root.key.graph_id != graph {
@@ -1911,6 +1915,7 @@ pub(super) fn peer_graph_receipt(
     };
     let session = owner.read_session(&cancel).map_err(|error| match error {
         FacadeError::NotFound => FacadeError::LaunchUnknown {
+            detail: None,
             operation_id: operation_id.clone(),
         },
         error => error,
@@ -1922,6 +1927,7 @@ pub(super) fn peer_graph_receipt(
         .operation(&launch_operation, &call)
         .map_err(run_error)?
         .ok_or_else(|| FacadeError::LaunchUnknown {
+            detail: None,
             operation_id: operation_id.clone(),
         })?;
     if operation.operation_id != launch_operation
@@ -1933,6 +1939,7 @@ pub(super) fn peer_graph_receipt(
         )
     {
         return Err(FacadeError::LaunchUnknown {
+            detail: None,
             operation_id: operation_id.clone(),
         });
     }

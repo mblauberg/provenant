@@ -33,6 +33,7 @@ fn uncertain_handoff_reobserves_one_guardian_on_the_same_route() {
             if self.calls.len() == 1 {
                 self.guardians += 1;
                 Err(FacadeError::LaunchUnknown {
+                    detail: Some("fixture handshake timed out".into()),
                     operation_id: provenant_core::OperationId::parse("uncertain-operation")
                         .unwrap(),
                 })
@@ -57,6 +58,11 @@ fn uncertain_handoff_reobserves_one_guardian_on_the_same_route() {
         pending.checkpoint.nodes[0].advance_owner_code.as_deref(),
         Some("LAUNCH_UNKNOWN")
     );
+    // Status names the launcher's cause, not only the code.
+    let note = pending.checkpoint.nodes[0]
+        .status_note()
+        .unwrap_or_default();
+    assert!(note.contains("fixture handshake timed out"), "{note}");
     assert_eq!(pending.checkpoint.nodes[0].attempts.len(), 1);
     owner.now = Some(at(5));
     let done = advance(&document, &mut owner, &mut journal).unwrap();
@@ -861,6 +867,7 @@ fn launch_retry_kinds_are_decided_from_the_typed_error_only() {
             path: None,
         },
         FacadeError::LaunchUnknown {
+            detail: None,
             operation_id: operation,
         },
     ] {

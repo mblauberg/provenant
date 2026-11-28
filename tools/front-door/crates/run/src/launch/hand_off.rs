@@ -139,8 +139,8 @@ fn custody_local(
         | custody::CustodyError::UnknownIdentity
         | custody::CustodyError::InvalidRecord
         | custody::CustodyError::Decode(_)
-        | custody::CustodyError::HandoffUnknown
-        | custody::CustodyError::ProfileHandoffUnknown => boundary_handoff(
+        | custody::CustodyError::HandoffUnknown(_)
+        | custody::CustodyError::ProfileHandoffUnknown(_) => boundary_handoff(
             policy,
             "HAND_OFF_RUNSTORE_HAND_OFF_AUTHORITY",
             message,
@@ -942,7 +942,7 @@ mod tests {
             custody::CustodyError::Fenced,
             custody::CustodyError::UnknownIdentity,
             custody::CustodyError::InvalidRecord,
-            custody::CustodyError::HandoffUnknown,
+            custody::CustodyError::HandoffUnknown("fixture".into()),
         ] {
             assert!(matches!(
                 custody_local(&test_policy(), "publication reservation", &error),
@@ -1016,8 +1016,8 @@ mod tests {
             }
         ));
         for error in [
-            custody::CustodyError::HandoffUnknown,
-            custody::CustodyError::ProfileHandoffUnknown,
+            custody::CustodyError::HandoffUnknown("fixture".into()),
+            custody::CustodyError::ProfileHandoffUnknown("fixture".into()),
             custody::CustodyError::Timeout,
             custody::CustodyError::InvalidRecord,
         ] {

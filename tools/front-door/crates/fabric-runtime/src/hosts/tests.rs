@@ -352,6 +352,7 @@ fn graph_peer_contexts_round_trip_and_reject_malformed_values() {
 #[test]
 fn peer_refusals_preserve_typed_errors_and_reject_unknown_codes() {
     let error = facade::FacadeError::LaunchUnknown {
+        detail: None,
         operation_id: OperationId::parse("typed-error-operation").unwrap(),
     };
     let value = serde_json::to_value(PeerResult::Error {

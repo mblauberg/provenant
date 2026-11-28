@@ -1428,6 +1428,7 @@ mod graph_writer_admission_tests {
                 }),
             },
             FacadeError::LaunchUnknown {
+                detail: None,
                 operation_id: provenant_core::OperationId::parse("dispatch-17").unwrap(),
             },
         ] {

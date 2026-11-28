@@ -3054,6 +3054,20 @@ impl GraphCheckpoint {
 }
 
 impl NodeProgress {
+    /// The note status shows for this node. A launch awaiting retry has no
+    /// advance note yet, so its retry reason names the cause, such as an
+    /// unconfirmed guardian handshake.
+    pub fn status_note(&self) -> Option<&str> {
+        self.advance_note
+            .as_deref()
+            .or(self.skip_reason.as_deref())
+            .or_else(|| {
+                self.launch_retry
+                    .as_ref()
+                    .and_then(|retry| retry.reason.as_deref())
+            })
+    }
+
     /// All attempt evidence in WorkKey order, including redos and continuations.
     pub fn recorded_attempts(&self) -> impl DoubleEndedIterator<Item = &GraphAttempt> {
         let mut attempts: Vec<_> = self

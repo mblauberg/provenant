@@ -1293,6 +1293,7 @@ fn retry_of_explicit_launch_refusal_preserves_pending_siblings_and_rejects_uncer
         &mut unknown,
         work_index,
         &crate::coordination::facade::FacadeError::LaunchUnknown {
+            detail: None,
             operation_id: provenant_core::OperationId::parse("unknown-operation").unwrap(),
         },
         LaunchTiming {

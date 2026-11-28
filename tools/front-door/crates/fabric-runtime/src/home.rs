@@ -189,6 +189,7 @@ impl RemoteCoordination<'_> {
                                         error:
                                             facade::FacadeError::LaunchUnknown {
                                                 operation_id: response_id,
+                                                ..
                                             },
                                         ..
                                     },
@@ -847,6 +848,7 @@ mod tests {
             }
         }
         let launch_unknown = facade::FacadeError::LaunchUnknown {
+            detail: None,
             operation_id: OperationId::parse("forged").unwrap(),
         };
         for (error, corrupt) in [(launch_unknown, true), (facade::FacadeError::Busy, false)] {
@@ -909,6 +911,7 @@ mod tests {
             }
         }
         let error = facade::FacadeError::LaunchUnknown {
+            detail: None,
             operation_id: OperationId::parse("forged").unwrap(),
         };
         let fixture = RemoteFixture::new();

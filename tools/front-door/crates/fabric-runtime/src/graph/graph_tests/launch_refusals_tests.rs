@@ -365,6 +365,7 @@ fn graph_remedies_follow_writer_resource_and_unknown_handoff_causes() {
         ),
         (
             FacadeError::LaunchUnknown {
+                detail: None,
                 operation_id: provenant_core::OperationId::parse("dispatch-17").unwrap(),
             },
             "dispatch-17",

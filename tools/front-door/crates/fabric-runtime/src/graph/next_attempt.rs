@@ -1503,6 +1503,7 @@ mod tests {
                 path: None,
             },
             FacadeError::LaunchUnknown {
+                detail: None,
                 operation_id: operation,
             },
         ] {
@@ -1568,6 +1569,7 @@ mod tests {
         }));
         assert!(!launch_pre_host(&FacadeError::Busy));
         assert!(!launch_pre_host(&FacadeError::LaunchUnknown {
+            detail: None,
             operation_id: provenant_core::OperationId::parse("op").unwrap()
         }));
 

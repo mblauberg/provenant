@@ -22,7 +22,10 @@ type Crash = provenant_fabric_runtime::coordination::facade::FacadeError;
 
 fn crash() -> Crash {
     provenant_core::OperationId::parse("op")
-        .map(|operation_id| Crash::LaunchUnknown { operation_id })
+        .map(|operation_id| Crash::LaunchUnknown {
+            operation_id,
+            detail: None,
+        })
         .unwrap_or(Crash::StateCorrupt)
 }
 

@@ -148,6 +148,7 @@ fn cli_recorded_remedies_preserve_typed_causes() {
         ),
         (
             FacadeError::LaunchUnknown {
+                detail: None,
                 operation_id: OperationId::parse("dispatch-17").unwrap(),
             },
             "dispatch-17",

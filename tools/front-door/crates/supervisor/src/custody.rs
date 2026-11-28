@@ -101,13 +101,13 @@ pub enum CustodyError {
         "attempt evidence was written before shared worktree leases and a holder may still be live; stop that holder and run `provenant reconcile` to clear the reservation"
     )]
     LegacyEvidence,
-    #[error("launch handoff is unconfirmed; reservation remains fenced")]
-    HandoffUnknown,
+    #[error("launch handoff is unconfirmed ({0}); reservation remains fenced")]
+    HandoffUnknown(String),
     /// This host cannot hold provider custody; nothing was handed off.
     #[error("process custody is supported only on macOS")]
     UnsupportedPlatform,
-    #[error("sandbox profile transport handoff is unconfirmed; reservation remains fenced")]
-    ProfileHandoffUnknown,
+    #[error("sandbox profile handoff is unconfirmed ({0}); reservation remains fenced")]
+    ProfileHandoffUnknown(String),
     #[error("operation was cancelled; custody is retained")]
     Cancelled,
     #[error("another stop request already owns this attempt")]
@@ -1370,7 +1370,7 @@ impl LaunchFailure {
         let record = self
             .pending_exit
             .as_ref()
-            .ok_or(CustodyError::HandoffUnknown)?;
+            .ok_or_else(|| CustodyError::HandoffUnknown("no exit pending".into()))?;
         let bytes = serde_json::to_vec(record).map_err(|_| CustodyError::InvalidRecord)?;
         if bytes.len() as u64 > EXIT_LIMIT {
             return Err(CustodyError::InvalidRecord);

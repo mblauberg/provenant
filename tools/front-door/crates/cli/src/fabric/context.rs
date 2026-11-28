@@ -1286,6 +1286,7 @@ impl Context {
                 // An uncertain launch must name this locally frozen request.
                 if let FacadeError::LaunchUnknown {
                     operation_id: returned,
+                    ..
                 } = &error
                     && Some(returned) != request.operation().as_ref()
                 {

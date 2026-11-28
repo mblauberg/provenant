@@ -435,11 +435,7 @@ pub(crate) fn status_rows(run: &GraphRun, target: &GraphTarget) -> Vec<Value> {
                     json!(wait_reason),
                 )
             } else {
-                (
-                    json!(node.state),
-                    node.advance_note.as_deref().or(node.skip_reason.as_deref()),
-                    Value::Null,
-                )
+                (json!(node.state), node.status_note(), Value::Null)
             };
             let mut node_row = row(
                 format!("{}/{}", target.graph, node.id),
