@@ -5501,6 +5501,10 @@ fn launch_flags_reach_the_host_as_launch_layer_settings() -> Result {
         "refuse"
     );
 
+    let own = super::launch_input(&json!({"commit":"own"}))?;
+    assert_eq!(own["attempt"]["commit"], "own_paths");
+    assert!(super::launch_input(&json!({"commit":"all"})).is_err());
+
     let prepared = super::launch_input(&json!({"isolated":true}))?;
     assert_eq!(prepared["attempt"]["sandbox"], "on");
     assert_eq!(prepared["attempt"]["checks_mode"], "strict");

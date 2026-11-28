@@ -218,18 +218,20 @@ pub fn commit_own_paths(
                         path.as_path()
                     };
                     if relative.as_os_str().is_empty()
-                        || path.to_str().is_some_and(|path| {
-                            path.split('/').any(|part| part == ".." || part == ".")
-                        })
-                        || relative.components().any(|component| {
-                            matches!(
-                                component,
-                                Component::CurDir
-                                    | Component::ParentDir
-                                    | Component::RootDir
-                                    | Component::Prefix(_)
-                            )
-                        })
+                        || (relative != Path::new(".")
+                            && path.to_str().is_some_and(|path| {
+                                path.split('/').any(|part| part == ".." || part == ".")
+                            }))
+                        || (relative != Path::new(".")
+                            && relative.components().any(|component| {
+                                matches!(
+                                    component,
+                                    Component::CurDir
+                                        | Component::ParentDir
+                                        | Component::RootDir
+                                        | Component::Prefix(_)
+                                )
+                            }))
                     {
                         return Err("commit path is not worktree-relative".to_owned());
                     }
@@ -308,7 +310,11 @@ pub fn commit_own_paths(
             )
             .with_class(ErrorClass::Transient { retry_at: None }));
         }
-        let tag = format!("{}-{attempt}", std::process::id());
+        let tag = format!(
+            "{}-{:?}-{attempt}",
+            std::process::id(),
+            std::thread::current().id()
+        );
         let private = PrivateIndex(crate::worktree_carry::private_index_path(git_dir, &tag));
         let mut index_env = env.to_vec();
         index_env.push((

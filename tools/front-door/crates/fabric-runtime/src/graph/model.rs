@@ -694,6 +694,9 @@ pub struct AttemptSpec {
     /// `lanes.worktree.sharing` at the launch layer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree_sharing: Option<String>,
+    /// Commit only the declared paths when a shared child finishes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commit: Option<provenant_records::lane_contract::CommitChoice>,
     /// Carry setting selected for a newly provisioned local writer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub carry_uncommitted: Option<provenant_records::lane_contract::CarryMode>,
@@ -791,6 +794,7 @@ impl AttemptSpec {
             read_source: self.read_source.clone(),
             destination: self.destination.clone(),
             worktree_sharing: self.worktree_sharing.clone(),
+            carry_uncommitted: self.carry_uncommitted,
             checks_mode: self.checks_mode.clone(),
             preamble_file: self.preamble_file.clone(),
             preset: self.preset.clone(),
@@ -914,6 +918,7 @@ impl AttemptSpec {
             && self.read_source.is_none()
             && self.destination.is_none()
             && self.worktree_sharing.is_none()
+            && self.commit.is_none()
             && self.carry_uncommitted.is_none()
             && self.checks_mode.is_none()
             && self.preamble_file.is_none()

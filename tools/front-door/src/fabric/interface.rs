@@ -452,6 +452,14 @@ pub(super) fn launch_input(input: &Value) -> Result<Value, FacadeError> {
     if let Some(sharing) = &flags.worktree_sharing {
         attempt["worktree_sharing"] = json!(sharing);
     }
+    if let Some(commit) = input.get("commit").filter(|value| !value.is_null()) {
+        if commit != "own" {
+            return Err(FacadeError::invalid(InvalidInputDetail::Field(
+                "commit".into(),
+            )));
+        }
+        attempt["commit"] = json!("own_paths");
+    }
     // Retain provenance when these run controls are merged onto a template.
     for field in ["token_budget", "on_budget", "budget_grace", "lane_access"] {
         if attempt.get(field).is_some() {

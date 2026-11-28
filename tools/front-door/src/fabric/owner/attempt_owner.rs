@@ -443,6 +443,23 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             .map(|base| Some(base.to_string()))
     }
 
+    fn peer_carry_unsupported(
+        &mut self,
+        mode: Option<provenant_records::lane_contract::CarryMode>,
+    ) -> Result<(), Self::Error> {
+        if super::carry::mode(self, mode)? != provenant_records::lane_contract::CarryMode::Off {
+            let code = provenant_records::warning::CARRY_PEER_UNSUPPORTED;
+            let warning = Warning::new(
+                code,
+                "CARRY_PEER_UNSUPPORTED: uncommitted edits cannot be carried to a peer writer",
+                provenant_records::warning::detected_source(code),
+            );
+            warn(warning.clone());
+            self.launch_warnings.push(warning);
+        }
+        Ok(())
+    }
+
     fn take_launch_warnings(&mut self) -> Vec<Warning> {
         std::mem::take(&mut self.launch_warnings)
     }

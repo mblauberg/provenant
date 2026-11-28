@@ -23,7 +23,7 @@ fn failure(path: &Path, detail: impl ToString) -> provenant_confinement::worktre
     }
 }
 
-fn mode(
+pub(super) fn mode(
     owner: &BoundGraphOwner<'_>,
     override_mode: Option<CarryMode>,
 ) -> Result<CarryMode, FacadeError> {

@@ -851,6 +851,14 @@ pub trait AttemptOwner {
         self.resolve_review_base(reference, None)
     }
 
+    /// Warn when a peer-origin writer cannot carry the sender's edits.
+    fn peer_carry_unsupported(
+        &mut self,
+        _mode: Option<provenant_records::lane_contract::CarryMode>,
+    ) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
     /// Create or recover a graph-owned writer after its base is checkpointed.
     fn provision_writer_worktree(
         &mut self,
@@ -1971,6 +1979,19 @@ fn bind_expanded_writer<R: AttemptOwner, J: GraphJournal>(
                         == Some(true)
                 })
             });
+            if node.source.is_none()
+                && document.peer_origin_work_key.is_some()
+                && creation_owner.is_none()
+                && !carried_elsewhere
+            {
+                owner
+                    .peer_carry_unsupported(
+                        node.attempt
+                            .as_ref()
+                            .and_then(|attempt| attempt.carry_uncommitted),
+                    )
+                    .map_err(GraphError::Run)?;
+            }
             let carry = (node.source.is_none()
                 && document.peer_origin_work_key.is_none()
                 && creation_owner.is_none()
@@ -2076,6 +2097,19 @@ fn bind_expanded_writer<R: AttemptOwner, J: GraphJournal>(
                         == Some(true)
                 })
             });
+            if spec.default_base
+                && document.peer_origin_work_key.is_some()
+                && creation_owner.is_none()
+                && !carried_elsewhere
+            {
+                owner
+                    .peer_carry_unsupported(
+                        node.attempt
+                            .as_ref()
+                            .and_then(|attempt| attempt.carry_uncommitted),
+                    )
+                    .map_err(GraphError::Run)?;
+            }
             let carry = (spec.default_base
                 && document.peer_origin_work_key.is_none()
                 && creation_owner.is_none()

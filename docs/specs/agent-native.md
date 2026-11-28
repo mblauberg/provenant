@@ -515,7 +515,7 @@ These are two separate defaults, and neither implies the other.
 | A writer launched by the chair | `ManagedWorktree` from the chair's HEAD | its own branch |
 | `--worktree` or `--branch` naming a lapsed lease | that tree or branch, with `WRITER_HANDOVER` | its own commits on that branch |
 
-**Carrying uncommitted edits.** `lanes.carry_uncommitted` (H/P/L, default `tracked`, values `off|tracked|all`) applies only when the new worktree branches from the chair's HEAD with no explicit `--base`.
+**Carrying uncommitted edits.** `lanes.carry_uncommitted` (H/P/L, default `tracked`, values `off|tracked|all`) applies only to local writers when the new worktree branches from the chair's HEAD with no explicit `--base`. A peer-origin launch requesting carry warns `CARRY_PEER_UNSUPPORTED` and proceeds without carrying.
 - The snapshot is taken at launch, inside the claim when there is one: `git stash create`, plus untracked non-ignored files for `all`. It never changes the chair's tree or index.
 - It becomes the writer's first commit, `wip: carried from chair`.
 - The footer lists the carried paths.
