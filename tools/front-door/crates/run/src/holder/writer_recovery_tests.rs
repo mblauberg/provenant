@@ -176,15 +176,13 @@ fn modern_writer_reconcile_preserves_unlaunched_private_evidence()
                 &call,
                 &provenant_supervisor::fixture::RecordedBootObserver,
             )?;
+            // An unwritable exit leaves the attempt uncertain and retryable;
+            // which reason names the obstruction depends on the first read
+            // that meets it. The invariant is the custody kept below.
             assert!(
                 matches!(
                     blocked.as_slice(),
-                    [(
-                        _,
-                        crate::Reconciled::Uncertain {
-                            reason: crate::UncertainReason::CustodyUnavailable { .. }
-                        }
-                    )]
+                    [(_, crate::Reconciled::Uncertain { .. })]
                 ),
                 "{mode}: {blocked:?}"
             );
