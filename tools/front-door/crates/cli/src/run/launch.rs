@@ -245,23 +245,15 @@ pub(super) fn launch_with_deadline(
     let _ = (session, call);
     let receipt =
         result.map_err(|error| Fail::new(Status::Error, ErrorKind::Io, error.to_string()))?;
-    let unknown = || {
-        Fail::new(
-            Status::Error,
-            ErrorKind::LaunchUnknown,
-            format!(
-                "launch preparation: outcome unknown; run `provenant status {}` to recover the receipt",
-                record.key
-            ),
-        )
-    };
     // The worker holds custody and keeps preparing after this wait ends, so a
     // launch that outlasts the wait is a lane still waiting, not a failure. The
     // caller reports the lane's current phase from the store.
     let Some(receipt) = receipt else {
         return Ok(Vec::new());
     };
-    let value: Value = serde_json::from_slice(&receipt).map_err(|_| unknown())?;
+    let unknown = |cause: String| receipt_unknown(&record.key, &cause, &receipt);
+    let value: Value = serde_json::from_slice(&receipt)
+        .map_err(|error| unknown(format!("receipt is not JSON: {error}")))?;
     if let Some(error) = value.get("error").filter(|error| !error.is_null()) {
         let kind = error["code"]
             .as_str()
@@ -283,7 +275,24 @@ pub(super) fn launch_with_deadline(
             error["message"].as_str().unwrap_or("launch worker failed"),
         ));
     }
-    serde_json::from_value(value["data"]["started"].clone()).map_err(|_| unknown())
+    serde_json::from_value(value["data"]["started"].clone())
+        .map_err(|error| unknown(format!("receipt has no started list: {error}")))
+}
+
+/// The most of a worker receipt an unknown-outcome error quotes.
+const RECEIPT_PREFIX_BYTES: usize = 160;
+
+/// An unreadable worker receipt: name why, with a bounded prefix of what the
+/// worker wrote, so the unknown outcome is diagnosable without its logs.
+fn receipt_unknown(key: &impl std::fmt::Display, cause: &str, receipt: &[u8]) -> Fail {
+    let prefix = String::from_utf8_lossy(&receipt[..receipt.len().min(RECEIPT_PREFIX_BYTES)]);
+    Fail::new(
+        Status::Error,
+        ErrorKind::LaunchUnknown,
+        provenant_records::diagnostic::safe_text(&format!(
+            "launch preparation: outcome unknown ({cause}; receipt starts {prefix:?}); run `provenant status {key}` to recover the receipt"
+        )),
+    )
 }
 
 pub(super) fn launch_prepared(
@@ -899,4 +908,34 @@ pub(super) fn check_launch_policy(started: &[run::Started]) -> Result<(), Fail> 
         return Err(fail);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod receipt_tests {
+    use super::*;
+
+    /// An unreadable worker receipt names why and quotes a bounded prefix.
+    #[test]
+    fn unreadable_receipt_names_its_cause_and_a_bounded_prefix() {
+        let receipt = format!("panic: worker died{}", "x".repeat(4096));
+        let error = serde_json::from_slice::<Value>(receipt.as_bytes()).unwrap_err();
+        let fail = receipt_unknown(
+            &"graph/node#1",
+            &format!("receipt is not JSON: {error}"),
+            receipt.as_bytes(),
+        );
+        assert_eq!(fail.kind, ErrorKind::LaunchUnknown);
+        assert!(
+            fail.message.contains("receipt is not JSON"),
+            "{}",
+            fail.message
+        );
+        assert!(
+            fail.message.contains("panic: worker died"),
+            "{}",
+            fail.message
+        );
+        assert!(fail.message.contains("provenant status graph/node#1"));
+        assert!(fail.message.len() < RECEIPT_PREFIX_BYTES + 512);
+    }
 }
