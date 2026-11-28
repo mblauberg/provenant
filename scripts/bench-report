@@ -133,7 +133,11 @@ def summary(rows):
             value = reported.get(category) if isinstance(reported, dict) else None
             if number(value):
                 values.append(value)
-        tokens[category] = {"mean": mean(values), "reported": len(values)}
+        tokens[category] = {
+            "mean": mean(values),
+            "reported": len(values),
+            "spread": spread(values),
+        }
     seconds = [row["seconds"] for row in rows if number(row.get("seconds"))]
     return {
         "attempts": len(rows),

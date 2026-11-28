@@ -137,13 +137,14 @@ verify)
     echo "verified $task"
     ;;
 run)
-    route='' split=acceptance limit=100 repeats=1 families=
+    route='' split=acceptance limit=100 repeats=1 families='' ledger=''
     while [ "$#" -gt 0 ]; do
         case "$1" in
             --route) route=$2; shift 2 ;;
             --split) split=$2; shift 2 ;;
             --limit) limit=$2; shift 2 ;;
             --repeats) repeats=$2; shift 2 ;;
+            --ledger) ledger=$2; shift 2 ;;
             --family) families="$families $2"; shift 2 ;;
             *) echo "unknown run option: $1" >&2; exit 2 ;;
         esac
@@ -157,8 +158,8 @@ run)
     model=${route%@*}; effort=${route##*@}; [ "$model" != "$route" ] || effort=
     bin=${PROVENANT_BIN:-provenant}
     state=$("$bin" root --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["data"]["state_directory"])')
-    ledger=$state/bench.jsonl
-    mkdir -p "$state"
+    [ -n "$ledger" ] || ledger=$state/bench.jsonl
+    mkdir -p "$state" "$(dirname "$ledger")"
     count=0
     runs=0
     for task in "$tasks"/*.toml; do
@@ -271,6 +272,7 @@ replay)
     [ -z "$split" ] || set -- "$@" --split "$split"
     [ -z "$limit" ] || set -- "$@" --limit "$limit"
     [ -z "$repeats" ] || set -- "$@" --repeats "$repeats"
+    [ -z "$ledger" ] || set -- "$@" --ledger "$ledger"
     for family in $families; do set -- "$@" --family "$family"; done
     "$script_dir/bench" "$@"
     set -- report --route "$route"

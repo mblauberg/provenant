@@ -133,6 +133,11 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          # A pull_request run defaults to refs/pull/N/merge. check-generated
+          # diffs its scratch index against local HEAD, so check out the PR
+          # head explicitly: the patch content and its declared head_sha must
+          # be the same commit even when the base has advanced.
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
       - name: Install pinned Rust toolchain
         uses: ./.github/actions/install-rust
