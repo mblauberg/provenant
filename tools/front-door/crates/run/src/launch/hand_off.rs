@@ -1478,6 +1478,12 @@ mod tests {
             .operation(&request.operation_id, &call)?
             .ok_or("operation")?;
         assert_eq!(operation.state, OperationState::LaunchUnknown);
+        assert!(
+            operation
+                .blocked_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("lost acknowledgement"))
+        );
         let record = store.record(request.attempt_id, &call)?;
         assert!(matches!(record.state, AttemptState::Starting { .. }));
         let recorded_route = record.resolved_route.as_ref().ok_or("resolved route")?;

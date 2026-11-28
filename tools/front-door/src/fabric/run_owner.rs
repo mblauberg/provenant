@@ -1190,10 +1190,16 @@ impl BinaryRunOwner<'_> {
         call: &provenant_run::Request<'_>,
     ) -> Result<SubmissionReceipt, FacadeError> {
         // An uncertain handoff is reconciled by receipt lookup, never relaunched.
-        if started
+        if let Some(provenant_run::Started::Unknown { error, .. }) = started
             .iter()
-            .any(|s| matches!(s, provenant_run::Started::Unknown { .. }))
+            .find(|s| matches!(s, provenant_run::Started::Unknown { .. }))
         {
+            let code = provenant_records::warning::WarningCode("LAUNCH_UNKNOWN");
+            provenant_records::warning::warn(provenant_records::warning::Warning::new(
+                code,
+                provenant_records::diagnostic::safe_text(error),
+                provenant_records::warning::detected_source(code),
+            ));
             return Err(FacadeError::LaunchUnknown { operation_id });
         }
         let mut lanes = Vec::new();

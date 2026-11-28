@@ -3072,7 +3072,7 @@ impl RunStore {
                         }
                     }
                     Err(HandOff::Uncertain(error)) => {
-                        self.launch_unknown(attempt, call)?;
+                        self.launch_unknown(attempt, &error, call)?;
                         Started::Unknown { attempt: id, error }
                     }
                     Err(HandOff::Protected(error)) => {
@@ -3098,13 +3098,14 @@ impl RunStore {
         )?;
         Ok((decode(&raw)?, settled))
     }
-    fn launch_unknown(&self, attempt: AttemptId, call: &Request<'_>) -> Result<()> {
+    fn launch_unknown(&self, attempt: AttemptId, reason: &str, call: &Request<'_>) -> Result<()> {
         self.write(call, |tx| {
             let (mut op, settled) = self.run_operation(tx, attempt)?;
             if settled {
                 return Ok(());
             }
             op.state = OperationState::LaunchUnknown;
+            op.blocked_reason = Some(provenant_records::diagnostic::safe_text(reason));
             tx.execute(
                 "UPDATE attempts SET operation_record=?1 WHERE id=?2 AND project=?3",
                 params![
