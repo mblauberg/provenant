@@ -979,6 +979,7 @@ fn settlement_policy(
                 &provenant_config::policy::dispatch(&task.profile),
                 provenant_records::Layer::Route,
             );
+            provenant_config::policy::apply_profile_checks_mode(&mut policy, &task.profile);
             policy
         }
         // No host roots and no sealed task: only the compiled policy table

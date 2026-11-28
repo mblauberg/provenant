@@ -296,10 +296,12 @@ fn submission_policy(
 ) -> provenant_records::policy::Policy {
     let mut dispatch = provenant_config::policy::dispatch(profile);
     dispatch.extend(attempt_overrides.clone());
-    config
+    let mut policy = config
         .domains
         .policy
-        .resolve_with_knobs(project, &config.knobs, &dispatch)
+        .resolve_with_knobs(project, &config.knobs, &dispatch);
+    provenant_config::policy::apply_profile_checks_mode(&mut policy, profile);
+    policy
 }
 
 /// A failed writer disk precheck: either the volumes could not be observed, or
@@ -588,12 +590,15 @@ fn submit_with_launcher(
     let (lane_depth, parent_attempt) = nested_dispatch_context(edge.roots, &project_policy)?;
     let config = crate::config_reads::read_for(edge.roots, "run")
         .map_err(|error| Fail::config(Status::Invalid, error))?;
-    let profile = match &submission.task.attempt.sealed_profile {
+    let mut profile = match &submission.task.attempt.sealed_profile {
         Some(profile) => profile.clone(),
         None => config
             .dispatch_profile(&submission.knobs)
             .map_err(|error| Fail::new(Status::Invalid, ErrorKind::Config, error.to_string()))?,
     };
+    if let Some(mode) = &submission.task.attempt.checks_mode {
+        profile.checks_mode = Some(mode.clone());
+    }
     // Nested proposals are checked by the host before provider preparation.
     // A confined parent cannot open a sibling worktree to sample its volume.
     if parent_attempt.is_none() {

@@ -228,6 +228,42 @@ fn over_binds_item_in_overrides_and_resolves_named_lists() {
 }
 
 #[test]
+fn review_fanout_explicit_minimum_survives_host_coverage_default() {
+    let library = library();
+    let resolvers = BTreeMap::from([
+        (
+            "review-panel".to_owned(),
+            vec!["security".to_owned(), "tests".to_owned()],
+        ),
+        ("review-advice-security".to_owned(), vec![String::new()]),
+        ("review-advice-tests".to_owned(), vec![String::new()]),
+        (
+            "review-coverage-floor".to_owned(),
+            vec![json!({"hard":false,"minimum":1,"required_lenses":[]}).to_string()],
+        ),
+    ]);
+    let compiler = Compiler {
+        library: &library,
+        resolvers: &resolvers,
+    };
+    for (minimum, expected) in [(Some(2), 2), (None, 1)] {
+        let mut input = json!({"id":"panel", "use":"review", "over":"@review-panel", "with":{"lens":"${item}"}});
+        if let Some(minimum) = minimum {
+            input["min_ok"] = json!(minimum);
+        }
+        assert_eq!(
+            compiler
+                .compile(&input)
+                .unwrap()
+                .composite
+                .unwrap()
+                .min_successful,
+            Some(expected)
+        );
+    }
+}
+
+#[test]
 fn review_panel_binds_per_lens_resolver_values() {
     let library = library();
     let resolvers = BTreeMap::from([

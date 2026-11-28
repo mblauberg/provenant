@@ -1823,42 +1823,61 @@ fn lane_graph_read(
     deadline: Option<provenant_core::Deadline>,
 ) -> Result<Value, FacadeError> {
     let cancel = CancelToken::new();
-    let within = deadline.map_or(
-        std::time::Duration::from_secs(55),
-        super::invocation_deadline::left,
-    );
+    // Even the fallback read gets one shared bound. A status read followed by
+    // a wake and a refreshed read must spend the same invocation budget.
+    let deadline = deadline
+        .unwrap_or_else(|| super::invocation_deadline::after(std::time::Duration::from_secs(55)));
+    read_lane_graph_with_deadline(
+        &input,
+        || super::invocation_deadline::left(deadline),
+        |remaining| {
+            provenant_cli::fabric::graph_relay::from_lane(
+                &provenant_fabric_runtime::graph::relay::RelayOp::Read {
+                    input: input.clone(),
+                },
+                &cancel,
+                remaining,
+            )
+            .map_err(super::interface::relay_error)
+        },
+        |value, remaining| {
+            super::progress::wake_lane_reading(
+                value,
+                super::progress::WakeReason::Status,
+                remaining,
+            )
+        },
+    )
+}
+
+fn read_lane_graph_with_deadline(
+    input: &Value,
+    mut remaining: impl FnMut() -> std::time::Duration,
+    mut read: impl FnMut(std::time::Duration) -> Result<Value, FacadeError>,
+    mut wake: impl FnMut(&Value, std::time::Duration) -> super::progress::WakeOutcome,
+) -> Result<Value, FacadeError> {
+    let within = remaining();
     if within.is_zero() {
         return Err(FacadeError::Timeout);
     }
-    let read = || {
-        let remaining = deadline.map_or(
-            std::time::Duration::from_secs(55),
-            super::invocation_deadline::left,
-        );
-        if remaining.is_zero() {
+    let value = read(within)?;
+    if input["op"] == "status" && !input["id"].as_str().unwrap_or("").is_empty() {
+        let within = remaining();
+        if within.is_zero() {
             return Err(FacadeError::Timeout);
         }
-        provenant_cli::fabric::graph_relay::from_lane(
-            &provenant_fabric_runtime::graph::relay::RelayOp::Read {
-                input: input.clone(),
-            },
-            &cancel,
-            remaining,
-        )
-        .map_err(super::interface::relay_error)
-    };
-    let value = read()?;
-    if input["op"] == "status"
-        && !input["id"].as_str().unwrap_or("").is_empty()
-        && matches!(
-            super::progress::wake_lane_reading(&value, super::progress::WakeReason::Status, within),
+        if matches!(
+            wake(&value, within),
             super::progress::WakeOutcome::Advanced { .. }
-        )
-    {
-        read()
-    } else {
-        Ok(value)
+        ) {
+            let within = remaining();
+            if within.is_zero() {
+                return Err(FacadeError::Timeout);
+            }
+            return read(within);
+        }
     }
+    Ok(value)
 }
 
 /// What a graph command reports before it is emitted: data, human text, the

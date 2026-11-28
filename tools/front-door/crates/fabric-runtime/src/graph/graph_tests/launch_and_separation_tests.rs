@@ -39,7 +39,8 @@ fn launch_flags_seal_their_settings_at_the_launch_layer()
     assert!(knobs.contains(&"lanes.destination.write=new".to_string()));
     assert!(knobs.contains(&"lanes.worktree.sharing=refuse".to_string()));
     assert!(knobs.contains(&"policy.default=refuse".to_string()));
-    let profile = provenant_config::read(&roots)?.dispatch_profile(&knobs)?;
+    let mut profile = provenant_config::read(&roots)?.dispatch_profile(&knobs)?;
+    profile.checks_mode = spec.checks_mode.clone();
     for key in [
         "lanes.read_source",
         "lanes.destination.write",
@@ -52,6 +53,27 @@ fn launch_flags_seal_their_settings_at_the_launch_layer()
             "{key}"
         );
     }
+    // A conflicting policy supplied by the route remains below the sealed
+    // `checks_mode` flag through the profile used by launch and recovery.
+    profile
+        .policy_overrides
+        .insert("default".into(), provenant_records::policy::Strength::Warn);
+    let policy = provenant_config::policy::for_profile(
+        roots.state.as_path(),
+        "project",
+        &profile,
+    );
+    let (_, strict) = provenant_records::policy::resolve_setting(
+        "LANE_DEPTH",
+        None,
+        &policy.settings,
+    );
+    assert_eq!(strict.value, provenant_records::policy::Strength::Refuse);
+    assert_eq!(strict.source.layer, provenant_records::Layer::Launch);
+    assert_eq!(
+        strict.source.origin.as_deref(),
+        Some("--checks/--strict#policy.default")
+    );
     Ok(())
 }
 

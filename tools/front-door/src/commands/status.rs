@@ -33,6 +33,7 @@ fn run(inv: &Call) -> Result<Outcome, CommandError> {
                     provenant_cli::run::status_session_stream(
                         cmd,
                         edge,
+                        deadline,
                         &mut std::io::stdout().lock(),
                     )
                 })

@@ -165,6 +165,12 @@ impl CommandError {
     /// Attach diagnostic details and move their legacy next hint into the
     /// structured next-step list, avoiding a duplicate flattened `next` key.
     pub fn set_diagnostic(&mut self, mut diagnostic: Option<crate::diagnostic::DiagnosticFields>) {
+        if let Some(class) = diagnostic
+            .as_mut()
+            .and_then(|details| details.error_class.take())
+        {
+            self.class = class;
+        }
         if let Some(details) = diagnostic.as_mut()
             && let Some(next) = details.next.take()
         {

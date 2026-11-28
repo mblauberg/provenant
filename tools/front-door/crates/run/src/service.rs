@@ -929,7 +929,7 @@ impl ErrorKind {
             | Self::QueueFull
             | Self::Unsupported
             | Self::ContinuationUnsupported => "refused",
-            Self::ForgeQuotaExhausted => "transient",
+            Self::ForgeQuotaExhausted | Self::PeerUpgradePending => "transient",
             _ => "error",
         }
     }

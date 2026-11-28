@@ -28,6 +28,40 @@ fn invocation_wait_budget_uses_only_the_remaining_deadline() {
     assert_eq!(expired.remaining(clock.mono_now()).as_micros(), 0);
 }
 
+#[test]
+fn lane_status_read_wake_and_refresh_share_one_remaining_budget() {
+    use std::{cell::Cell, time::Duration};
+
+    let input = json!({"op":"status", "id":"graph"});
+    let budget = Cell::new(Duration::from_secs(10));
+    let mut read_budgets = Vec::new();
+    let mut wake_budget = None;
+    let result = super::read_lane_graph_with_deadline(
+        &input,
+        || budget.get(),
+        |remaining| {
+            read_budgets.push(remaining);
+            if read_budgets.len() == 1 {
+                budget.set(remaining.saturating_sub(Duration::from_secs(3)));
+            }
+            Ok(json!({"rows": []}))
+        },
+        |_, remaining| {
+            wake_budget = Some(remaining);
+            budget.set(remaining.saturating_sub(Duration::from_secs(2)));
+            super::super::progress::WakeOutcome::Advanced { transitions: 1 }
+        },
+    )
+    .unwrap();
+
+    assert_eq!(result, json!({"rows": []}));
+    assert_eq!(
+        read_budgets,
+        [Duration::from_secs(10), Duration::from_secs(5)]
+    );
+    assert_eq!(wake_budget, Some(Duration::from_secs(7)));
+}
+
 // Spec: docs/specs/delivery-queue.md#queue-and-controls
 #[test]
 fn status_projects_recorded_delivery_progress_into_the_digest()

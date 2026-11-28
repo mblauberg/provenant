@@ -169,6 +169,35 @@ fn cli_recorded_remedies_preserve_typed_causes() {
         assert!(!wire.to_string().contains("TOKEN_SENTINEL"));
     }
 }
+
+#[test]
+fn review_command_keeps_transient_retry_metadata_in_its_error_envelope() {
+    use provenant_records::command_result::ErrorClass;
+    let reset = jiff::Timestamp::from_second(2_000_000_000).unwrap();
+    let projection = provenant_records::diagnostic::Diagnostic::new("FORGE_QUOTA_EXHAUSTED")
+        .category("transient")
+        .detail("forge rate limit")
+        .next("wait until reset, then retry")
+        .error_class(ErrorClass::Transient {
+            retry_at: Some(reset),
+        });
+    let mut failure = super::Fail::new(
+        Status::Unavailable,
+        ErrorKind::ForgeQuotaExhausted,
+        "forge rate limit",
+    );
+    failure.projection = Some(Box::new(projection));
+
+    let reply = super::reply("review", Err(failure));
+    let wire = serde_json::to_value(reply.result).unwrap();
+    assert_eq!(wire["command"], "review");
+    assert_eq!(wire["status"], "unavailable");
+    assert_eq!(
+        wire["error"]["class"]["transient"]["retry_at"],
+        serde_json::to_value(reset).unwrap()
+    );
+}
+
 #[test]
 fn malformed_claude_result_preserves_provider_error_in_settlement() {
     let route = run::RouteRecord {

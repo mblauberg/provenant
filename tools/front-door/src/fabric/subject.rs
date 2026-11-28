@@ -138,7 +138,7 @@ fn subject_from_entry(entry: &crate::pr::status::batch::Entry) -> Option<PullSna
 fn forge_quota_error(reset: jiff::Timestamp) -> FacadeError {
     let projected = crate::pr::observer::forge_quota_error(reset, None, None);
     let category = if matches!(
-        projected.class,
+        &projected.class,
         provenant_records::command_result::ErrorClass::Transient { retry_at: Some(_) }
     ) {
         "transient"
@@ -154,7 +154,8 @@ fn forge_quota_error(reset: jiff::Timestamp) -> FacadeError {
     let diagnostic = provenant_records::diagnostic::Diagnostic::new(&projected.code)
         .category(category)
         .detail(&projected.message)
-        .next(next);
+        .next(next)
+        .error_class(projected.class.clone());
     FacadeError::RecordedRefusal {
         refusal_code: projected.code.clone(),
         diagnostic: Box::new(diagnostic),
@@ -1205,9 +1206,16 @@ mod tests {
         )
         .err()
         .ok_or("a rate-limited subject must report a transient quota condition")?;
+        let error: FacadeError = serde_json::from_value(serde_json::to_value(error)?)?;
         assert_eq!(error.code(), "FORGE_QUOTA_EXHAUSTED", "{error:?}");
         let diagnostic = error.diagnostic();
         assert_eq!(diagnostic.category.as_deref(), Some("transient"));
+        assert!(matches!(
+            &diagnostic.error_class,
+            Some(provenant_records::command_result::ErrorClass::Transient {
+                retry_at: Some(retry_at)
+            }) if retry_at == &reset
+        ));
         let next = diagnostic.next.as_deref().unwrap_or_default();
         assert!(next.contains("Unix timestamp 2000000000"), "{next}");
         assert!(next.contains(&reset.to_string()), "{next}");

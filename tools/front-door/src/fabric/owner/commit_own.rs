@@ -37,7 +37,9 @@ pub(super) fn commit(
     let git_dir =
         provenant_os::git::repository_path(worktree, provenant_os::git::RepositoryPath::GitDir)
             .map_err(|error| FacadeError::io(error.to_string()))?;
-    let paths: Vec<PathBuf> = claims.iter().map(PathBuf::from).collect();
+    let paths: Vec<PathBuf> = super::claims::effective_claims(claims)
+        .map(PathBuf::from)
+        .collect();
     let env = provenant_run::build::prepare::lane_environment(home);
     let result = provenant_run::commit_own_paths(provenant_run::OwnCommitRequest {
         worktree,
@@ -100,5 +102,33 @@ mod tests {
         let again = commit(&repo, &["own".into()], id, temp.path(), &executor, &cancel).unwrap();
         assert_eq!(first, again);
         assert_eq!(git(&repo, &["rev-parse", "HEAD"]), first);
+    }
+
+    #[test]
+    fn empty_claims_commit_the_whole_worktree() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        fs::create_dir(&repo).unwrap();
+        git(&repo, &["init", "-q", "-b", "main"]);
+        git(&repo, &["config", "user.name", "Test"]);
+        git(&repo, &["config", "user.email", "test@example.invalid"]);
+        fs::write(repo.join("tracked"), "before").unwrap();
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-qm", "base"]);
+        fs::write(repo.join("tracked"), "after").unwrap();
+        fs::write(repo.join("new"), "new file").unwrap();
+        let executor = provenant_os::exec::SystemExecutor::new(1).unwrap();
+        let cancel = provenant_core::CancelToken::new();
+        commit(
+            &repo,
+            &[],
+            provenant_core::AttemptId::from_bytes([43; 16]),
+            temp.path(),
+            &executor,
+            &cancel,
+        )
+        .unwrap();
+        assert_eq!(git(&repo, &["show", "HEAD:tracked"]), "after");
+        assert_eq!(git(&repo, &["show", "HEAD:new"]), "new file");
     }
 }

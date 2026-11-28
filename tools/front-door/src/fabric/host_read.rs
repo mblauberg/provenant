@@ -721,7 +721,7 @@ pub(crate) fn execute(
             let globals = globals_with_full(globals, *full);
             if *session_stream {
                 let (mut reply, stream) = with_edge_and_stream(&globals, |edge, out| {
-                    provenant_cli::run::status_session_stream(command.clone(), edge, out)
+                    provenant_cli::run::status_session_stream(command.clone(), edge, deadline, out)
                 })?;
                 reply.result.data["stream"] = session_stream_rows(&stream)?;
                 return Ok(reply.result);

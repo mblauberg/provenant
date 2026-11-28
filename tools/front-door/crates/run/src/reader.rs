@@ -1389,11 +1389,49 @@ impl RunStore {
         &self,
         query: &LaneQuery,
         call: &Request<'_>,
+        report: impl FnMut(usize, Option<(u64, &AttemptRecord)>, Option<u64>),
+    ) -> Result<LanePage> {
+        self.lanes_streaming_inner(query, call, || None, report)
+    }
+
+    /// Stream lanes while refreshing the caller's remaining lock budget
+    /// before the inventory query and every record read.
+    pub fn lanes_streaming_with_budget(
+        &self,
+        query: &LaneQuery,
+        call: &Request<'_>,
+        mut remaining: impl FnMut() -> std::time::Duration,
+        report: impl FnMut(usize, Option<(u64, &AttemptRecord)>, Option<u64>),
+    ) -> Result<LanePage> {
+        self.lanes_streaming_inner(query, call, || Some(remaining()), report)
+    }
+
+    fn lanes_streaming_inner(
+        &self,
+        query: &LaneQuery,
+        call: &Request<'_>,
+        mut remaining: impl FnMut() -> Option<std::time::Duration>,
         mut report: impl FnMut(usize, Option<(u64, &AttemptRecord)>, Option<u64>),
     ) -> Result<LanePage> {
         if !(1..=100).contains(&query.limit) || query.targets.len() > 100 {
             return Err(RunError::Validation("lane page bounds"));
         }
+        let set_budget = |remaining: &mut dyn FnMut() -> Option<std::time::Duration>,
+                          call: &Request<'_>,
+                          db: &rusqlite::Connection|
+         -> Result<Option<std::time::Duration>> {
+            call.check()?;
+            if let Some(timeout) = remaining() {
+                if timeout.is_zero() {
+                    call.cancel.cancel();
+                    return Err(RunError::Cancelled);
+                }
+                db.busy_timeout(timeout)?;
+                Ok(Some(timeout))
+            } else {
+                Ok(None)
+            }
+        };
         let project = self.context.project_id.to_string();
         let after = sql_int(query.after)?;
         let fetch = sql_int(query.limit + 1)?;
@@ -1402,6 +1440,7 @@ impl RunStore {
         let mut rows: Vec<(i64, String)> = {
             let mut found = Vec::new();
             if query.targets.is_empty() {
+                set_budget(&mut remaining, call, &self.db)?;
                 // Merge ordered terminal partitions using the existing index.
                 let sql = inventory_page_sql(query.all, query.newest_first, query.after != 0);
                 let mut statement = self.db.prepare(&sql)?;
@@ -1410,10 +1449,12 @@ impl RunStore {
                     |r| Ok((r.get(0)?, r.get(1)?)),
                 )?;
                 for row in page {
+                    set_budget(&mut remaining, call, &self.db)?;
                     found.push(row?);
                 }
             }
             for target in &query.targets {
+                set_budget(&mut remaining, call, &self.db)?;
                 let sql = if query.newest_first {
                     "SELECT sequence,id FROM attempts WHERE project=?1 AND refused=0 AND (?2=0 OR sequence<?2) AND id=?3".to_owned() + UNSEEN_TARGET + " ORDER BY sequence DESC LIMIT ?4"
                 } else {
@@ -1425,6 +1466,7 @@ impl RunStore {
                     |r| Ok((r.get(0)?, r.get(1)?)),
                 )?;
                 for row in page {
+                    set_budget(&mut remaining, call, &self.db)?;
                     found.push(row?);
                 }
             }
@@ -1442,14 +1484,31 @@ impl RunStore {
             .then(|| rows.last().map(|(sequence, _)| *sequence as u64))
             .flatten();
         let total = rows.len();
-        report(total, None, next);
+        let report_budget = set_budget(&mut remaining, call, &self.db)?;
+        if let Some(timeout) = report_budget {
+            provenant_sqlite::with_busy_timeout(timeout, || report(total, None, next));
+        } else {
+            report(total, None, next);
+        }
         let mut lanes = Vec::with_capacity(total);
         for (sequence, id) in rows {
+            let lock_budget = set_budget(&mut remaining, call, &self.db)?;
             let id = AttemptId::parse(&id).map_err(|_| RunError::Validation("attempt index ID"))?;
-            let lane = self.record_observed(id, call)?;
+            let lane = if let Some(timeout) = lock_budget {
+                provenant_sqlite::with_busy_timeout(timeout, || self.record_observed(id, call))?
+            } else {
+                self.record_observed(id, call)?
+            };
             let cursor =
                 u64::try_from(sequence).map_err(|_| RunError::Validation("attempt sequence"))?;
-            report(total, Some((cursor, &lane)), next);
+            let report_budget = set_budget(&mut remaining, call, &self.db)?;
+            if let Some(timeout) = report_budget {
+                provenant_sqlite::with_busy_timeout(timeout, || {
+                    report(total, Some((cursor, &lane)), next)
+                });
+            } else {
+                report(total, Some((cursor, &lane)), next);
+            }
             lanes.push(lane);
         }
         Ok(LanePage { lanes, next })

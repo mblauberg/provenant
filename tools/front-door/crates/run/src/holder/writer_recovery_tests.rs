@@ -2614,10 +2614,10 @@ fn budget_stop_case(case: BudgetStopCase) -> std::result::Result<(), Box<dyn std
         )?;
         assert_eq!(report["code"], "WRITE_SCOPE");
         assert_eq!(report["strength"], "refuse");
-        // The launch-layer strict setting wins over the route override.
+        // The sealed dispatch override is reported at the route layer.
         assert_eq!(
             report["source"],
-            serde_json::json!({"layer": "launch", "origin": "--checks/--strict#policy.WRITE_SCOPE"})
+            serde_json::json!({"layer": "route", "origin": "dispatch#policy.WRITE_SCOPE"})
         );
         assert!(
             !report["out_of_scope_paths"]

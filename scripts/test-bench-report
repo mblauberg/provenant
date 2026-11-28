@@ -86,6 +86,20 @@ assert filtered["families"] == ["fix"] and filtered["repeats_filter"] == 2
 assert filtered["attempts"] == 2 and set(filtered["tasks"]) == {"task-b"}
 PY
 
+# Two measured repeats are still incomplete when a third has no measurement.
+cat > "$tmp/incomplete.jsonl" <<'JSON'
+{"task":"partial","family":"writer","tokens":{"input":100}}
+{"task":"partial","family":"writer","tokens":{"input":300}}
+{"task":"partial","family":"writer","tokens":{"input":null}}
+JSON
+python3 "$helper" report --ledger "$tmp/incomplete.jsonl" > "$tmp/incomplete-report.json"
+python3 - "$tmp/incomplete-report.json" <<'PY'
+import json, sys
+with open(sys.argv[1]) as source:
+    report = json.load(source)
+assert report["tasks"]["partial"]["tokens"]["input"] == {"mean":200.0,"reported":2,"spread":None}
+PY
+
 # Drive the ledger row through scripts/bench run with a stubbed host and git,
 # so the provider-with-usage and provider-without-usage cases use the real path.
 repo=$tmp/repo

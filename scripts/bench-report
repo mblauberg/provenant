@@ -136,7 +136,7 @@ def summary(rows):
         tokens[category] = {
             "mean": mean(values),
             "reported": len(values),
-            "spread": spread(values),
+            "spread": spread(values) if len(values) == len(rows) else None,
         }
     seconds = [row["seconds"] for row in rows if number(row.get("seconds"))]
     return {

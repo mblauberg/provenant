@@ -2118,6 +2118,7 @@ impl<'a> Compiler<'a> {
         let mut composite = Map::new();
         composite.insert("nodes".into(), Value::Array(children));
         composite.insert("exports".into(), Value::Array(exports));
+        let explicit_minimum = min_ok.is_some();
         if let Some(min_ok) = min_ok {
             composite.insert("min_successful".into(), min_ok);
         } else if lens_panel {
@@ -2132,7 +2133,9 @@ impl<'a> Compiler<'a> {
         }
         if let Some(floor) = coverage_floor {
             composite.insert("soft_review_coverage".into(), Value::Bool(true));
-            composite.insert("min_successful".into(), Value::from(floor.minimum));
+            if !explicit_minimum {
+                composite.insert("min_successful".into(), Value::from(floor.minimum));
+            }
             if floor.hard {
                 composite.insert("hard_review_coverage".into(), Value::Bool(true));
                 composite.insert(

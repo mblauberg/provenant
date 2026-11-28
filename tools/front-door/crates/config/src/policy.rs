@@ -61,7 +61,7 @@ impl Settings {
         if let Some(project) = self.projects.get(project) {
             policy.overlay(&project.rules, Layer::Project);
         }
-        policy.overlay(dispatch, Layer::Launch);
+        policy.overlay(dispatch, Layer::Route);
         policy
     }
     pub fn resolve(&self, project: &str, dispatch: &BTreeMap<String, Strength>) -> Policy {
@@ -69,7 +69,7 @@ impl Settings {
         if let Some(project) = self.projects.get(project) {
             policy.overlay(&project.rules, Layer::Project);
         }
-        policy.overlay(dispatch, Layer::Launch);
+        policy.overlay(dispatch, Layer::Route);
         policy
     }
 }
@@ -192,9 +192,26 @@ pub fn read_reporting(
             source.layer,
         );
     }
-    policy.overlay(dispatch, Layer::Launch);
+    policy.overlay(dispatch, Layer::Route);
     policy
 }
+
+/// Apply an explicit checks flag retained with the sealed profile. Policy
+/// values in the dispatch map stay at `Layer::Route`; only this distinct field
+/// can create the launch-layer `policy.default` candidate.
+pub fn apply_profile_checks_mode(
+    policy: &mut Policy,
+    profile: &provenant_records::run::HarnessProfile,
+) {
+    if let Some(mode) = profile
+        .checks_mode
+        .as_deref()
+        .and_then(provenant_records::policy::ChecksMode::from_checks)
+    {
+        policy.apply_checks(mode);
+    }
+}
+
 /// Dispatch overrides are already parsed and sealed by `dispatch_profile`.
 pub fn dispatch(profile: &provenant_records::run::HarnessProfile) -> BTreeMap<String, Strength> {
     let mut values = profile
@@ -211,12 +228,28 @@ pub fn dispatch(profile: &provenant_records::run::HarnessProfile) -> BTreeMap<St
     values
 }
 pub fn for_task(state: &Path, project: &str, task: &provenant_records::run::TaskRequest) -> Policy {
-    let values = dispatch(&task.profile);
     let project_id = task
         .profile
         .policy_project
         .map(|project| project.to_string());
-    read(state, project_id.as_deref().unwrap_or(project), &values)
+    for_profile(
+        state,
+        project_id.as_deref().unwrap_or(project),
+        &task.profile,
+    )
+}
+
+/// Resolve a sealed profile's policy, retaining launch provenance for its
+/// explicit checks mode.
+pub fn for_profile(
+    state: &Path,
+    project: &str,
+    profile: &provenant_records::run::HarnessProfile,
+) -> Policy {
+    let values = dispatch(profile);
+    let mut policy = read(state, project, &values);
+    apply_profile_checks_mode(&mut policy, profile);
+    policy
 }
 
 pub fn overlay_knobs(
@@ -241,6 +274,62 @@ pub fn overlay_knobs(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn assert_dispatch_source(policy: &Policy) {
+        let source = &policy.rule("WRITE_SCOPE").source;
+        assert_eq!(source.layer, Layer::Route);
+        assert_eq!(
+            source.origin.as_deref(),
+            Some("dispatch#policy.WRITE_SCOPE")
+        );
+    }
+
+    #[test]
+    fn dispatch_policy_keeps_route_provenance_in_each_resolver() {
+        let dispatch = BTreeMap::from([("WRITE_SCOPE".into(), Strength::Refuse)]);
+        let settings = Settings::default();
+        assert_dispatch_source(&settings.resolve("project", &dispatch));
+        assert_dispatch_source(&settings.resolve_with_knobs(
+            "project",
+            &BTreeMap::new(),
+            &dispatch,
+        ));
+
+        let state = tempfile::tempdir().unwrap();
+        assert_dispatch_source(&read_reporting(state.path(), "project", &dispatch, |_| {}));
+
+        let sourced_dispatch = provenant_records::run::HarnessProfile {
+            knobs: BTreeMap::from([("policy.WRITE_SCOPE".into(), serde_json::json!("refuse"))]),
+            overrides: vec!["policy.WRITE_SCOPE=refuse".into()],
+            knob_sources: BTreeMap::from([("policy.WRITE_SCOPE".into(), Layer::Launch)]),
+            ..Default::default()
+        };
+        assert_dispatch_source(&for_profile(state.path(), "project", &sourced_dispatch));
+    }
+
+    #[test]
+    fn explicit_strict_policy_has_launch_provenance_and_outranks_dispatch() {
+        let route_dispatch = BTreeMap::from([("default".into(), Strength::Warn)]);
+        let profile = provenant_records::run::HarnessProfile {
+            knobs: BTreeMap::from([("policy.default".into(), serde_json::json!("refuse"))]),
+            overrides: vec!["policy.default=refuse".into()],
+            knob_sources: BTreeMap::from([("policy.default".into(), Layer::Launch)]),
+            checks_mode: Some("strict".into()),
+            ..Default::default()
+        };
+        let mut policy = Settings::default().resolve("project", &route_dispatch);
+        apply_profile_checks_mode(&mut policy, &profile);
+
+        let (key, strict) =
+            provenant_records::policy::resolve_setting("LANE_DEPTH", None, &policy.settings);
+        assert_eq!(key, "policy.default");
+        assert_eq!(strict.value, Strength::Refuse);
+        assert_eq!(strict.source.layer, Layer::Launch);
+        assert_eq!(
+            strict.source.origin.as_deref(),
+            Some("--checks/--strict#policy.default")
+        );
+    }
 
     #[test]
     fn project_rules_reject_unsupported_strengths_and_unknown_codes() {

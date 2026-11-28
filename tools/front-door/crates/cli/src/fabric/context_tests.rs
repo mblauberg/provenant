@@ -541,7 +541,7 @@ fn peer_upgrade_pending_keeps_its_code_through_the_cli_projection() {
         resource: None,
     };
     let (outcome, kind) = super::facade_outcome(&error);
-    assert_eq!(outcome, provenant_records::Outcome::Error);
+    assert_eq!(outcome, provenant_records::Outcome::Unavailable);
     assert_eq!(kind.code(), "PEER_UPGRADE_PENDING");
     let projected =
         provenant_records::CommandError::new(kind.code(), error.to_string(), None, "retry");

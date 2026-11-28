@@ -1462,6 +1462,33 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn recovery_stream_without_host_context_preserves_explicit_checks_mode()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use provenant_records::policy::Strength;
+        let dir = tempfile::tempdir()?;
+        let (_, mut child) = child_fixture(dir.path(), &SystemClock::new())?;
+        child.request.task.profile.checks_mode = Some("strict".into());
+        child
+            .request
+            .task
+            .profile
+            .policy_overrides
+            .insert("default".into(), Strength::Warn);
+
+        let recovered = super::super::settlement_policy(None, Some(&child.request.task));
+        let (key, source) =
+            provenant_records::policy::resolve_setting("LANE_DEPTH", None, &recovered.settings);
+        assert_eq!(key, "policy.default");
+        assert_eq!(source.value, Strength::Refuse);
+        assert_eq!(source.source.layer, provenant_records::Layer::Launch);
+        assert_eq!(
+            source.source.origin.as_deref(),
+            Some("--checks/--strict#policy.default")
+        );
+        Ok(())
+    }
+
     fn child_fixture(
         base: &Path,
         clock: &SystemClock,

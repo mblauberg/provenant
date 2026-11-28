@@ -68,7 +68,7 @@ pub(super) fn overlap_warnings(
     Ok(result)
 }
 
-fn effective_claims(claims: &[String]) -> impl Iterator<Item = &str> {
+pub(super) fn effective_claims(claims: &[String]) -> impl Iterator<Item = &str> {
     claims
         .iter()
         .map(String::as_str)
