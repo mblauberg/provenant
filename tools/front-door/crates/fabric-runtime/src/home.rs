@@ -146,6 +146,11 @@ impl RemoteCoordination<'_> {
                         .exchange(&self.peer, &recovery, budget, cancel)
                         .map_err(|error| match error {
                             PeerError::ProtocolMismatch { .. } => error,
+                            PeerError::Refused { error: ref refusal }
+                                if refusal.code() == PEER_UPGRADE_PENDING =>
+                            {
+                                error
+                            }
                             _ => PeerError::Unknown {
                                 operation_id: id.clone(),
                             },
@@ -257,6 +262,17 @@ impl RemoteCoordination<'_> {
                             )?;
                             return Err(error.into());
                         }
+                        Err(error @ PeerError::Refused { .. })
+                            if error.code() == PEER_UPGRADE_PENDING =>
+                        {
+                            self.journal.retry_peer(
+                                self.project,
+                                self.actor,
+                                &id,
+                                &store_request,
+                            )?;
+                            return Err(error.into());
+                        }
                         Err(_) => {
                             // Sent already recovers from the owner's receipt if this write fails.
                             let _ = self.journal.peer_phase(
@@ -306,7 +322,9 @@ fn is_retryable_refusal(error: &facade::FacadeError) -> bool {
         facade::FacadeError::Cancelled => RetryCause::Cancelled,
         // A spent forge allowance clears with time, like contention; its typed
         // refusal must be retried instead of treated as a permanent verdict.
-        facade::FacadeError::RunKind { run_code, .. } if run_code == "FORGE_QUOTA" => {
+        facade::FacadeError::RunKind { run_code, .. }
+            if run_code == "FORGE_QUOTA" || run_code == PEER_UPGRADE_PENDING =>
+        {
             RetryCause::Contention
         }
         _ => RetryCause::Permanent,
@@ -1016,6 +1034,12 @@ mod tests {
             facade::FacadeError::Busy,
             facade::FacadeError::Timeout,
             facade::FacadeError::Cancelled,
+            facade::FacadeError::RunKind {
+                run_code: PEER_UPGRADE_PENDING.into(),
+                next: "wait 5 seconds and retry".into(),
+                detail: None,
+                resource: None,
+            },
         ] {
             let fixture = RemoteFixture::new();
             let actions = Arc::new(Mutex::new(Vec::new()));

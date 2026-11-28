@@ -896,4 +896,26 @@ leaf_source = "dispatch"
         assert_eq!(std::fs::read(&config).expect("read config"), original);
         assert!(!path.join("migrating-4").exists(), "no marker was written");
     }
+
+    #[test]
+    fn held_worktree_slot_blocks_upgrade_until_released() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let path = root.path();
+        let config = path.join("config.toml");
+        std::fs::write(&config, "[lanes]\nisolation = \"shared\"\n[domains.install]\nquiesce_seconds = 0\n")
+            .expect("write config");
+        let original = std::fs::read(&config).expect("read config");
+        let slot = path.join("worktrees/project/slot");
+        std::fs::create_dir_all(&slot).expect("create slot");
+        let directory = Directory::open_anchor(&slot).expect("slot anchor");
+        let holder = directory.try_lock(OsStr::new("writer.lock"), LockMode::Exclusive)
+            .expect("hold slot lock");
+        let error = run(path).expect_err("held slot blocks upgrade");
+        assert!(error.1.contains("UPGRADE_NOT_QUIESCENT"), "{error:?}");
+        assert!(error.1.contains("worktrees/project/slot/writer.lock"), "{error:?}");
+        assert_eq!(std::fs::read(&config).expect("read config"), original);
+        assert!(!path.join("migrating-4").exists());
+        drop(holder);
+        run(path).expect("upgrade after lock release");
+    }
 }
