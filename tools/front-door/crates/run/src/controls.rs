@@ -4620,9 +4620,7 @@ impl RunStore {
     ) -> Result<Option<Reconciled>> {
         let scope = Self::scope(record);
         let attempt = self.attempt_dir(record.attempt_id, false)?;
-        if fence.scope != scope
-            || read_sealed(&attempt, "process-exit.json", RECORD_LIMIT)?.is_some()
-        {
+        if fence.scope != scope {
             return Ok(None);
         }
         let directory = fence.custody_directory().ok_or_else(|| {
@@ -4644,9 +4642,23 @@ impl RunStore {
         {
             return Ok(None);
         }
-        // No canonical exit exists to import the writer's private head.
-        // Lost-without-exit retains it through both cleanup and GC. Repeating
-        // this transaction also finishes a release interrupted after commit.
+        // The never-spawned exit is owed before the attempt settles: record it,
+        // or keep custody until it can be. An exit already recorded for this
+        // scope is kept, so a repeat finishes a commit or release interrupted
+        // after it; any other exit is not this transaction's to settle.
+        let reason = crate::store::cancel_requested(&attempt, scope)
+            .then_some(StopReason::ExplicitCancellation);
+        match recovery
+            .record_never_spawned_exit(&attempt, reason)
+            .and_then(|publication| publication.require_durable().map_err(Into::into))
+        {
+            Ok(()) => {}
+            Err(CustodyError::InvalidRecord) => return Ok(None),
+            Err(error) => return Ok(Some(Reconciled::custody_unavailable(&error))),
+        }
+        // A never-spawned exit has nothing to import, so the terminal record
+        // carries no exit evidence: Lost-without-exit-evidence retains the
+        // writer's private head through both cleanup and GC.
         self.commit_lost(
             scope,
             "launch interrupted: provider never spawned; private evidence retained",
