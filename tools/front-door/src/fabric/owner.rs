@@ -139,8 +139,9 @@ pub(crate) fn resolve_child_launch(
             }
         }
     }
-    // `request.commit` is applied by the launch path that owns the commit
-    // decision; placement and claims are the only decisions made here.
+    // Placement and claims are the only decisions made here. `request.commit`
+    // is applied when the shared child settles: the graph owner commits only
+    // its claimed paths once custody is released (`commit_own`).
     Ok(placement)
 }
 
