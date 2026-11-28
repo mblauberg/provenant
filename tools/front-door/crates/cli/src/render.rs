@@ -1538,7 +1538,7 @@ mod tests {
     }
 
     #[test]
-    // Spec: docs/specs/agent-native.md#33-error-and-warning-contract-3777
+    // Spec: docs/specs/agent-native.md#33-error-and-warning-contract
     fn error_human_form_names_subject_setting_and_next() -> Result<(), Box<dyn std::error::Error>> {
         let subject = Subject {
             host: Some("workshop".into()),

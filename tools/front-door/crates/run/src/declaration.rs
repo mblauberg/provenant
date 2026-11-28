@@ -385,7 +385,7 @@ mod tests {
         Ok(found)
     }
 
-    // Spec: docs/specs/run-settlement.md, test 7 (a lane cannot write
+    // Spec: docs/specs/run-settlement.md#settlement, test 7 (a lane cannot write
     // settlement records).
     #[test]
     fn a_declaration_writes_only_the_bound_attempts_journal() -> TestResult {

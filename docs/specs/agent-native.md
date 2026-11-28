@@ -1,7 +1,9 @@
 # Agent-native lanes and delivery
 
 Owner: `tools/front-door` records, runtime, CLI and run crates.
-Anchor: the shared contracts in sections 2–5.
+Anchor: `tools/front-door/crates/records/src/custody.rs`, `tools/front-door/src/pr/observer.rs`,
+`tools/front-door/src/output.rs`, `tools/front-door/src/install/migrations.rs`; the shared
+contracts are in sections 2–5.
 
 Why: lanes, progress and delivery need one set of sourced settings, outcomes, deadlines and custody rules.
 
@@ -58,7 +60,9 @@ Scopes used below: H host, P project, R route, T template, L launch, O owning la
 
 ## 3. Per-item design
 
-### 3.1 Progress without tick (#4104 residue, #4105–#4107)
+### 3.1 Progress without tick
+
+Issues: #4104 residue, #4105–#4107.
 
 **Wake.** The signature is `progress::wake(subject: WakeSubject, reason: WakeReason, deadline: Deadline) -> WakeOutcome`.
 - `WakeSubject` is `Graph{project,id}` or `QueueItem{project,queue,item}`.
@@ -117,7 +121,9 @@ The steps run in this fixed order and are shared by tick:
 | `domains.wait.advance` | H/P/L | `on` (`off` makes every reader a pure snapshot) |
 | `domains.wait.advance_budget_ms` | H/P/L | 2000 |
 
-### 3.2 Checks warn by default (#4101 residue, #4103, #3551)
+### 3.2 Checks warn by default
+
+Issues: #4101 residue, #4103, #3551.
 
 **Audit of all 83 `refuse` rows.** Every row is reclassified with this rule:
 
@@ -170,7 +176,9 @@ A failed transfer is `Transient{retry_at}`. A verification mismatch is `operatio
 
 No migration is needed: the `policy.<CODE>` keys and their values already exist.
 
-### 3.3 Error and warning contract (#4102 residue, #3777)
+### 3.3 Error and warning contract
+
+Issues: #4102 residue, #3777.
 
 ```rust
 // crates/records/src/command_result.rs
@@ -227,7 +235,9 @@ Session-stream host reads carry their JSON lines as an ordered `stream` array in
 
 `config explain KEY` is a new `Config::Explain` subcommand. It prints the winner and every losing candidate with layer, origin and specificity, using `crates/config/src/inspection.rs`.
 
-### 3.5 Short output (#4092 residue, #4099, #3775)
+### 3.5 Short output
+
+Issues: #4092 residue, #4099, #3775.
 
 - **Collapse.** The existing warning sink and the bounded renderer (`src/output.rs`, `crates/cli/src/render.rs`) collapse warnings by `(code, setting.key, message template)`. The line reads `warning [CODE] ×7: <first> (first: <subject>) — --full lists all`. JSON keeps up to 64 instances plus `warnings_omitted`. The key is `domains.cli.collapse_warnings` (H/L, default `on`).
 - **Pool-selection warning.** `apply_route` (`graph/transitions.rs:141-176`) checks only identifier fields against `HOST_ID_BYTES`.
@@ -265,7 +275,9 @@ Session-stream host reads carry their JSON lines as an ordered `stream` array in
   - **Committing:** `--commit` uses a pathspec limited to the patch paths.
 - **Key.** `domains.ci.generated_patch = off|offer|apply` (H/P/T, default `offer`). The deliver template sets `apply`.
 
-### 3.7 Review convergence (#4017 wiring, #4108, #4109)
+### 3.7 Review convergence
+
+Issues: #4017 wiring, #4108, #4109.
 
 **Finding ledger.** `FindingLedger` is stored per queue item and keyed by head. It holds findings, unresolved findings, their dispositions, coverage per lens and per invariant, and `last_reviewed_head`. Each displayed finding ID retains its structural source identity so a later colliding raw ID cannot rename or merge an existing ledger item. Every round reads and writes it, and the adjudicator writes its verdict and findings into it. Repair always reads the ledger, never one reviewer's output.
 
@@ -318,7 +330,9 @@ Verify already has unique graph names, home-relative scratch and per-binding cle
 - **Pin.** Verify takes a shared `<state>/releases/<version>.lock`. Install and swap never remove a release whose lock is held, and gc skips it.
 - **Keep.** `--keep` writes `<smoke>/keep`. gc and peer cleanup honour it, and `next` names `provenant retire graph:<smoke>`.
 
-### 3.9 Delivery queue absorbs the fleet (#3972 residue, #3510)
+### 3.9 Delivery queue absorbs the fleet
+
+Issues: #3972 residue, #3510.
 
 **One CI reader.**
 - `pr::observer::observe_head(repo, pr, expected) -> HeadReading` returns `{expected_head, branch_ref, pr_head, mergeable, required: Vec<Check>, observed_at, complete: bool, pending_reason?, retry_at?}`.
@@ -412,7 +426,9 @@ Owned paths must be disjoint across the slices that can run in parallel. An over
 | `needs-chair.md` | `queue status --parked` and the inbox |
 | `batch.mjs` | `deliver.batch` |
 
-### 3.10 Store migrations (one cut-over per store per batch)
+### 3.10 Store migrations
+
+One cut-over per store per batch.
 
 **Store-owned transforms.**
 - Each store owner exposes `fn migrate(from: u64, to: u64, record) -> Result<record>`, which is pure and deterministic, plus a `migrate_store()` that runs it under that store's own lock.
@@ -438,7 +454,9 @@ Owned paths must be disjoint across the slices that can run in parallel. An over
 
 Tests: old fixtures per store, an interruption between stores, replay on the new binary, an old binary refusing a new store, and `UPGRADE_NOT_QUIESCENT`.
 
-### 3.11 Worktree and branch custody as a lease (#4120)
+### 3.11 Worktree and branch custody as a lease
+
+Issues: #4120.
 
 **Lease.** A worktree and its branch carry `WorktreeLease{holder: AttemptId, since, sharing: Inherit|Allow|Warn|Refuse}` (`crates/records/src/custody.rs`). It replaces `WriterOwnership` as the ownership record.
 - The lease is **live** while the holder's attempt is nonterminal. It **lapses** when the holder is terminal: done, stopped, failed or cancelled.

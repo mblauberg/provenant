@@ -1,6 +1,6 @@
-## Features
+## Additions
 
-### Session checkpoints
+### Chair, inbox and console
 
 `workflow session save` now validates the checkpoint against the `session`
 skill's template and warns, without refusing, on each gap it finds: missing

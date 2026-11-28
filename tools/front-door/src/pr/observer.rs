@@ -82,7 +82,7 @@ pub(crate) enum ObserveError {
 
 /// The one error-contract projection for an exhausted forge allowance: a
 /// transient condition carrying the reset, never a CI verdict and never bad
-/// input. Spec: docs/specs/agent-native.md#33-error-and-warning-contract-3777
+/// input. Spec: docs/specs/agent-native.md#33-error-and-warning-contract
 fn forge_quota_error(reset: jiff::Timestamp, pr: Option<u64>, cause: Option<&str>) -> CommandError {
     let mut error = CommandError::new(
         "FORGE_QUOTA_EXHAUSTED",
@@ -214,7 +214,7 @@ impl HeadReading {
 
     /// The error contract for a quota-bound reading: a transient condition
     /// carrying the forge's reset, never a CI verdict and never bad input.
-    /// Spec: docs/specs/agent-native.md#33-error-and-warning-contract-3777
+    /// Spec: docs/specs/agent-native.md#33-error-and-warning-contract
     pub(crate) fn quota_error(&self) -> Option<CommandError> {
         let retry_at = self.retry_at?;
         let mut error = forge_quota_error(retry_at, None, self.pending_reason.as_deref());
@@ -1020,7 +1020,7 @@ impl<F: Forge, C: Clock> Observer<F, C> {
     /// consulted only when a REST read is quota-bound: a GraphQL row answers a
     /// rate-limited read only when it names the very same head.
     ///
-    /// Spec: docs/specs/agent-native.md#39-delivery-queue-absorbs-the-fleet-3972-residue-3510
+    /// Spec: docs/specs/agent-native.md#39-delivery-queue-absorbs-the-fleet
     /// Resolve the PR's current head through this observer, then bind checks
     /// and a final head read to the resolved identity.
     pub(crate) fn observe_current_head(

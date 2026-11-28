@@ -1511,7 +1511,7 @@ fn a_pin_mismatch_refusal_uses_its_own_text_not_the_handoff_cause() {
 
 #[cfg(test)]
 #[test]
-// Spec: docs/specs/agent-native.md#only-boundaries-refuse
+// Spec: docs/specs/agent-native.md#32-checks-warn-by-default
 fn overlong_raw_prompt_is_an_operation_error_not_a_boundary() {
     use provenant_records::policy::Boundary;
     let refusal = PrepareError::Prompt(LaunchPromptError::TooLarge).into_refusal();

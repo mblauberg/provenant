@@ -758,7 +758,7 @@ grants = ["postgres"]
         );
     }
 
-    /// Spec: docs/specs/agent-native.md#3.10-store-migrations
+    /// Spec: docs/specs/agent-native.md#310-store-migrations
     #[test]
     fn config_knob_rewrite_maps_isolation_and_source_tags_once() {
         let root = tempfile::tempdir().expect("tempdir");
@@ -819,7 +819,7 @@ leaf_source = "dispatch"
         assert!(again.warnings.is_empty(), "{again:?}");
     }
 
-    /// Spec: docs/specs/agent-native.md#3.10-store-migrations
+    /// Spec: docs/specs/agent-native.md#310-store-migrations
     #[test]
     fn config_knob_rewrite_drops_private_isolation() {
         let root = tempfile::tempdir().expect("tempdir");
@@ -832,7 +832,7 @@ leaf_source = "dispatch"
         assert!(!text.contains("read_source"), "{text}");
     }
 
-    /// Spec: docs/specs/agent-native.md#3.10-store-migrations
+    /// Spec: docs/specs/agent-native.md#310-store-migrations
     #[test]
     fn store_cutover_records_each_store_id_and_resumes_a_marker() {
         let root = tempfile::tempdir().expect("tempdir");
@@ -863,7 +863,7 @@ leaf_source = "dispatch"
         assert_eq!(again, applied, "recorded steps are skipped");
     }
 
-    /// Spec: docs/specs/agent-native.md#3.10-store-migrations
+    /// Spec: docs/specs/agent-native.md#310-store-migrations
     #[test]
     fn not_quiescent_migrates_nothing() {
         let root = tempfile::tempdir().expect("tempdir");

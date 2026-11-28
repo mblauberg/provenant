@@ -461,7 +461,7 @@ fn each_split_panel_uses_its_own_adjudicator_on_its_pinned_head() {
     assert_eq!(owner.calls.len(), 6);
 }
 
-// Spec: docs/specs/agent-native.md#3-7-review-convergence
+// Spec: docs/specs/agent-native.md#37-review-convergence
 #[test]
 fn separate_review_chains_on_the_same_head_get_separate_adjudicators() {
     let answer = |verdict: &str| format!(
@@ -546,7 +546,7 @@ fn separate_review_chains_on_the_same_head_get_separate_adjudicators() {
     }
 }
 
-// Spec: docs/specs/agent-native.md#3-7-review-convergence
+// Spec: docs/specs/agent-native.md#37-review-convergence
 #[test]
 fn same_chain_panels_on_one_head_share_complete_adjudication_inputs() {
     let answer = |verdict: &str| format!(
@@ -619,7 +619,7 @@ fn same_chain_panels_on_one_head_share_complete_adjudication_inputs() {
     assert!(gate.gate.as_ref().is_some_and(|gate| gate.passed));
 }
 
-// Spec: docs/specs/agent-native.md#3-7-review-convergence
+// Spec: docs/specs/agent-native.md#37-review-convergence
 #[test]
 fn later_same_head_split_continues_one_adjudicator_and_replays_its_union() {
     let answer = |verdict: &str| format!(

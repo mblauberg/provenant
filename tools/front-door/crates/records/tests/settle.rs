@@ -808,7 +808,7 @@ fn terminal_record(
     Ok(record)
 }
 
-// Spec: docs/specs/run-settlement.md, test 6 (projections agree).
+// Spec: docs/specs/run-settlement.md#settlement, test 6 (projections agree).
 #[test]
 fn every_projection_of_a_settled_row_agrees() -> Result<(), Box<dyn std::error::Error>> {
     for row in rows() {

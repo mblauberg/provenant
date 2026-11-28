@@ -1,5 +1,5 @@
 #[test]
-// Spec: docs/specs/agent-native.md#peer-projection
+// Spec: docs/specs/agent-native.md#32-checks-warn-by-default
 fn unlocatable_peer_project_is_a_typed_operation_error_with_setting_and_next()
 -> Result<(), Box<dyn std::error::Error>> {
     use provenant_core::{CancelToken, Clock, RootInputs, WaitBudget};
@@ -71,7 +71,7 @@ fn unlocatable_peer_project_is_a_typed_operation_error_with_setting_and_next()
 }
 
 #[test]
-// Spec: docs/specs/agent-native.md#peer-projection
+// Spec: docs/specs/agent-native.md#32-checks-warn-by-default
 fn projection_setting_uses_the_resolved_layer_and_origin() -> Result<(), Box<dyn std::error::Error>>
 {
     use provenant_fabric_runtime::hosts::mirror::ProjectionMode;

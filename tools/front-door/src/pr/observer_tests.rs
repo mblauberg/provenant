@@ -1441,7 +1441,7 @@ printf '%s\n' '{"status":200,"headers":{},"body":"{\"full_name\":\"owner/repo\"}
         );
     }
 
-    /// Spec: docs/specs/agent-native.md#33-error-and-warning-contract-3777
+    /// Spec: docs/specs/agent-native.md#33-error-and-warning-contract
     #[test]
     fn forge_rate_limit_is_transient_with_reset() {
         let shared = Shared::new();
@@ -1470,7 +1470,7 @@ printf '%s\n' '{"status":200,"headers":{},"body":"{\"full_name\":\"owner/repo\"}
         );
     }
 
-    /// Spec: docs/specs/agent-native.md#39-delivery-queue-absorbs-the-fleet-3972-residue-3510
+    /// Spec: docs/specs/agent-native.md#39-delivery-queue-absorbs-the-fleet
     #[test]
     fn graphql_rest_head_mismatch_is_pending() {
         let shared = Shared::new();

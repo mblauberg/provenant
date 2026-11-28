@@ -109,7 +109,7 @@ impl CommonArgs {
 impl Command {
     /// The shared flags for verbs that flatten `CommonArgs`. Every such verb
     /// resolves its deadline and host target through this one path; verbs that
-    /// do not flatten it return `None`. Spec: docs/specs/agent-native.md#consistent-verbs-and-flags.
+    /// do not flatten it return `None`. Spec: docs/specs/agent-native.md#34-consistent-verbs-and-flags.
     pub fn common(&self) -> Option<&CommonArgs> {
         match self {
             Self::Events { common, .. } | Self::Result { common, .. } => Some(common),
@@ -1693,7 +1693,7 @@ mod common_args_tests {
         host && timeout
     }
 
-    /// Spec: docs/specs/agent-native.md#consistent-verbs-and-flags. The
+    /// Spec: docs/specs/agent-native.md#34-consistent-verbs-and-flags. The
     /// exemption list is part of the contract: these verbs keep their own
     /// option surface and must never inherit `--host` or `--timeout`.
     #[test]

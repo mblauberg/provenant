@@ -1610,7 +1610,7 @@ mod session_warning_tests {
     }
 }
 
-/// Declared per-verb budget defaults from docs/specs/agent-native.md#consistent-verbs-and-flags.
+/// Declared per-verb budget defaults from docs/specs/agent-native.md#34-consistent-verbs-and-flags.
 /// `wait` resolves its own default from `domains.wait.timeout_seconds` in its handler.
 fn verb_default_timeout(leaf: &str) -> u64 {
     match leaf {

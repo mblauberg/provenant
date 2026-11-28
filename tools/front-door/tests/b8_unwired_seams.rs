@@ -1,5 +1,7 @@
 //! B8 invariants: the batch's new public seams have no dead-code allows, and
-//! `LaunchTimings` has one owner. Spec: docs/specs/agent-native.md §3.4 and §4.
+//! `LaunchTimings` has one owner.
+//! Spec: docs/specs/agent-native.md#34-consistent-verbs-and-flags
+//! Spec: docs/specs/agent-native.md#4-a-lane-as-a-native-sub-agent
 
 use std::collections::BTreeMap;
 use std::error::Error;

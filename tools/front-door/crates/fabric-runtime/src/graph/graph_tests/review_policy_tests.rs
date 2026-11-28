@@ -22,9 +22,7 @@ fn admission_resolves_template_launch_and_route_review_policy_sources() {
     });
     document.template_library = authored;
     document.template_layers = template::TemplateLibrary::bundled().snapshot_layers();
-    document.nodes[0]
-        .extra
-        .insert(template::TEMPLATE_FIELD.into(), serde_json::json!("task"));
+    document.nodes[0].template = Some("task".to_owned());
     document.nodes[0].effective_review_policy = Some(ReviewPolicy::default());
     let route = document.nodes[0].route.as_mut().expect("route");
     route.review_policy = Some(ReviewPolicyOverride {

@@ -2855,7 +2855,7 @@ mod panel_tests {
 mod wake_tests {
     use super::*;
 
-    // Spec: docs/specs/agent-native.md#34-wake
+    // Spec: docs/specs/agent-native.md#31-progress-without-tick
     #[test]
     fn lane_wake_frame_is_read_class_and_carries_no_mutation_authority()
     -> Result<(), Box<dyn std::error::Error>> {

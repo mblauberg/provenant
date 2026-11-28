@@ -205,7 +205,7 @@ mod tests {
         assert!(!resolved.paragraph().contains("cargo check"));
     }
 
-    // Spec: docs/specs/run.md#lanes-do-not-build
+    // Spec: docs/specs/run.md#build-strategy
     #[test]
     fn every_scope_tells_the_lane_to_format_and_never_to_build() {
         for (scope, source) in [

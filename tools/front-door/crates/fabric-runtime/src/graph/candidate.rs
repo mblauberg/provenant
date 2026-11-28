@@ -405,10 +405,7 @@ fn template_review_policy(
     template_library: &std::collections::BTreeMap<String, Template>,
     node: &GraphNode,
 ) -> Option<(String, ReviewPolicyOverride)> {
-    let name = node
-        .extra
-        .get(super::template::TEMPLATE_FIELD)
-        .and_then(serde_json::Value::as_str)?;
+    let name = node.template.as_deref()?;
     let policy = template_library
         .get(name)
         .and_then(|template| template.review_policy.clone())?;

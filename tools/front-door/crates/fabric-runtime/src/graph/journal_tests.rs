@@ -3139,7 +3139,7 @@ fn v2_checkpoint_migrates_and_is_published_under_the_journal_lock() {
     );
 }
 
-/// Spec: docs/specs/agent-native.md#3.10-store-migrations
+/// Spec: docs/specs/agent-native.md#310-store-migrations
 #[test]
 fn v3_checkpoint_cut_over_types_warnings_and_renames_sealed_settings() {
     let temp = crate::test_support::tempdir().unwrap();
