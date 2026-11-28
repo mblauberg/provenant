@@ -2039,6 +2039,8 @@ fn bind_expanded_writer<R: AttemptOwner, J: GraphJournal>(
                         )
                         .map_err(GraphError::Refused)?
                         {
+                            // Break ends the node's launch loop, whose exit
+                            // retains this step's warnings on the deferred node.
                             journal.save(&*checkpoint).map_err(GraphError::Journal)?;
                             return Ok(LoopStep::Break);
                         }
