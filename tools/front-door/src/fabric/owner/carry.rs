@@ -5,7 +5,7 @@ use provenant_run::worktree_carry::{self, CARRY_TIMEOUT, CarrySnapshot};
 use serde::{Deserialize, Serialize};
 use std::{ffi::OsStr, path::Path};
 
-const RECEIPT: &OsStr = OsStr::new("provenant-carried-edits.json");
+const RECEIPT: &str = "provenant-carried-edits.json";
 
 #[derive(Serialize, Deserialize)]
 struct Receipt {
@@ -114,7 +114,7 @@ pub(super) fn recover(
         return Ok(None);
     }
     with_target(owner, target, |_context, tree| {
-        let bytes = match tree.repo().private_dir().read_stable(RECEIPT, 1024 * 1024) {
+        let bytes = match tree.repo().private_dir().read_stable(OsStr::new(RECEIPT), 1024 * 1024) {
             Ok(bytes) => bytes,
             Err(error) if error.is_not_found() => return Ok(None),
             Err(error) => return Err(error.into()),
@@ -261,7 +261,7 @@ pub(super) fn apply(
         }
         tree.repo()
             .private_dir()
-            .atomic_write(RECEIPT, ".carry-", &bytes, PublishMode::NoReplace)?
+            .atomic_write(OsStr::new(RECEIPT), ".carry-", &bytes, PublishMode::NoReplace)?
             .require_durable()
             .map_err(|error| failure(target, error))?;
         let head = if snapshot.is_empty() {
@@ -306,7 +306,7 @@ pub(super) fn apply(
         let bytes = serde_json::to_vec(&receipt).map_err(|error| failure(target, error))?;
         tree.repo()
             .private_dir()
-            .atomic_write(RECEIPT, ".carry-", &bytes, PublishMode::Replace)?
+            .atomic_write(OsStr::new(RECEIPT), ".carry-", &bytes, PublishMode::Replace)?
             .require_durable()
             .map_err(|error| failure(target, error))?;
         Ok(receipt.paths)

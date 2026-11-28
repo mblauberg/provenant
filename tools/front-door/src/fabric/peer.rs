@@ -1496,7 +1496,11 @@ pub fn peer(
                     state_dir: Some(peer_factory.context.roots.state.as_path().to_owned()),
                     project: Some(cwd.clone()),
                 };
-                match super::host_read::execute(input, &globals, workers) {
+                let deadline = std::time::Instant::now()
+                    + std::time::Duration::from_micros(
+                        budget.remaining(clock.mono_now()).as_micros(),
+                    );
+                match super::host_read::execute(input, &globals, workers, deadline) {
                     Ok(result) => PeerResult::HostRead {
                         data: Box::new(result),
                         extra: Default::default(),

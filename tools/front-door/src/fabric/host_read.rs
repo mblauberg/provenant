@@ -536,6 +536,7 @@ pub(crate) fn execute_local_bounded(
             next: Vec::new(),
         };
     }
+    let deadline = std::time::Instant::now() + timeout;
     let (send, receive) = mpsc::sync_channel(1);
     let input = input.clone();
     let globals = Globals {
@@ -547,7 +548,7 @@ pub(crate) fn execute_local_bounded(
     let spawned = std::thread::Builder::new()
         .name("provenant-host-read".into())
         .spawn(move || {
-            let result = execute(&input, &globals, workers).map_err(|error| error.to_string());
+            let result = execute(&input, &globals, workers, deadline).map_err(|error| error.to_string());
             let _ = send.send(result);
         });
     if let Err(error) = spawned {
@@ -678,10 +679,13 @@ fn output_data_bytes(data: &Value) -> Result<Vec<u8>, Box<dyn std::error::Error>
     }
 }
 
+/// Run one host read. `deadline` bounds the local output reader the same way
+/// the invocation timeout bounds the command.
 pub(crate) fn execute(
     input: &HostReadInput,
     globals: &Globals,
     workers: &'static dyn WorkerObserver,
+    deadline: std::time::Instant,
 ) -> Result<CommandResult<Value>, Box<dyn std::error::Error>> {
     match input {
         HostReadInput::Status {
@@ -753,14 +757,7 @@ pub(crate) fn execute(
             };
             let globals = globals_with_full(globals, *full);
             let reply = with_edge(&globals, |edge| {
-                let remaining = budget.remaining(clock.mono_now()).as_micros();
-                unified::unified_graph_output(
-                    &command,
-                    edge,
-                    &globals,
-                    workers,
-                    std::time::Instant::now() + std::time::Duration::from_micros(remaining),
-                )
+                unified::unified_graph_output(&command, edge, &globals, workers, deadline)
             })?;
             Ok(reply.result)
         }

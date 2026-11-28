@@ -139,7 +139,7 @@ fn forge_quota_error(reset: jiff::Timestamp) -> FacadeError {
     let projected = crate::pr::observer::forge_quota_error(reset, None, None);
     let category = if matches!(
         projected.class,
-        provenant_records::ErrorClass::Transient { retry_at: Some(_) }
+        provenant_records::command_result::ErrorClass::Transient { retry_at: Some(_) }
     ) {
         "transient"
     } else {
@@ -1193,7 +1193,7 @@ mod tests {
         let shared = crate::pr::observer::forge_quota_error(reset, None, None);
         assert!(matches!(
             shared.class,
-            provenant_records::ErrorClass::Transient {
+            provenant_records::command_result::ErrorClass::Transient {
                 retry_at: Some(retry_at)
             } if retry_at == reset
         ));
