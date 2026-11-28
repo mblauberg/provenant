@@ -1712,13 +1712,13 @@ mod tests {
             .ok_or("operation")?;
         store.db.execute_batch("CREATE TEMP TRIGGER fail_unknown BEFORE UPDATE OF operation_record ON attempts BEGIN SELECT RAISE(ABORT, 'fixture unknown write'); END;")?;
         assert!(matches!(
-            store.launch_unknown(request.attempt_id, &call),
+            store.launch_unknown(request.attempt_id, "fixture lost acknowledgement", &call),
             Err(RunError::Sqlite(_))
         ));
         assert_eq!(store.operation(&request.operation_id, &call)?, Some(prior));
         assert!(custody::reservation_present(&directory, scope)?);
         store.db.execute_batch("DROP TRIGGER fail_unknown")?;
-        store.launch_unknown(request.attempt_id, &call)?;
+        store.launch_unknown(request.attempt_id, "fixture lost acknowledgement", &call)?;
         assert_eq!(
             store
                 .operation(&request.operation_id, &call)?
