@@ -604,6 +604,35 @@ fn new_writer_carries_chair_edits_once_and_preserves_the_chair()
         ["CARRY_SETTING_UNREADABLE", "CARRY_PEER_UNSUPPORTED"],
         "{codes:?}"
     );
+    // A local writer resolves the same setting: a malformed value warns,
+    // carries tracked edits by default and still provisions the writer.
+    for (setting, path) in [("7", "malformed"), ("'sometimes'", "unknown")] {
+        std::fs::write(
+            rig.project.join(".provenant/config.toml"),
+            format!("[knobs]\n'lanes.carry_uncommitted' = {setting}\n"),
+        )?;
+        let request = WriterCarryRequest {
+            graph: "malformed-graph",
+            node: path,
+            mode: None,
+        };
+        let worktree = format!(".worktrees/{path}");
+        let binding = owner
+            .provision_writer_worktree(&worktree, path, &base, None, Some(&request))?
+            .ok_or("malformed-setting binding")?;
+        assert_eq!(
+            binding.carried_paths,
+            vec!["AGENTS.md".to_owned()],
+            "{setting}"
+        );
+        let codes: Vec<_> = owner
+            .take_launch_warnings()
+            .into_iter()
+            .map(|warning| warning.code.as_ref().to_owned())
+            .collect();
+        assert_eq!(codes, ["CARRY_SETTING_UNREADABLE"], "{setting}");
+    }
+    assert_eq!(std::fs::read(rig.project.join(".git/index"))?, index);
     Ok(())
 }
 

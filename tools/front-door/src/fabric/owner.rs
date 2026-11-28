@@ -2654,11 +2654,11 @@ impl BoundGraphOwner<'_> {
                 .and_then(|spec| spec.new_worktree.as_ref())
                 .is_some_and(|tree| tree.default_base)
         {
-            let warnings = carry::peer_unsupported_warnings(
-                self,
+            carry::warn_peer_unsupported(
+                self.factory,
+                &mut self.launch_warnings,
                 node.attempt.and_then(|spec| spec.carry_uncommitted),
             );
-            self.launch_warnings.extend(warnings);
         }
         let writer_project = if access == provenant_fabric_runtime::graph::AccessMode::WorktreeWrite
         {
@@ -3540,9 +3540,11 @@ impl BoundGraphOwner<'_> {
                 .as_ref()
                 .is_some_and(|tree| tree.default_base)
         {
-            let (mode, warnings) = carry::advisory_mode(self, attempt.carry_uncommitted);
-            self.launch_warnings.extend(warnings);
-            attempt.carry_uncommitted = Some(mode);
+            attempt.carry_uncommitted = Some(carry::resolve(
+                self.factory,
+                &mut self.launch_warnings,
+                attempt.carry_uncommitted,
+            ));
         }
         // The graph checkpoint owns worktree provisioning on this host;
         // submission receives the resolved checkout, never a second request to

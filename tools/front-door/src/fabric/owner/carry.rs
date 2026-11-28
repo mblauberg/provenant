@@ -23,14 +23,10 @@ fn failure(path: &Path, detail: impl ToString) -> provenant_confinement::worktre
     }
 }
 
-pub(super) fn mode(
-    owner: &BoundGraphOwner<'_>,
-    override_mode: Option<CarryMode>,
-) -> Result<CarryMode, FacadeError> {
-    if let Some(mode) = override_mode {
-        return Ok(mode);
-    }
-    let config = provenant_cli::config_reads::read_for(&owner.factory.context.roots, "run")
+/// The configured `lanes.carry_uncommitted`, read through every layer. Only
+/// [`resolve`] reads it, so no consumer can turn a bad value into an abort.
+fn configured(factory: &Factory) -> Result<CarryMode, FacadeError> {
+    let config = provenant_cli::config_reads::read_for(&factory.context.roots, "run")
         .map_err(|error| FacadeError::io(format!("read carry setting: {error}")))?;
     let mut value = config
         .knobs
@@ -38,10 +34,10 @@ pub(super) fn mode(
         .and_then(|knob| knob.value.as_str())
         .unwrap_or("tracked")
         .to_owned();
-    let project = &owner.factory.context.project_root;
+    let project = &factory.context.project_root;
     let mut files = Vec::new();
     if let Some(dir) =
-        provenant_config::host_project_dir(owner.factory.context.roots.state.as_path(), project)
+        provenant_config::host_project_dir(factory.context.roots.state.as_path(), project)
     {
         files.push(dir.join("config.toml"));
     }
@@ -77,39 +73,43 @@ pub(super) fn mode(
     }
 }
 
-/// The carry setting where it only shapes a warning or a peer request. An
-/// unreadable setting warns and uses the compiled default (`tracked`) rather
-/// than aborting the graph advance before the node settles. The caller keeps
-/// the returned warnings with the launch.
-pub(super) fn advisory_mode(
-    owner: &BoundGraphOwner<'_>,
+/// The effective carry mode for one launch: the node's override, else the
+/// configured setting. Every consumer (local capture, a peer request and the
+/// peer warning) takes its mode from here. Carry is advisory: an unreadable
+/// setting warns, keeps the warning with the launch and uses the compiled
+/// default (`tracked`) instead of aborting the graph advance. The owner
+/// passes its launch warning collector so the warning stays with this launch.
+pub(super) fn resolve(
+    factory: &Factory,
+    warnings: &mut Vec<Warning>,
     override_mode: Option<CarryMode>,
-) -> (CarryMode, Vec<Warning>) {
-    match mode(owner, override_mode) {
-        Ok(mode) => (mode, Vec::new()),
-        Err(error) => {
-            let code = provenant_records::warning::CARRY_SETTING_UNREADABLE;
-            let warning = Warning::new(
-                code,
-                format!(
-                    "CARRY_SETTING_UNREADABLE: {error}; using lanes.carry_uncommitted=tracked (compiled default)"
-                ),
-                provenant_records::warning::detected_source(code),
-            );
-            warn(warning.clone());
-            (CarryMode::Tracked, vec![warning])
-        }
+) -> CarryMode {
+    if let Some(mode) = override_mode {
+        return mode;
     }
+    configured(factory).unwrap_or_else(|error| {
+        let code = provenant_records::warning::CARRY_SETTING_UNREADABLE;
+        let warning = Warning::new(
+            code,
+            format!(
+                "CARRY_SETTING_UNREADABLE: {error}; using lanes.carry_uncommitted=tracked (compiled default)"
+            ),
+            provenant_records::warning::detected_source(code),
+        );
+        warn(warning.clone());
+        warnings.push(warning);
+        CarryMode::Tracked
+    })
 }
 
-/// Warnings for a peer writer that cannot receive the sender's uncommitted
-/// edits; none when carrying is off.
-pub(super) fn peer_unsupported_warnings(
-    owner: &BoundGraphOwner<'_>,
-    mode: Option<CarryMode>,
-) -> Vec<Warning> {
-    let (mode, mut warnings) = advisory_mode(owner, mode);
-    if mode != CarryMode::Off {
+/// Warn that a peer writer cannot receive the sender's uncommitted edits;
+/// silent when carrying is off.
+pub(super) fn warn_peer_unsupported(
+    factory: &Factory,
+    warnings: &mut Vec<Warning>,
+    override_mode: Option<CarryMode>,
+) {
+    if resolve(factory, warnings, override_mode) != CarryMode::Off {
         let code = provenant_records::warning::CARRY_PEER_UNSUPPORTED;
         let warning = Warning::new(
             code,
@@ -119,7 +119,6 @@ pub(super) fn peer_unsupported_warnings(
         warn(warning.clone());
         warnings.push(warning);
     }
-    warnings
 }
 
 fn with_target<T>(
@@ -200,12 +199,12 @@ pub(super) fn recover(
     })
 }
 
+/// Snapshot the chair's edits under the launch's resolved carry `mode`.
 pub(super) fn capture(
     owner: &BoundGraphOwner<'_>,
-    request: &provenant_fabric_runtime::graph::WriterCarryRequest<'_>,
+    mode: CarryMode,
     base: &str,
 ) -> Result<Option<CarrySnapshot>, FacadeError> {
-    let mode = mode(owner, request.mode)?;
     if mode == CarryMode::Off {
         return Ok(None);
     }

@@ -447,8 +447,7 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
         &mut self,
         mode: Option<provenant_records::lane_contract::CarryMode>,
     ) -> Result<(), Self::Error> {
-        let warnings = super::carry::peer_unsupported_warnings(self, mode);
-        self.launch_warnings.extend(warnings);
+        super::carry::warn_peer_unsupported(self.factory, &mut self.launch_warnings, mode);
         Ok(())
     }
 
@@ -854,7 +853,11 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             None => None,
         };
         let snapshot = match (carry_request, &recovered) {
-            (Some(request), None) => super::carry::capture(self, request, base)?,
+            (Some(request), None) => {
+                let mode =
+                    super::carry::resolve(self.factory, &mut self.launch_warnings, request.mode);
+                super::carry::capture(self, mode, base)?
+            }
             _ => None,
         };
         let carry_examined = recovered.is_some() || snapshot.is_some();
@@ -899,7 +902,11 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
             None => None,
         };
         let snapshot = match (carry_request, &recovered) {
-            (Some(request), None) => super::carry::capture(self, request, source)?,
+            (Some(request), None) => {
+                let mode =
+                    super::carry::resolve(self.factory, &mut self.launch_warnings, request.mode);
+                super::carry::capture(self, mode, source)?
+            }
             _ => None,
         };
         let carry_examined = recovered.is_some() || snapshot.is_some();
