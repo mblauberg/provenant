@@ -1243,11 +1243,11 @@
     "lanes.pr": {
       "type": "enum",
       "values": ["never", "draft", "allowed"],
-      "default": "never",
+      "default": "allowed",
       "status": "wired",
       "reader": "tools/front-door/crates/config/src/pr_policy.rs",
-      "effect": "Pull-request policy enforced by the lane's provider `gh` tool before it forwards a command. never (the default, and the default for leaf implement writer lanes in a graph) refuses `gh pr create|edit|close` and forge API writes; draft permits creation only as a draft (the wrapper adds `--draft`) and still refuses forge API writes; allowed forwards pull-request writes unchanged. A missing or unknown value falls back to never. The effective value and its source appear in the writer preamble, the launch receipt and `run --explain`. Set with `provenant config set lanes.pr draft` or under `[knobs]` in config.toml, or per launch with `--set lanes.pr=allowed`. Host-side publication after settlement is not a lane and is unaffected.",
-      "trade_off": "never keeps PR creation with the chair so a leaf cannot open one against the wrong base; draft lets a lane propose work without publishing it; allowed restores the old behaviour for lanes that must own their pull requests. The wrapper is a tool-policy control, not an authority boundary: a lane that invokes the real gh binary or another API client directly is outside it."
+      "effect": "Pull-request policy enforced by the lane's provider `gh` tool before it forwards a command. never refuses `gh pr create|edit|close` and forge API writes; draft permits creation only as a draft (the wrapper adds `--draft`) and still refuses forge API writes; allowed forwards pull-request writes unchanged. A missing or unknown value falls back to allowed. The effective value and its source appear in the writer preamble, the launch receipt and `run --explain`. Set with `provenant config set lanes.pr draft` or under `[knobs]` in config.toml, or per launch with `--set lanes.pr=allowed`. Host-side publication after settlement is not a lane and is unaffected.",
+      "trade_off": "never keeps PR creation with the chair so a leaf cannot open one against the wrong base; draft lets a lane propose work without publishing it; allowed forwards pull-request writes by default. The wrapper is a tool-policy control, not an authority boundary: a lane that invokes the real gh binary or another API client directly is outside it."
     },
     "lanes.verification": {
       "type": "enum",
@@ -1419,7 +1419,7 @@
       "safe": false,
       "type": "bool", "default": true, "status": "wired",
       "reader": "tools/front-door/crates/cli/src/run/provider/confinement.rs",
-      "effect": "Let every lane with open network, read-only lanes included, use the host's gh login, a git credential helper and gh to push their own branch and read or update issues and pull requests. Pull-request writes are separately governed by lanes.pr; with its default never the gh tool refuses them even when this knob is on.",
+      "effect": "Let every lane with open network, read-only lanes included, use the host's gh login, a git credential helper and gh to push their own branch and read or update issues and pull requests. Pull-request writes are separately governed by lanes.pr; when set to never the gh tool refuses them even when this knob is on.",
       "trade_off": "On (default) gives every networked lane your GitHub credential, so a malicious lane can extract the token and act outside the wrapper. false keeps publishing with the chair through host-side delivery."
     },
     "lanes.sandbox_floor": {

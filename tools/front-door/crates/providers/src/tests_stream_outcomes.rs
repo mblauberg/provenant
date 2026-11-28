@@ -1210,6 +1210,7 @@ pub(super) fn read_only_plan_protecting(
         scope: PathScope::Subtree,
     };
     ConfinedPlan::new(PlanRequest {
+        policy: provenant_records::policy::Policy::default(),
         scope: WorkScope::Project(ProjectId::from_bytes([1; 16])),
         codex: CodexPolicy::Clean,
         extensions: ExtensionPolicy::Deny,
@@ -1255,6 +1256,7 @@ pub(super) fn fixture_access_plan(
         permissions.mode = AccessMode::WorktreeWrite(Box::new(authority));
     }
     ConfinedPlan::new(PlanRequest {
+        policy: provenant_records::policy::Policy::default(),
         scope: reader.scope(),
         permissions,
         codex: CodexPolicy::Clean,
@@ -1276,6 +1278,7 @@ pub(super) fn fixture_network_plan(
     let mut permissions = plan.permissions().clone();
     permissions.network = network;
     ConfinedPlan::new(PlanRequest {
+        policy: provenant_records::policy::Policy::default(),
         scope: plan.scope(),
         permissions,
         codex: CodexPolicy::Clean,

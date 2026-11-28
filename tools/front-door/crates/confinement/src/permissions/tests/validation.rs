@@ -100,13 +100,13 @@ fn git_control_link_refusal_names_the_file_and_the_recovery() {
 fn only_git_control_files_are_checked_for_other_names() -> Result<(), Box<dyn std::error::Error>> {
     let fixture = crate::test_support::Fixture::new()?;
     let git_dir = fixture.repo.common_git_dir().to_owned();
-    verify_git_control_links(&fixture.repo)?;
+    verify_git_control_links(&fixture.repo, &provenant_records::policy::Policy::default())?;
     // Build output and dependency trees hold hard links and are not walked.
     let tree = fixture.root.join("target/debug");
     std::fs::create_dir_all(&tree)?;
     std::fs::write(tree.join("object"), b"o")?;
     std::fs::hard_link(tree.join("object"), tree.join("alias"))?;
-    verify_git_control_links(&fixture.repo)?;
+    verify_git_control_links(&fixture.repo, &provenant_records::policy::Policy::default())?;
     std::fs::create_dir_all(git_dir.join("hooks"))?;
     std::fs::create_dir_all(git_dir.join("info"))?;
     std::fs::write(git_dir.join("hooks/pre-commit"), b"#!/bin/sh\n")?;
@@ -116,8 +116,9 @@ fn only_git_control_files_are_checked_for_other_names() -> Result<(), Box<dyn st
         std::fs::hard_link(git_dir.join(control), &alias)?;
         // Settlement moves hard-linked handoffs aside, so a second name is
         // advisory: the check warns through its `none/warn` rule and proceeds.
-        let (result, warnings) =
-            provenant_records::warning::capture(|| verify_git_control_links(&fixture.repo));
+        let (result, warnings) = provenant_records::warning::capture(|| {
+            verify_git_control_links(&fixture.repo, &provenant_records::policy::Policy::default())
+        });
         result?;
         assert!(
             warnings.iter().any(|warning| {
@@ -145,8 +146,20 @@ fn only_git_control_files_are_checked_for_other_names() -> Result<(), Box<dyn st
             ),
             provenant_records::policy::Effect::Warn(_)
         ));
+        let mut strict = provenant_records::policy::Policy::default();
+        strict.overlay(
+            &std::collections::BTreeMap::from([(
+                "default".into(),
+                provenant_records::policy::Strength::Refuse,
+            )]),
+            provenant_records::Layer::Launch,
+        );
+        assert!(matches!(
+            verify_git_control_links(&fixture.repo, &strict),
+            Err(PermissionError::GitControlHardLinked(_))
+        ));
         std::fs::remove_file(alias)?;
-        verify_git_control_links(&fixture.repo)?;
+        verify_git_control_links(&fixture.repo, &provenant_records::policy::Policy::default())?;
     }
     Ok(())
 }
@@ -181,6 +194,7 @@ fn a_hard_linked_exact_grant_names_its_path() -> Result<(), Box<dyn std::error::
         anchors.verify_single_link_grant_advisory(
             &grant("linked"),
             "VALIDATION_VERIFY_WORKTREE_AUTHORITY_GIT_ISOLATION",
+            &provenant_records::policy::Policy::default(),
         )
     });
     result?;
@@ -194,11 +208,13 @@ fn a_hard_linked_exact_grant_names_its_path() -> Result<(), Box<dyn std::error::
     anchors.verify_single_link_grant_advisory(
         &grant("linked"),
         "VALIDATION_VERIFY_WORKTREE_AUTHORITY_GIT_ISOLATION",
+        &provenant_records::policy::Policy::default(),
     )?;
     anchors.verify_single_link_grant(&grant("absent"))?;
     anchors.verify_single_link_grant_advisory(
         &grant("absent"),
         "VALIDATION_VERIFY_WORKTREE_AUTHORITY_GIT_ISOLATION",
+        &provenant_records::policy::Policy::default(),
     )?;
     Ok(())
 }

@@ -930,6 +930,7 @@ fn staged_skills_native_probes() -> Result<(), Box<dyn std::error::Error>> {
                 ),
             );
             let mut plan = ConfinedPlan::new(PlanRequest {
+                policy: provenant_records::policy::Policy::default(),
                 scope: base.scope(),
                 permissions,
                 codex: CodexPolicy::Clean,
@@ -1090,6 +1091,7 @@ fn adapters_use_scratch_when_private_state_is_absent() -> Result<(), ProviderErr
             let mut permissions = original.permissions().clone();
             permissions.private_state = None;
             let plan = ConfinedPlan::new(PlanRequest {
+                policy: provenant_records::policy::Policy::default(),
                 scope: original.scope(),
                 permissions,
                 codex: CodexPolicy::Clean,

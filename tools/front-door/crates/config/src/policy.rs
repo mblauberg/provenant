@@ -61,7 +61,7 @@ impl Settings {
         if let Some(project) = self.projects.get(project) {
             policy.overlay(&project.rules, Layer::Project);
         }
-        policy.overlay(dispatch, Layer::Route);
+        policy.overlay(dispatch, Layer::Launch);
         policy
     }
     pub fn resolve(&self, project: &str, dispatch: &BTreeMap<String, Strength>) -> Policy {
@@ -69,10 +69,91 @@ impl Settings {
         if let Some(project) = self.projects.get(project) {
             policy.overlay(&project.rules, Layer::Project);
         }
-        policy.overlay(dispatch, Layer::Route);
+        policy.overlay(dispatch, Layer::Launch);
         policy
     }
 }
+/// A single configured policy candidate, shared by enforcement and explanation.
+pub(crate) struct Source {
+    pub key: String,
+    pub strength: Strength,
+    pub layer: Layer,
+    pub origin: String,
+}
+
+pub(crate) fn sources(state: &Path, project: &str, checkout: Option<&Path>) -> Vec<Source> {
+    let mut result = Vec::new();
+    let mut add = |values: Vec<(String, serde_json::Value)>, layer, origin: &str| {
+        for (key, value) in values {
+            if let Ok(strength) = serde_json::from_value(value) {
+                result.push(Source {
+                    origin: format!("{origin}.{key}"),
+                    key,
+                    strength,
+                    layer,
+                });
+            }
+        }
+    };
+    let host = crate::loader::open_at_state(state)
+        .ok()
+        .flatten()
+        .and_then(|file| crate::loader::bounded_text(file, &state.join("config.toml")).ok())
+        .filter(|text| {
+            text.parse::<toml_edit::DocumentMut>().ok().and_then(|doc| {
+                doc.get("schema_version")
+                    .and_then(toml_edit::Item::as_integer)
+            }) == Some(crate::CONFIG_SCHEMA_VERSION as i64)
+        });
+    if let Some(text) = host {
+        add(
+            crate::inspection::section_values(&text, "knobs")
+                .into_iter()
+                .filter_map(|(key, value)| Some((key.strip_prefix("policy.")?.to_owned(), value)))
+                .collect(),
+            Layer::Host,
+            "config.toml#knobs.policy",
+        );
+        add(
+            crate::inspection::section_values(&text, "policy"),
+            Layer::Host,
+            "config.toml#policy",
+        );
+    }
+    if let Ok(settings) = crate::read_domain::<Settings>(state, "policy")
+        && let Some(project) = settings.projects.get(project)
+    {
+        add(
+            project
+                .rules
+                .iter()
+                .map(|(key, value)| (key.clone(), serde_json::json!(value)))
+                .collect(),
+            Layer::Project,
+            "domains.policy#projects.rules",
+        );
+    }
+    if let Some(text) = crate::inspection::project_text(checkout, "policy.toml") {
+        add(
+            crate::inspection::section_values(&text, "policy"),
+            Layer::Project,
+            ".provenant/policy.toml#policy",
+        );
+    }
+    result
+}
+
+pub(crate) fn project_checkout(state: &Path, project: &str) -> Option<std::path::PathBuf> {
+    let id = project.parse::<provenant_core::ProjectId>().ok()?;
+    let binding = crate::project_binding::lookup_project_by_id(state, id)
+        .ok()
+        .flatten()?;
+    let root = binding.primary_checkout_hint()?;
+    let marker = provenant_os::git::repository_marker(root)?;
+    let common = std::fs::canonicalize(marker.common_dir?).ok()?;
+    (common == binding.common_dir()).then(|| root.to_path_buf())
+}
+
 /// Resolve current host and project policy overlaid with the request's sealed
 /// dispatch overrides. Invalid optional policy settings warn and retain compiled
 /// defaults, without changing the boundaries or operation errors.
@@ -99,28 +180,19 @@ pub fn read_reporting(
     dispatch: &BTreeMap<String, Strength>,
     report: impl FnOnce(&dyn std::fmt::Display),
 ) -> Policy {
-    let settings = crate::read_domain::<Settings>(state, "policy").unwrap_or_else(|error| {
+    let _ = crate::read_domain::<Settings>(state, "policy").unwrap_or_else(|error| {
         report(&error);
         Settings::default()
     });
+    let checkout = project_checkout(state, project);
     let mut policy = Policy::default();
-    if let Ok(knobs) =
-        crate::loader::read_boundary_settings::<BTreeMap<String, serde_json::Value>>(state, "knobs")
-    {
-        let mut values = BTreeMap::new();
-        for (name, value) in knobs {
-            if let Some(code) = name.strip_prefix("policy.")
-                && let Ok(strength) = serde_json::from_value(value)
-            {
-                values.insert(code.to_owned(), strength);
-            }
-        }
-        policy.overlay(&values, Layer::Host);
+    for source in sources(state, project, checkout.as_deref()) {
+        policy.overlay(
+            &BTreeMap::from([(source.key, source.strength)]),
+            source.layer,
+        );
     }
-    if let Some(project) = settings.projects.get(project) {
-        policy.overlay(&project.rules, Layer::Project);
-    }
-    policy.overlay(dispatch, Layer::Route);
+    policy.overlay(dispatch, Layer::Launch);
     policy
 }
 /// Dispatch overrides are already parsed and sealed by `dispatch_profile`.

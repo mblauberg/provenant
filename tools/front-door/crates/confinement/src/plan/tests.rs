@@ -17,6 +17,7 @@ fn request(root: &Path) -> PlanRequest {
         scope: PathScope::Subtree,
     };
     PlanRequest {
+        policy: provenant_records::policy::Policy::default(),
         scope: WorkScope::Project(ProjectId::from_bytes([1; 16])),
         permissions: PlanPermissions {
             credential_roots: provenant_core::CredentialRoots::for_home(std::path::Path::new(
@@ -329,6 +330,17 @@ fn read_only_plans_warn_and_proceed_on_extensions_and_inherited_codex_config() {
     assert!(plan.is_ok(), "{:?}", plan.as_ref().err());
     assert_eq!(warnings.len(), 1);
     assert_eq!(warnings[0].code.as_ref(), "PLAN_CONFINEDPLAN_NEW_AUTHORITY");
+
+    let mut input = request(temp.path());
+    input.codex = CodexPolicy::Inherited;
+    input.policy.overlay(
+        &std::collections::BTreeMap::from([("default".into(), Strength::Refuse)]),
+        provenant_records::Layer::Launch,
+    );
+    assert!(matches!(
+        ConfinedPlan::new(input),
+        Err(PlanError::UnconfinedExtensions)
+    ));
 }
 
 #[test]

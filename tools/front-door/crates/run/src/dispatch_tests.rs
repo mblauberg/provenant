@@ -137,6 +137,7 @@ impl Providers for Confined {
             AccessMode::ReadOnly
         };
         let plan = ConfinedPlan::new(PlanRequest {
+            policy: provenant_records::policy::Policy::default(),
             scope: provenant_core::WorkScope::Project(provenant_core::ProjectId::from_bytes(
                 [1; 16],
             )),

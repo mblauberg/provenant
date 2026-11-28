@@ -459,7 +459,9 @@ pub fn inspect_config<T: DeserializeOwned + Serialize>(
 pub(crate) fn open(roots: &Roots) -> Result<Option<provenant_os::fs::FileHandle>, ConfigError> {
     open_at_state(roots.state.as_path())
 }
-fn open_at_state(state: &Path) -> Result<Option<provenant_os::fs::FileHandle>, ConfigError> {
+pub(crate) fn open_at_state(
+    state: &Path,
+) -> Result<Option<provenant_os::fs::FileHandle>, ConfigError> {
     let path = state.join("config.toml");
     let dir = match provenant_os::fs::Directory::open_anchor(state) {
         Ok(dir) => dir,

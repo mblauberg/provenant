@@ -3943,8 +3943,10 @@ pub(super) fn prepare_candidates_inner(
             InventoryContext::Preflight,
         )
         .map_err(PlanCheckError::from)
-        .and_then(|request| ConfinedPlan::new(request).map_err(PlanCheckError::from))
-        {
+        .and_then(|mut request| {
+            request.policy = launch_policy.clone();
+            ConfinedPlan::new(request).map_err(PlanCheckError::from)
+        }) {
             Ok(_) => access.push(provenant_routing::AccessContext {
                 adapter,
                 disclosure_ref: &digest,
@@ -5003,6 +5005,7 @@ pub(super) fn prepare_candidates_inner(
                 continue;
             }
         };
+        request.policy = launch_policy.clone();
         if adapter_spec.is_some_and(|spec| spec.launch.codex_policy) {
             request.codex = if writer.is_none()
                 || config
@@ -6965,6 +6968,7 @@ mod user_skills_tests {
                 _ => None,
             };
             let plan = ConfinedPlan::new(PlanRequest {
+                policy: provenant_records::policy::Policy::default(),
                 scope: WorkScope::Project(ProjectId::from_bytes([1; 16])),
                 codex: CodexPolicy::Clean,
                 extensions: ExtensionPolicy::Deny,
@@ -7030,6 +7034,7 @@ mod user_skills_tests {
                     )?));
                 }
                 let plan = ConfinedPlan::new(PlanRequest {
+                    policy: provenant_records::policy::Policy::default(),
                     scope: plan.scope(),
                     codex: CodexPolicy::Clean,
                     extensions: ExtensionPolicy::Deny,

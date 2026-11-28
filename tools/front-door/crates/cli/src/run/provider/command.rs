@@ -215,7 +215,7 @@ pub(super) fn prepare_command(
             .launch
             .default_network,
     );
-    let request = confinement_request(
+    let mut request = confinement_request(
         project,
         ConfinementRoots {
             host_roots: Some(roots),
@@ -237,6 +237,7 @@ pub(super) fn prepare_command(
         false,
         InventoryContext::Launch(task, &format!("{provider}/{name}"), &lane_access),
     )?;
+    request.policy = launch_policy.clone();
     let (mut plan, mut observed_head, repository, mut worktree_gitdir) = read_only_plan(
         roots,
         project,

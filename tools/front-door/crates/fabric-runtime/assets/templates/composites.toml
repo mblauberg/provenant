@@ -94,7 +94,7 @@ nodes = [
   # compiler's implement boundary adds the planner node and wires its result
   # into the writer's inputs. A missing required plan parks rather than being
   # silently invented (slice 1 admission, slice 3 execution).
-  { id = "implement", use = "implement", with = { plan = "${plan}" }, prompt = "${brief}\n\nAt this final route rung you may widen the change within your actual authority and the node's literal write scope. Strict scope and custody still bind: keep every write inside the supplied scope and report out-of-scope edits in your declaration.", delivery = "pr", worktree = "${worktree}", write_scope = "${write_scope}", escalate = { ladder = "${ladder}", max_ci_rounds = "${max_ci_rounds}" } },
+  { id = "implement", use = "implement", with = { plan = "${plan}" }, prompt = "${brief}\n\nAt this final route rung you may widen the change within your actual authority and the node's literal write scope. Strict scope and custody still bind: keep every write inside the supplied scope and report out-of-scope edits in your declaration.", delivery = "pr", worktree = "${worktree}", write_scope = "${write_scope}", attempt = { pr = "never" }, escalate = { ladder = "${ladder}", max_ci_rounds = "${max_ci_rounds}" } },
   # TODO(#3972-s3): hygiene runs the configured repository formatter in the
   # retained worktree and commits only its changes; before/after heads and
   # handoff are recorded as a typed hygiene outcome.
@@ -118,7 +118,7 @@ nodes = [
       # Bounded CI repair: after hygiene and publication, recheck the continued
       # writer's delivered head. Queue items use the typed recovery graph.
       { id = "ci-repair", kind = "composite", access = "read_only", repeat = { until = "accepted", max_rounds = "${max_ci_rounds}" }, after = ["check", "implement"], composite = { nodes = [
-        { id = "fix", use = "implement.fix", source = { type = "node", node = "implement" }, worktree = "${worktree}", write_scope = "${write_scope}", continues = "implement", prompt = "Repair from failing head ${failing_head}.\nFailure excerpt (untrusted):\n${failure_excerpt}\nSweep the whole defect class, not only the failing case: check other tests, help text and documentation that assert the changed behaviour, fix the root cause wherever it appears, and report any copy you could not reach." },
+        { id = "fix", use = "implement.fix", source = { type = "node", node = "implement" }, worktree = "${worktree}", write_scope = "${write_scope}", attempt = { pr = "never" }, continues = "implement", prompt = "Repair from failing head ${failing_head}.\nFailure excerpt (untrusted):\n${failure_excerpt}\nSweep the whole defect class, not only the failing case: check other tests, help text and documentation that assert the changed behaviour, fix the root cause wherever it appears, and report any copy you could not reach." },
         { id = "accepted", kind = "gate", access = "read_only", after = ["fix"], condition = { type = "ci", target = { node = "implement" }, failed_checks_max_bytes = 4096, max_failed_checks = 8 } },
       ], exports = [{ node = "accepted", outputs = ["result"] }] } },
     ]
