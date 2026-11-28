@@ -1394,7 +1394,7 @@ pub fn launch(
         // No guardian is contacted: the failure carries its own cause and the
         // never-spawned exit, so the caller withdraws instead of fencing.
         let error = invalid_capture.unwrap_or(CustodyError::InvalidRecord);
-        return Err(refuse_never_spawned(
+        return Err(launch_failure::refuse_never_spawned(
             owned.lease,
             owned.cancel,
             publication,
@@ -1425,16 +1425,29 @@ pub fn launch(
     if let Err(error) = prepared {
         return Err(failure(error, publication));
     }
-    owned.lease.phase = LaunchPhase::HandedOff;
+    // The reservation records the handoff before any guardian may hold the
+    // message. Until it is durable no guardian was contacted: a failed write
+    // leaves the lease unlaunched in its prior state, so the caller withdraws
+    // it locally.
+    let prior = owned.lease.reservation.launch_state;
     owned.lease.reservation.launch_state = LaunchState::HandingOff;
-    if let Err(error) = write_record(
+    let recorded = write_record(
         &owned.lease.directory,
         "reservation.json",
         &owned.lease.reservation,
         PublishMode::Replace,
     )
-    .and_then(|publication| publication.require_durable().map_err(Into::into))
-    {
+    .and_then(|publication| publication.require_durable().map_err(Into::into));
+    #[cfg(test)]
+    let recorded = recorded.and_then(|()| {
+        if TEST_FAIL_HANDOFF_RESERVATION.with(|fault| fault.replace(false)) {
+            Err(CustodyError::InvalidRecord)
+        } else {
+            Ok(())
+        }
+    });
+    if let Err(error) = recorded {
+        owned.lease.reservation.launch_state = prior;
         return Err(failure(error, publication));
     }
     let OwnedLaunch {
@@ -1444,6 +1457,9 @@ pub fn launch(
         cancel,
         clock,
     } = owned;
+    // From here a guardian may receive the whole message: a failure the
+    // guardian handoff cannot classify as undelivered stays uncertain.
+    lease.phase = LaunchPhase::HandedOff;
     let handed = crate::guardian::handoff(
         OwnedLaunch {
             command,
@@ -1464,50 +1480,21 @@ pub fn launch(
         }),
         // Only a guardian holding the whole message may have launched.
         Err(HandoffFailure::Unconfirmed(error)) => Err(failure(error, publication)),
-        Err(HandoffFailure::Undelivered(error)) => {
-            Err(refuse_never_spawned(lease, cancel, publication, error))
-        }
+        Err(HandoffFailure::Undelivered(error)) => Err(launch_failure::refuse_never_spawned(
+            lease,
+            cancel,
+            publication,
+            error,
+        )),
     }
 }
 
-/// Settle a launch no guardian accepted. The reservation records
-/// `NeverSpawned` and the failure carries the never-spawned exit, so the
-/// caller withdraws instead of fencing. A cancel request names the stop.
-fn refuse_never_spawned(
-    lease: &mut CustodyLease,
-    cancel: &CancelToken,
-    publication: PublicationReservation,
-    error: CustodyError,
-) -> LaunchFailure {
-    let scope = lease.scope();
-    lease.reservation.launch_state = LaunchState::NeverSpawned;
-    lease.reservation.unresolved_cleanup = false;
-    lease.reservation.census_incomplete = false;
-    lease.phase = LaunchPhase::NeverSpawned;
-    let (reason, error) = if cancel.is_cancelled() {
-        (
-            Some(StopReason::ExplicitCancellation),
-            CustodyError::Cancelled,
-        )
-    } else {
-        (None, error)
-    };
-    let failure = LaunchFailure {
-        error: Box::new(error),
-        custody: publication,
-        pending_exit: Some(Box::new(ProcessExit::never_spawned(scope, reason, vec![]))),
-    };
-    // A failed record leaves the exit pending for the caller's retry.
-    let _ = write_record(
-        &lease.directory,
-        "reservation.json",
-        &lease.reservation,
-        PublishMode::Replace,
-    )
-    .and_then(|publication| publication.require_durable().map_err(Into::into))
-    .and_then(|()| failure.retry_exit_publication())
-    .and_then(|publication| publication.require_durable().map_err(Into::into));
-    failure
+#[cfg(test)]
+thread_local! {
+    /// Fail the durable reservation write that records a handoff, after the
+    /// guardian lifetime is prepared and before any guardian is contacted.
+    pub(crate) static TEST_FAIL_HANDOFF_RESERVATION: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

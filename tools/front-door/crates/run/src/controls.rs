@@ -4764,7 +4764,21 @@ impl RunStore {
                         UncertainReason::CustodyNotProvablyAbsent,
                     ));
                 }
-                if read_sealed(&attempt, "process-exit.json", RECORD_LIMIT)?.is_some() {
+                // A refused launch whose exit could not be recorded kept its
+                // custody for this: record the never-spawned exit before the
+                // withdrawal, or keep custody until it can be recorded.
+                if recovery
+                    .never_spawned(&attempt)
+                    .map_err(|error| RunError::Io(std::io::Error::other(error)))?
+                {
+                    let reason = cancelled.then_some(StopReason::ExplicitCancellation);
+                    if let Err(error) = recovery
+                        .record_never_spawned_exit(&attempt, reason)
+                        .and_then(|publication| publication.require_durable().map_err(Into::into))
+                    {
+                        return Ok(Reconciled::custody_unavailable(&error));
+                    }
+                } else if read_sealed(&attempt, "process-exit.json", RECORD_LIMIT)?.is_some() {
                     return Ok(Reconciled::uncertain(
                         UncertainReason::ExitWithoutLaunchSummary,
                     ));

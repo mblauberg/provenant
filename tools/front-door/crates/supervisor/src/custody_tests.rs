@@ -1409,6 +1409,55 @@ fn unsupported_host_refuses_a_launch_before_the_reservation_records_a_handoff() 
     Ok(())
 }
 
+// Spec: docs/specs/run-launch.md#admission-and-custody
+// A launch is uncertain only once a guardian may hold its message. A failed
+// reservation write before the handoff contacts no guardian, so the lease
+// stays unlaunched and withdraws locally instead of fencing the attempt.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_failed_handoff_reservation_write_leaves_the_lease_unlaunched() -> TestResult {
+    let root = tempfile::tempdir()?;
+    let attempt = tempfile::tempdir()?;
+    let mut writer = acquire(root.path())?;
+    let clock = SystemClock::new();
+    let token = CancelToken::new();
+    let publication = PublicationReservation::prepare(
+        Directory::open_anchor(attempt.path())?,
+        WaitBudget::cli(clock.mono_now(), 1)?,
+        &token,
+        &clock,
+    )?;
+    TEST_FAIL_HANDOFF_RESERVATION.with(|fault| fault.set(true));
+    let failure = launch(
+        OwnedLaunch {
+            command: never_executed_command(root.path()),
+            lease: &mut writer,
+            handshake: WaitBudget::cli(clock.mono_now(), 1)?,
+            cancel: &token,
+            clock: &clock,
+        },
+        CapturePlan::default(),
+        publication,
+    )
+    .err()
+    .ok_or("a launch with a failed reservation write succeeded")?;
+    assert!(
+        !TEST_FAIL_HANDOFF_RESERVATION.with(std::cell::Cell::get),
+        "the launch never reached the handoff reservation write"
+    );
+    assert!(matches!(*failure.error, CustodyError::InvalidRecord));
+    assert_eq!(writer.phase(), LaunchPhase::Unlaunched);
+    assert!(failure.retry_exit_publication().is_err(), "no exit is owed");
+    let reservation = root
+        .path()
+        .join(scope().attempt.to_string())
+        .join("reservation.json");
+    writer.withdraw_unlaunched()?;
+    assert!(!reservation.exists());
+    assert!(!attempt.path().join("process-exit.json").exists());
+    Ok(())
+}
+
 #[test]
 fn contradictory_never_spawned_records_never_prove_absence() -> TestResult {
     let root = tempfile::tempdir()?;

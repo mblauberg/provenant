@@ -97,7 +97,9 @@ its custody is withdrawn. A launch cancelled or refused before it spawns records
 on every host: so does one whose guardian failed to spawn, closed the channel before the message
 was delivered or refused it before accepting custody. Each ends as a local refusal under its own
 cause: its reservation is withdrawn, the
-exit is kept as evidence and the attempt is never `LAUNCH_UNKNOWN`. Admission and provisioning precede that boundary, so a graph may be admitted and
+exit is kept as evidence and the attempt is never `LAUNCH_UNKNOWN`. The exit is recorded before
+the withdrawal: while it cannot be written the attempt keeps protected custody. Reconcile then records the exit
+and withdraws a read-only attempt; a writer settles lost with its private evidence retained. Admission and provisioning precede that boundary, so a graph may be admitted and
 its planned worktrees created on such a host; the platform refusal is neither an admission nor a
 route refusal.
 - Why: a launch that cannot start must not look like a lost lane, and a missing custody backend
