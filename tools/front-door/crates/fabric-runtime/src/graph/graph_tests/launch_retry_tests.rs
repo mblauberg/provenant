@@ -1000,3 +1000,101 @@ fn concurrent_launch_waits_the_full_provisioning_allowance_for_a_held_writer_loc
         "settled contention must offer retry: {reason}"
     );
 }
+
+// A deferred launch keeps the warnings its own provisioning raised; the next
+// node launched in the same advance never inherits them.
+#[test]
+fn a_contention_deferred_launch_keeps_its_own_warnings() {
+    use crate::coordination::facade::FacadeError;
+    struct DeferringOwner {
+        now: provenant_core::WallTime,
+        warnings: Vec<provenant_records::Warning>,
+        launched: Vec<String>,
+    }
+    impl AttemptOwner for DeferringOwner {
+        type Error = FacadeError;
+        fn take_launch_warnings(&mut self) -> Vec<provenant_records::Warning> {
+            std::mem::take(&mut self.warnings)
+        }
+        fn worktree_layout(&self) -> provenant_config::WorktreeLayoutPort {
+            provenant_config::PortTable::builtin().worktree_layout
+        }
+        fn actor(&self) -> String {
+            "fixture".into()
+        }
+        fn wall_now(&self) -> Option<provenant_core::WallTime> {
+            Some(self.now)
+        }
+        fn provision_child_worktree(
+            &mut self,
+            _: &str,
+            _: &str,
+            _owner: Option<provenant_core::Digest>,
+            _: Option<&WriterCarryRequest<'_>>,
+        ) -> Result<Option<ChildWorktreeProvision>, Self::Error> {
+            let code = provenant_records::warning::CARRY_SETTING_UNREADABLE;
+            self.warnings.push(provenant_records::Warning::new(
+                code,
+                "fixture carry setting is unreadable",
+                provenant_records::warning::detected_source(code),
+            ));
+            Err(FacadeError::WriterLockBusy { holder: None })
+        }
+        fn observe_or_start(
+            &mut self,
+            key: &AttemptKey,
+            _: NodeInput<'_>,
+            _: &GraphRoute,
+            _: AccessMode,
+            _: Option<&str>,
+            _: Replay<'_>,
+        ) -> Result<AttemptObservation, Self::Error> {
+            self.launched.push(key.node_id.clone());
+            Ok(terminal(GraphAttemptOutcome::Succeeded))
+        }
+    }
+    let mut writer = node("writer", route("first"));
+    writer.access = AccessMode::WorktreeWrite;
+    writer.worktree = Some(".worktrees/topic-fix".into());
+    writer.provision_worktree = true;
+    writer.source = Some(SourceBinding::Commit {
+        commit: "a".repeat(40),
+    });
+    let mut document = graph(vec![writer, node("reader", route("first"))]);
+    document.schema_version = 2;
+    let (plan, _) = validate_plan(&document).unwrap();
+    let digest = plan_digest(&plan).unwrap().to_string();
+    let mut checkpoint =
+        transitions::initial_checkpoint(&document, &plan, digest, None, None, None);
+    transitions::record_provisioning(
+        &plan.nodes[0],
+        &mut checkpoint,
+        0,
+        ".worktrees/topic-fix",
+        &"a".repeat(40),
+    );
+    let mut journal = MemoryJournal(Some(checkpoint));
+    let mut owner = DeferringOwner {
+        now: at(0),
+        warnings: Vec::new(),
+        launched: Vec::new(),
+    };
+    let advanced = advance(&document, &mut owner, &mut journal).unwrap();
+    let nodes = &advanced.checkpoint.nodes;
+    assert_eq!(nodes[0].state, NodeState::Running, "the writer is deferred");
+    assert!(nodes[0].attempts.is_empty());
+    assert_eq!(owner.launched, ["reader"], "the reader launches meanwhile");
+    let codes = |index: usize| -> Vec<String> {
+        nodes[index]
+            .warnings
+            .iter()
+            .map(|warning| warning.code.as_ref().to_owned())
+            .collect()
+    };
+    assert_eq!(codes(0), ["CARRY_SETTING_UNREADABLE"]);
+    assert!(codes(1).is_empty(), "{:?}", codes(1));
+    assert_eq!(
+        journal.0.as_ref().unwrap().nodes[0].warnings,
+        nodes[0].warnings
+    );
+}

@@ -165,6 +165,24 @@ use transitions::{apply_pending_observation, apply_unknown_observation};
 pub(crate) use validation::*;
 pub use wait_view::{GraphNodeWait, graph_waits};
 
+/// Drain the owner's launch warnings into the node whose launch step raised
+/// them. This is the one owner boundary for launch warnings: every exit from
+/// a node's step (observed, deferred, refused or waiting) passes through it,
+/// so a warning never attaches to the next node. Returns whether the node
+/// changed and needs saving.
+fn retain_launch_warnings<R: AttemptOwner>(
+    owner: &mut R,
+    checkpoint: &mut GraphCheckpoint,
+    node_index: usize,
+) -> bool {
+    let warnings = owner.take_launch_warnings();
+    if warnings.is_empty() {
+        return false;
+    }
+    checkpoint.nodes[node_index].warnings = warnings;
+    true
+}
+
 /// Persist a writer's contention wait independently of the transport retry
 /// limit. Provisioning callers retain their own effect fence until resolution.
 /// Returns false for a settled or cancelled node, or a non-contention error.
@@ -2884,8 +2902,7 @@ fn record_observed_attempt<R: AttemptOwner, J: GraphJournal>(
         last.attempt_ref = Some(reference);
         journal.save(&*checkpoint).map_err(GraphError::Journal)?;
     }
-    let warnings = owner.take_launch_warnings();
-    transitions::apply_launch_metadata(&mut *checkpoint, node_index, warnings);
+    retain_launch_warnings(owner, &mut *checkpoint, node_index);
     let applied_route = match &observation {
         AttemptObservation::Pending { attempt_ref }
         | AttemptObservation::Unknown { attempt_ref }

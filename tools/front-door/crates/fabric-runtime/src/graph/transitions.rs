@@ -128,16 +128,6 @@ pub(super) fn apply_gate_result(
 }
 
 /// Retain launch warnings supplied by the owner.
-pub(super) fn apply_launch_metadata(
-    checkpoint: &mut GraphCheckpoint,
-    node_index: usize,
-    warnings: Vec<provenant_records::Warning>,
-) {
-    if !warnings.is_empty() {
-        checkpoint.nodes[node_index].warnings = warnings;
-    }
-}
-
 pub(super) fn apply_route(progress: &mut NodeProgress, applied_route: Option<GraphRoute>) {
     if let Some(route) = applied_route {
         // Only host identifiers are bounded by HOST_ID_BYTES. A pool-selection

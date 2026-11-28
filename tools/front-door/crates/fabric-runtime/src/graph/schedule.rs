@@ -2179,7 +2179,12 @@ pub(super) fn advance_schedule<R: AttemptOwner, J: GraphJournal>(
                 )? {
                     LoopStep::Proceed => {}
                     LoopStep::Break => break,
-                    LoopStep::Reschedule => continue 'schedule,
+                    LoopStep::Reschedule => {
+                        if retain_launch_warnings(owner, &mut checkpoint, node_index) {
+                            journal.save(&checkpoint).map_err(GraphError::Journal)?;
+                        }
+                        continue 'schedule;
+                    }
                 }
                 let needs_record = checkpoint.nodes[node_index]
                     .attempts
@@ -2420,6 +2425,11 @@ pub(super) fn advance_schedule<R: AttemptOwner, J: GraphJournal>(
                 if !should_continue {
                     break;
                 }
+            }
+            // Every break from this node's launch loop lands here, so warnings
+            // its step raised (a deferred or waiting launch included) stay on it.
+            if retain_launch_warnings(owner, &mut checkpoint, node_index) {
+                journal.save(&checkpoint).map_err(GraphError::Journal)?;
             }
             if (!checkpoint.cancelled
                 || resume
