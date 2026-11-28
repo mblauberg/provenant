@@ -494,7 +494,6 @@ dependencies = [
  "provenant-redact",
  "provenant-routing",
  "provenant-run",
- "provenant-sqlite",
  "provenant-supervisor",
  "provenant-telemetry",
  "provenant-test-support",

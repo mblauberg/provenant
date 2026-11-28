@@ -723,8 +723,7 @@ fn session_inventory_page(
     let open_budget = status_stream_budget(deadline, clock.mono_now())?;
     let cancel = CancelToken::new();
     let call = request(&clock, &cancel)?;
-    let (context, store) =
-        provenant_sqlite::with_busy_timeout(open_budget, || open_read_only(edge, &call))?;
+    let (context, store) = open_read_only_within(edge, &call, open_budget)?;
     status_stream_budget(deadline, clock.mono_now())?;
     let Some(store) = store else {
         status_stream_budget(deadline, clock.mono_now())?;

@@ -1826,6 +1826,18 @@ fn open_read_only(
     let store = read_only_store(&context, edge.roots.state.as_path(), call)?;
     Ok((context, store))
 }
+/// [`open_read_only`] whose store open waits on a contended store for at most
+/// `busy`.
+fn open_read_only_within(
+    edge: &Edge<'_>,
+    call: &run::Request<'_>,
+    busy: std::time::Duration,
+) -> Result<(run::ExecutionContext, Option<run::RunStore>), Fail> {
+    let context = execution_context(edge)?;
+    let store = run::RunStore::open_read_only_within(&context, call, busy)?
+        .map(|store| store.with_writer_registry(edge.roots.state.as_path()));
+    Ok((context, store))
+}
 /// The read-only open of `context`'s store. Like the writable open, it reads
 /// the host admission ledger from the host state root: in a nested lane
 /// the store is a child directory with no ledger of its own, and without the

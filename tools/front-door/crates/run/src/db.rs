@@ -149,6 +149,18 @@ impl RunStore {
         Self::open_read_only_mode(context, request, false)
     }
 
+    /// [`Self::open_read_only`] with SQLite's busy wait bounded by `busy`, so a
+    /// caller with its own deadline never waits past it on a contended store.
+    pub fn open_read_only_within(
+        context: &ExecutionContext,
+        request: &Request<'_>,
+        busy: std::time::Duration,
+    ) -> Result<Option<Self>> {
+        provenant_sqlite::with_busy_timeout(busy, || {
+            Self::open_read_only_mode(context, request, false)
+        })
+    }
+
     /// Inspect an existing store, including committed WAL frames. SQLite may
     /// update read marks or create WAL/shared-memory companions of that store.
     /// Never create a database, initialise a schema or recover a journal.
