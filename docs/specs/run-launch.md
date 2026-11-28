@@ -90,10 +90,13 @@ observation cannot substitute for the original free locks or positive non-occupa
 - Why: a stale process checkpoint cannot prove same-boot guardian death; the original kernel lock
   supplies that evidence without PID-reuse heuristics.
 
-A launch is uncertain only once its reservation may record a handoff. A host that cannot hold
+A launch is uncertain only once a guardian may hold its whole launch message; the outcome follows
+what the guardian acknowledged, not whether a write started. A host that cannot hold
 provider custody refuses before that point: the attempt ends with `unsupported_platform` and
 its custody is withdrawn. A launch cancelled or refused before it spawns records `never_spawned`
-on every host and ends as a local refusal under its own cause: its reservation is withdrawn, the
+on every host: so does one whose guardian failed to spawn, closed the channel before the message
+was delivered or refused it before accepting custody. Each ends as a local refusal under its own
+cause: its reservation is withdrawn, the
 exit is kept as evidence and the attempt is never `LAUNCH_UNKNOWN`. Admission and provisioning precede that boundary, so a graph may be admitted and
 its planned worktrees created on such a host; the platform refusal is neither an admission nor a
 route refusal.

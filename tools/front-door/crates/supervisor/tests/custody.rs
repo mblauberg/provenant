@@ -3297,6 +3297,13 @@ fn profile_transport_pass_failure_never_launches_provider(root: &Path) -> Result
                 "{error}"
             );
             assert!(!root.join(format!("{name}-attempt/launch.json")).exists());
+            // The guardian never held the message: the attempt settles as
+            // never spawned instead of a fenced, unconfirmed handoff.
+            assert!(!error.to_string().contains("remains fenced"), "{error}");
+            let exit: serde_json::Value = serde_json::from_slice(&std::fs::read(
+                root.join(format!("{name}-attempt/process-exit.json")),
+            )?)?;
+            assert_eq!(exit["never_spawned"], true, "{exit}");
         } else {
             let (_writer, handle, _) = launched?;
             let exit = exited(&handle)?;

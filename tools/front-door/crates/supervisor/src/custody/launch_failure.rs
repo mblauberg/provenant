@@ -7,17 +7,20 @@ use std::ffi::OsStr;
 use thiserror::Error;
 
 /// How far a launch progressed on one lease. Only a possible handoff leaves
-/// the outcome unknown: a launch refused before any guardian records a
-/// never-spawned exit and has nothing to fence.
+/// the outcome unknown: a launch no guardian accepted records a never-spawned
+/// exit and has nothing to fence.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LaunchPhase {
     /// No launch was attempted; the reservation is still prepared.
     Unlaunched,
-    /// Launch refused before contacting a guardian (cancelled, or an invalid
-    /// capture plan). The reservation records `NeverSpawned` and the failure
-    /// carries the never-spawned exit for the attempt.
+    /// Launch refused before any guardian held the whole launch message
+    /// (cancelled, an invalid capture plan or command, a guardian that failed
+    /// to spawn or closed the channel mid-message) or the guardian refused it
+    /// before accepting custody. The reservation records `NeverSpawned` and the
+    /// failure carries the never-spawned exit for the attempt.
     NeverSpawned,
-    /// A guardian may hold custody; reconcile owns the outcome.
+    /// A guardian holds the launch message and may hold custody; reconcile
+    /// owns the outcome.
     HandedOff,
 }
 

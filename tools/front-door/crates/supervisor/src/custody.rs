@@ -5,6 +5,7 @@ use crate::census::{
     boot_observer,
 };
 use crate::machine::StopReason;
+use crate::process_os::handoff::HandoffFailure;
 pub use liveness::{GuardianLossRecovery, LossUnproven};
 use provenant_core::{ActorId, AttemptId, CancelToken, Clock, Digest, GitOid, WaitBudget};
 use provenant_os::{
@@ -115,8 +116,17 @@ pub enum CustodyError {
     /// This host cannot hold provider custody; nothing was handed off.
     #[error("process custody is supported only on macOS")]
     UnsupportedPlatform,
-    #[error("sandbox profile handoff is unconfirmed ({0}); reservation remains fenced")]
+    #[error("sandbox profile transport handoff is unconfirmed ({0}); reservation remains fenced")]
     ProfileHandoffUnknown(String),
+    /// The guardian never held the whole launch message; nothing launched.
+    #[error("launch message never reached the guardian ({0}); the provider never launched")]
+    HandoffUndelivered(String),
+    /// The sandbox profile failed in transit or the guardian refused it before
+    /// accepting custody; nothing launched.
+    #[error(
+        "sandbox profile transport failed before the guardian accepted the launch ({0}); the provider never launched"
+    )]
+    ProfileHandoffUndelivered(String),
     #[error("operation was cancelled; custody is retained")]
     Cancelled,
     #[error("another stop request already owns this attempt")]
@@ -595,7 +605,8 @@ impl CustodyLease {
     pub fn scope(&self) -> Scope {
         self.reservation.scope
     }
-    /// How far launch got; only [`LaunchPhase::HandedOff`] contacted a guardian.
+    /// How far launch got; only [`LaunchPhase::HandedOff`] may have reached a
+    /// guardian that holds the launch message.
     pub fn phase(&self) -> LaunchPhase {
         self.phase
     }
@@ -1380,34 +1391,13 @@ pub fn launch(
     if owned.cancel.is_cancelled() || invalid_capture.is_some() {
         // No guardian is contacted: the failure carries its own cause and the
         // never-spawned exit, so the caller withdraws instead of fencing.
-        owned.lease.reservation.launch_state = LaunchState::NeverSpawned;
-        owned.lease.reservation.unresolved_cleanup = false;
-        owned.lease.reservation.census_incomplete = false;
-        owned.lease.phase = LaunchPhase::NeverSpawned;
-        let (reason, error) = match invalid_capture {
-            _ if owned.cancel.is_cancelled() => (
-                Some(StopReason::ExplicitCancellation),
-                CustodyError::Cancelled,
-            ),
-            Some(error) => (None, error),
-            None => (None, CustodyError::InvalidRecord),
-        };
-        let failure = LaunchFailure {
-            error: Box::new(error),
-            custody: publication,
-            pending_exit: Some(Box::new(ProcessExit::never_spawned(scope, reason, vec![]))),
-        };
-        // A failed record leaves the exit pending for the caller's retry.
-        let _ = write_record(
-            &owned.lease.directory,
-            "reservation.json",
-            &owned.lease.reservation,
-            PublishMode::Replace,
-        )
-        .and_then(|publication| publication.require_durable().map_err(Into::into))
-        .and_then(|()| failure.retry_exit_publication())
-        .and_then(|publication| publication.require_durable().map_err(Into::into));
-        return Err(failure);
+        let error = invalid_capture.unwrap_or(CustodyError::InvalidRecord);
+        return Err(refuse_never_spawned(
+            owned.lease,
+            owned.cancel,
+            publication,
+            error,
+        ));
     }
     // A host without provider custody refuses before the reservation records
     // a handoff: the lease stays unlaunched, so the caller withdraws it rather
@@ -1445,15 +1435,77 @@ pub fn launch(
     {
         return Err(failure(error, publication));
     }
-    match crate::guardian::handoff(owned, capture, &publication) {
+    let OwnedLaunch {
+        command,
+        lease,
+        handshake,
+        cancel,
+        clock,
+    } = owned;
+    let handed = crate::guardian::handoff(
+        OwnedLaunch {
+            command,
+            lease: &mut *lease,
+            handshake,
+            cancel,
+            clock,
+        },
+        capture,
+        &publication,
+    );
+    match handed {
         Ok(()) => Ok(CustodyHandle {
             directory: publication.directory,
             scope,
             requester,
             held: false,
         }),
-        Err(error) => Err(failure(error, publication)),
+        // Only a guardian holding the whole message may have launched.
+        Err(HandoffFailure::Unconfirmed(error)) => Err(failure(error, publication)),
+        Err(HandoffFailure::Undelivered(error)) => {
+            Err(refuse_never_spawned(lease, cancel, publication, error))
+        }
     }
+}
+
+/// Settle a launch no guardian accepted. The reservation records
+/// `NeverSpawned` and the failure carries the never-spawned exit, so the
+/// caller withdraws instead of fencing. A cancel request names the stop.
+fn refuse_never_spawned(
+    lease: &mut CustodyLease,
+    cancel: &CancelToken,
+    publication: PublicationReservation,
+    error: CustodyError,
+) -> LaunchFailure {
+    let scope = lease.scope();
+    lease.reservation.launch_state = LaunchState::NeverSpawned;
+    lease.reservation.unresolved_cleanup = false;
+    lease.reservation.census_incomplete = false;
+    lease.phase = LaunchPhase::NeverSpawned;
+    let (reason, error) = if cancel.is_cancelled() {
+        (
+            Some(StopReason::ExplicitCancellation),
+            CustodyError::Cancelled,
+        )
+    } else {
+        (None, error)
+    };
+    let failure = LaunchFailure {
+        error: Box::new(error),
+        custody: publication,
+        pending_exit: Some(Box::new(ProcessExit::never_spawned(scope, reason, vec![]))),
+    };
+    // A failed record leaves the exit pending for the caller's retry.
+    let _ = write_record(
+        &lease.directory,
+        "reservation.json",
+        &lease.reservation,
+        PublishMode::Replace,
+    )
+    .and_then(|publication| publication.require_durable().map_err(Into::into))
+    .and_then(|()| failure.retry_exit_publication())
+    .and_then(|publication| publication.require_durable().map_err(Into::into));
+    failure
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

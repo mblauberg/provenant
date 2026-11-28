@@ -9,6 +9,7 @@ use crate::machine::{
     self, Budgets, DeliveryFailure, DeliveryOutcome, DeliveryReceipt, Effect, Event, Phase, State,
     Tick,
 };
+use crate::process_os::handoff::HandoffFailure;
 use provenant_core::{CancelToken, Clock, WallTime};
 use provenant_os::fs::{Directory, Publication, PublishMode};
 use provenant_records::custody::Scope;
@@ -389,21 +390,24 @@ pub(crate) fn handoff(
     owned: OwnedLaunch<'_>,
     capture: CapturePlan,
     publication: &PublicationReservation,
-) -> Result<()> {
+) -> std::result::Result<(), HandoffFailure> {
+    // Every refusal before the guardian spawns leaves nothing to fence.
+    use HandoffFailure::Undelivered;
     if owned.command.config_environment.len() > 128
         || owned.command.holder_context.len() > HOLDER_CONTEXT_LIMIT
         || !valid_resolved_route(&owned.command.resolved_route)
     {
-        return Err(CustodyError::InvalidRecord);
+        return Err(Undelivered(CustodyError::InvalidRecord));
     }
-    validate_profile_command(owned.command.profile_file.as_ref(), &owned.command.argv)?;
+    validate_profile_command(owned.command.profile_file.as_ref(), &owned.command.argv)
+        .map_err(|error| Undelivered(error.into()))?;
     if !owned
         .command
         .argv
         .first()
         .is_some_and(|executable| Path::new(executable).is_absolute())
     {
-        return Err(CustodyError::InvalidRecord);
+        return Err(Undelivered(CustodyError::InvalidRecord));
     }
     let message = LaunchMessage {
         redaction: provenant_redact::mode().as_str().to_owned(),
@@ -450,16 +454,25 @@ pub(crate) fn handoff(
         || message.stdin.len() > 1024 * 1024
         || !owned.command.cwd.is_absolute()
     {
-        return Err(CustodyError::InvalidRecord);
+        return Err(Undelivered(CustodyError::InvalidRecord));
     }
-    let payload = serde_json::to_vec(&message).map_err(|_| CustodyError::InvalidRecord)?;
+    let payload =
+        serde_json::to_vec(&message).map_err(|_| Undelivered(CustodyError::InvalidRecord))?;
     crate::process_os::handoff::spawn(
         &owned.lease.lock_directory,
         &publication.directory,
         &owned.lease.directory,
-        owned.lease.lease.as_ref().ok_or(CustodyError::Fenced)?,
+        owned
+            .lease
+            .lease
+            .as_ref()
+            .ok_or(Undelivered(CustodyError::Fenced))?,
         &publication.custody,
-        owned.lease.holder.as_ref().ok_or(CustodyError::Fenced)?,
+        owned
+            .lease
+            .holder
+            .as_ref()
+            .ok_or(Undelivered(CustodyError::Fenced))?,
         owned
             .command
             .profile_file
