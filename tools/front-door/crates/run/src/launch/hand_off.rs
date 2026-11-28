@@ -3,6 +3,7 @@ use super::*;
 #[cfg(test)]
 thread_local! {
     static TEST_UNCERTAIN_HANDOFF: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    pub(super) static TEST_CANCEL_INSIDE_LAUNCH: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static TEST_HANDOFF_FAILURE: std::cell::RefCell<Option<RunError>> = const { std::cell::RefCell::new(None) };
 }
 
@@ -638,6 +639,11 @@ impl RunStore {
         if local_or_withdraw!(cancel_requested()) {
             local_or_withdraw!(Err::<(), _>(local("launch", &CANCELLED_BEFORE_LAUNCH)));
         }
+        // Simulate a cancel landing after the last check, inside custody.
+        #[cfg(test)]
+        if TEST_CANCEL_INSIDE_LAUNCH.with(|fault| fault.replace(false)) {
+            call.cancel.cancel();
+        }
         let launched = custody::launch(
             OwnedLaunch {
                 command,
@@ -650,7 +656,17 @@ impl RunStore {
             reservation,
         );
         if let Err(failure) = launched {
-            match launch_failure(&policy, &failure.error, lease.launched()) {
+            let phase = lease.phase();
+            // A never-spawned launch owes its exit before custody is withdrawn;
+            // the publication is idempotent and a failure is reported, not fenced.
+            let unrecorded = (phase == custody::LaunchPhase::NeverSpawned)
+                .then(|| {
+                    failure
+                        .retry_exit_publication()
+                        .and_then(|publication| publication.require_durable().map_err(Into::into))
+                })
+                .and_then(std::result::Result::err);
+            match launch_failure(&policy, &failure.error, phase, unrecorded.as_ref()) {
                 uncertain @ HandOff::Uncertain(_) => return Err(uncertain),
                 refused => local_or_withdraw!(Err::<(), _>(refused)),
             }
@@ -659,24 +675,39 @@ impl RunStore {
     }
 }
 
-/// A launch failure is uncertain only once the lease recorded a handoff, or
-/// a never-spawned exit whose settlement reconciliation owns. Before that no
-/// guardian was contacted: the failure is a local refusal under its own cause
-/// and the caller withdraws the lease, instead of fencing an attempt for a
-/// receipt that never comes. A host that cannot hold provider custody keeps
-/// its typed cause.
+/// A launch failure is uncertain only once a guardian may hold custody.
+/// Before that no guardian was contacted: the failure is a local refusal
+/// under its own cause and the caller withdraws the lease, instead of fencing
+/// an attempt for a receipt that never comes. A never-spawned launch is such
+/// a refusal: its exit is recorded as evidence and its reservation withdrawn,
+/// so the attempt settles here rather than as `LAUNCH_UNKNOWN`. A host that
+/// cannot hold provider custody keeps its typed cause.
 fn launch_failure(
     policy: &provenant_records::policy::Policy,
     error: &custody::CustodyError,
-    launched: bool,
+    phase: custody::LaunchPhase,
+    unrecorded: Option<&custody::CustodyError>,
 ) -> HandOff {
-    match error {
-        custody::CustodyError::UnsupportedPlatform => HandOff::TypedLocal {
+    use custody::LaunchPhase;
+    match (phase, error) {
+        (_, custody::CustodyError::UnsupportedPlatform) => HandOff::TypedLocal {
             message: format!("provider custody: {error}"),
             cause: CauseKind::UnsupportedPlatform,
         },
-        _ if !launched => custody_local(policy, "provider custody", error),
-        _ => HandOff::Uncertain(error.to_string()),
+        (LaunchPhase::Unlaunched, _) => custody_local(policy, "provider custody", error),
+        (LaunchPhase::NeverSpawned, _) => {
+            let cause = match error {
+                custody::CustodyError::Cancelled => format!("launch: {CANCELLED_BEFORE_LAUNCH}"),
+                _ => format!("provider custody: {error}; the provider never spawned"),
+            };
+            HandOff::Local(match unrecorded {
+                Some(publication) => {
+                    format!("{cause}; never-spawned exit unrecorded: {publication}")
+                }
+                None => cause,
+            })
+        }
+        (LaunchPhase::HandedOff, _) => HandOff::Uncertain(error.to_string()),
     }
 }
 
@@ -1015,13 +1046,15 @@ mod tests {
     // Spec: docs/specs/run-launch.md#admission-and-custody
     #[test]
     fn only_a_possible_handoff_makes_a_launch_failure_uncertain() {
+        use custody::LaunchPhase::{HandedOff, NeverSpawned, Unlaunched};
         let policy = test_policy();
-        for launched in [false, true] {
+        for phase in [Unlaunched, NeverSpawned, HandedOff] {
             assert!(matches!(
                 launch_failure(
                     &policy,
                     &custody::CustodyError::UnsupportedPlatform,
-                    launched
+                    phase,
+                    None
                 ),
                 HandOff::TypedLocal {
                     cause: CauseKind::UnsupportedPlatform,
@@ -1036,12 +1069,15 @@ mod tests {
             custody::CustodyError::InvalidRecord,
         ] {
             assert!(
-                matches!(launch_failure(&policy, &error, true), HandOff::Uncertain(_)),
+                matches!(
+                    launch_failure(&policy, &error, HandedOff, None),
+                    HandOff::Uncertain(_)
+                ),
                 "{error}"
             );
             // Before the lease records a handoff no guardian was contacted:
             // the refusal is local, keeps its cause and can be withdrawn.
-            let refused = launch_failure(&policy, &error, false);
+            let refused = launch_failure(&policy, &error, Unlaunched, None);
             assert!(!matches!(refused, HandOff::Uncertain(_)), "{error}");
             let (HandOff::Local(message) | HandOff::Boundary { message, .. }) = refused else {
                 panic!("{error}: unexpected refusal kind");
@@ -1052,10 +1088,34 @@ mod tests {
             launch_failure(
                 &policy,
                 &custody::CustodyError::Io(std::io::Error::other("fixture")),
-                false
+                Unlaunched,
+                None
             ),
             HandOff::Local(_)
         ));
+        // A never-spawned launch is a local refusal under its own cause, and
+        // names an exit it could not record.
+        let plan = custody::CustodyError::CapturePlan {
+            field: "wall_ms",
+            value: 0,
+            bound: "1..=86400000".into(),
+        };
+        let unrecorded = custody::CustodyError::Io(std::io::Error::other("disk full"));
+        for (error, unrecorded, expected) in [
+            (&plan, None, "capture plan wall_ms is 0"),
+            (
+                &custody::CustodyError::Cancelled,
+                None,
+                CANCELLED_BEFORE_LAUNCH,
+            ),
+            (&plan, Some(&unrecorded), "never-spawned exit unrecorded"),
+        ] {
+            let HandOff::Local(message) = launch_failure(&policy, error, NeverSpawned, unrecorded)
+            else {
+                panic!("{error}: a never-spawned launch must refuse locally");
+            };
+            assert!(message.contains(expected), "{message}");
+        }
     }
 
     #[test]

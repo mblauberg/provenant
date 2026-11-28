@@ -21,6 +21,8 @@ use thiserror::Error;
 
 mod capture;
 mod indexes;
+mod launch_failure;
+pub use launch_failure::{LaunchFailure, LaunchPhase};
 mod writer_release;
 pub use indexes::{
     RecordedAttemptIndex, attempt_index_retired, recorded_attempt_indexes, register_attempt_index,
@@ -587,15 +589,15 @@ pub struct CustodyLease {
     pub(crate) lease: Option<LockGuard>,
     pub(crate) holder: Option<LockGuard>,
     pub(crate) reservation: Reservation,
-    launched: bool,
+    phase: LaunchPhase,
 }
 impl CustodyLease {
     pub fn scope(&self) -> Scope {
         self.reservation.scope
     }
-    /// Whether launch recorded a handoff; until then no guardian was contacted.
-    pub fn launched(&self) -> bool {
-        self.launched
+    /// How far launch got; only [`LaunchPhase::HandedOff`] contacted a guardian.
+    pub fn phase(&self) -> LaunchPhase {
+        self.phase
     }
     pub fn lock_directory(&self) -> &Directory {
         &self.lock_directory
@@ -607,7 +609,7 @@ impl CustodyLease {
         guardian: crate::census::ProcessIdentity,
         provider: crate::census::ProcessIdentity,
     ) -> Result<()> {
-        if self.launched
+        if self.phase != LaunchPhase::Unlaunched
             || self.lease.is_none()
             || self.reservation.launch_state != LaunchState::Prepared
         {
@@ -631,13 +633,14 @@ impl CustodyLease {
         )?
         .require_durable()?;
         self.reservation = reservation;
-        self.launched = true;
+        self.phase = LaunchPhase::HandedOff;
         Ok(())
     }
-    /// A preparation failure before handoff has no child to fence. Explicit
-    /// withdrawal keeps crashes conservative: dropping a lease never clears it.
+    /// A failure before handoff, including a never-spawned launch, has no
+    /// child to fence. Explicit withdrawal keeps crashes conservative:
+    /// dropping a lease never clears it. Attempt evidence is retained.
     pub fn withdraw_unlaunched(self) -> Result<()> {
-        if self.launched || self.lease.is_none() {
+        if !self.phase.withdrawable() || self.lease.is_none() {
             return Err(CustodyError::Fenced);
         }
         indexes::retire_unlaunched_index(&self.directory, &self.reservation)?;
@@ -888,7 +891,7 @@ pub(crate) fn acquire_writer_with_observer(
         lease: Some(lease),
         holder: Some(holder),
         reservation,
-        launched: false,
+        phase: LaunchPhase::Unlaunched,
     })
 }
 
@@ -1346,68 +1349,6 @@ impl CustodyHandle {
             .is_ok_and(|metadata| metadata.same_identity(identity))
     }
 }
-#[derive(Debug, Error)]
-#[error("{error}")]
-pub struct LaunchFailure {
-    pub error: Box<CustodyError>,
-    pub custody: PublicationReservation,
-    pending_exit: Option<Box<ProcessExit>>,
-}
-impl LaunchFailure {
-    /// Retry the bounded never-spawned outcome while retaining attempt custody.
-    /// Conflicting terminal bytes are never replaced.
-    pub fn retry_exit_publication(&self) -> Result<Publication> {
-        let record = self
-            .pending_exit
-            .as_ref()
-            .ok_or_else(|| CustodyError::HandoffUnknown("no exit pending".into()))?;
-        let bytes = serde_json::to_vec(record).map_err(|_| CustodyError::InvalidRecord)?;
-        if bytes.len() as u64 > EXIT_LIMIT {
-            return Err(CustodyError::InvalidRecord);
-        }
-        let publish = || {
-            self.custody.directory.atomic_write(
-                OsStr::new("process-exit.json"),
-                ".custody-",
-                &bytes,
-                PublishMode::NoReplace,
-            )
-        };
-        let mut result = publish();
-        if result
-            .as_ref()
-            .is_err_and(|error| error.raw_os_error() == Some(provenant_os::sys::errno::ENOSPC))
-        {
-            match self.custody.directory.unlink(OsStr::new("reserve")) {
-                Ok(()) => {
-                    let _ = self.custody.directory.sync();
-                    result = publish();
-                }
-                Err(error) if error.is_not_found() => {
-                    result = publish();
-                }
-                Err(_) => {}
-            }
-        }
-        match result {
-            Ok(publication) => Ok(publication),
-            Err(error) if error.is_exists() => {
-                let previous = self
-                    .custody
-                    .directory
-                    .read_bounded(OsStr::new("process-exit.json"), EXIT_LIMIT)?;
-                if previous != bytes {
-                    return Err(CustodyError::InvalidRecord);
-                }
-                Ok(match self.custody.directory.sync() {
-                    Ok(()) => Publication::Durable,
-                    Err(sync_error) => Publication::VisibleDurabilityUnconfirmed { sync_error },
-                })
-            }
-            Err(error) => Err(error.into()),
-        }
-    }
-}
 pub fn launch(
     owned: OwnedLaunch<'_>,
     capture: CapturePlan,
@@ -1418,7 +1359,8 @@ pub fn launch(
         custody,
         pending_exit: None,
     };
-    if owned.lease.launched {
+    // One lease launches at most once, whatever the previous outcome.
+    if owned.lease.phase != LaunchPhase::Unlaunched {
         return Err(failure(CustodyError::Fenced, publication));
     }
     let scope = owned.lease.scope();
@@ -1436,42 +1378,36 @@ pub fn launch(
     owned.lease.reservation.requester = Some(requester);
     let invalid_capture = capture.validate().err();
     if owned.cancel.is_cancelled() || invalid_capture.is_some() {
+        // No guardian is contacted: the failure carries its own cause and the
+        // never-spawned exit, so the caller withdraws instead of fencing.
         owned.lease.reservation.launch_state = LaunchState::NeverSpawned;
         owned.lease.reservation.unresolved_cleanup = false;
         owned.lease.reservation.census_incomplete = false;
-        owned.lease.launched = true;
-        let reason = if owned.cancel.is_cancelled() {
-            Some(StopReason::ExplicitCancellation)
-        } else {
-            None
+        owned.lease.phase = LaunchPhase::NeverSpawned;
+        let (reason, error) = match invalid_capture {
+            _ if owned.cancel.is_cancelled() => (
+                Some(StopReason::ExplicitCancellation),
+                CustodyError::Cancelled,
+            ),
+            Some(error) => (None, error),
+            None => (None, CustodyError::InvalidRecord),
         };
-        let record = ProcessExit::never_spawned(scope, reason, vec![]);
-        let publication_result = write_record(
+        let failure = LaunchFailure {
+            error: Box::new(error),
+            custody: publication,
+            pending_exit: Some(Box::new(ProcessExit::never_spawned(scope, reason, vec![]))),
+        };
+        // A failed record leaves the exit pending for the caller's retry.
+        let _ = write_record(
             &owned.lease.directory,
             "reservation.json",
             &owned.lease.reservation,
             PublishMode::Replace,
         )
         .and_then(|publication| publication.require_durable().map_err(Into::into))
-        .and_then(|()| {
-            write_record(
-                &publication.directory,
-                "process-exit.json",
-                &record,
-                PublishMode::NoReplace,
-            )
-        })
+        .and_then(|()| failure.retry_exit_publication())
         .and_then(|publication| publication.require_durable().map_err(Into::into));
-        let error = match publication_result {
-            Err(error) => error,
-            Ok(()) if reason.is_some() => CustodyError::Cancelled,
-            Ok(()) => invalid_capture.unwrap_or(CustodyError::InvalidRecord),
-        };
-        return Err(LaunchFailure {
-            error: Box::new(error),
-            custody: publication,
-            pending_exit: Some(Box::new(record)),
-        });
+        return Err(failure);
     }
     // A host without provider custody refuses before the reservation records
     // a handoff: the lease stays unlaunched, so the caller withdraws it rather
@@ -1497,7 +1433,7 @@ pub fn launch(
     if let Err(error) = prepared {
         return Err(failure(error, publication));
     }
-    owned.lease.launched = true;
+    owned.lease.phase = LaunchPhase::HandedOff;
     owned.lease.reservation.launch_state = LaunchState::HandingOff;
     if let Err(error) = write_record(
         &owned.lease.directory,

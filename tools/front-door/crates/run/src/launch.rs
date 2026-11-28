@@ -462,6 +462,9 @@ pub fn commit_own_paths(
 #[cfg(test)]
 #[path = "launch/commit_own_tests.rs"]
 mod commit_own_tests;
+#[cfg(test)]
+#[path = "launch/never_spawned_tests.rs"]
+mod never_spawned_tests;
 
 fn sandbox_mode_receipt(
     mode: &provenant_confinement::run_config::SandboxMode,
@@ -3045,6 +3048,14 @@ impl RunStore {
                         };
                         let (preparation_failure, preparation_note) =
                             handoff_preparation(&error, &reason);
+                        // Custody is already withdrawn: finish the refusal's
+                        // bounded settlement even if the caller was cancelled
+                        // meanwhile, so no starting row outlives its reservation.
+                        let uncancelled = provenant_core::CancelToken::new();
+                        let settle = Request {
+                            clock: call.clock,
+                            cancel: &uncancelled,
+                        };
                         match self.withdraw_with_preparation_failure(
                             id,
                             crate::store::Withdrawal {
@@ -3058,7 +3069,7 @@ impl RunStore {
                                 cause,
                                 terminal_note: preparation_note.or_else(|| kind.terminal_note()),
                             },
-                            call,
+                            &settle,
                         ) {
                             // Cancel already settled it from the other side.
                             Ok(_) | Err(RunError::Conflict) if cancelled => {}
