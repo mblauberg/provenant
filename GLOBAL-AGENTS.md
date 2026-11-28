@@ -58,8 +58,12 @@ SKILL.md.
   a red default branch, merge on green without review; weakening a check or
   changing a real boundary does not qualify.
 - **Checks.** Locally, run lint and types on the shared build cache, plus
-  touched tests only when that cache is warm; never start a cold build. CI runs
-  the tests and gates the merge. Review follows risk (`code-review`): a small
+  touched tests when that cache is warm. A leaf lane never starts a cold build.
+  An integrator (integration branch, large batch, default branch) may build
+  cold where no warm cache exists rather than wait on CI, admitted by the
+  host's resource limits (cores, free memory), not a fixed count. These are
+  defaults: a host or project may set its own build, cache and verification
+  policy. CI runs the tests and gates the merge. Review follows risk (`code-review`): a small
   change needs none; when review runs, the author is never its reviewer, and
   lens coverage comes before provider family. A test that pins a restriction
   makes the restriction the suspect.
