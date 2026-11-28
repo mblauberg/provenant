@@ -9,22 +9,37 @@ mod graph_writer_admission_tests {
 
     // Spec: docs/specs/fabric.md#graph-admission-and-refusal-causes
     #[test]
-    fn prepatched_run_preserves_admission_refusal_in_cli_diagnostic() -> Result<(), Box<dyn std::error::Error>> {
+    fn prepatched_run_preserves_admission_refusal_in_cli_diagnostic()
+    -> Result<(), Box<dyn std::error::Error>> {
         use provenant_fabric_runtime::coordination::facade::DispatchRefusalFact;
         use provenant_fabric_runtime::graph::{self, GraphDocument};
         struct Free;
         impl WorkerObserver for Free {
-            fn observe_roots(&self, roots: &[PathBuf]) -> std::collections::BTreeMap<PathBuf, provenant_confinement::worktrees::Occupancy> {
-                roots.iter().cloned().map(|root| (root, provenant_confinement::worktrees::Occupancy::Available)).collect()
+            fn observe_roots(
+                &self,
+                roots: &[PathBuf],
+            ) -> std::collections::BTreeMap<PathBuf, provenant_confinement::worktrees::Occupancy>
+            {
+                roots
+                    .iter()
+                    .cloned()
+                    .map(|root| (root, provenant_confinement::worktrees::Occupancy::Available))
+                    .collect()
             }
         }
         let rig = crate::worktree_tests::support::TestRig::new()?;
         let roots = crate::roots::child(&rig.home, &rig.project, rig.state.clone())?;
         let mut factory = Factory {
             context: Context::open(roots, &rig.home, &rig.project)?,
-            project_attribution: false, clock: SystemClock, backoff: ThreadPause,
-            executor: SystemExecutor::new(1)?, home: rig.home.clone(), cwd: rig.project.clone(),
-            assets: rig.project.clone(), host_launch: None, workers: &Free,
+            project_attribution: false,
+            clock: SystemClock,
+            backoff: ThreadPause,
+            executor: SystemExecutor::new(1)?,
+            home: rig.home.clone(),
+            cwd: rig.project.clone(),
+            assets: rig.project.clone(),
+            host_launch: None,
+            workers: &Free,
         };
         let mut base: GraphDocument = serde_json::from_value(serde_json::json!({
             "schema_version": 2, "graph_id": "typed-refusal", "nodes": [
@@ -32,17 +47,34 @@ mod graph_writer_admission_tests {
                 {"id":"two","prompt":"two","access":"read_only","route":{"alias":"fixture"}}
             ]
         }))?;
-        graph::patch::submission(&mut base, "submit:typed-refusal", &factory.context.config.graph.limits, factory.context.port_table.worktree_layout.clone())?;
+        graph::patch::submission(
+            &mut base,
+            "submit:typed-refusal",
+            &factory.context.config.graph.limits,
+            factory.context.port_table.worktree_layout.clone(),
+        )?;
         let cancel = CancelToken::new();
         let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
-        for case in ["schema", "composite", "cycle", "writer", "plan", "output", "envelope", "structural"] {
+        for case in [
+            "schema",
+            "composite",
+            "cycle",
+            "writer",
+            "plan",
+            "output",
+            "envelope",
+            "structural",
+        ] {
             let mut value = serde_json::to_value(&base)?;
             match case {
                 "schema" => {
                     value["schema_version"] = 1.into();
                     value["review_base"] = serde_json::json!("main");
                 }
-                "composite" => value["nodes"][0] = serde_json::json!({"id":"one","kind":"loop","access":"read_only"}),
+                "composite" => {
+                    value["nodes"][0] =
+                        serde_json::json!({"id":"one","kind":"loop","access":"read_only"})
+                }
                 "cycle" => {
                     value["nodes"][0]["depends_on"] = serde_json::json!(["two"]);
                     value["nodes"][1]["depends_on"] = serde_json::json!(["one"]);
@@ -53,7 +85,8 @@ mod graph_writer_admission_tests {
                 "writer" => value["nodes"][0]["access"] = serde_json::json!("worktree_write"),
                 "output" => {
                     value["nodes"][1]["depends_on"] = serde_json::json!(["one"]);
-                    value["nodes"][1]["inputs"] = serde_json::json!([{"node":"one","outputs":["commit"]}]);
+                    value["nodes"][1]["inputs"] =
+                        serde_json::json!([{"node":"one","outputs":["commit"]}]);
                 }
                 "envelope" => {
                     factory.context.config.graph.limits.nodes = 2048;
@@ -66,31 +99,49 @@ mod graph_writer_admission_tests {
             }
             let path = rig.project.join(format!("{case}.json"));
             std::fs::write(&path, serde_json::to_vec(&value)?)?;
-            let error = factory.graph(GraphInput::Run { extra: Default::default(), document: path }, budget, &cancel).unwrap_err();
+            let error = factory
+                .graph(
+                    GraphInput::Run {
+                        extra: Default::default(),
+                        document: path,
+                    },
+                    budget,
+                    &cancel,
+                )
+                .unwrap_err();
             let fact = match &error {
-                FacadeError::DispatchRefused { fact: Some(fact), .. } => fact,
+                FacadeError::DispatchRefused {
+                    fact: Some(fact), ..
+                } => fact,
                 other => panic!("{case}: {other:?}"),
             };
-            assert!(match case {
-                "schema" => matches!(fact, DispatchRefusalFact::GraphSchema),
-                "composite" => matches!(fact, DispatchRefusalFact::GraphComposite),
-                "cycle" => matches!(fact, DispatchRefusalFact::GraphCycle { .. }),
-                "writer" => matches!(fact, DispatchRefusalFact::GraphWriterWorktree { .. }),
-                "plan" => matches!(fact, DispatchRefusalFact::GraphPlan),
-                "output" => matches!(fact, DispatchRefusalFact::GraphOutputKind(_)),
-                "envelope" => matches!(fact, DispatchRefusalFact::GraphEnvelope),
-                "structural" => matches!(fact, DispatchRefusalFact::GraphStructuralLimit(_)),
-                _ => false,
-            }, "{case}: {fact:?}");
+            assert!(
+                match case {
+                    "schema" => matches!(fact, DispatchRefusalFact::GraphSchema),
+                    "composite" => matches!(fact, DispatchRefusalFact::GraphComposite),
+                    "cycle" => matches!(fact, DispatchRefusalFact::GraphCycle { .. }),
+                    "writer" => matches!(fact, DispatchRefusalFact::GraphWriterWorktree { .. }),
+                    "plan" => matches!(fact, DispatchRefusalFact::GraphPlan),
+                    "output" => matches!(fact, DispatchRefusalFact::GraphOutputKind(_)),
+                    "envelope" => matches!(fact, DispatchRefusalFact::GraphEnvelope),
+                    "structural" => matches!(fact, DispatchRefusalFact::GraphStructuralLimit(_)),
+                    _ => false,
+                },
+                "{case}: {fact:?}"
+            );
             let diagnostic = error.diagnostic();
-            assert!(diagnostic.detail.is_some() && diagnostic.next.is_some(), "{case}");
+            assert!(
+                diagnostic.detail.is_some() && diagnostic.next.is_some(),
+                "{case}"
+            );
         }
         Ok(())
     }
 
     // Spec: docs/specs/fabric.md#graph-admission-and-refusal-causes
     #[test]
-    fn facade_resume_persists_lowered_structural_limit_and_recovers() -> Result<(), Box<dyn std::error::Error>> {
+    fn facade_resume_persists_lowered_structural_limit_and_recovers()
+    -> Result<(), Box<dyn std::error::Error>> {
         use provenant_fabric_runtime::graph::{self, GraphJournal};
         use provenant_records::pause::PauseCause;
 
@@ -100,24 +151,48 @@ mod graph_writer_admission_tests {
             fn worktree_layout(&self) -> provenant_config::WorktreeLayoutPort {
                 provenant_config::PortTable::builtin().worktree_layout
             }
-            fn actor(&self) -> String { self.0.to_string() }
-            fn observe_or_start(&mut self, _: &graph::AttemptKey, _: graph::NodeInput<'_>, _: &graph::GraphRoute, _: graph::AccessMode, _: Option<&str>, _: graph::Replay<'_>) -> Result<graph::AttemptObservation, Self::Error> {
+            fn actor(&self) -> String {
+                self.0.to_string()
+            }
+            fn observe_or_start(
+                &mut self,
+                _: &graph::AttemptKey,
+                _: graph::NodeInput<'_>,
+                _: &graph::GraphRoute,
+                _: graph::AccessMode,
+                _: Option<&str>,
+                _: graph::Replay<'_>,
+            ) -> Result<graph::AttemptObservation, Self::Error> {
                 Ok(graph::AttemptObservation::Pending { attempt_ref: None })
             }
         }
         struct Free;
         impl WorkerObserver for Free {
-            fn observe_roots(&self, roots: &[PathBuf]) -> std::collections::BTreeMap<PathBuf, provenant_confinement::worktrees::Occupancy> {
-                roots.iter().cloned().map(|root| (root, provenant_confinement::worktrees::Occupancy::Available)).collect()
+            fn observe_roots(
+                &self,
+                roots: &[PathBuf],
+            ) -> std::collections::BTreeMap<PathBuf, provenant_confinement::worktrees::Occupancy>
+            {
+                roots
+                    .iter()
+                    .cloned()
+                    .map(|root| (root, provenant_confinement::worktrees::Occupancy::Available))
+                    .collect()
             }
         }
         let rig = crate::worktree_tests::support::TestRig::new()?;
         let roots = crate::roots::child(&rig.home, &rig.project, rig.state.clone())?;
         let mut factory = Factory {
             context: Context::open(roots.clone(), &rig.home, &rig.project)?,
-            project_attribution: false, clock: SystemClock, backoff: ThreadPause,
-            executor: SystemExecutor::new(1)?, home: rig.home.clone(), cwd: rig.project.clone(),
-            assets: rig.project.clone(), host_launch: None, workers: &Free,
+            project_attribution: false,
+            clock: SystemClock,
+            backoff: ThreadPause,
+            executor: SystemExecutor::new(1)?,
+            home: rig.home.clone(),
+            cwd: rig.project.clone(),
+            assets: rig.project.clone(),
+            host_launch: None,
+            workers: &Free,
         };
         let cancel = CancelToken::new();
         let budget = WaitBudget::cli(factory.clock.mono_now(), 30)?;
@@ -127,36 +202,109 @@ mod graph_writer_admission_tests {
                 {"id":"two","prompt":"two","access":"read_only","route":{"adapter":"fixture","model":"fixture/model"}}
             ]
         }))?;
-        graph::patch::submission(&mut document, "submit:limit-resume", &factory.context.config.graph.limits, factory.context.port_table.worktree_layout.clone())?;
+        graph::patch::submission(
+            &mut document,
+            "submit:limit-resume",
+            &factory.context.config.graph.limits,
+            factory.context.port_table.worktree_layout.clone(),
+        )?;
         let project = factory.context.identity.project;
-        let mut journal = graph::FileJournal::open(&roots.state, project, &document.graph_id, budget, &cancel, &factory.clock)?;
+        let mut journal = graph::FileJournal::open(
+            &roots.state,
+            project,
+            &document.graph_id,
+            budget,
+            &cancel,
+            &factory.clock,
+        )?;
         journal.bind(graph::GraphExecution {
-            peer_origin_context: None, peer_submission_digest: None, requester_path: None,
-            extra: Default::default(), bases: None, directory: rig.project.clone(), document: document.clone(),
+            peer_origin_context: None,
+            peer_submission_digest: None,
+            requester_path: None,
+            extra: Default::default(),
+            bases: None,
+            directory: rig.project.clone(),
+            document: document.clone(),
         })?;
-        graph::advance_with_budget(&document, &mut Pending(factory.context.identity.inbox.actor), &mut journal, &Default::default(), &Default::default())?;
+        graph::advance_with_budget(
+            &document,
+            &mut Pending(factory.context.identity.inbox.actor),
+            &mut journal,
+            &Default::default(),
+            &Default::default(),
+        )?;
         drop(journal);
-        std::fs::write(rig.state.join("config.toml"), "schema_version=1\n[knobs]\n'domains.wait.advance'='off'\n")?;
-        let before = graph::FileJournal::read_checkpoint(&roots.state, project, "limit-resume")?.unwrap();
-        for reason in [super::progress::WakeReason::Status, super::progress::WakeReason::Output, super::progress::WakeReason::Result] {
-            assert_eq!(super::unified::graph_wait::wake_graph_for_reader(&factory, "limit-resume", reason, budget, &cancel), super::progress::WakeOutcome::Idle);
-            assert_eq!(graph::FileJournal::read_checkpoint(&roots.state, project, "limit-resume")?.unwrap(), before);
+        std::fs::write(
+            rig.state.join("config.toml"),
+            "schema_version=1\n[knobs]\n'domains.wait.advance'='off'\n",
+        )?;
+        let before =
+            graph::FileJournal::read_checkpoint(&roots.state, project, "limit-resume")?.unwrap();
+        for reason in [
+            super::progress::WakeReason::Status,
+            super::progress::WakeReason::Output,
+            super::progress::WakeReason::Result,
+        ] {
+            assert_eq!(
+                super::unified::graph_wait::wake_graph_for_reader(
+                    &factory,
+                    "limit-resume",
+                    reason,
+                    budget,
+                    &cancel
+                ),
+                super::progress::WakeOutcome::Idle
+            );
+            assert_eq!(
+                graph::FileJournal::read_checkpoint(&roots.state, project, "limit-resume")?
+                    .unwrap(),
+                before
+            );
         }
         std::fs::write(rig.state.join("config.toml"), "schema_version=1\n")?;
         factory.context.config.graph.limits.nodes = 1;
-        let resume = || GraphInput::Resume { extra: Default::default(), document: "limit-resume".into(), extend: vec![] };
+        let resume = || GraphInput::Resume {
+            extra: Default::default(),
+            document: "limit-resume".into(),
+            extend: vec![],
+        };
         let paused = factory.graph(resume(), budget, &cancel)?;
-        assert_eq!(paused.checkpoint.pause_cause(), Some(PauseCause::StructuralLimit));
-        assert_eq!(graph::FileJournal::read_checkpoint(&roots.state, project, "limit-resume")?.unwrap().pause_cause(), Some(PauseCause::StructuralLimit));
-        assert_eq!(super::unified::graph_wait::wake_in_host(
-            &mut factory, budget, &cancel,
-            super::progress::WakeSubjectRef::Graph { project, id: "limit-resume".into() },
-            super::progress::WakeReason::Status,
-        ), super::progress::WakeOutcome::Idle);
-        assert_eq!(graph::FileJournal::read_checkpoint(&roots.state, project, "limit-resume")?.unwrap().pause_cause(), Some(PauseCause::StructuralLimit));
-        factory.context.config.graph.limits.nodes = provenant_fabric_runtime::config::GraphLimits::default().nodes;
+        assert_eq!(
+            paused.checkpoint.pause_cause(),
+            Some(PauseCause::StructuralLimit)
+        );
+        assert_eq!(
+            graph::FileJournal::read_checkpoint(&roots.state, project, "limit-resume")?
+                .unwrap()
+                .pause_cause(),
+            Some(PauseCause::StructuralLimit)
+        );
+        assert_eq!(
+            super::unified::graph_wait::wake_in_host(
+                &mut factory,
+                budget,
+                &cancel,
+                super::progress::WakeSubjectRef::Graph {
+                    project,
+                    id: "limit-resume".into()
+                },
+                super::progress::WakeReason::Status,
+            ),
+            super::progress::WakeOutcome::Idle
+        );
+        assert_eq!(
+            graph::FileJournal::read_checkpoint(&roots.state, project, "limit-resume")?
+                .unwrap()
+                .pause_cause(),
+            Some(PauseCause::StructuralLimit)
+        );
+        factory.context.config.graph.limits.nodes =
+            provenant_fabric_runtime::config::GraphLimits::default().nodes;
         let resumed = factory.graph(resume(), budget, &cancel)?;
-        assert_ne!(resumed.checkpoint.pause_cause(), Some(PauseCause::StructuralLimit));
+        assert_ne!(
+            resumed.checkpoint.pause_cause(),
+            Some(PauseCause::StructuralLimit)
+        );
 
         // A writer advances the persisted revision after the first read but
         // before the wake acquires its journal lock. The locked re-read must
@@ -169,20 +317,50 @@ mod graph_writer_admission_tests {
             journal: Option<graph::FileJournal>,
         }
         impl super::progress::WakeSource for RacingJournal<'_> {
-            fn reconcile(&mut self, _: &super::progress::WakeSubjectRef, _: super::progress::WakeReason) -> Result<(), super::progress::WakeOutcome> { Ok(()) }
-            fn claim(&mut self, _: &super::progress::WakeSubjectRef, _: provenant_core::Deadline) -> super::progress::WakeClaim {
-                let before = graph::FileJournal::read_checkpoint(self.root, self.project, "limit-resume").unwrap().unwrap();
+            fn reconcile(
+                &mut self,
+                _: &super::progress::WakeSubjectRef,
+                _: super::progress::WakeReason,
+            ) -> Result<(), super::progress::WakeOutcome> {
+                Ok(())
+            }
+            fn claim(
+                &mut self,
+                _: &super::progress::WakeSubjectRef,
+                _: provenant_core::Deadline,
+            ) -> super::progress::WakeClaim {
+                let before =
+                    graph::FileJournal::read_checkpoint(self.root, self.project, "limit-resume")
+                        .unwrap()
+                        .unwrap();
                 self.start.send(()).unwrap();
                 self.finished.recv().unwrap().unwrap();
-                self.journal = Some(graph::FileJournal::try_open(self.root, self.project, "limit-resume").unwrap());
-                super::progress::WakeClaim::Ready { revision: graph::patch::revision(&before) }
+                self.journal = Some(
+                    graph::FileJournal::try_open(self.root, self.project, "limit-resume").unwrap(),
+                );
+                super::progress::WakeClaim::Ready {
+                    revision: graph::patch::revision(&before),
+                }
             }
             fn live_revision(&self, _: &super::progress::WakeSubjectRef) -> u64 {
                 assert!(self.journal.is_some());
-                assert!(graph::FileJournal::try_open(self.root, self.project, "limit-resume").err().is_some_and(|error| error.is_lock_timeout()));
-                graph::patch::revision(&graph::FileJournal::read_checkpoint(self.root, self.project, "limit-resume").unwrap().unwrap())
+                assert!(
+                    graph::FileJournal::try_open(self.root, self.project, "limit-resume")
+                        .err()
+                        .is_some_and(|error| error.is_lock_timeout())
+                );
+                graph::patch::revision(
+                    &graph::FileJournal::read_checkpoint(self.root, self.project, "limit-resume")
+                        .unwrap()
+                        .unwrap(),
+                )
             }
-            fn advance(&mut self, _: &super::progress::WakeSubjectRef, _: super::progress::WakeReason, _: provenant_core::Deadline) -> super::progress::WakeOutcome {
+            fn advance(
+                &mut self,
+                _: &super::progress::WakeSubjectRef,
+                _: super::progress::WakeReason,
+                _: provenant_core::Deadline,
+            ) -> super::progress::WakeOutcome {
                 panic!("a stale wake must not advance")
             }
         }
@@ -193,19 +371,44 @@ mod graph_writer_admission_tests {
             scope.spawn(move || {
                 let result = (|| -> Result<(), String> {
                     start_rx.recv().map_err(|error| error.to_string())?;
-                    let mut writer = graph::FileJournal::try_open(state, project, "limit-resume").map_err(|error| error.to_string())?;
-                    let mut checkpoint = writer.load("limit-resume").map_err(|error| error.to_string())?.ok_or("missing checkpoint")?;
-                    checkpoint.expansions.push(serde_json::from_value(serde_json::json!({"source":"one", "nodes":[]})).map_err(|error| error.to_string())?);
-                    writer.save(&checkpoint).map_err(|error| error.to_string())?;
+                    let mut writer = graph::FileJournal::try_open(state, project, "limit-resume")
+                        .map_err(|error| error.to_string())?;
+                    let mut checkpoint = writer
+                        .load("limit-resume")
+                        .map_err(|error| error.to_string())?
+                        .ok_or("missing checkpoint")?;
+                    checkpoint.expansions.push(
+                        serde_json::from_value(serde_json::json!({"source":"one", "nodes":[]}))
+                            .map_err(|error| error.to_string())?,
+                    );
+                    writer
+                        .save(&checkpoint)
+                        .map_err(|error| error.to_string())?;
                     Ok(())
                 })();
                 finished_tx.send(result).unwrap();
             });
-            let mut source = RacingJournal { root: &roots.state, project, start: start_tx, finished: finished_rx, journal: None };
-            assert_eq!(super::progress::wake_subject(
-                super::progress::WakeSubjectRef::Graph { project, id: "limit-resume".into() },
-                super::progress::WakeReason::Wait, budget.deadline(), &mut source,
-            ), super::progress::WakeOutcome::Skipped { code: "STALE_REVISION".into() });
+            let mut source = RacingJournal {
+                root: &roots.state,
+                project,
+                start: start_tx,
+                finished: finished_rx,
+                journal: None,
+            };
+            assert_eq!(
+                super::progress::wake_subject(
+                    super::progress::WakeSubjectRef::Graph {
+                        project,
+                        id: "limit-resume".into()
+                    },
+                    super::progress::WakeReason::Wait,
+                    budget.deadline(),
+                    &mut source,
+                ),
+                super::progress::WakeOutcome::Skipped {
+                    code: "STALE_REVISION".into()
+                }
+            );
         });
         Ok(())
     }
@@ -311,9 +514,7 @@ mod graph_writer_admission_tests {
                 Ok(
                     provenant_fabric_runtime::graph::AttemptObservation::Terminal {
                         attempt_ref: None,
-                        settlement_class: Some(
-                            provenant_records::run::SettlementClass::Completed,
-                        ),
+                        settlement_class: Some(provenant_records::run::SettlementClass::Completed),
                         outcome: provenant_fabric_runtime::graph::GraphAttemptOutcome::Succeeded,
                         launched: true,
                         result: None,
@@ -322,7 +523,7 @@ mod graph_writer_admission_tests {
                         branch: None,
                         commit: None,
                         stop: None,
-                    cause: None,
+                        cause: None,
                     },
                 )
             }
@@ -477,12 +678,16 @@ mod graph_writer_admission_tests {
             let admission_seconds = 30;
             let budget = WaitBudget::cli(clock.mono_now(), admission_seconds + 1).unwrap();
             let errors = match scenario {
-                "release" => std::iter::repeat_with(|| WorktreeError::RegistryLockTimeout { holder: None })
-                    .take(2)
-                    .collect(),
-                "held" => std::iter::repeat_with(|| WorktreeError::RegistryLockTimeout { holder: None })
-                    .take(10)
-                    .collect(),
+                "release" => {
+                    std::iter::repeat_with(|| WorktreeError::RegistryLockTimeout { holder: None })
+                        .take(2)
+                        .collect()
+                }
+                "held" => {
+                    std::iter::repeat_with(|| WorktreeError::RegistryLockTimeout { holder: None })
+                        .take(10)
+                        .collect()
+                }
                 _ => vec![WorktreeError::LiveWriter],
             };
             let mut owner = MockWriterOwner {
@@ -576,7 +781,9 @@ mod graph_writer_admission_tests {
     #[test]
     fn submission_wait_settles_after_earlier_remote_reading_errors() {
         use provenant_core::{Clock, MonoTime, TestClock, WallTime};
-        use provenant_fabric_runtime::graph::{AttemptState, GraphDocument, GraphStatus, NodeState};
+        use provenant_fabric_runtime::graph::{
+            AttemptState, GraphDocument, GraphStatus, NodeState,
+        };
         use std::cell::Cell;
         let document: GraphDocument = serde_json::from_value(serde_json::json!({
             "schema_version":1,"graph_id":"cli-wait-recovery","nodes":[{
@@ -617,7 +824,12 @@ mod graph_writer_admission_tests {
             Some(local_host),
             |_| Ok(pending_again.clone()),
             |run| {
-                assert!(run.checkpoint.nodes.iter().any(|node| !node.state.settled()));
+                assert!(
+                    run.checkpoint
+                        .nodes
+                        .iter()
+                        .any(|node| !node.state.settled())
+                );
                 let call = reads.get() + 1;
                 reads.set(call);
                 match call {
@@ -627,7 +839,7 @@ mod graph_writer_admission_tests {
                         advancements.set(advancements.get() + 1);
                         advance(&document, &mut owner, &mut journal)
                             .map_err(|_| FacadeError::StateCorrupt)
-                    },
+                    }
                 }
             },
         )
@@ -642,7 +854,9 @@ mod graph_writer_admission_tests {
     #[test]
     fn submission_wait_survives_n_unavailable_readings_then_settles() {
         use provenant_core::{Clock, MonoTime, TestClock, WallTime};
-        use provenant_fabric_runtime::graph::{AttemptState, GraphDocument, GraphStatus, NodeState};
+        use provenant_fabric_runtime::graph::{
+            AttemptState, GraphDocument, GraphStatus, NodeState,
+        };
         use std::cell::Cell;
         let document: GraphDocument = serde_json::from_value(serde_json::json!({
             "schema_version":1,"graph_id":"cli-wait-outage","nodes":[{
@@ -684,7 +898,12 @@ mod graph_writer_admission_tests {
             Some(local_host),
             |_| Ok(pending_again.clone()),
             |run| {
-                assert!(run.checkpoint.nodes.iter().any(|node| !node.state.settled()));
+                assert!(
+                    run.checkpoint
+                        .nodes
+                        .iter()
+                        .any(|node| !node.state.settled())
+                );
                 let call = reads.get() + 1;
                 reads.set(call);
                 if call <= 4 {
@@ -711,7 +930,9 @@ mod graph_writer_admission_tests {
     fn a_terminal_remote_reading_settles_the_wait_without_a_tick()
     -> Result<(), Box<dyn std::error::Error>> {
         use provenant_core::HostId;
-        use provenant_fabric_runtime::graph::{AttemptState, GraphDocument, GraphStatus, NodeState};
+        use provenant_fabric_runtime::graph::{
+            AttemptState, GraphDocument, GraphStatus, NodeState,
+        };
         use std::cell::Cell;
 
         let document: GraphDocument = serde_json::from_value(serde_json::json!({
@@ -759,7 +980,10 @@ mod graph_writer_admission_tests {
                 Ok(settled.clone())
             },
         )?;
-        assert!(recovered, "a terminal remote reading must re-drive the advance");
+        assert!(
+            recovered,
+            "a terminal remote reading must re-drive the advance"
+        );
         assert_eq!(advances.get(), 1, "one terminal reading advances once");
         assert_eq!(
             rows.first().and_then(|row| row["state"].as_str()),
@@ -1112,7 +1336,10 @@ mod graph_writer_admission_tests {
     #[test]
     fn invalid_fake_launch_reaches_human_and_machine_graph_status() {
         use provenant_fabric_runtime::coordination::facade::InvalidInputDetail;
-        use provenant_fabric_runtime::graph::{AccessMode, AttemptKey, AttemptObservation, AttemptOwner, GraphDocument, GraphRoute, NodeInput, Replay, };
+        use provenant_fabric_runtime::graph::{
+            AccessMode, AttemptKey, AttemptObservation, AttemptOwner, GraphDocument, GraphRoute,
+            NodeInput, Replay,
+        };
         struct Refuse(FacadeError);
         impl AttemptOwner for Refuse {
             type Error = FacadeError;
@@ -1182,7 +1409,9 @@ mod graph_writer_admission_tests {
             }
         }
         use provenant_fabric_runtime::coordination::facade::DispatchRefusalFact;
-        use provenant_records::diagnostic::{PressureLevel, PressureThreshold, ResourceFact, Layer, };
+        use provenant_records::diagnostic::{
+            Layer, PressureLevel, PressureThreshold, ResourceFact,
+        };
         for cause in [
             FacadeError::DispatchRefused {
                 fact: Some(DispatchRefusalFact::DirtyWriter {
@@ -1311,7 +1540,10 @@ mod graph_writer_admission_tests {
         assert_eq!(node.advance_code.as_deref(), Some("unregistered_account"));
         assert_eq!(node.attempts.len(), 1);
         assert_eq!(node.attempts[0].key.route_index, 0);
-        assert_eq!(node.attempts[0].stop, Some(provenant_records::StopCause::UnregisteredAccount));
+        assert_eq!(
+            node.attempts[0].stop,
+            Some(provenant_records::StopCause::UnregisteredAccount)
+        );
         assert!(node.launch_retry.is_none());
         // The graph seals dispatch intent before calling the owner. Provider
         // execution is proved separately by the durable run-lane record.
@@ -1379,8 +1611,7 @@ mod graph_writer_admission_tests {
             provenant_records::run::CauseKind::RetainedWriterImport,
         ] {
             let mut refused = lanes[0].clone();
-            if let provenant_records::run::AttemptState::Terminal { cause, .. } =
-                &mut refused.state
+            if let provenant_records::run::AttemptState::Terminal { cause, .. } = &mut refused.state
             {
                 *cause = Some(refusal_cause);
             }
@@ -1405,13 +1636,23 @@ mod graph_writer_admission_tests {
                 detail: "pacing reserve".into(),
             });
         pacing.skipped_routes[0].detail = "monthly policy=Pace source=configuration knob=domains.routing.pacing.monthly; window=thirty_day".into();
-        pacing.skipped_routes[0].skipped_accounts.push(provenant_records::SkippedAccount {
-            extra: Default::default(), account: "Go account".into(), reason: provenant_records::RouteExclusionReason::PacingReserve,
-        });
+        pacing.skipped_routes[0]
+            .skipped_accounts
+            .push(provenant_records::SkippedAccount {
+                extra: Default::default(),
+                account: "Go account".into(),
+                reason: provenant_records::RouteExclusionReason::PacingReserve,
+            });
         assert!(durable_launch_refusal(&[pacing.clone()]).is_some());
         let refusal = launch_refusal(&[], std::slice::from_ref(&pacing)).ok_or("pacing refusal")?;
         let wire = serde_json::to_string(&refusal)?;
-        for expected in ["codex/gpt-6-luna", "Go account", "window=thirty_day", "domains.routing.pacing.monthly", "source=configuration"] {
+        for expected in [
+            "codex/gpt-6-luna",
+            "Go account",
+            "window=thirty_day",
+            "domains.routing.pacing.monthly",
+            "source=configuration",
+        ] {
             assert!(wire.contains(expected), "{wire}");
         }
         assert!(durable_launch_refusal(&[pacing, lanes[0].clone()]).is_none());
@@ -1570,7 +1811,9 @@ mod graph_review_tests {
     #[test]
     fn review_identity_requires_read_only_and_recognises_behaviour()
     -> Result<(), Box<dyn std::error::Error>> {
-        use provenant_fabric_runtime::graph::{GraphNode, is_review_node, template::ReviewBehaviour, };
+        use provenant_fabric_runtime::graph::{
+            GraphNode, is_review_node, template::ReviewBehaviour,
+        };
         for (role, reviews) in [
             (None, false),
             (Some("lens"), true),
@@ -1648,7 +1891,9 @@ mod graph_ask_inbox_tests {
         graph::{AskFiling, AskLink, AskScope, LoopDecision, loop_ask},
         inbox::{InboxFilter, InboxInput, InboxResult, InboxService},
     };
-    use provenant_records::inbox::{AnswerAction, AnswerDeliveryState, InteractionChannel, RequestState, };
+    use provenant_records::inbox::{
+        AnswerAction, AnswerDeliveryState, InteractionChannel, RequestState,
+    };
 
     #[test]
     fn graph_owner_notification_is_non_blocking_and_replays_one_receipt()
@@ -2089,7 +2334,9 @@ mod graph_ask_inbox_tests {
     #[test]
     fn graph_ask_is_one_open_request_and_a_chat_answer_resumes_the_node()
     -> Result<(), Box<dyn std::error::Error>> {
-        use provenant_fabric_runtime::graph::{GraphDocument, GraphStatus, NodeState, advance_with_budget, };
+        use provenant_fabric_runtime::graph::{
+            GraphDocument, GraphStatus, NodeState, advance_with_budget,
+        };
         let temp = tempfile::tempdir()?;
         let base = temp.path().canonicalize()?;
         let mut inputs = provenant_core::RootInputs::new(base.join("home"), base.join("assets"));
@@ -2151,7 +2398,7 @@ mod graph_ask_inbox_tests {
         service.execute(
             InboxInput::Answer {
                 extra: Default::default(),
-                    queue_control: None,
+                queue_control: None,
                 id: open.id,
                 action: AnswerAction::Choose,
                 option_id: Some("hold".into()),
@@ -2181,7 +2428,9 @@ mod graph_ask_inbox_tests {
     #[test]
     fn graph_decide_asks_stay_fresh_across_repeated_cancel_and_resume()
     -> Result<(), Box<dyn std::error::Error>> {
-        use provenant_fabric_runtime::graph::{GraphDocument, GraphStatus, NodeState, advance_with_budget, resume_with_budget, };
+        use provenant_fabric_runtime::graph::{
+            GraphDocument, GraphStatus, NodeState, advance_with_budget, resume_with_budget,
+        };
         let temp = tempfile::tempdir()?;
         let base = temp.path().canonicalize()?;
         let mut inputs = provenant_core::RootInputs::new(base.join("home"), base.join("assets"));
@@ -2256,7 +2505,7 @@ mod graph_ask_inbox_tests {
         service.execute(
             InboxInput::Answer {
                 extra: Default::default(),
-                    queue_control: None,
+                queue_control: None,
                 id: open[0].id,
                 action: AnswerAction::Choose,
                 option_id: Some("ship".into()),
@@ -2736,12 +2985,18 @@ mod result_tests {
                 head: "1".repeat(40),
             });
         let dependency = run.checkpoint.nodes[0].clone();
-        run.checkpoint.nodes[0].settled_dependency_snapshots.insert("upstream".into(), dependency);
+        run.checkpoint.nodes[0]
+            .settled_dependency_snapshots
+            .insert("upstream".into(), dependency);
         let snapshot = super::graph_snapshot(run.checkpoint);
         let json = serde_json::to_string(&snapshot).unwrap();
         assert!(json.contains("/private/host/writer"));
         assert!(json.contains(&"1".repeat(40)));
-        assert!(snapshot.checkpoint.nodes[0].settled_dependency_snapshots.contains_key("upstream"));
+        assert!(
+            snapshot.checkpoint.nodes[0]
+                .settled_dependency_snapshots
+                .contains_key("upstream")
+        );
     }
 
     #[test]
@@ -2927,7 +3182,9 @@ mod result_tests {
             return Ok(());
         }
         use super::*;
-        use provenant_fabric_runtime::graph::{FileJournal, GraphDocument, GraphExecution, GraphJournal, };
+        use provenant_fabric_runtime::graph::{
+            FileJournal, GraphDocument, GraphExecution, GraphJournal,
+        };
         struct FreeWorkers;
         impl WorkerObserver for FreeWorkers {
             fn observe_roots(
@@ -3302,7 +3559,7 @@ mod result_tests {
                     branch: None,
                     commit: None,
                     stop: None,
-                cause: None,
+                    cause: None,
                 })
             }
         }
@@ -3410,11 +3667,14 @@ mod result_tests {
         std::fs::write(&second_response, serde_json::to_vec(&second)?)?;
         std::fs::write(
             &ssh,
-            format!(
-                "#!/bin/sh\nrequest=$(cat)\ncase \"$request\" in\n  *'\"offset\":5'*) touch '{}' ; cat '{}' ;;\n  *) cat '{}' ;;\nesac\n",
-                second_seen.display(),
-                second_response.display(),
-                response.display()
+            super::peer_tests::probing_ssh(
+                &health,
+                &format!(
+                    "case \"$request\" in\n  *'\"offset\":5'*) touch '{}' ; cat '{}' ;;\n  *) cat '{}' ;;\nesac\n",
+                    second_seen.display(),
+                    second_response.display(),
+                    response.display()
+                ),
             ),
         )?;
         let paged = graph_inputs::materialise(
@@ -3914,7 +4174,7 @@ mod retry_allowance_tests {
                 branch: None,
                 commit: None,
                 stop: None,
-            cause: None,
+                cause: None,
             })
         }
     }
@@ -4178,14 +4438,13 @@ mod provisioned_writer_submission_tests {
                 attempt: 1,
             };
             let spec = if condition == "unpinned" {
-                serde_json::from_value(
-                    serde_json::json!({"directory": source}),
-                )?
+                serde_json::from_value(serde_json::json!({"directory": source}))?
             } else {
                 serde_json::from_value(serde_json::json!({"preset":"light"}))?
             };
             let node = graph::NodeInput {
-                writer_dirty_preflight: false, review_launch: false,
+                writer_dirty_preflight: false,
+                review_launch: false,
                 require_skill_location: false,
                 settlement_retries: Some(1),
                 prior_attempts: &[],
@@ -4400,7 +4659,9 @@ mod provisioned_writer_submission_tests {
             provenant_core::WallTime::from_micros(record.queued_at.as_micros() + 1_500_000)?;
         let finished = provenant_core::WallTime::from_micros(started.as_micros() + 3_000_000)?;
         use provenant_records::custody::Scope;
-        use provenant_supervisor::custody::{ExitObservation, PublicationState, SettlementEvidence, };
+        use provenant_supervisor::custody::{
+            ExitObservation, PublicationState, SettlementEvidence,
+        };
         let exit = ExitObservation {
             launch_refusal: None,
             publication: PublicationState::Durable,

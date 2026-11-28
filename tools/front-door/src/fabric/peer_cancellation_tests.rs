@@ -122,11 +122,6 @@ fn lost_peer_reply_cancellation_survives_reconnect_and_stops_receiver_subtree() 
     let response = origin_rig.root.join("cancel-response");
     let frame = origin_rig.root.join("cancel-request");
     let health = origin_rig.root.join("cancel-health");
-    write_health_reply(
-        &health,
-        remote_host,
-        ProjectLocator::new(&origin.context.identity, &origin.home)?.key,
-    )?;
     std::fs::write(
         &ssh,
         probing_ssh(
@@ -167,6 +162,11 @@ fn lost_peer_reply_cancellation_survives_reconnect_and_stops_receiver_subtree() 
         })
     };
     origin = reopen()?;
+    write_health_reply(
+        &health,
+        remote_host,
+        ProjectLocator::new(&origin.context.identity, &origin.home)?.key,
+    )?;
     let execution = FileJournal::execution(
         &receiver_factory.context.roots.state,
         receiver_factory.context.identity.project,
