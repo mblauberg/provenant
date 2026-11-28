@@ -70,14 +70,17 @@ assert report["families"] is None and report["repeats_filter"] is None
 writer = report["family_summary"]["writer"]
 assert writer["attempts"] == 2 and writer["pass"] == {"passed":1,"failed":1,"unknown":0,"rate":0.5}, writer
 assert writer["seconds"] == {"mean":15.0,"min":10,"max":20,"stdev":5.0}, writer
-assert writer["tokens"]["input"] == {"mean":200.0,"reported":2}, writer
-assert writer["tokens"]["reasoning"] == {"mean":None,"reported":0}, writer
+assert writer["tokens"]["input"] == {"mean":200.0,"reported":2,"spread":100.0}, writer
+assert writer["tokens"]["reasoning"] == {"mean":None,"reported":0,"spread":None}, writer
 assert report["family_summary"]["fix"]["pass"]["rate"] == 1.0
 assert report["family_summary"]["review"]["pass"] == {"passed":0,"failed":0,"unknown":1,"rate":None}
 task = report["tasks"]["task-a"]
 assert task["family"] == "writer" and task["repeats"] == 2
 assert task["seconds"]["stdev"] == 5.0, "per-task variance across repeats"
 assert report["tasks"]["task-b"]["seconds"]["stdev"] == 1.0
+assert task["tokens"]["input"] == {"mean":200.0,"reported":2,"spread":100.0}, "per-task token variance across repeats"
+assert report["tasks"]["task-b"]["tokens"]["input"]["spread"] == 0.0, "identical repeats have zero spread"
+assert task["tokens"]["cache_read"]["spread"] is None, "incomplete usage keeps a null spread"
 filtered = load("filtered")
 assert filtered["families"] == ["fix"] and filtered["repeats_filter"] == 2
 assert filtered["attempts"] == 2 and set(filtered["tasks"]) == {"task-b"}
@@ -178,7 +181,7 @@ with open(sys.argv[1]) as source:
     report = json.load(source)
 assert report["families"] == ["writer"], report
 assert report["family_summary"]["writer"]["attempts"] == 2
-assert report["family_summary"]["writer"]["tokens"]["input"] == {"mean":100.0,"reported":1}
+assert report["family_summary"]["writer"]["tokens"]["input"] == {"mean":100.0,"reported":1,"spread":None}
 PY
 
 (cd "$repo" && "$bench" replay --route fixture/route --limit 1 --family writer \
@@ -191,6 +194,29 @@ assert "recorded 1 run(s)" in lines[0], lines
 report = json.loads(lines[-1])
 assert report["families"] == ["writer"] and report["route"] == "fixture/route"
 assert report["family_summary"]["writer"]["attempts"] == 3
+PY
+
+# A replay with a custom ledger must run into that ledger and report from the
+# same one; neither side may fall back to the default state ledger.
+custom=$state/custom.jsonl
+before=$(wc -l < "$state/bench.jsonl")
+(cd "$repo" && "$bench" replay --route fixture/route --limit 1 --family writer \
+    --ledger "$custom") > "$tmp/replay-custom.log"
+after=$(wc -l < "$state/bench.jsonl")
+[ "$before" = "$after" ] || { echo "custom replay wrote to the default ledger" >&2; exit 1; }
+python3 - "$custom" "$tmp/replay-custom.log" <<'PY'
+import json, sys
+custom, log = sys.argv[1], sys.argv[2]
+with open(log) as source:
+    lines = [line for line in source if line.strip()]
+assert "recorded 1 run(s)" in lines[0] and custom in lines[0], lines
+report = json.loads(lines[-1])
+assert report["ledger"] == custom, report
+assert report["family_summary"]["writer"]["attempts"] == 1, report
+assert len(report["tasks"]) == 1 and next(iter(report["tasks"].values()))["attempts"] == 1, report
+with open(custom) as ledger:
+    rows = [json.loads(line) for line in ledger if line.strip()]
+assert len(rows) == 1 and rows[0]["family"] == "writer", rows
 PY
 
 echo 'bench report fixture passed'

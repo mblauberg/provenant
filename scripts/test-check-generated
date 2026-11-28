@@ -91,8 +91,15 @@ def failed_generator_does_not_stop_others() -> None:
         (root / "config").mkdir()
         (root / "config" / "ports.json").write_text(json.dumps(registry))
 
-        pull_request_event = {"pull_request": {"head": {"sha": "b" * 40}}}
-        workflow_head_sha = pull_request_event["pull_request"]["head"]["sha"]
+        # Model a PR event whose base has advanced past the branch point: the
+        # declared head is a real commit, and the patch must be generated from
+        # that checkout rather than from a stale merge tree.
+        base = git(root, "rev-parse", "HEAD").strip()
+        (root / "base-advanced").write_text("base moved on\n")
+        git(root, "add", "-A")
+        git(root, "commit", "-qm", "advance base past PR branch point")
+        workflow_head_sha = git(root, "rev-parse", "HEAD").strip()
+        assert workflow_head_sha != base, "fixture must model an advanced base"
         result = subprocess.run(
             [str(CHECK), "--root", str(root), "--ports", str(root / "config/ports.json"), "--head-sha", workflow_head_sha,
              "--out", str(root / "artifacts")],
@@ -142,9 +149,21 @@ def reference_render_job_unchanged() -> None:
     assert "\n      - generated\n" in status, "aggregate gate must depend on generated"
 
 
+def generated_job_checks_out_pr_head() -> None:
+    """The generated job must diff from the PR head, never refs/pull/N/merge."""
+    workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text()
+    generated = workflow.split("\n  generated:\n", 1)[1].split("\n  rust-lint:\n", 1)[0]
+    checkout = generated.split("- name: Check out repository", 1)[1].split("- name:", 1)[0]
+    assert "ref: ${{ github.event.pull_request.head.sha || github.sha }}" in checkout, (
+        "generated job checkout must pin the PR head (falling back to github.sha on push)"
+    )
+    assert "GENERATED_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}" in generated
+
+
 def main() -> int:
     failed_generator_does_not_stop_others()
     reference_render_job_unchanged()
+    generated_job_checks_out_pr_head()
     print("check-generated: ok")
     return 0
 
