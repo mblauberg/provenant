@@ -431,7 +431,10 @@ fn review_panel_minimum_defaults_to_all_lenses_but_one_and_verification_to_one()
             Some(&template::default_review_minimum(lenses.len())),
             "{lenses:?}"
         );
-        assert_eq!(minima.get("lenses"), Some(&lenses.len().saturating_sub(1).max(1)));
+        assert_eq!(
+            minima.get("lenses"),
+            Some(&lenses.len().saturating_sub(1).max(1))
+        );
         assert_eq!(minima.get("verify"), Some(&1), "{lenses:?}");
     }
 }

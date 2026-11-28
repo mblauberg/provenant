@@ -172,7 +172,10 @@ fn hosts_doctor_uses_the_configured_peer_transport() -> Result {
     let request = rig.root.join("ssh-request");
     let response = rig.root.join("ssh-response");
     let health = rig.root.join("ssh-health");
-    std::fs::write(&health, serde_json::to_vec(&health_frame(host, &json!(key)))?)?;
+    std::fs::write(
+        &health,
+        serde_json::to_vec(&health_frame(host, &json!(key)))?,
+    )?;
     std::fs::write(
         &response,
         serde_json::to_vec(&json!({
@@ -252,7 +255,10 @@ fn hosts_doctor_rejects_untrusted_peer_reports() -> Result {
     let ssh = rig.root.join("ssh");
     let response_path = rig.root.join("ssh-response");
     let health = rig.root.join("ssh-health");
-    std::fs::write(&health, serde_json::to_vec(&health_frame(host, &json!(key)))?)?;
+    std::fs::write(
+        &health,
+        serde_json::to_vec(&health_frame(host, &json!(key)))?,
+    )?;
     let good = json!({
         "claude":[{"label":"default","signin":{"state":"signed_out","token_validity":"unverified"}}],
         "peer_agent":"running","login_accounts":[],"managed":[],"warnings":[]
@@ -2142,7 +2148,10 @@ fn inbox_hosts_names_why_a_peer_gave_no_page() -> Result {
     let ssh = rig.root.join("ssh");
     let real = std::fs::read_to_string(&ssh)?;
     let health = rig.root.join("peer-health.json");
-    std::fs::write(&health, serde_json::to_vec(&health_frame(peer, &json!(key)))?)?;
+    std::fs::write(
+        &health,
+        serde_json::to_vec(&health_frame(peer, &json!(key)))?,
+    )?;
     std::fs::write(
         &ssh,
         probing_ssh(
