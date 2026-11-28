@@ -2,6 +2,7 @@
 pub(crate) mod liveness;
 use crate::census::{
     CensusError, ProcessIdentity, ProcessObservation, ProcessObserver, SystemProcessObserver,
+    boot_observer,
 };
 use crate::machine::StopReason;
 pub use liveness::{GuardianLossRecovery, LossUnproven};
@@ -3213,7 +3214,7 @@ pub fn list_writer_reservations_in_slot(slot: &Directory) -> Result<ReservationL
             let live = if legacy && holderless {
                 Some(false)
             } else {
-                reservation_holder_live(&reservation, &SystemProcessObserver)
+                reservation_holder_live(&reservation, boot_observer(&reservation.boot))
             };
             let branch = match &reservation.binding {
                 StoredWriterBinding::Worktree { branch, .. } => Some(branch.clone()),

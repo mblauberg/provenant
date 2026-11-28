@@ -1,4 +1,5 @@
 mod support;
+use provenant_test_support::fake_forge;
 use sha2::Digest;
 use std::{
     fs,
@@ -45,7 +46,7 @@ fn rig() -> Result<TestRig> {
 /// only against a non-empty required set, so a rig that expects one to settle
 /// names the check its pull requests report.
 fn require_check(rig: &TestRig, check: &str) -> Result {
-    fs::write(rig.project.join("required-checks"), format!("{check}\n"))?;
+    fake_forge::require_checks(&rig.project, check)?;
     Ok(())
 }
 
@@ -1319,20 +1320,8 @@ fn fake_gh(args: &[String]) -> Result<u8> {
             if value.contains("repos/{owner}/{repo}/branches/main")
                 && !value.contains("/protection") =>
         {
-            let checks = fs::read_to_string("required-checks").unwrap_or_default();
-            let contexts: Vec<&str> = checks.lines().filter(|line| !line.is_empty()).collect();
-            let body = serde_json::json!({
-                "name": "main",
-                "protected": !contexts.is_empty(),
-                "protection": {
-                    "enabled": !contexts.is_empty(),
-                    "required_status_checks": {
-                        "enforcement_level": if contexts.is_empty() { "off" } else { "everyone" },
-                        "contexts": contexts,
-                        "checks": [],
-                    },
-                },
-            });
+            let contexts = fake_forge::required_checks(Path::new("."));
+            let body = fake_forge::branch_read("main", &contexts);
             io::stdout().write_all(&serde_json::to_vec(&body)?)?;
         }
         "pr view 1668 --json headRefOid" | "pr view 1668 --json headRefOid,mergeable" => {
@@ -1404,12 +1393,8 @@ fn fake_gh(args: &[String]) -> Result<u8> {
         }
         "api repos/{owner}/{repo}/branches/main/protection" => {
             // The CI observer reads the required set from classic protection.
-            let checks = fs::read_to_string("required-checks").unwrap_or_default();
-            let contexts: Vec<&str> = checks.lines().filter(|line| !line.is_empty()).collect();
-            if !contexts.is_empty() {
-                let body = serde_json::json!({
-                    "required_status_checks": {"contexts": contexts, "checks": []},
-                });
+            let contexts = fake_forge::required_checks(Path::new("."));
+            if let Some(body) = fake_forge::protection_read(&contexts) {
                 io::stdout().write_all(b"HTTP/2.0 200 OK\r\n\r\n")?;
                 io::stdout().write_all(&serde_json::to_vec(&body)?)?;
                 return Ok(0);

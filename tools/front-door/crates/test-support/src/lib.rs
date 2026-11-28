@@ -10,6 +10,8 @@ use std::{
 
 use provenant_core::{PathResolver, RootInputs};
 
+pub mod fake_forge;
+
 /// Run native Git in an isolated fixture, without inherited lane bindings.
 #[allow(clippy::disallowed_methods)]
 pub fn git_command() -> std::process::Command {

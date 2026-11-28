@@ -779,6 +779,7 @@ name = "provenant-test-support"
 version = "2.11.0"
 dependencies = [
  "provenant-core",
+ "serde_json",
 ]
 
 [[package]]

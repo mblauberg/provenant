@@ -288,9 +288,9 @@ pub(crate) fn pr_contribution_roundtrip() -> Result {
         serde_json::to_vec(&open_view)?,
     )?;
     fs::write(landing.rig.project.join("checks-fail"), "")?;
-    let unbound_land = command(&landing.rig, &["land", NUMBER, "--json"])?;
+    let unbound_land = command(&landing.rig, &["land", NUMBER, "--wait=2s", "--json"])?;
     assert_ne!(code(&unbound_land), 0);
-    assert_eq!(json(&unbound_land)?["error"]["code"], "CI_UNAVAILABLE");
+    assert_eq!(json(&unbound_land)?["error"]["code"], "LAND_PENDING");
     // The v2 envelope carries warnings as typed values, not prose on stderr.
     // The `--bind` repair is owned by the `pr open` binding warning asserted
     // above; the land failure reports the capture diagnostic through the same
@@ -1133,7 +1133,25 @@ pub(crate) fn fake_gh(args: &[String]) -> Result<u8> {
             )?;
         }
         "api repos/{owner}/{repo}/branches/main" => {
-            io::stdout().write_all(br#"{"protected":false}"#)?;
+            // The base stays open to a direct push, which the landing probes
+            // here; the required set is served by the protection read below.
+            let body = provenant_test_support::fake_forge::branch_read("main", &[]);
+            io::stdout().write_all(&serde_json::to_vec(&body)?)?;
+        }
+        // The CI observer reads the required set from classic protection.
+        "api repos/{owner}/{repo}/branches/main/protection" => {
+            let contexts = provenant_test_support::fake_forge::required_checks(&dir);
+            match provenant_test_support::fake_forge::protection_read(&contexts) {
+                Some(body) => {
+                    io::stdout().write_all(b"HTTP/2.0 200 OK\r\n\r\n")?;
+                    io::stdout().write_all(&serde_json::to_vec(&body)?)?;
+                }
+                None => {
+                    io::stdout().write_all(b"HTTP/2.0 404 Not Found\r\n\r\n{}")?;
+                    writeln!(io::stderr(), "gh: Not Found (HTTP 404)")?;
+                    return Ok(1);
+                }
+            }
         }
         "api --paginate --slurp repos/{owner}/{repo}/rules/branches/main?per_page=100" => {
             io::stdout().write_all(b"[[]]")?;
@@ -1226,8 +1244,11 @@ fn landing_with_git_dir(separate: bool) -> Result<Landing> {
     *path = format!("{}:/usr/bin:/bin", bin.display()).into();
     fs::write(
         admin.join("info/exclude"),
-        "head.json\nview.json\ngh-calls\nwatched\nmerge-args\nchecks-fail\nmerge-completes\n",
+        "head.json\nview.json\ngh-calls\nwatched\nmerge-args\nchecks-fail\nmerge-completes\nrequired-checks\n",
     )?;
+    // A landing settles CI only against a required set: the check the fake
+    // forge's runs report.
+    provenant_test_support::fake_forge::require_checks(&rig.project, "ci-status")?;
     fs::write(rig.project.join(".gitignore"), ".worktrees/\n**/target/\n")?;
     git(&rig, &["add", ".gitignore"])?;
     git(&rig, &["commit", "-qm", "ignore build output"])?;
@@ -2793,7 +2814,18 @@ pub(crate) fn pr_land_changes_nothing_when_the_merge_does_not_happen() -> Result
         } else {
             fs::write(rig.project.join(flag), "")?;
         }
-        let output = command(rig, &["land", NUMBER, "--head", &landing.head, "--json"])?;
+        // CI that cannot be read or settled stays pending to the wait bound.
+        let output = command(
+            rig,
+            &[
+                "land",
+                NUMBER,
+                "--head",
+                &landing.head,
+                "--wait=2s",
+                "--json",
+            ],
+        )?;
         assert_ne!(code(&output), 0, "{flag}");
         let value = json(&output)?;
         assert_eq!(value["data"]["merged"], false, "{value}");
@@ -2809,10 +2841,12 @@ pub(crate) fn pr_land_changes_nothing_when_the_merge_does_not_happen() -> Result
         r#"{"state":"OPEN","baseRefName":"main","headRefName":"feat","isCrossRepository":false}"#,
     )?;
     fs::write(landing.rig.project.join("checks-fail"), "")?;
-    let output = command(&landing.rig, &["land", NUMBER, "--json"])?;
+    let output = command(&landing.rig, &["land", NUMBER, "--wait=2s", "--json"])?;
     let value = json(&output)?;
     assert_ne!(code(&output), 0, "{value}");
-    assert_eq!(value["error"]["code"], "CI_UNAVAILABLE", "{value}");
+    // CI the observer cannot read stays pending to the wait bound: the
+    // landing reports it pending and changes nothing.
+    assert_eq!(value["error"]["code"], "LAND_PENDING", "{value}");
     assert_eq!(value["data"]["merged"], false);
     assert!(landing.worktree.exists());
     assert!(branch_exists(&landing.rig, "feat")?);
