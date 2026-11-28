@@ -2833,7 +2833,11 @@ fn observe_attempt<R: AttemptOwner, J: GraphJournal>(
             )?;
             return Ok(None);
         }
-        Err(error) => return Err(GraphError::Run(error)),
+        Err(error) => {
+            // Already reported; never attribute them to a later launch.
+            owner.take_launch_warnings();
+            return Err(GraphError::Run(error));
+        }
     };
     Ok(Some(observation))
 }

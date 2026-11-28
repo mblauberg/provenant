@@ -423,6 +423,11 @@ pub(crate) fn launch_disposition<R: AttemptOwner, J: GraphJournal>(
         timing.policy,
     )
     .map_err(GraphError::Refused)?;
+    // Warnings the failed launch raised (a custody change, a carry setting)
+    // explain the refusal; keep them on this node rather than leaking them
+    // into the next launch's metadata.
+    let warnings = owner.take_launch_warnings();
+    super::transitions::apply_launch_metadata(checkpoint, index, warnings);
     journal.save(checkpoint).map_err(GraphError::Journal)
 }
 

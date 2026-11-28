@@ -8,8 +8,12 @@ fn uncertain_handoff_reobserves_one_guardian_on_the_same_route() {
         calls: Vec<(AttemptKey, GraphRoute)>,
         guardians: usize,
         now: Option<provenant_core::WallTime>,
+        warnings: Vec<provenant_records::Warning>,
     }
     impl AttemptOwner for UncertainOwner {
+        fn take_launch_warnings(&mut self) -> Vec<provenant_records::Warning> {
+            std::mem::take(&mut self.warnings)
+        }
         type Error = FacadeError;
         fn worktree_layout(&self) -> provenant_config::WorktreeLayoutPort {
             provenant_config::PortTable::builtin().worktree_layout
@@ -32,6 +36,12 @@ fn uncertain_handoff_reobserves_one_guardian_on_the_same_route() {
             self.calls.push((key.clone(), route.clone()));
             if self.calls.len() == 1 {
                 self.guardians += 1;
+                let code = provenant_records::warning::WarningCode("CUSTODY_CHANGED");
+                self.warnings.push(provenant_records::Warning::new(
+                    code,
+                    "fixture custody changed",
+                    provenant_records::warning::detected_source(code),
+                ));
                 Err(FacadeError::LaunchUnknown {
                     detail: Some("fixture handshake timed out".into()),
                     operation_id: provenant_core::OperationId::parse("uncertain-operation")
@@ -63,6 +73,14 @@ fn uncertain_handoff_reobserves_one_guardian_on_the_same_route() {
         .status_note()
         .unwrap_or_default();
     assert!(note.contains("fixture handshake timed out"), "{note}");
+    // The failed launch's warnings stay on its node.
+    assert!(
+        pending.checkpoint.nodes[0]
+            .warnings
+            .iter()
+            .any(|warning| warning.message == "fixture custody changed")
+    );
+    assert!(owner.warnings.is_empty());
     assert_eq!(pending.checkpoint.nodes[0].attempts.len(), 1);
     owner.now = Some(at(5));
     let done = advance(&document, &mut owner, &mut journal).unwrap();
