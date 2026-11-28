@@ -111,6 +111,13 @@ fn commit_own_stages_only_claimed_paths_and_cas_updates_the_branch()
     assert!(files.contains("own.txt"), "{files}");
     assert!(!files.contains("other.txt"), "{files}");
     assert!(!files.contains("base.txt"), "{files}");
+    assert_eq!(
+        fs::read_to_string(fixture.repo.join("other.txt"))?,
+        "other\n"
+    );
+    assert!(
+        git(&fixture.repo, &["status", "--porcelain", "--", "other.txt"]).contains("other.txt")
+    );
     let subject = git(&fixture.repo, &["log", "-1", "--pretty=format:%s"]);
     assert_eq!(subject, "lane: own paths");
     Ok(())
@@ -183,7 +190,11 @@ fn index_lock_race_retries_then_transient() -> std::result::Result<(), Box<dyn s
     // Pre-lock the private index for both attempts. The first two
     // `git add` calls fail on the lock and the third exceeds retries.
     for attempt in 0..=1 {
-        let tag = format!("{}-{attempt}", std::process::id());
+        let tag = format!(
+            "{}-{:?}-{attempt}",
+            std::process::id(),
+            std::thread::current().id()
+        );
         let lock = crate::worktree_carry::private_index_path(&fixture.git_dir(), &tag);
         let lock = lock.with_extension("index.lock");
         fs::write(lock, "held by another process")?;

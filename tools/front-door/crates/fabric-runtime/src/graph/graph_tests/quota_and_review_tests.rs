@@ -369,6 +369,7 @@ fn default_writer_base_requests_the_selected_carry_mode() {
     let mut peer_journal = MemoryJournal::default();
     advance(&document, &mut peer, &mut peer_journal).unwrap();
     assert!(peer.carry_requests.is_empty(), "peer checkout edits are not the chair's edits");
+    assert_eq!(peer.peer_carry_requests, [Some(provenant_records::lane_contract::CarryMode::All)]);
 }
 
 #[test]

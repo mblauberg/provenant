@@ -121,8 +121,8 @@ pub(crate) fn resolve_child_launch(
                     warn(Warning::new(
                         WarningCode(PATH_CLAIM_OVERLAP),
                         format!(
-                            "{PATH_CLAIM_OVERLAP}: claim {path:?} overlaps a live claim by attempt {}",
-                            live.holder
+                            "{PATH_CLAIM_OVERLAP}: claim {path:?} overlaps claim {:?} by attempt {}",
+                            live.path, live.holder
                         ),
                         provenant_records::warning::detected_source(WarningCode(
                             PATH_CLAIM_OVERLAP,
@@ -1735,6 +1735,8 @@ impl BoundGraphOwner<'_> {
 #[path = "owner/attempt_owner.rs"]
 mod attempt_owner;
 mod carry;
+mod claims;
+mod commit_own;
 
 /// Reconstruct an [`AttemptSpec`] from an accepted task request and the node's admitter,
 /// round-tripping all fields that affect dispatch and request hashing.
@@ -2295,6 +2297,7 @@ impl BoundGraphOwner<'_> {
             actor: None,
             chair: None,
         };
+        let own_commit = node.attempt.and_then(|spec| spec.commit.clone());
         let (required_verdict, deadline_seconds, source_commit) = (
             node.required_verdict,
             node.deadline_seconds,
@@ -2362,6 +2365,7 @@ impl BoundGraphOwner<'_> {
                 deadline_seconds,
                 source_commit,
                 access,
+                own_commit,
             },
         )
     }
@@ -2636,6 +2640,25 @@ impl BoundGraphOwner<'_> {
                 provenant_run::OperationState::Prepared | provenant_run::OperationState::Refused
             )
         });
+        if !accepted
+            && host.is_some_and(|host| host != self.factory.context.identity.host)
+            && access == provenant_fabric_runtime::graph::AccessMode::WorktreeWrite
+            && node
+                .attempt
+                .and_then(|spec| spec.new_worktree.as_ref())
+                .is_some_and(|tree| tree.default_base)
+            && carry::mode(self, node.attempt.and_then(|spec| spec.carry_uncommitted))?
+                != provenant_records::lane_contract::CarryMode::Off
+        {
+            let code = provenant_records::warning::CARRY_PEER_UNSUPPORTED;
+            let warning = Warning::new(
+                code,
+                "CARRY_PEER_UNSUPPORTED: uncommitted edits cannot be carried to a peer writer",
+                provenant_records::warning::detected_source(code),
+            );
+            warn(warning.clone());
+            self.launch_warnings.push(warning);
+        }
         let writer_project = if access == provenant_fabric_runtime::graph::AccessMode::WorktreeWrite
         {
             worktree
@@ -2978,6 +3001,34 @@ impl BoundGraphOwner<'_> {
         } else {
             None
         };
+        if let (Some(subject), Some(spec), Some(path)) =
+            (shared_writer.as_ref(), node.attempt, worktree)
+        {
+            match claims::overlap_warnings(
+                &store,
+                &call,
+                subject,
+                Path::new(path),
+                &spec.write_scope,
+            ) {
+                Ok(warnings) => {
+                    for warning in warnings {
+                        warn(warning.clone());
+                        self.launch_warnings.push(warning);
+                    }
+                }
+                Err(error) => {
+                    let code = WarningCode("PATH_CLAIM_CHECK_UNAVAILABLE");
+                    let warning = Warning::new(
+                        code,
+                        format!("could not inspect live path claims: {error}"),
+                        provenant_records::warning::detected_source(code),
+                    );
+                    warn(warning.clone());
+                    self.launch_warnings.push(warning);
+                }
+            }
+        }
         // Preserve the specific detached-writer refusal in node status.
         if !accepted
             && access == provenant_fabric_runtime::graph::AccessMode::WorktreeWrite
@@ -3480,6 +3531,16 @@ impl BoundGraphOwner<'_> {
             attempt.account = route.account.clone().or(attempt.account);
             attempt
         });
+        if !accepted
+            && host.is_some_and(|host| host != self.factory.context.identity.host)
+            && access == provenant_fabric_runtime::graph::AccessMode::WorktreeWrite
+            && attempt
+                .new_worktree
+                .as_ref()
+                .is_some_and(|tree| tree.default_base)
+        {
+            attempt.carry_uncommitted = Some(carry::mode(self, attempt.carry_uncommitted)?);
+        }
         // The graph checkpoint owns worktree provisioning on this host;
         // submission receives the resolved checkout, never a second request to
         // create it. A peer has no access to this host's checkout, so it keeps
@@ -3818,6 +3879,7 @@ impl BoundGraphOwner<'_> {
             deadline_seconds,
             source_commit,
             access,
+            own_commit,
         } = facts;
         use provenant_records::run::{AttemptState, Outcome};
         match attempt.state {
@@ -3858,6 +3920,39 @@ impl BoundGraphOwner<'_> {
                         attempt_ref: reference,
                     });
                 }
+                let own_head = if !remote && launched_for_own_commit(&attempt, own_commit.as_ref())
+                {
+                    let request = store
+                        .request(attempt.attempt_id, &call)
+                        .map_err(run_error)?;
+                    if let Some(expected) = request.task.access.shared_worktree.as_ref() {
+                        let writer = request
+                            .task
+                            .writer
+                            .as_ref()
+                            .ok_or(FacadeError::StateCorrupt)?;
+                        let current = provenant_cli::fabric::inspect_checkout_subject(
+                            &self.factory.context.roots,
+                            &writer.worktree,
+                        )
+                        .map_err(|_| FacadeError::StateCorrupt)?;
+                        if current.as_ref() != Some(expected) {
+                            return Err(FacadeError::StateCorrupt);
+                        }
+                        Some(commit_own::commit(
+                            &writer.worktree,
+                            &request.task.profile.write_scope,
+                            attempt.attempt_id,
+                            &self.factory.home,
+                            &self.factory.executor,
+                            self.cancel,
+                        )?)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
                 let pickup = if remote {
                     None
                 } else {
@@ -4006,12 +4101,12 @@ impl BoundGraphOwner<'_> {
                             })
                     }),
                     branch: effective_delivery.map(|receipt| receipt.branch.clone()),
-                    commit: Self::observed_writer_commit(
+                    commit: own_head.or_else(|| Self::observed_writer_commit(
                         attempt.head,
                         effective_delivery,
                         access,
                         source_commit,
-                    ),
+                    )),
                     stop,
                     settlement_class: attempt.settlement_class,
                     cause: attempt.state.cause().map(Box::new),
@@ -4113,6 +4208,15 @@ struct TerminalFacts<'a> {
     deadline_seconds: Option<u64>,
     source_commit: Option<&'a str>,
     access: provenant_fabric_runtime::graph::AccessMode,
+    own_commit: Option<provenant_records::lane_contract::CommitChoice>,
+}
+
+fn launched_for_own_commit(
+    attempt: &provenant_records::run::AttemptRecord,
+    choice: Option<&provenant_records::lane_contract::CommitChoice>,
+) -> bool {
+    choice == Some(&provenant_records::lane_contract::CommitChoice::OwnPaths)
+        && attempt.provider_launched.unwrap_or(true)
 }
 
 /// Resolve the existing routing allowance, retaining explicit zero overrides.
@@ -4561,12 +4665,12 @@ mod child_launch_tests {
         .unwrap();
         assert_eq!(placement, ChildPlacement::ParentWorktree);
         let warnings = take_unhandled();
-        assert!(
-            warnings
-                .iter()
-                .any(|warning| warning.code.as_ref()
-                    == provenant_records::policy::PATH_CLAIM_OVERLAP)
-        );
+        let warning = warnings
+            .iter()
+            .find(|warning| warning.code.as_ref() == provenant_records::policy::PATH_CLAIM_OVERLAP)
+            .expect("overlap warning");
+        assert!(warning.message.contains("src/lib.rs"));
+        assert!(warning.message.contains("src"));
     }
 }
 

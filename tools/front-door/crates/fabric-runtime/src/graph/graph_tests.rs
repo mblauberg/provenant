@@ -77,6 +77,7 @@ struct FakeOwner {
         String,
         Option<provenant_records::lane_contract::CarryMode>,
     )>,
+    peer_carry_requests: Vec<Option<provenant_records::lane_contract::CarryMode>>,
     child_provision: Option<ChildWorktreeProvision>,
     provision_fail_once: bool,
     source_commits: Vec<Option<String>>,
@@ -266,6 +267,13 @@ impl AttemptOwner for FakeOwner {
             },
             head: self.implicit_head.clone().unwrap_or_else(|| "a".repeat(40)),
         }))
+    }
+    fn peer_carry_unsupported(
+        &mut self,
+        mode: Option<provenant_records::lane_contract::CarryMode>,
+    ) -> Result<(), Self::Error> {
+        self.peer_carry_requests.push(mode);
+        Ok(())
     }
     fn provision_writer_worktree(
         &mut self,
