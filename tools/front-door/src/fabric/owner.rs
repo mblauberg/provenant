@@ -1759,6 +1759,11 @@ pub(crate) fn recovered_attempt_spec(
         policy_sealed: true,
         sealed_profile: Some(task.profile.clone()),
         provider_timeout: Some(task.provider_timeout_seconds),
+        // Node-level choices the task request does not carry: a recovered
+        // shared child still commits only its claims, and a recovered writer
+        // keeps its carry setting.
+        commit: original.and_then(|spec| spec.commit.clone()),
+        carry_uncommitted: original.and_then(|spec| spec.carry_uncommitted),
         ..Default::default()
     })
 }

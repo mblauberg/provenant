@@ -27,6 +27,11 @@ fn recovery_rebuild_preserves_request_digest_for_any_submitted_spec()
                                         provenant_config::REPOSITORY_CONFIG.into(),
                                     ),
                                 }),
+                                commit: build_heavy.then_some(
+                                    provenant_records::lane_contract::CommitChoice::OwnPaths,
+                                ),
+                                carry_uncommitted: confidential
+                                    .then_some(provenant_records::lane_contract::CarryMode::All),
                                 ..Default::default()
                             };
 
@@ -97,6 +102,8 @@ fn recovery_rebuild_preserves_request_digest_for_any_submitted_spec()
                             assert_eq!(rebuilt_spec.confidential, spec.confidential);
                             assert_eq!(rebuilt_spec.build_heavy, spec.build_heavy);
                             assert_eq!(rebuilt_spec.account, spec.account);
+                            assert_eq!(rebuilt_spec.commit, spec.commit);
+                            assert_eq!(rebuilt_spec.carry_uncommitted, spec.carry_uncommitted);
                             assert_eq!(
                                 rebuilt_spec.provider_timeout,
                                 Some(original_task.provider_timeout_seconds)
