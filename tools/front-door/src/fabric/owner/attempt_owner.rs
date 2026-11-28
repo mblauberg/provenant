@@ -835,6 +835,8 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
         Ok(Some(
             provenant_fabric_runtime::graph::WriterWorktreeBinding {
                 extra: Default::default(),
+                carry_examined: false,
+                carried_paths: Vec::new(),
                 shared_worktree: None,
                 source_directory_identity: Some(provenant_records::run::SourceIdentity {
                     device: identity.device,
@@ -886,16 +888,8 @@ impl provenant_fabric_runtime::graph::AttemptOwner for BoundGraphOwner<'_> {
         };
         let mut binding = self.bind_writer_worktree(path)?;
         if let Some(binding) = binding.as_mut() {
-            if carry_examined {
-                binding
-                    .extra
-                    .insert("carry_examined".into(), serde_json::json!(true));
-            }
-            if !paths.is_empty() {
-                binding
-                    .extra
-                    .insert("carried_paths".into(), serde_json::json!(paths));
-            }
+            binding.carry_examined = carry_examined;
+            binding.carried_paths = paths;
         }
         Ok(binding)
     }

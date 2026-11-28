@@ -396,6 +396,8 @@ fn recorded_peer_responses_refuse_retired_protocols() {
 fn protocol_fence_precedes_action_decoding() {
     let mut request = PeerRequest {
         extra: Default::default(),
+        release: None,
+        release_probe: false,
         version: 1,
         protocol: PROTOCOL - 1,
         target_host: HostId::from_bytes([3; 16]),
@@ -481,6 +483,8 @@ fn validate_refuses_the_target_as_its_own_source() {
     }
     let mut request = PeerRequest {
         extra: Default::default(),
+        release: None,
+        release_probe: false,
         version: 1,
         protocol: PROTOCOL,
         target_host: local,
@@ -1054,6 +1058,8 @@ fn fixed_peer_transport_preserves_mutation_uncertainty_without_retry() {
     };
     let request = PeerRequest {
         extra: Default::default(),
+        release: None,
+        release_probe: false,
         version: 1,
         protocol: PROTOCOL,
         target_host: host,
@@ -1228,7 +1234,7 @@ fn fixture_creation_probes_release_without_requiring_the_remote_project() {
         fn execute(&self, options: ExecOptions<'_>) -> Result<ExecOutcome, ExecError> {
             let request = decode_request(options.stdin.unwrap()).unwrap();
             assert!(matches!(request.action, PeerAction::Health { .. }));
-            assert_eq!(request.extra.get("release_probe"), Some(&true.into()));
+            assert!(request.release_probe);
             Ok(healthy_outcome(&request, "0.0.1"))
         }
     }
@@ -1331,6 +1337,8 @@ fn exchange_action_error(executor: &dyn Executor, action: PeerAction) -> PeerErr
     let host = HostId::from_bytes([2; 16]);
     let request = PeerRequest {
         extra: Default::default(),
+        release: None,
+        release_probe: false,
         version: 1,
         protocol: action_fence(&action),
         target_host: host,
@@ -1678,6 +1686,8 @@ fn protocol_mismatch_names_both_versions_without_decoding_payload() {
             };
             let request = PeerRequest {
                 extra: Default::default(),
+                release: None,
+                release_probe: false,
                 version: 1,
                 protocol: requested,
                 target_host: host,
@@ -1846,6 +1856,8 @@ fn session_handoff_fits_one_frame_and_keeps_its_operation_on_a_lost_reply() {
     input.validate().unwrap();
     let request = PeerRequest {
         extra: Default::default(),
+        release: None,
+        release_probe: false,
         version: 1,
         protocol: PROTOCOL,
         target_host: host,
@@ -1958,6 +1970,8 @@ fn peer_policy_overrides_remote_executable_and_connect_timeout() {
     };
     let request = PeerRequest {
         extra: Default::default(),
+        release: None,
+        release_probe: false,
         version: 1,
         protocol: PROTOCOL,
         target_host: host,
@@ -2012,6 +2026,8 @@ fn peer_exchange_respects_a_fair_probe_cap() {
     };
     let request = PeerRequest {
         extra: Default::default(),
+        release: None,
+        release_probe: false,
         version: 1,
         protocol: PROTOCOL,
         target_host: host,
@@ -2095,6 +2111,8 @@ fn peer_exchange_within_a_deadline_includes_termination_and_reap() {
     };
     let request = PeerRequest {
         extra: Default::default(),
+        release: None,
+        release_probe: false,
         version: 1,
         protocol: PROTOCOL,
         target_host: host,

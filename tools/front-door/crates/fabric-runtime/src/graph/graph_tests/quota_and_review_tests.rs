@@ -517,6 +517,8 @@ fn writer_binding_and_provisioning_contention_wait_for_the_same_launch() {
         fn binding(&self, path: &str) -> Option<WriterWorktreeBinding> {
             Some(WriterWorktreeBinding {
                 extra: Default::default(),
+                carry_examined: false,
+                carried_paths: Vec::new(),
                 shared_worktree: None,
                 source_directory_identity: None,
                 worktree: format!("/fixture/{path}"),

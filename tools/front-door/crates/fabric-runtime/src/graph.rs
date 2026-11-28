@@ -1971,13 +1971,10 @@ fn bind_expanded_writer<R: AttemptOwner, J: GraphJournal>(
             });
             checkpoint.nodes[node_index].provisioned_owner = creation_owner;
             let carried_elsewhere = checkpoint.nodes.iter().any(|progress| {
-                progress.writer_binding.as_ref().is_some_and(|binding| {
-                    binding
-                        .extra
-                        .get("carry_examined")
-                        .and_then(serde_json::Value::as_bool)
-                        == Some(true)
-                })
+                progress
+                    .writer_binding
+                    .as_ref()
+                    .is_some_and(|binding| binding.carry_examined)
             });
             if node.source.is_none()
                 && document.peer_origin_work_key.is_some()
@@ -2089,13 +2086,10 @@ fn bind_expanded_writer<R: AttemptOwner, J: GraphJournal>(
             });
             checkpoint.nodes[node_index].provisioned_owner = creation_owner;
             let carried_elsewhere = checkpoint.nodes.iter().any(|progress| {
-                progress.writer_binding.as_ref().is_some_and(|binding| {
-                    binding
-                        .extra
-                        .get("carry_examined")
-                        .and_then(serde_json::Value::as_bool)
-                        == Some(true)
-                })
+                progress
+                    .writer_binding
+                    .as_ref()
+                    .is_some_and(|binding| binding.carry_examined)
             });
             if spec.default_base
                 && document.peer_origin_work_key.is_some()
@@ -2146,17 +2140,8 @@ fn bind_expanded_writer<R: AttemptOwner, J: GraphJournal>(
             }
         };
         if let (Some(child_provision), Some(binding)) = (child_provision, binding.as_mut()) {
-            if child_provision.carry_examined {
-                binding
-                    .extra
-                    .insert("carry_examined".into(), serde_json::json!(true));
-            }
-            if !child_provision.carried_paths.is_empty() {
-                binding.extra.insert(
-                    "carried_paths".into(),
-                    serde_json::json!(child_provision.carried_paths),
-                );
-            }
+            binding.carry_examined = child_provision.carry_examined;
+            binding.carried_paths = child_provision.carried_paths;
         }
         transitions::apply_writer_binding(
             node,

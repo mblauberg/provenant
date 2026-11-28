@@ -4693,6 +4693,8 @@ fn writer_sourced_template_review_selects_shape_and_pins_every_stage() -> Result
         ) -> std::result::Result<Option<graph::WriterWorktreeBinding>, Self::Error> {
             Ok(Some(graph::WriterWorktreeBinding {
                 extra: Default::default(),
+                carry_examined: false,
+                carried_paths: Vec::new(),
                 shared_worktree: None,
                 source_directory_identity: None,
                 worktree: worktree.into(),

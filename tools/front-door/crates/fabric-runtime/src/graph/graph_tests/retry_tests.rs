@@ -2766,6 +2766,8 @@ fn retry_of_launch_blocked_writer_starts_a_new_attempt_in_the_same_worktree() {
     // The launch created its writer checkout before the lock wait expired.
     let binding = WriterWorktreeBinding {
         extra: Default::default(),
+        carry_examined: false,
+        carried_paths: Vec::new(),
         source_directory_identity: None,
         shared_worktree: None,
         worktree: "/fixture/launch-blocked".into(),

@@ -519,8 +519,8 @@ fn new_writer_carries_chair_edits_once_and_preserves_the_chair()
     let carried_head = binding.head.clone();
     assert_ne!(carried_head, base);
     assert_eq!(
-        binding.extra["carried_paths"],
-        serde_json::json!(["AGENTS.md", "new.txt"])
+        binding.carried_paths,
+        vec!["AGENTS.md".to_owned(), "new.txt".to_owned()]
     );
     assert_eq!(std::fs::read(rig.project.join(".git/index"))?, index);
     assert_eq!(std::fs::read(rig.project.join("AGENTS.md"))?, b"chair edit");
@@ -544,10 +544,7 @@ fn new_writer_carries_chair_edits_once_and_preserves_the_chair()
         .provision_writer_worktree(".worktrees/carried", "carried", &base, None, Some(&request))?
         .ok_or("replay binding")?;
     assert_eq!(replay.head, carried_head);
-    assert_eq!(
-        replay.extra["carried_paths"],
-        binding.extra["carried_paths"]
-    );
+    assert_eq!(replay.carried_paths, binding.carried_paths);
     let off = WriterCarryRequest {
         graph: "off-graph",
         node: "writer",
@@ -566,10 +563,7 @@ fn new_writer_carries_chair_edits_once_and_preserves_the_chair()
     let tracked_binding = owner
         .provision_writer_worktree(".worktrees/tracked", "tracked", &base, None, Some(&tracked))?
         .ok_or("tracked binding")?;
-    assert_eq!(
-        tracked_binding.extra["carried_paths"],
-        serde_json::json!(["AGENTS.md"])
-    );
+    assert_eq!(tracked_binding.carried_paths, vec!["AGENTS.md".to_owned()]);
     assert!(!rig.project.join(".worktrees/tracked/new.txt").exists());
     std::fs::create_dir_all(rig.project.join(".provenant"))?;
     std::fs::write(

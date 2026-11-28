@@ -4469,8 +4469,8 @@ fn planner_writer_without_worktree_is_provisioned_before_launch_and_replayed() {
     assert_eq!(owner.carry_requests, vec![("planned".into(), "plan--write".into(), None)]);
     let binding = run.checkpoint.nodes.iter().find(|node| node.id == "plan--write")
         .and_then(|node| node.writer_binding.as_ref()).expect("writer binding");
-    assert_eq!(binding.extra["carried_paths"], json!(["src/edited.rs"]));
-    assert_eq!(binding.extra["carry_examined"], json!(true));
+    assert_eq!(binding.carried_paths, vec!["src/edited.rs".to_owned()]);
+    assert!(binding.carry_examined);
     assert_eq!(
         owner.permissions[1].1.as_deref(),
         Some("/fixture/.worktrees/planned-plan--write")
@@ -4550,7 +4550,7 @@ fn planned_writers_carry_chair_snapshot_only_once() {
     assert_eq!(owner.provisioned.len(), 2);
     assert_eq!(owner.carry_requests.len(), 1);
     assert_eq!(run.checkpoint.nodes.iter().filter(|node| {
-        node.writer_binding.as_ref().and_then(|binding| binding.extra.get("carried_paths")).is_some()
+        node.writer_binding.as_ref().is_some_and(|binding| !binding.carried_paths.is_empty())
     }).count(), 1);
 }
 

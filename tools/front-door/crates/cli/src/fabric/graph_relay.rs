@@ -260,6 +260,8 @@ fn bind_shared_writers(
             .ok_or_else(|| refused("invalid_graph", "shared writer progress missing"))?;
         progress.writer_binding = Some(WriterWorktreeBinding {
             extra: Default::default(),
+            carry_examined: false,
+            carried_paths: Vec::new(),
             shared_worktree: Some(sealed.clone()),
             source_directory_identity: Some(provenant_records::run::SourceIdentity {
                 device: identity.device,

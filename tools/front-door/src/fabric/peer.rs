@@ -635,13 +635,7 @@ pub fn peer(
         // or creating that project; the actual create still takes the normal
         // project and mutation path below.
         let probe = decode_request(&bytes)?;
-        if matches!(probe.action, PeerAction::Health { .. })
-            && probe
-                .extra
-                .get("release_probe")
-                .and_then(|value| value.as_bool())
-                == Some(true)
-        {
+        if matches!(probe.action, PeerAction::Health { .. }) && probe.release_probe {
             let local = provenant_config::lookup_host(&host.roots)?.ok_or(PeerError::Project)?;
             let config = provenant_cli::config_reads::read_for(&host.roots, "fabric context")?;
             probe.validate(local, &config.domains.fabric, &home)?;

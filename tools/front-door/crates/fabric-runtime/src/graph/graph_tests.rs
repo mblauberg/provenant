@@ -258,6 +258,8 @@ impl AttemptOwner for FakeOwner {
         self.implicit_bindings += 1;
         Ok(Some(WriterWorktreeBinding {
             extra: Default::default(),
+            carry_examined: false,
+            carried_paths: Vec::new(),
             shared_worktree: None,
             source_directory_identity: None,
             worktree: if std::path::Path::new(worktree).is_absolute() {

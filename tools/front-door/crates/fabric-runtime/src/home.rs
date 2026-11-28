@@ -680,6 +680,8 @@ mod tests {
         fn remote<'a>(&'a self, transport: Box<dyn PeerTransport + 'a>) -> RemoteCoordination<'a> {
             let request = PeerRequest {
                 extra: Default::default(),
+                release: None,
+                release_probe: false,
                 version: 1,
                 protocol: PROTOCOL,
                 target_host: self.remote_host,

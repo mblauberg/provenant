@@ -1169,6 +1169,8 @@ mod tests {
             ) -> Result<Option<WriterWorktreeBinding>, Self::Error> {
                 Ok(Some(WriterWorktreeBinding {
                     extra: Default::default(),
+                    carry_examined: false,
+                    carried_paths: Vec::new(),
                     source_directory_identity: None,
                     shared_worktree: None,
                     worktree: path.into(),

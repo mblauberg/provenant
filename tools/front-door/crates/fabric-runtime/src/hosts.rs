@@ -659,6 +659,12 @@ peer_feature_protocols! {
 pub struct PeerRequest<A = PeerAction> {
     #[serde(flatten)]
     pub extra: provenant_records::ExtraFields,
+    /// Release reported by the sending host. Older frames may omit it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub release: Option<String>,
+    /// Marks the health check used before creating a remote fixture project.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub release_probe: bool,
     pub version: u64,
     pub protocol: u64,
     pub target_host: HostId,
@@ -681,7 +687,9 @@ impl PeerRequest {
         action: PeerAction,
     ) -> Self {
         let mut request = Self {
-            extra: [("release".into(), env!("CARGO_PKG_VERSION").into())].into(),
+            extra: Default::default(),
+            release: Some(env!("CARGO_PKG_VERSION").into()),
+            release_probe: false,
             version: 1,
             protocol: action_fence(&action),
             target_host,
@@ -751,6 +759,10 @@ impl PeerRequest {
         self.actor()?;
         Ok(())
     }
+}
+
+fn is_false(value: &bool) -> bool {
+    !value
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HostHealth {
@@ -1005,12 +1017,7 @@ pub fn protocol_refusal(bytes: &[u8]) -> Result<Option<PeerResponse>, PeerError>
         feature_protocol_for_wire_name(request.action["action"].as_str().unwrap_or_default());
     let error = if request.protocol != expected {
         Some(facade::FacadeError::PeerVersion)
-    } else if request
-        .extra
-        .get("release")
-        .and_then(|value| value.as_str())
-        != Some(env!("CARGO_PKG_VERSION"))
-    {
+    } else if request.release.as_deref() != Some(env!("CARGO_PKG_VERSION")) {
         Some(upgrade_pending())
     } else {
         None
@@ -1620,9 +1627,7 @@ pub fn encode_peer_request(request: &PeerRequest) -> Result<Vec<u8>, PeerError> 
         provenant_confinement::publication::Projector::ambient().map_err(|_| PeerError::Frame)?;
     let boundary = provenant_confinement::publication::CrossHostTransport::new(&projector);
     let mut outbound = request.clone();
-    outbound
-        .extra
-        .insert("release".into(), env!("CARGO_PKG_VERSION").into());
+    outbound.release = Some(env!("CARGO_PKG_VERSION").into());
     let mut texts = Vec::new();
     match &mut outbound.action {
         PeerAction::Submit { input, .. } => {
@@ -1752,7 +1757,7 @@ impl SshTransport<'_> {
                     ..
                 }
             ) {
-                probe.extra.insert("release_probe".into(), true.into());
+                probe.release_probe = true;
             }
             probe.protocol = action_fence(&probe.action);
             let started = self.clock.mono_now();

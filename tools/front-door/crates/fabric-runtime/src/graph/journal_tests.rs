@@ -2304,6 +2304,8 @@ fn implicit_writer_binding_reattaches_without_resolving_the_moved_head() {
             self.bindings += 1;
             Ok(Some(WriterWorktreeBinding {
                 extra: Default::default(),
+                carry_examined: false,
+                carried_paths: Vec::new(),
                 shared_worktree: None,
                 source_directory_identity: None,
                 worktree: "/fixture/lane".into(),

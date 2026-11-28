@@ -2699,6 +2699,12 @@ pub struct LaunchTimings {
 pub struct WriterWorktreeBinding {
     #[serde(flatten)]
     pub extra: provenant_records::ExtraFields,
+    /// Whether the host examined carry state when provisioning this writer.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub carry_examined: bool,
+    /// Paths carried into this writer checkout from the chair's snapshot.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub carried_paths: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_directory_identity: Option<provenant_records::run::SourceIdentity>,
     /// Host-granted sharing of the owning lane's exact checkout incarnation.
